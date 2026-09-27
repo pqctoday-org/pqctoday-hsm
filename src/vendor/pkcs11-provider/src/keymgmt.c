@@ -1262,6 +1262,7 @@ const OSSL_DISPATCH p11prov_rsapss_keymgmt_functions[] = {
 DISPATCH_KEYMGMT_FN(ec, new);
 DISPATCH_KEYMGMT_FN(ec, gen_init);
 DISPATCH_KEYMGMT_FN(ec, gen);
+DISPATCH_KEYMGMT_FN(ec, gen_set_params);
 DISPATCH_KEYMGMT_FN(ec, gen_settable_params);
 DISPATCH_KEYMGMT_FN(ec, load);
 DISPATCH_KEYMGMT_FN(ec, free);
@@ -1333,12 +1334,56 @@ static void *p11prov_ec_gen_init(void *provctx, int selection,
     ctx->data.ec.ec_params = prime256v1_param;
     ctx->data.ec.ec_params_size = sizeof(prime256v1_param);
 
-    ret = p11prov_common_gen_set_params(ctx, params);
+    /* the EC wrapper, not the common handler: a caller may pass
+     * pkcs11_ec_extra_bits at gen_init time rather than in a later
+     * EVP_PKEY_CTX_set_params() call, and both must work */
+    ret = p11prov_ec_gen_set_params(ctx, params);
     if (ret != RET_OSSL_OK) {
         p11prov_common_gen_cleanup(ctx);
         ctx = NULL;
     }
     return ctx;
+}
+
+/* Q-6 / plan item X1. OpenSSL has no standard parameter for choosing an EC
+ * key-generation METHOD, so the choice between FIPS 186-5 A.2.2 ("extra
+ * random bits") and the default is carried by a provider-specific
+ * parameter. Everything else is delegated to the common handler. */
+static int p11prov_ec_gen_set_params(void *genctx, const OSSL_PARAM params[])
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    const OSSL_PARAM *p;
+
+    if (!ctx) {
+        return RET_OSSL_ERR;
+    }
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+
+    p = OSSL_PARAM_locate_const(params, P11PROV_PARAM_EC_EXTRA_BITS);
+    if (p) {
+        int extra_bits = 0;
+
+        if (OSSL_PARAM_get_int(p, &extra_bits) != RET_OSSL_OK) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_SET_PARAMETER);
+            return RET_OSSL_ERR;
+        }
+        /* Only ever moves BETWEEN the two keypair-generation mechanisms.
+         * A paramgen-only selection leaves the mechanism at
+         * CK_UNAVAILABLE_INFORMATION (see gen_init), and must keep it
+         * there — p11prov_ec_gen() reads exactly that value to decide it
+         * is producing a mock public key rather than calling the token. */
+        if (ctx->mechanism.mechanism != CK_UNAVAILABLE_INFORMATION) {
+            ctx->mechanism.mechanism = extra_bits
+                                           ? CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS
+                                           : CKM_EC_KEY_PAIR_GEN;
+            P11PROV_debug("EC keygen mechanism set to %lu (extra_bits=%d)",
+                          ctx->mechanism.mechanism, extra_bits);
+        }
+    }
+
+    return p11prov_common_gen_set_params(genctx, params);
 }
 
 static void *p11prov_ec_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
@@ -1419,6 +1464,7 @@ static const OSSL_PARAM *p11prov_ec_gen_settable_params(void *genctx,
     static OSSL_PARAM p11prov_ec_params[] = {
         OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
         OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0),
+        OSSL_PARAM_int(P11PROV_PARAM_EC_EXTRA_BITS, NULL),
         OSSL_PARAM_END,
     };
     return p11prov_ec_params;
@@ -1825,7 +1871,7 @@ const OSSL_DISPATCH p11prov_ec_keymgmt_functions[] = {
     DISPATCH_KEYMGMT_ELEM(ec, GEN_INIT, gen_init),
     DISPATCH_KEYMGMT_ELEM(ec, GEN, gen),
     DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
-    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    DISPATCH_KEYMGMT_ELEM(ec, GEN_SET_PARAMS, gen_set_params),
     DISPATCH_KEYMGMT_ELEM(ec, GEN_SETTABLE_PARAMS, gen_settable_params),
     DISPATCH_KEYMGMT_ELEM(ec, LOAD, load),
     DISPATCH_KEYMGMT_ELEM(ec, FREE, free),

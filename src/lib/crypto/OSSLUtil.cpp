@@ -35,6 +35,7 @@
 #include "DerUtil.h"
 #include "OSSLUtil.h"
 #include <openssl/asn1.h>
+#include <string>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 
@@ -160,8 +161,6 @@ ByteString OSSL::oid2ByteString(int nid)
 // Convert a ByteString to an OpenSSL EVP_PKEY id
 int OSSL::byteString2oid(const ByteString& byteString)
 {
-	ASN1_OBJECT *oid = NULL;
-	ASN1_PRINTABLESTRING *curve_name = NULL;
 	const unsigned char *p = byteString.const_byte_str();
 	const unsigned char *pp = p;
 	long length;
@@ -171,43 +170,37 @@ int OSSL::byteString2oid(const ByteString& byteString)
 	ByteString secp256k1Params = "06052b8104000a"; // 1.3.132.0.10 DER String
 	if (byteString == secp256k1Params) return NID_secp256k1;
 
-	ASN1_get_object(&pp, &length, &tag, &pclass, byteString.size());
+	// ASN1_get_object sets 0x80 in its return value on a malformed header or
+	// a length running past the input; tag/pclass are not trustworthy then.
+	if (byteString.size() == 0) return NID_undef;
+	if (ASN1_get_object(&pp, &length, &tag, &pclass, byteString.size()) & 0x80) return NID_undef;
+
 	if (pclass == V_ASN1_UNIVERSAL && tag == V_ASN1_OBJECT)
 	{
 		/* The initial release of SoftHSM was expecting just OID value */
-		oid = d2i_ASN1_OBJECT(NULL, &p, byteString.size());
-
-		if (oid == NULL)
-		{
-			return NID_undef;
-		}
-
-		return OBJ_obj2nid(oid);
+		ASN1_OBJECT *oid = d2i_ASN1_OBJECT(NULL, &p, byteString.size());
+		if (oid == NULL) return NID_undef;
+		int nid = OBJ_obj2nid(oid);
+		ASN1_OBJECT_free(oid);
+		return nid;
 	}
 	else if (pclass == V_ASN1_UNIVERSAL && tag == V_ASN1_PRINTABLESTRING)
 	{
 		/* The final PKCS#11 3.0 expects curve name encoded as PrintableString */
-		curve_name = d2i_ASN1_PRINTABLESTRING(NULL, &p, byteString.size());
+		// d2i can still fail (e.g. a length running past the input). It used
+		// to be passed straight to strcmp — a NULL dereference reachable from
+		// a caller's CKA_EC_PARAMS at C_GenerateKeyPair and C_CreateObject.
+		ASN1_PRINTABLESTRING *curve_name = d2i_ASN1_PRINTABLESTRING(NULL, &p, byteString.size());
+		if (curve_name == NULL) return NID_undef;
+		// Compare the exact bytes: ASN1_STRING data is not guaranteed to be
+		// free of embedded NULs.
+		std::string name((const char*)ASN1_STRING_get0_data(curve_name), ASN1_STRING_length(curve_name));
+		ASN1_STRING_free(curve_name);
 
-		if (strcmp((char *)ASN1_STRING_get0_data(curve_name), "edwards25519") == 0)
-		{
-			return EVP_PKEY_ED25519;
-		}
-
-		if (strcmp((char *)ASN1_STRING_get0_data(curve_name), "curve25519") == 0)
-		{
-			return EVP_PKEY_X25519;
-		}
-
-		if (strcmp((char *)ASN1_STRING_get0_data(curve_name), "edwards448") == 0)
-		{
-			return EVP_PKEY_ED448;
-		}
-
-		if (strcmp((char *)ASN1_STRING_get0_data(curve_name), "curve448") == 0)
-		{
-			return EVP_PKEY_X448;
-		}
+		if (name == "edwards25519") return EVP_PKEY_ED25519;
+		if (name == "curve25519") return EVP_PKEY_X25519;
+		if (name == "edwards448") return EVP_PKEY_ED448;
+		if (name == "curve448") return EVP_PKEY_X448;
 	}
 
 	return NID_undef;

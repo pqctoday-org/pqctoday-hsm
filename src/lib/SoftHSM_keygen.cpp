@@ -41,6 +41,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -75,6 +76,9 @@
 #include "OSSLMLKEMPublicKey.h"
 #include "OSSLMLKEMPrivateKey.h"
 #include "OSSLMLKEM.h"
+#include "ClassicMcEliecePublicKey.h"
+#include "ClassicMcEliecePrivateKey.h"
+#include "ClassicMcElieceParameters.h"
 #include "OSSLRSAPublicKey.h"
 #include "OSSLECPublicKey.h"
 #include "OSSLEDPublicKey.h"
@@ -101,6 +105,42 @@ extern "C" {
 #include "HDWalletDerivation.h"
 #include "SlotManager.h"
 #include "odd.h"
+#include "OSSLUtil.h"
+
+// PKCS#11 v3.2 §6.3 — the return code for CKA_EC_PARAMS a generator cannot
+// use, once it has established that it cannot use them. The line is the one
+// the Rust engine draws (decode_ec_params, rust/src/crypto/handlers.rs):
+//   - exactly ONE complete DER value naming something this engine does not
+//     implement is an unsupported CURVE: an OBJECT IDENTIFIER, an explicit
+//     ECParameters SEQUENCE, or (where the generator accepts §6.3.10's
+//     curveName form at all) a PrintableString curve name;
+//   - anything else — a truncated or over-long value, trailing bytes, the
+//     forbidden implicitCA NULL, another tag, or a curveName handed to a
+//     generator that does not take that form — is an invalid or unsupported
+//     REPRESENTATION, CKR_DOMAIN_PARAMS_INVALID.
+// These values used to fall through to CKR_GENERAL_ERROR, which tells the
+// caller nothing about what to change.
+static CK_RV unusableEcParamsRv(const ByteString& params, bool acceptsCurveName)
+{
+	const size_t n = params.size();
+	const unsigned char* b = params.const_byte_str();
+	// One TLV with a short-form length that spans the whole value exactly.
+	// Named-curve OIDs and names are far below 128 bytes.
+	if (n >= 2 && (b[1] & 0x80) == 0 && n == 2 + (size_t)b[1])
+	{
+		switch (b[0])
+		{
+			case 0x06: // OBJECT IDENTIFIER
+			case 0x30: // explicit ECParameters
+				return CKR_CURVE_NOT_SUPPORTED;
+			case 0x13: // PrintableString curveName
+				return acceptsCurveName ? CKR_CURVE_NOT_SUPPORTED : CKR_DOMAIN_PARAMS_INVALID;
+			default:
+				break;
+		}
+	}
+	return CKR_DOMAIN_PARAMS_INVALID;
+}
 
 // Compute asymmetric key check value: SHA-256(keyValue) → first 3 bytes.
 // Used for RSA, EC, EdDSA, ML-DSA, ML-KEM, SLH-DSA public and private keys.
@@ -291,6 +331,89 @@ static CK_ULONG hssTotalSignatures(unsigned levels, const param_set_t* lmType)
 //   • present with invalid value → CKR_ATTRIBUTE_VALUE_INVALID
 // validMin/validMax bound the accepted CKP_* range for the family (the CKP_*
 // enums are dense per pkcs11t.h §CKP).
+// PKCS#11 v3.2 §5.18.4: C_UnwrapKey "SHALL return CKR_WRAPPED_KEY_LEN_RANGE"
+// when the unwrapped key's length does not suit the key type in the template.
+// It used to create a 16-byte CKK_CHACHA20 key (plan 2.D, p05). Same rule as
+// the Rust engine's unwrap_secret_len_check: fixed-length types are checked,
+// other secret keys must merely be non-empty.
+static bool unwrappedSecretLenOk(CK_KEY_TYPE keyType, size_t len)
+{
+	switch (keyType)
+	{
+		case CKK_AES:      return len == 16 || len == 24 || len == 32;
+		case CKK_AES_XTS:  return len == 32 || len == 64;
+		case CKK_CHACHA20: return len == 32;
+		default:           return len > 0;
+	}
+}
+
+// PKCS#11 v3.2 §6.42 (Tables 198-201): the encoded L for a
+// CK_SP800_108_DKM_LENGTH data parameter. The field "identifies the location
+// of the DKM length in the constructed PRF input data"; until 2026-09-27 all
+// three C++ SP 800-108 handlers skipped it, so a caller who supplied one got a
+// derivation WITHOUT it — different key bytes from the spec and from the Rust
+// engine, under CKR_OK (gap-closure plan 2.D). This mirrors the Rust engine's
+// parse_sp800_108_segments exactly: SUM_OF_KEYS is the requested key length
+// in bits; SUM_OF_SEGMENTS rounds that up to whole PRF outputs; the width is
+// 8/16/32/64 bits, big- or little-endian. The value is constant across rounds,
+// so callers insert it as a literal segment.
+static size_t sp800108PrfOutLen(CK_MECHANISM_TYPE prf, size_t baseKeyLen)
+{
+	switch (prf)
+	{
+		case CKM_SHA_1_HMAC:      return 20;
+		case CKM_SHA224_HMAC:     return 28;
+		case CKM_SHA256_HMAC:     return 32;
+		case CKM_SHA384_HMAC:     return 48;
+		case CKM_SHA512_HMAC:     return 64;
+		case CKM_SHA512_224_HMAC: return 28;
+		case CKM_SHA512_256_HMAC: return 32;
+		case CKM_SHA3_224_HMAC:   return 28;
+		case CKM_SHA3_256_HMAC:   return 32;
+		case CKM_SHA3_384_HMAC:   return 48;
+		case CKM_SHA3_512_HMAC:   return 64;
+		case CKM_AES_CMAC:
+			return (baseKeyLen == 16 || baseKeyLen == 24 || baseKeyLen == 32) ? 16 : 0;
+		default:                  return 0;
+	}
+}
+
+static CK_RV sp800108DkmLength(const CK_PRF_DATA_PARAM* dp, CK_ULONG keyLen, CK_MECHANISM_TYPE prf,
+                               size_t baseKeyLen, ByteString& out)
+{
+	if (dp->pValue == NULL_PTR || dp->ulValueLen != sizeof(CK_SP800_108_DKM_LENGTH_FORMAT))
+		return CKR_MECHANISM_PARAM_INVALID;
+	const CK_SP800_108_DKM_LENGTH_FORMAT* f = (const CK_SP800_108_DKM_LENGTH_FORMAT*)dp->pValue;
+	CK_ULONG width = f->ulWidthInBits;
+	if (width != 8 && width != 16 && width != 32 && width != 64)
+		return CKR_MECHANISM_PARAM_INVALID;
+	unsigned long long lBits;
+	if (f->dkmLengthMethod == CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS)
+	{
+		lBits = (unsigned long long)keyLen * 8;
+	}
+	else if (f->dkmLengthMethod == CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS)
+	{
+		size_t prfOut = sp800108PrfOutLen(prf, baseKeyLen);
+		if (prfOut == 0) return CKR_MECHANISM_PARAM_INVALID;
+		size_t segments = (keyLen + prfOut - 1) / prfOut;
+		if (segments == 0) segments = 1;
+		lBits = (unsigned long long)(segments * prfOut) * 8;
+	}
+	else
+	{
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	size_t wb = width / 8;
+	out.resize(wb);
+	for (size_t i = 0; i < wb; i++)
+	{
+		unsigned char b = (unsigned char)((lBits >> (8 * i)) & 0xff);
+		if (f->bLittleEndian) out[i] = b; else out[wb - 1 - i] = b;
+	}
+	return CKR_OK;
+}
+
 static CK_RV extractParameterSet(CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
                                  CK_ULONG validMin, CK_ULONG validMax,
                                  CK_ULONG& parameterSetOut)
@@ -478,12 +601,29 @@ CK_RV SoftHSM::C_GenerateKeyPair
 	CK_OBJECT_HANDLE_PTR phPrivateKey
 )
 {
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv = generateKeyPairImpl(hSession, pMechanism,
 	                               pPublicKeyTemplate, ulPublicKeyAttributeCount,
 	                               pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 	                               phPublicKey, phPrivateKey);
 
-	if (OpLog::enabled())
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
+	if (ring)
+	{
+		// Parameter set read off the private key when there is one; a failed
+		// keygen records the family as ALG_OTHER rather than guessing a size.
+		const bool haveKey = (rv == CKR_OK && phPrivateKey != NULL_PTR && *phPrivateKey != CK_INVALID_HANDLE);
+		const uint8_t alg = (pMechanism != NULL_PTR)
+			? behaviourAlg(hSession, haveKey ? *phPrivateKey : CK_INVALID_HANDLE, pMechanism->mechanism)
+			: BehaviourIds::ALG_NONE;
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_GENERATEKEYPAIR, alg, rv, 0, dur));
+	}
+
+	if (logging)
 	{
 		const CK_MECHANISM_TYPE mech = (pMechanism != NULL_PTR) ? pMechanism->mechanism : 0;
 
@@ -500,13 +640,14 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			: std::string("extractable=- sensitive=- never_extractable=- always_sensitive=- local=-");
 
 		OpLog::emit("C_GenerateKeyPair",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(mech), (unsigned long)mech,
 		            keyFields.c_str(), custody.c_str(),
 		            (unsigned long)(phPublicKey  != NULL_PTR ? *phPublicKey  : CK_INVALID_HANDLE),
 		            (unsigned long)(phPrivateKey != NULL_PTR ? *phPrivateKey : CK_INVALID_HANDLE),
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;
@@ -546,6 +687,7 @@ CK_RV SoftHSM::generateKeyPairImpl
 			break;
 #ifdef WITH_ECC
 		case CKM_EC_KEY_PAIR_GEN:
+		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			keyType = CKK_EC;
 			break;
 #endif
@@ -565,6 +707,9 @@ CK_RV SoftHSM::generateKeyPairImpl
 			break;
 		case CKM_ML_KEM_KEY_PAIR_GEN:
 			keyType = CKK_ML_KEM;
+			break;
+		case CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN:
+			keyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
 			break;
 		case CKM_HSS_KEY_PAIR_GEN:
 			keyType = CKK_HSS;
@@ -602,7 +747,10 @@ CK_RV SoftHSM::generateKeyPairImpl
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
 		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if ((pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
+	     pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS) && keyType != CKK_EC)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
 		return CKR_TEMPLATE_INCONSISTENT;
@@ -633,7 +781,10 @@ CK_RV SoftHSM::generateKeyPairImpl
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
 		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if ((pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
+	     pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS) && keyType != CKK_EC)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
 		return CKR_TEMPLATE_INCONSISTENT;
@@ -666,13 +817,15 @@ CK_RV SoftHSM::generateKeyPairImpl
 
 
 	// Generate EC (Weierstrass curve) keys
-	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN)
+	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
+	    pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS)
 	{
 			return this->generateEC(hSession,
 									 pPublicKeyTemplate, ulPublicKeyAttributeCount,
 									 pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 									 phPublicKey, phPrivateKey,
-									 ispublicKeyToken, ispublicKeyPrivate, isprivateKeyToken, isprivateKeyPrivate);
+									 ispublicKeyToken, ispublicKeyPrivate, isprivateKeyToken, isprivateKeyPrivate,
+									 pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS);
 	}
 
 	// Generate Edwards / Montgomery keys
@@ -710,6 +863,16 @@ CK_RV SoftHSM::generateKeyPairImpl
 	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN)
 	{
 		return this->generateMLKEM(hSession,
+			pPublicKeyTemplate, ulPublicKeyAttributeCount,
+			pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+			phPublicKey, phPrivateKey,
+			ispublicKeyToken, ispublicKeyPrivate, isprivateKeyToken, isprivateKeyPrivate);
+	}
+
+	// Generate Classic McEliece keys (BSI TR-02102-1 §2.4.2, all 10 sets)
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN)
+	{
+		return this->generateClassicMcEliece(hSession,
 			pPublicKeyTemplate, ulPublicKeyAttributeCount,
 			pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 			phPublicKey, phPrivateKey,
@@ -841,9 +1004,15 @@ CK_RV SoftHSM::generateKeyPairImpl
 			keyType = CKK_HSS;
 
 			// Parse HSS Params
+			// HBS-1 (2026-09-03): the LMOTS default was W8 (IANA 0x04) here and
+			// W4 (IANA 0x03) in the Rust engine — PKCS#11 v3.2/RFC 8554 mandate
+			// no default when CK_HSS_KEY_PAIR_GEN_PARAMS is omitted, so a caller
+			// relying on either engine's silent default got a different,
+			// non-interoperable key shape. Aligned to Rust's W4, since Rust is
+			// this repo's production KMIP/CACP backend (CLAUDE.md).
 			unsigned hss_levels = 1;
 			param_set_t lm_type[8] = { LMS_SHA256_N32_H5 };       // IANA 0x05
-			param_set_t lm_ots_type[8] = { LMOTS_SHA256_N32_W8 }; // IANA 0x04
+			param_set_t lm_ots_type[8] = { LMOTS_SHA256_N32_W4 }; // IANA 0x03
 			if (pMechanism->pParameter && pMechanism->ulParameterLen >= sizeof(CK_HSS_KEY_PAIR_GEN_PARAMS)) {
 				CK_HSS_KEY_PAIR_GEN_PARAMS* hP = (CK_HSS_KEY_PAIR_GEN_PARAMS*)pMechanism->pParameter;
 				hss_levels = hP->ulLevels;
@@ -1481,7 +1650,7 @@ CK_RV SoftHSM::C_WrapKey
 			// Does not handle optional init vector
 			if (pMechanism->pParameter != NULL_PTR ||
                             pMechanism->ulParameterLen != 0)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 		case CKM_RSA_PKCS_OAEP:
 			rv = MechParamCheckRSAPKCSOAEP(pMechanism);
@@ -1497,7 +1666,7 @@ CK_RV SoftHSM::C_WrapKey
 	        case CKM_AES_CBC_PAD:
 			if (pMechanism->pParameter == NULL_PTR ||
                             pMechanism->ulParameterLen != 16)
-                                return CKR_ARGUMENTS_BAD;
+                                return CKR_MECHANISM_PARAM_INVALID;
                         break;
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -1660,7 +1829,12 @@ CK_RV SoftHSM::C_WrapKey
 		// already the serialised key material.  This avoids the
 		// newPrivateKey → PKCS8Encode() round-trip which can fail in
 		// the WASM build when OpenSSL cannot re-encode PQC keys.
-		if (keyType == CKK_ML_KEM || keyType == CKK_ML_DSA || keyType == CKK_SLH_DSA)
+		// CKK_PQCTODAY_CLASSIC_MCELIECE has no registered AlgorithmIdentifier
+		// OID at all (the IETF draft defines none), so it belongs on this
+		// raw-CKA_VALUE path unconditionally — not just as a WASM-build
+		// workaround, since there is no PKCS#8 form to produce on ANY build.
+		if (keyType == CKK_ML_KEM || keyType == CKK_ML_DSA || keyType == CKK_SLH_DSA ||
+		    keyType == CKK_PQCTODAY_CLASSIC_MCELIECE)
 		{
 			if (isKeyPrivate)
 			{
@@ -2147,7 +2321,7 @@ CK_RV SoftHSM::C_UnwrapKey
 			// Does not handle optional init vector
 			if (pMechanism->pParameter != NULL_PTR ||
                             pMechanism->ulParameterLen != 0)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 #endif
 #ifdef HAVE_AES_KEY_WRAP_PAD
@@ -2158,7 +2332,7 @@ CK_RV SoftHSM::C_UnwrapKey
 			// Does not handle optional init vector
 			if (pMechanism->pParameter != NULL_PTR ||
                             pMechanism->ulParameterLen != 0)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 #endif
 		case CKM_RSA_PKCS:
@@ -2185,7 +2359,7 @@ CK_RV SoftHSM::C_UnwrapKey
 			// IV is mandatory and must be exactly one AES block (16 bytes).
 			if (pMechanism->pParameter == NULL_PTR ||
                             pMechanism->ulParameterLen != 16)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 
 		default:
@@ -2228,8 +2402,11 @@ CK_RV SoftHSM::C_UnwrapKey
 	if ((pMechanism->mechanism == CKM_RSA_PKCS || pMechanism->mechanism == CKM_RSA_PKCS_OAEP || pMechanism->mechanism == CKM_RSA_AES_KEY_WRAP) &&
 		unwrapKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_RSA)
 		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
+	// §5.18.4 lists CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT; §5.1.6 says
+	// CKR_WRAPPING_KEY_TYPE_INCONSISTENT "can only be returned by C_WrapKey"
+	// (G-8 finding E7, 2026-09-25).
 	if ((pMechanism->mechanism == CKM_AES_CBC || pMechanism->mechanism == CKM_AES_CBC_PAD) && unwrapKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_AES)
-		return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
+		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
 	// Check if the unwrapping key can be used for unwrapping
 	if (unwrapKey->getBooleanValue(CKA_UNWRAP, false) == false)
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -2388,6 +2565,29 @@ CK_RV SoftHSM::C_UnwrapKey
 			return rv;
 	}
 
+	if (objClass == CKO_SECRET_KEY && !unwrappedSecretLenOk(keyType, keydata.size()))
+	{
+		keydata.wipe();
+		return CKR_WRAPPED_KEY_LEN_RANGE;
+	}
+
+	// C1 (2026-09-06) — §5.18.4: "The CKA_EXTRACTABLE attribute is by default
+	// set to CK_TRUE" for an unwrapped key. P11AttrExtractable::setDefault()
+	// hard-codes CK_FALSE for every creation path, so without this a conforming
+	// caller that omits the attribute silently gets a key it can never wrap or
+	// export again. Scanned over the EFFECTIVE template — the caller's entries
+	// plus anything merged from the unwrapping key's CKA_UNWRAP_TEMPLATE above
+	// — so an explicit CK_FALSE from either source still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	// Create the secret object using C_CreateObject
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, hKey, OBJECT_OP_UNWRAP);
 
@@ -2409,6 +2609,10 @@ CK_RV SoftHSM::C_UnwrapKey
 			// Common Secret Key Attributes
 			bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 			bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+			// C1 — §5.18.4's CK_TRUE default overrides the class-wide CK_FALSE,
+			// unless the effective template asked for something else.
+			if (!extractableSupplied)
+				bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 			// Secret Attributes
 			if (objClass == CKO_SECRET_KEY)
@@ -2526,11 +2730,11 @@ CK_RV SoftHSM::C_WrapKeyAuthenticated
 	if (pMechanism->mechanism != CKM_AES_GCM) return CKR_MECHANISM_INVALID;
 	if (pMechanism->pParameter == NULL_PTR ||
 	    pMechanism->ulParameterLen != sizeof(CK_AES_GCM_PARAMS))
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	CK_AES_GCM_PARAMS* gcmParam = reinterpret_cast<CK_AES_GCM_PARAMS*>(pMechanism->pParameter);
-	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_ARGUMENTS_BAD;
+	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_MECHANISM_PARAM_INVALID;
 	size_t tagLen = gcmParam->ulTagBits / 8;
-	if (tagLen == 0 || tagLen > 16) return CKR_ARGUMENTS_BAD;
+	if (tagLen == 0 || tagLen > 16) return CKR_MECHANISM_PARAM_INVALID;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -2666,11 +2870,11 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	if (pMechanism->mechanism != CKM_AES_GCM) return CKR_MECHANISM_INVALID;
 	if (pMechanism->pParameter == NULL_PTR ||
 	    pMechanism->ulParameterLen != sizeof(CK_AES_GCM_PARAMS))
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	CK_AES_GCM_PARAMS* gcmParam = reinterpret_cast<CK_AES_GCM_PARAMS*>(pMechanism->pParameter);
-	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_ARGUMENTS_BAD;
+	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_MECHANISM_PARAM_INVALID;
 	size_t tagLen = gcmParam->ulTagBits / 8;
-	if (tagLen == 0 || tagLen > 16) return CKR_ARGUMENTS_BAD;
+	if (tagLen == 0 || tagLen > 16) return CKR_MECHANISM_PARAM_INVALID;
 	if (ulWrappedKeyLen <= tagLen) return CKR_WRAPPED_KEY_LEN_RANGE;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
@@ -2752,6 +2956,11 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	
 	// Fix Issue 44: OSSLEVPSymmetricAlgorithm dumps the entire AES-GCM plaintext in decryptFinal
 	keydata = discarded;
+	if (objClass == CKO_SECRET_KEY && !unwrappedSecretLenOk(keyType, keydata.size()))
+	{
+		keydata.wipe();
+		return CKR_WRAPPED_KEY_LEN_RANGE; // §5.18.4, same rule as C_UnwrapKey
+	}
 	discarded.wipe();
 
 	// Build the secret-key creation template (mirrors C_UnwrapKey pattern)
@@ -2780,6 +2989,19 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	}
 
 	*phKey = CK_INVALID_HANDLE;
+	// C1 (2026-09-06) — §5.18.7 C_UnwrapKeyAuthenticated carries the same
+	// sentence as §5.18.4: "The CKA_EXTRACTABLE attribute is by default set to
+	// CK_TRUE". See the C_UnwrapKey path for the full reasoning.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	CK_RV rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_UNWRAP);
 	if (rv == CKR_OK)
 	{
@@ -2794,6 +3016,10 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 			bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 			bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 			bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+			// C1 — §5.18.7's CK_TRUE default overrides the class-wide CK_FALSE,
+			// unless the effective template asked for something else.
+			if (!extractableSupplied)
+				bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 			if (objClass == CKO_SECRET_KEY)
 			{
 				ByteString value;
@@ -2923,7 +3149,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_PKCS5_PBKD2_PARAMS2))
 		{
 			ERROR_MSG("CKM_PKCS5_PBKD2 requires CK_PKCS5_PBKD2_PARAMS2");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_PKCS5_PBKD2_PARAMS2* pbkdp = (CK_PKCS5_PBKD2_PARAMS2*)pMechanism->pParameter;
 		if (pbkdp->saltSource != CKZ_SALT_SPECIFIED)
@@ -2931,10 +3157,27 @@ CK_RV SoftHSM::C_DeriveKey
 			ERROR_MSG("CKM_PKCS5_PBKD2: only CKZ_SALT_SPECIFIED is supported");
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
-		if (pbkdp->pPassword == NULL_PTR || pbkdp->iterations == 0)
+		if (pbkdp->pPassword == NULL_PTR)
 		{
-			ERROR_MSG("CKM_PKCS5_PBKD2: invalid password or iteration count");
-			return CKR_ARGUMENTS_BAD;
+			ERROR_MSG("CKM_PKCS5_PBKD2: invalid password");
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		// E15 / decision D7 (ACVP gap-closure 2026-09-25): token policy floor
+		// of PBKDF2_MIN_ITERATIONS (covers c = 0 too), aligned with the Rust
+		// engine's `iterations < 1000` refusal. Code per decision D6: the
+		// count is a field of the mechanism parameter (CK_PKCS5_PBKD2_PARAMS2),
+		// so CKR_MECHANISM_PARAM_INVALID ("invalid parameters were supplied
+		// to the mechanism", PKCS#11 v3.2 §5.1.6), not CKR_ARGUMENTS_BAD,
+		// which §5.1.6 reserves for bad function arguments.
+		// NIST SP 800-132 §5.2: "A minimum iteration count of 1,000 is
+		// recommended". PBKDF2 itself (RFC 8018 §5.2) accepts c >= 1, so this
+		// is policy, not an algorithm limit: NIST ACVP PBKDF samples with
+		// c < 1000 are "unsupported by policy" on both engines.
+		if (pbkdp->iterations < PBKDF2_MIN_ITERATIONS)
+		{
+			ERROR_MSG("CKM_PKCS5_PBKD2: iteration count %lu is below the token policy minimum %lu",
+			          (unsigned long)pbkdp->iterations, (unsigned long)PBKDF2_MIN_ITERATIONS);
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 
 		// Map PRF to OpenSSL digest
@@ -3133,6 +3376,23 @@ CK_RV SoftHSM::C_DeriveKey
 		return rv;
 	}
 
+	// HKDF base key (PKCS#11 v3.2 §6.62.3): "The input key must be of type
+	// CKK_HKDF or CKK_GENERIC_SECRET … The exception is a data object". An
+	// asymmetric key is therefore never a valid base key; C_DeriveKey (§5.18.5)
+	// lists CKR_KEY_TYPE_INCONSISTENT for it, and §5.1.6 ranks that above
+	// CKR_KEY_FUNCTION_NOT_PERMITTED, so this runs before the CKA_DERIVE test.
+	// Found by the Hub's G-8 probes (finding E5, 2026-09-25): an EC private key
+	// was accepted as the HKDF base key. Only the key CLASS is enforced here —
+	// secret keys of other types keep being accepted, because existing callers
+	// (the vendored pkcs11-provider's TLS 1.3 path among them) have not been
+	// audited for the narrower §6.62.3 key-type rule.
+	if (pMechanism->mechanism == CKM_HKDF_DERIVE || pMechanism->mechanism == CKM_HKDF_DATA)
+	{
+		CK_OBJECT_CLASS baseClass = key->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED);
+		if (baseClass != CKO_SECRET_KEY && baseClass != CKO_DATA)
+			return CKR_KEY_TYPE_INCONSISTENT;
+	}
+
 	// Check if key can be used for derive
 	if (!key->getBooleanValue(CKA_DERIVE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -3167,14 +3427,45 @@ CK_RV SoftHSM::C_DeriveKey
 				seed = key->getByteStringValue(CKA_VALUE);
 			}
 
+			// Seed length contract: 16..64 bytes (maintainer ruling 2026-09-26),
+			// which is what C_GetMechanismInfo advertises as 16/64. BIP-32 permits
+			// 128 to 512 bits of seed entropy, so this range covers every real
+			// seed — including the 64-byte seed BIP-39 produces — while still being
+			// a range rather than "anything".
+			//
+			// Enforce it here rather than only advertising it: deriveMasterNode
+			// HMAC-SHA512s the seed as the MAC *message*, so any length would
+			// otherwise derive happily and the advertised range would be a
+			// constraint the engine does not have — finding E20's own defect class.
+			if (seed.size() < 16 || seed.size() > 64) {
+				seed.wipe();
+				return CKR_KEY_SIZE_RANGE;
+			}
+
 			deriveOk = HDWalletDerivation::deriveMasterNode(seed, curveOid, privKeyBytes, chainCodeBytes);
 			seed.wipe();
 		} else {
 			if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen != sizeof(CK_BIP32_CHILD_DERIVE_PARAMS)) {
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			CK_BIP32_CHILD_DERIVE_PARAMS* params = (CK_BIP32_CHILD_DERIVE_PARAMS*)pMechanism->pParameter;
-			
+
+			// 4.F (2026-09-27): a child lives on its parent's curve. The curve
+			// used to come from the template alone, so a P-256 template on a
+			// secp256k1 parent derived on the wrong curve and returned CKR_OK.
+			// A parent that records its curve must match the template's.
+			// A private parent stores CKA_EC_PARAMS encrypted, like every other
+			// private-key attribute here; compare the plaintext.
+			if (key->attributeExists(CKA_EC_PARAMS)) {
+				ByteString parentParams;
+				if (isKeyPrivate) {
+					if (!token->decrypt(key->getByteStringValue(CKA_EC_PARAMS), parentParams)) return CKR_GENERAL_ERROR;
+				} else {
+					parentParams = key->getByteStringValue(CKA_EC_PARAMS);
+				}
+				if (parentParams.size() > 0 && parentParams != rawOid) return CKR_TEMPLATE_INCONSISTENT;
+			}
+
 			ByteString parentPriv;
 			if (isKeyPrivate) {
 				if (!token->decrypt(key->getByteStringValue(CKA_VALUE), parentPriv)) return CKR_GENERAL_ERROR;
@@ -3196,7 +3487,10 @@ CK_RV SoftHSM::C_DeriveKey
 
 		// Save the object
 		CK_OBJECT_CLASS objCko = CKO_PRIVATE_KEY;
-		CK_KEY_TYPE objCkk = CKK_EC;
+		// 4.F (2026-09-27): a SLIP-10 Ed25519 node is an Edwards key — its
+		// 32-byte value is the RFC 8032 private key CKM_EDDSA signs with. It
+		// used to be stored as CKK_EC, which CKM_EDDSA refuses.
+		CK_KEY_TYPE objCkk = (rawOid == ByteString("06032b6570")) ? CKK_EC_EDWARDS : CKK_EC;
 		CK_BBOOL objFalse = CK_FALSE;
 		CK_BBOOL objTrue = CK_TRUE;
 		
@@ -3256,7 +3550,15 @@ CK_RV SoftHSM::C_DeriveKey
 		} else svOk = false;
 		
 		svOk = svOk && nObj->setAttribute(CKA_BIP32_CHAIN_CODE, chainCodeBytes);
-		svOk = svOk && nObj->setAttribute(CKA_EC_PARAMS, rawOid);
+		// The derived node is always CKA_PRIVATE (forced above), and
+		// getECPrivateKey / getEDPrivateKey DECRYPT CKA_EC_PARAMS of a private
+		// key. It used to be stored in plaintext here, so the decrypt failed
+		// and C_SignInit on ANY BIP32-derived key answered CKR_GENERAL_ERROR
+		// (found by testBip32ChildCurveFollowsParentAndEd25519IsEdwards).
+		ByteString encParams;
+		if (token->encrypt(rawOid, encParams)) {
+			svOk = svOk && nObj->setAttribute(CKA_EC_PARAMS, encParams);
+		} else svOk = false;
 		
 #ifdef WITH_ECC
 		// Set OpenSSL structural keys natively if CKK_EC. setECPrivateKey() returns
@@ -3369,7 +3671,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_KDF_PARAMS))
 		{
 			ERROR_MSG("CKM_SP800_108_COUNTER_KDF requires CK_SP800_108_KDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SP800_108_KDF_PARAMS* kp = (CK_SP800_108_KDF_PARAMS*)pMechanism->pParameter;
 
@@ -3432,11 +3734,42 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		// Parse CK_PRF_DATA_PARAM array:
-		//   CK_SP800_108_BYTE_ARRAY → append to fixed-input label/context buffer
-		//   CK_SP800_108_ITERATION_VARIABLE → extract counter width (default 32 bits)
-		ByteString kbkFixedInput;
-		int kbkCounterBits = 32;
+		// Parse the CK_PRF_DATA_PARAM array into ORDERED segments.
+		//
+		// §6.42.3 / Table 199 defines CK_SP800_108_ITERATION_VARIABLE as
+		// identifying "the location of the iteration variable in the
+		// constructed PRF input data", and for this KDF type "the iteration
+		// variable ... is a counter". That wording is locational, so the
+		// caller's array order — not a fixed library layout — decides the byte
+		// layout of each round's PRF input.
+		//
+		// 2026-09-26. This handler used to concatenate every BYTE_ARRAY into
+		// one buffer, take only the counter WIDTH from ITERATION_VARIABLE, and
+		// hand the derivation to OpenSSL's KBKDF provider, which hardwires
+		// counter || label || [separator] || context || [L]
+		// (providers/implementations/kdfs/kbkdf.c derive() writes the counter
+		// first regardless of array order). ACVP's "after fixed data" and
+		// "middle fixed data" counter placements were therefore unreachable —
+		// 4 failing vectors. Fixed by hand-rolling the round loop on EVP_MAC,
+		// the same treatment the FEEDBACK and DOUBLE_PIPELINE handlers below
+		// already received, producing the same layout as Rust's
+		// sp800_108_iter_input.
+		//
+		// Verified against an independent from-spec SP 800-108 §5.1 reference
+		// (Python/HMAC, written from the publication rather than from either
+		// engine) which matches 37 of 37 HMAC ACVP vectors across all five
+		// counterLocation values. Note that "middle fixed data" splits the
+		// fixed input at ACVP's breakLocation expressed in BITS.
+		struct KbkSeg
+		{
+			bool       isCounter;
+			ByteString bytes;      // literal segment bytes when !isCounter
+			bool       le;         // counter endianness
+			unsigned   widthBytes; // counter width
+		};
+		std::vector<KbkSeg> kbkSegs;
+		bool kbkHaveCounter = false;
+		bool kbkSeenDkm = false;
 		for (CK_ULONG i = 0; i < kp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &kp->pDataParams[i];
@@ -3444,84 +3777,161 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dp->pValue != NULL_PTR && dp->ulValueLen > 0)
-						kbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+					{
+						KbkSeg s;
+						s.isCounter = false;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+						kbkSegs.push_back(s);
+					}
 					break;
 				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					KbkSeg s;
+					s.isCounter = true;
+					s.le = false;
+					s.widthBytes = 4;
 					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
-							kbkCounterBits = (int)cf->ulWidthInBits;
+						// The old path passed this width to the provider as
+						// OSSL_KDF_PARAM_KBKDF_R, which accepts only
+						// {8,16,24,32}; anything else failed deep inside
+						// EVP_KDF_derive and surfaced as CKR_FUNCTION_FAILED.
+						// Reject it up front with the specific code instead,
+						// which is also what Rust returns — one fewer
+						// cross-engine divergence.
+						if (cf->ulWidthInBits != 8  && cf->ulWidthInBits != 16 &&
+						    cf->ulWidthInBits != 24 && cf->ulWidthInBits != 32)
+						{
+							ERROR_MSG("CKM_SP800_108_COUNTER_KDF: counter width %lu bits is not 8/16/24/32",
+							          (unsigned long)cf->ulWidthInBits);
+							return CKR_MECHANISM_PARAM_INVALID;
+						}
+						s.le = (cf->bLittleEndian != 0);
+						s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
 					}
+					kbkSegs.push_back(s);
+					kbkHaveCounter = true;
 					break;
+				}
+				case CK_SP800_108_COUNTER:
+					// Table 199: "This data field type is invalid for this KDF
+					// type." It used to be silently skipped (plan 2.D, p03);
+					// the Rust engine already refused it.
+					ERROR_MSG("CKM_SP800_108_COUNTER_KDF: CK_SP800_108_COUNTER is invalid in counter mode");
+					return CKR_MECHANISM_PARAM_INVALID;
+				case CK_SP800_108_DKM_LENGTH:
+				{
+					// "If specified, only one instance of this type may be specified."
+					if (kbkSeenDkm) return CKR_MECHANISM_PARAM_INVALID;
+					kbkSeenDkm = true;
+					KbkSeg s;
+					s.isCounter = false;
+					s.le = false;
+					s.widthBytes = 0;
+					CK_RV dkmRv = sp800108DkmLength(dp, kbkKeyLen, kp->prfType, kbkIKM.size(), s.bytes);
+					if (dkmRv != CKR_OK) return dkmRv;
+					kbkSegs.push_back(s);
+					break;
+				}
 				default:
-					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // KEY_HANDLE (additional derived keys) not supported — skip
 			}
 		}
-
-		// Derive via OpenSSL KBKDF counter mode
-		ByteString kbkOut;
-		kbkOut.resize(kbkKeyLen);
+		// No ITERATION_VARIABLE supplied at all: keep this engine's historical
+		// layout of a 32-bit big-endian counter first. That is what the
+		// OpenSSL provider did unconditionally, and what Rust's
+		// sp800_108_iter_input still does when no counter segment is present,
+		// so the default stays byte-identical across both engines.
+		if (!kbkHaveCounter)
 		{
-			static const char kbkModeStr[] = "COUNTER";
-			EVP_KDF* kbkAlgo = EVP_KDF_fetch(NULL, "KBKDF", NULL);
+			KbkSeg s;
+			s.isCounter = true;
+			s.le = false;
+			s.widthBytes = 4;
+			kbkSegs.insert(kbkSegs.begin(), s);
+		}
+
+		// Derive via a hand-rolled Counter Mode loop on EVP_MAC (SP 800-108
+		// §5.1): K(i) = PRF(Ki, <segments in caller order, counter = i>), with
+		// the output the leftmost kbkKeyLen bytes of K(1) || K(2) || ...
+		// EVP_MAC is the same PRF primitive OpenSSL's own KBKDF uses
+		// internally, so this stays EVP-only; what it does NOT inherit is that
+		// provider's fixed byte layout (see the segment parser above).
+		ByteString kbkOut;
+		{
+			EVP_MAC* kbkAlgo = EVP_MAC_fetch(NULL, kbkMacName, NULL);
 			if (kbkAlgo == NULL)
 			{
-				ERROR_MSG("EVP_KDF_fetch KBKDF failed: 0x%08X", ERR_get_error());
-				return CKR_FUNCTION_FAILED;
-			}
-			EVP_KDF_CTX* kbkctx = EVP_KDF_CTX_new(kbkAlgo);
-			EVP_KDF_free(kbkAlgo);
-			if (kbkctx == NULL)
-			{
-				ERROR_MSG("EVP_KDF_CTX_new KBKDF failed");
+				ERROR_MSG("EVP_MAC_fetch %s failed: 0x%08X", kbkMacName, ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
 
-			// OpenSSL's KBKDF provider hardwires the SP800-108 byte layout to
-			// counter || label || [0x00 separator] || context || [L] (see
-			// providers/implementations/kdfs/kbkdf.c derive(): the counter is
-			// always written first, regardless of CK_PRF_DATA_PARAM array order).
-			// Route the caller's fixed input through "info" (context) with an
-			// empty label, and disable the auto-appended separator/L fields —
-			// the caller's dataParams array is the single source of truth for
-			// what's in the PRF input, matching PKCS#11 v3.2 §6.26's model where
-			// CK_SP800_108_DKM_LENGTH (not implemented here) is what a caller
-			// would use to request an L field, not an implicit library default.
-			// Net effect: this engine can only produce ACVP's "before fixed
-			// data" counter placement, not "after fixed data" / "middle fixed
-			// data" — a real, documented limitation of the OpenSSL backend.
-			int kbkUseL = 0;
-			int kbkUseSep = 0;
-			OSSL_PARAM kbkParams[10];
-			int kpi = 0;
-			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
-			                        const_cast<char*>(kbkModeStr), 0);
-			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,
-			                        const_cast<char*>(kbkMacName), 0);
+			OSSL_PARAM kbkInitParams[2];
+			int kbkParamCount = 0;
 			if (!kbkUseCmac)
-				kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-				                        const_cast<char*>(kbkDigestName), 0);
+				kbkInitParams[kbkParamCount++] = OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(kbkDigestName), 0);
 			else
-				kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_CIPHER,
-				                        const_cast<char*>(kbkCipherName), 0);
-			kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-			                        kbkIKM.byte_str(), kbkIKM.size());
-			if (kbkFixedInput.size() > 0)
-				kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-				                        kbkFixedInput.byte_str(), kbkFixedInput.size());
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &kbkCounterBits);
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &kbkUseL);
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &kbkUseSep);
-			kbkParams[kpi] = OSSL_PARAM_construct_end();
+				kbkInitParams[kbkParamCount++] = OSSL_PARAM_construct_utf8_string("cipher", const_cast<char*>(kbkCipherName), 0);
+			kbkInitParams[kbkParamCount] = OSSL_PARAM_construct_end();
 
-			int kbkRet = EVP_KDF_derive(kbkctx, kbkOut.byte_str(), kbkKeyLen, kbkParams);
-			EVP_KDF_CTX_free(kbkctx);
-			if (kbkRet <= 0)
+			auto kbkRunMac = [&](const ByteString& in, ByteString& out) -> bool
 			{
-				ERROR_MSG("EVP_KDF_derive KBKDF failed: 0x%08X", ERR_get_error());
+				EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(kbkAlgo);
+				if (ctx == NULL) return false;
+				bool ok = EVP_MAC_init(ctx, kbkIKM.const_byte_str(), kbkIKM.size(), kbkInitParams) > 0 &&
+				          EVP_MAC_update(ctx, in.const_byte_str(), in.size()) > 0;
+				if (ok)
+				{
+					size_t macSize = EVP_MAC_CTX_get_mac_size(ctx);
+					out.resize(macSize);
+					size_t outLen = 0;
+					ok = EVP_MAC_final(ctx, out.byte_str(), &outLen, macSize) > 0;
+					if (ok) out.resize(outLen);
+				}
+				EVP_MAC_CTX_free(ctx);
+				return ok;
+			};
+
+			unsigned long kbkCounter = 1;
+			bool kbkOK = true;
+			while (kbkOK && kbkOut.size() < kbkKeyLen)
+			{
+				ByteString kbkRoundIn;
+				for (size_t s = 0; s < kbkSegs.size(); s++)
+				{
+					const KbkSeg& seg = kbkSegs[s];
+					if (!seg.isCounter)
+					{
+						kbkRoundIn += seg.bytes;
+						continue;
+					}
+					if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							kbkRoundIn += (unsigned char)((kbkCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							kbkRoundIn += (unsigned char)((kbkCounter >> (8 * b)) & 0xFF);
+					}
+				}
+
+				ByteString kbkBlock;
+				if (!kbkRunMac(kbkRoundIn, kbkBlock)) { kbkOK = false; break; }
+				kbkOut += kbkBlock;
+				kbkCounter++;
+			}
+			EVP_MAC_free(kbkAlgo);
+			if (!kbkOK)
+			{
+				ERROR_MSG("CKM_SP800_108_COUNTER_KDF: EVP_MAC round failed: 0x%08X", ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
+			kbkOut.resize(kbkKeyLen);
 		}
 
 		// Build output key object (mirrors HKDF handler)
@@ -3639,14 +4049,19 @@ CK_RV SoftHSM::C_DeriveKey
 		return CKR_OK;
 	}
 
-	// SP 800-108 Feedback KDF (PKCS#11 v3.2 §2.44.2, CKM_SP800_108_FEEDBACK_KDF = 0x000003ad)
+	// SP 800-108 Feedback KDF (PKCS#11 v3.2 §2.44.2, CKM_SP800_108_FEEDBACK_KDF = 0x000003ad).
+	// 2026-09: hand-rolls the round loop on EVP_MAC rather than delegating to
+	// OpenSSL's own KBKDF provider (mode=FEEDBACK) — that provider has no
+	// parameter to omit the counter (see the long comment below, at the
+	// CK_SP800_108_COUNTER parse loop, for the empirical confirmation and the
+	// v3.2-canonical-header citation for why the counter is optional here).
 	if (pMechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF)
 	{
 		if (pMechanism->pParameter == NULL_PTR ||
 		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_FEEDBACK_KDF_PARAMS))
 		{
 			ERROR_MSG("CKM_SP800_108_FEEDBACK_KDF requires CK_SP800_108_FEEDBACK_KDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SP800_108_FEEDBACK_KDF_PARAMS* fp = (CK_SP800_108_FEEDBACK_KDF_PARAMS*)pMechanism->pParameter;
 
@@ -3711,13 +4126,65 @@ CK_RV SoftHSM::C_DeriveKey
 
 		// Parse CK_PRF_DATA_PARAM array:
 		//   CK_SP800_108_BYTE_ARRAY → append to fixed-input context buffer
-		//   CK_SP800_108_COUNTER → explicit optional counter (PKCS#11 v3.2 §2.44.2:
-		//     "invalid for this KDF type" does NOT apply here — that restriction is
-		//     COUNTER_KDF-only; feedback mode's counter is CK_SP800_108_COUNTER,
-		//     distinct from CK_SP800_108_ITERATION_VARIABLE which represents K(i-1)
-		//     and is handled implicitly by OpenSSL's mode=FEEDBACK + seed below.
-		ByteString fbkFixedInput;
-		int fbkCounterBits = 32;
+		//   CK_SP800_108_COUNTER → explicit OPTIONAL counter. PKCS#11 v3.2's own
+		//     canonical header (docs/refs/pkcs11t-canonical-v3.2.h; matches
+		//     src/lib/pkcs11/pkcs11t.h) #defines CK_SP800_108_COUNTER as a bare
+		//     alias for CK_SP800_108_OPTIONAL_COUNTER — optionality is baked into
+		//     the v3.2 constant's own name, independent of any later spec prose.
+		//     The v3.3 draft's Feedback Mode data field table agrees without
+		//     conflict ("This data field type is optional"). Since 2026-09-26
+		//     optionality is carried by the segment list itself: a counter
+		//     segment exists only if the caller supplied CK_SP800_108_COUNTER,
+		//     so there is no default width that could be misread as "a counter
+		//     was asked for". That misreading was the original bug.
+		//
+		//     2026-09 remediation (companion to the CKM_SP800_108_DOUBLE_PIPELINE_KDF
+		//     fix): this handler used to hand the whole job to OpenSSL's own
+		//     KBKDF provider (mode=FEEDBACK). That provider has NO parameter to
+		//     omit the counter at all — core_names.h defines only
+		//     OSSL_KDF_PARAM_KBKDF_R (counter WIDTH, not presence), _USE_L, and
+		//     _USE_SEPARATOR for this provider — confirmed empirically: calling
+		//     EVP_KDF_derive with mode=FEEDBACK and no "r" param set at all still
+		//     mixes in a 32-bit BE counter every round, byte-identical to
+		//     explicitly setting r=32 (verified against an independent from-spec
+		//     NIST SP 800-108 §5.2 Python/HMAC reference: both OpenSSL calls
+		//     matched the WITH-counter reference, not the WITHOUT-counter one).
+		//     So a caller-omitted CK_SP800_108_COUNTER was STILL getting a
+		//     counter mixed in on this path — same class of bug as Double
+		//     Pipeline's, but for a structurally different reason (an OpenSSL
+		//     provider limitation, not a hand-rolled default). Fixed the same
+		//     way: hand-roll the round loop directly on EVP_MAC instead of
+		//     delegating to the KBKDF provider, so the counter can genuinely be
+		//     omitted (see rust/src/ffi.rs sp800_108_run_feedback, which has
+		//     always done this correctly — independently re-verified here, not
+		//     just trusted from its own commit history).
+		//     2026-09-26 follow-up. The above fixed counter PRESENCE but not
+		//     counter POSITION: this loop flattened every BYTE_ARRAY into one
+		//     buffer and emitted K(i-1) || [counter] || fixedInput, with the
+		//     iteration variable hardcoded first and the counter always just
+		//     after it. CK_SP800_108_ITERATION_VARIABLE is what Table 199 calls
+		//     out as identifying "the location of the iteration variable in the
+		//     constructed PRF input data" — for this mode that variable IS
+		//     K(i-1) — so its array position is meaningful and was being
+		//     discarded. Both this and the double-pipeline handler now build
+		//     the round input from ORDERED segments, which is what makes
+		//     ACVP's "after fixed data" and "before iterator" placements
+		//     reachable. Rust has the same defect (Sp800Seg has no
+		//     iteration-variable variant and sp800_108_run_feedback updates the
+		//     MAC with k_prev before walking the segments), so "before
+		//     iterator" was unreachable in BOTH engines and the differential
+		//     harness could never see it — the oracle here is an independent
+		//     from-spec reference, not the other engine.
+		struct FbkSeg
+		{
+			int        kind;       // 0 = literal bytes, 1 = counter, 2 = K(i-1)
+			ByteString bytes;
+			bool       le;
+			unsigned   widthBytes;
+		};
+		std::vector<FbkSeg> fbkSegs;
+		bool fbkHaveIterVar = false;
+		bool fbkSeenCounter = false, fbkSeenDkm = false;
 		for (CK_ULONG i = 0; i < fp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &fp->pDataParams[i];
@@ -3725,78 +4192,168 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dp->pValue != NULL_PTR && dp->ulValueLen > 0)
-						fbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+					{
+						FbkSeg s;
+						s.kind = 0;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+						fbkSegs.push_back(s);
+					}
 					break;
 				case CK_SP800_108_COUNTER:
+					// Table 200: "If specified, only one instance of this type
+					// may be specified." A second one used to be mixed in
+					// (plan 2.D, p12; the Rust engine refuses it too).
+					if (fbkSeenCounter) return CKR_MECHANISM_PARAM_INVALID;
+					fbkSeenCounter = true;
 					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
-							fbkCounterBits = (int)cf->ulWidthInBits;
+						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64 &&
+						    (cf->ulWidthInBits % 8) == 0)
+						{
+							FbkSeg s;
+							s.kind = 1;
+							s.le = (cf->bLittleEndian != 0);
+							s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
+							fbkSegs.push_back(s);
+						}
 					}
 					break;
+				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					// Feedback mode's iteration variable is K(i-1), whose "size,
+					// format and value is defined by the internal KDF structure
+					// and PRF output" (Table 200) — so pValue is legitimately
+					// NULL here and carries no counter format. Only the POSITION
+					// is information.
+					FbkSeg s;
+					s.kind = 2;
+					s.le = false;
+					s.widthBytes = 0;
+					fbkSegs.push_back(s);
+					fbkHaveIterVar = true;
+					break;
+				}
+				case CK_SP800_108_DKM_LENGTH:
+				{
+					if (fbkSeenDkm) return CKR_MECHANISM_PARAM_INVALID;
+					fbkSeenDkm = true;
+					FbkSeg s;
+					s.kind = 0;
+					s.le = false;
+					s.widthBytes = 0;
+					CK_RV dkmRv = sp800108DkmLength(dp, fbkKeyLen, fp->prfType, fbkIKM.size(), s.bytes);
+					if (dkmRv != CKR_OK) return dkmRv;
+					fbkSegs.push_back(s);
+					break;
+				}
 				default:
-					break; // ITERATION_VARIABLE (implicit K(i-1)), DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // KEY_HANDLE (additional derived keys) not supported — skip
 			}
 		}
-
-		// Derive via OpenSSL KBKDF feedback mode
-		ByteString fbkOut;
-		fbkOut.resize(fbkKeyLen);
+		// No ITERATION_VARIABLE supplied: K(i-1) goes first, which is this
+		// engine's prior layout and also Rust's.
+		if (!fbkHaveIterVar)
 		{
-			static const char fbkModeStr[] = "FEEDBACK";
-			EVP_KDF* fbkAlgo = EVP_KDF_fetch(NULL, "KBKDF", NULL);
+			FbkSeg s;
+			s.kind = 2;
+			s.le = false;
+			s.widthBytes = 0;
+			fbkSegs.insert(fbkSegs.begin(), s);
+		}
+
+		// Derive via a hand-rolled Feedback Mode loop on EVP_MAC (the same PRF
+		// primitive OpenSSL's own KBKDF uses internally under the hood; same
+		// pattern as the CKM_SP800_108_DOUBLE_PIPELINE_KDF handler below).
+		// K(0) = IV (fp->pIV/fp->ulIVLen), or empty if none supplied — this
+		// engine's prior behavior when fp->pIV was NULL_PTR (the old code never
+		// set OSSL_KDF_PARAM_SEED in that case either), preserved unchanged.
+		// K(i) = PRF(Ki, <segments in caller order>), where the K(i-1) segment
+		// is emitted at the position CK_SP800_108_ITERATION_VARIABLE occupied
+		// and a counter segment appears only if CK_SP800_108_COUNTER was
+		// supplied. That is what makes all four ACVP placements reachable
+		// rather than only "before fixed data".
+		ByteString fbkOut;
+		{
+			EVP_MAC* fbkAlgo = EVP_MAC_fetch(NULL, fbkMacName, NULL);
 			if (fbkAlgo == NULL)
 			{
-				ERROR_MSG("EVP_KDF_fetch KBKDF failed: 0x%08X", ERR_get_error());
-				return CKR_FUNCTION_FAILED;
-			}
-			EVP_KDF_CTX* fbkctx = EVP_KDF_CTX_new(fbkAlgo);
-			EVP_KDF_free(fbkAlgo);
-			if (fbkctx == NULL)
-			{
-				ERROR_MSG("EVP_KDF_CTX_new KBKDF failed");
+				ERROR_MSG("EVP_MAC_fetch %s failed: 0x%08X", fbkMacName, ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
 
-			// See the matching comment in CKM_SP800_108_COUNTER_KDF above: OpenSSL's
-			// KBKDF hardwires counter placement and auto-appends L/separator unless
-			// told not to. Same fix — route fixedInput through "info", disable both.
-			int fbkUseL = 0;
-			int fbkUseSep = 0;
-			OSSL_PARAM fbkParams[11];
-			int fpi = 0;
-			fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
-			                        const_cast<char*>(fbkModeStr), 0);
-			fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,
-			                        const_cast<char*>(fbkMacName), 0);
+			OSSL_PARAM fbkInitParams[2];
+			int fbkParamCount = 0;
 			if (!fbkUseCmac)
-				fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-				                        const_cast<char*>(fbkDigestName), 0);
+				fbkInitParams[fbkParamCount++] = OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(fbkDigestName), 0);
 			else
-				fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_CIPHER,
-				                        const_cast<char*>(fbkCipherName), 0);
-			fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-			                        fbkIKM.byte_str(), fbkIKM.size());
-			if (fbkFixedInput.size() > 0)
-				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-				                        fbkFixedInput.byte_str(), fbkFixedInput.size());
-			// Optional IV/seed for feedback mode (PKCS#11 v3.2 §2.44.2 fp->pIV)
-			if (fp->pIV != NULL_PTR && fp->ulIVLen > 0)
-				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SEED,
-				                        fp->pIV, (size_t)fp->ulIVLen);
-			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &fbkCounterBits);
-			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &fbkUseL);
-			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &fbkUseSep);
-			fbkParams[fpi] = OSSL_PARAM_construct_end();
+				fbkInitParams[fbkParamCount++] = OSSL_PARAM_construct_utf8_string("cipher", const_cast<char*>(fbkCipherName), 0);
+			fbkInitParams[fbkParamCount] = OSSL_PARAM_construct_end();
 
-			int fbkRet = EVP_KDF_derive(fbkctx, fbkOut.byte_str(), fbkKeyLen, fbkParams);
-			EVP_KDF_CTX_free(fbkctx);
-			if (fbkRet <= 0)
+			auto fbkRunMac = [&](const ByteString& in, ByteString& out) -> bool
 			{
-				ERROR_MSG("EVP_KDF_derive KBKDF feedback failed: 0x%08X", ERR_get_error());
+				EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(fbkAlgo);
+				if (ctx == NULL) return false;
+				bool ok = EVP_MAC_init(ctx, fbkIKM.const_byte_str(), fbkIKM.size(), fbkInitParams) > 0 &&
+				          EVP_MAC_update(ctx, in.const_byte_str(), in.size()) > 0;
+				if (ok)
+				{
+					size_t macSize = EVP_MAC_CTX_get_mac_size(ctx);
+					out.resize(macSize);
+					size_t outLen = 0;
+					ok = EVP_MAC_final(ctx, out.byte_str(), &outLen, macSize) > 0;
+					if (ok) out.resize(outLen);
+				}
+				EVP_MAC_CTX_free(ctx);
+				return ok;
+			};
+
+			ByteString fbkKPrev;
+			if (fp->pIV != NULL_PTR && fp->ulIVLen > 0)
+				fbkKPrev = ByteString(fp->pIV, fp->ulIVLen);
+			unsigned long fbkCounter = 1;
+			bool fbkOK = true;
+			while (fbkOK && fbkOut.size() < fbkKeyLen)
+			{
+				ByteString fbkRoundIn;
+				for (size_t s = 0; s < fbkSegs.size(); s++)
+				{
+					const FbkSeg& seg = fbkSegs[s];
+					if (seg.kind == 0)
+					{
+						fbkRoundIn += seg.bytes;
+					}
+					else if (seg.kind == 2)
+					{
+						fbkRoundIn += fbkKPrev;
+					}
+					else if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							fbkRoundIn += (unsigned char)((fbkCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							fbkRoundIn += (unsigned char)((fbkCounter >> (8 * b)) & 0xFF);
+					}
+				}
+
+				ByteString fbkBlock;
+				if (!fbkRunMac(fbkRoundIn, fbkBlock)) { fbkOK = false; break; }
+				fbkKPrev = fbkBlock;
+				fbkOut += fbkBlock;
+				fbkCounter++;
+			}
+			EVP_MAC_free(fbkAlgo);
+			if (!fbkOK)
+			{
+				ERROR_MSG("CKM_SP800_108_FEEDBACK_KDF: EVP_MAC round failed: 0x%08X", ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
+			fbkOut.resize(fbkKeyLen);
 		}
 
 		// Build output key object (mirrors COUNTER_KDF handler)
@@ -3937,7 +4494,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_KDF_PARAMS))
 		{
 			ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF requires CK_SP800_108_KDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SP800_108_KDF_PARAMS* dpp = (CK_SP800_108_KDF_PARAMS*)pMechanism->pParameter;
 
@@ -4003,16 +4560,37 @@ CK_RV SoftHSM::C_DeriveKey
 		//     KDF" table: "This data field type is optional... If specified, only
 		//     one instance of this type may be specified" — identical wording to
 		//     Feedback Mode's own CK_SP800_108_COUNTER row). dpCounterRequested
-		//     tracks whether the caller actually supplied one; dpCounterBits is
-		//     ONLY the width to use *when* one was requested (its 32-bit default
-		//     must never be read as "a counter was asked for" — that was the bug:
-		//     a counter was unconditionally mixed into every round even with no
-		//     CK_SP800_108_COUNTER entry at all, diverging from the Rust engine's
-		//     already-correct sp800_108_feedback_input, which omits the counter
-		//     segment entirely when the caller didn't ask for one).
-		ByteString dpFixedInput;
-		int dpCounterBits = 32;
-		bool dpCounterRequested = false;
+		//     tracked whether the caller actually supplied one. The original bug
+		//     was that a 32-bit default width was read as "a counter was asked
+		//     for", so a counter was unconditionally mixed into every round even
+		//     with no CK_SP800_108_COUNTER entry at all, diverging from the Rust
+		//     engine's already-correct sp800_108_feedback_input. Since
+		//     2026-09-26 the segment list itself carries that optionality: a
+		//     counter segment exists only if the caller asked for one.
+		//     2026-09-26 follow-up, twin of the FEEDBACK_KDF change above: this
+		//     loop also discarded the POSITION of both the counter and the
+		//     iteration variable, emitting A(i) || [counter] || fixedInput
+		//     unconditionally. Table 201's iteration variable for this mode is
+		//     A(i), and Table 199's "identifies the location of the iteration
+		//     variable in the constructed PRF input data" makes its array
+		//     position meaningful. Now built from ordered segments.
+		//
+		//     Note the asymmetry that makes this mode easy to get wrong: A(0)
+		//     is the FixedInputData ALONE — the counter never enters the A
+		//     chain, only each round's PRF input (SP 800-108 §5.3). Feeding a
+		//     counter into the A chain produces plausible wrong bytes rather
+		//     than an error.
+		struct DpSeg
+		{
+			int        kind;       // 0 = literal bytes, 1 = counter, 2 = A(i)
+			ByteString bytes;
+			bool       le;
+			unsigned   widthBytes;
+		};
+		std::vector<DpSeg> dpSegs;
+		ByteString dpFixedInput;   // A(0): the fixed segments (byte arrays, DKM length) in order
+		bool dpHaveIterVar = false;
+		bool dpSeenCounter = false, dpSeenDkm = false;
 		for (CK_ULONG i = 0; i < dpp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dpm = &dpp->pDataParams[i];
@@ -4020,22 +4598,75 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dpm->pValue != NULL_PTR && dpm->ulValueLen > 0)
-						dpFixedInput += ByteString((CK_BYTE_PTR)dpm->pValue, dpm->ulValueLen);
+					{
+						DpSeg s;
+						s.kind = 0;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dpm->pValue, dpm->ulValueLen);
+						dpSegs.push_back(s);
+						dpFixedInput += s.bytes;
+					}
 					break;
 				case CK_SP800_108_COUNTER:
+					// Table 201: only one instance (plan 2.D, p12).
+					if (dpSeenCounter) return CKR_MECHANISM_PARAM_INVALID;
+					dpSeenCounter = true;
 					if (dpm->pValue != NULL_PTR && dpm->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dpm->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64 &&
+						    (cf->ulWidthInBits % 8) == 0)
 						{
-							dpCounterBits = (int)cf->ulWidthInBits;
-							dpCounterRequested = true;
+							DpSeg s;
+							s.kind = 1;
+							s.le = (cf->bLittleEndian != 0);
+							s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
+							dpSegs.push_back(s);
 						}
 					}
 					break;
+				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					// A(i) — defined by the internal KDF structure (Table 201),
+					// so pValue is legitimately NULL. Position is the payload.
+					DpSeg s;
+					s.kind = 2;
+					s.le = false;
+					s.widthBytes = 0;
+					dpSegs.push_back(s);
+					dpHaveIterVar = true;
+					break;
+				}
+				case CK_SP800_108_DKM_LENGTH:
+				{
+					// A literal part of FixedInputData, so it also enters A(0),
+					// in its position — exactly as the Rust engine's
+					// sp800_108_fixed_only does.
+					if (dpSeenDkm) return CKR_MECHANISM_PARAM_INVALID;
+					dpSeenDkm = true;
+					DpSeg s;
+					s.kind = 0;
+					s.le = false;
+					s.widthBytes = 0;
+					CK_RV dkmRv = sp800108DkmLength(dpm, dpKeyLen, dpp->prfType, dpIKM.size(), s.bytes);
+					if (dkmRv != CKR_OK) return dkmRv;
+					dpSegs.push_back(s);
+					dpFixedInput += s.bytes;
+					break;
+				}
 				default:
-					break; // ITERATION_VARIABLE (implicit A(i)), DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // KEY_HANDLE (additional derived keys) not supported — skip
 			}
+		}
+		// No ITERATION_VARIABLE supplied: A(i) goes first, the prior layout.
+		if (!dpHaveIterVar)
+		{
+			DpSeg s;
+			s.kind = 2;
+			s.le = false;
+			s.widthBytes = 0;
+			dpSegs.insert(dpSegs.begin(), s);
 		}
 		if (dpFixedInput.size() == 0)
 		{
@@ -4078,7 +4709,6 @@ CK_RV SoftHSM::C_DeriveKey
 				return ok;
 			};
 
-			int dpCounterBytes = dpCounterBits / 8;
 			ByteString dpA = dpFixedInput; // A(0), PKCS#11 v3.2 §2.44.3
 			unsigned long dpCounter = 1;
 			bool dpOK = true;
@@ -4088,18 +4718,34 @@ CK_RV SoftHSM::C_DeriveKey
 				if (!dpRunMac(dpA, dpANext)) { dpOK = false; break; }
 				dpA = dpANext;
 
-				ByteString dpRoundIn = dpA;
-				// Counter is mixed in ONLY when the caller explicitly supplied
-				// CK_SP800_108_COUNTER (see dpCounterRequested above) — an absent
+				// Round input from ORDERED segments. A counter appears only
+				// when the caller supplied CK_SP800_108_COUNTER — an absent
 				// counter is a valid, spec-conformant call shape for Double
-				// Pipeline mode, not an error and not a "use the default width"
-				// signal.
-				if (dpCounterRequested)
+				// Pipeline mode, not an error and not a "use the default
+				// width" signal — and it appears wherever they put it.
+				ByteString dpRoundIn;
+				for (size_t s = 0; s < dpSegs.size(); s++)
 				{
-					for (int b = dpCounterBytes - 1; b >= 0; b--)
-						dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+					const DpSeg& seg = dpSegs[s];
+					if (seg.kind == 0)
+					{
+						dpRoundIn += seg.bytes;
+					}
+					else if (seg.kind == 2)
+					{
+						dpRoundIn += dpA;
+					}
+					else if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+					}
 				}
-				dpRoundIn += dpFixedInput;
 
 				ByteString dpBlock;
 				if (!dpRunMac(dpRoundIn, dpBlock)) { dpOK = false; break; }
@@ -4232,7 +4878,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_HKDF_PARAMS))
 		{
 			ERROR_MSG("CKM_HKDF_DERIVE/DATA requires CK_HKDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_HKDF_PARAMS* hkdfp = (CK_HKDF_PARAMS*)pMechanism->pParameter;
 
@@ -5478,7 +6124,8 @@ CK_RV SoftHSM::generateEC
 	CK_BBOOL isPublicKeyOnToken,
 	CK_BBOOL isPublicKeyPrivate,
 	CK_BBOOL isPrivateKeyOnToken,
-	CK_BBOOL isPrivateKeyPrivate)
+	CK_BBOOL isPrivateKeyPrivate,
+	bool useExtraBits)
 {
 	*phPublicKey = CK_INVALID_HANDLE;
 	*phPrivateKey = CK_INVALID_HANDLE;
@@ -5514,9 +6161,24 @@ CK_RV SoftHSM::generateEC
 		return CKR_TEMPLATE_INCOMPLETE;
 	}
 
+	// Exactly one DER value (plan 3.B′): OpenSSL decodes a valid OID's prefix
+	// and ignores trailing bytes, which used to be accepted.
+	if (!isSingleDerValue(params.const_byte_str(), params.size())) return CKR_DOMAIN_PARAMS_INVALID;
+
+	// Refuse, with the §6.3 code, parameters OpenSSL cannot turn into a curve
+	// group — before generation, where the failure would be CKR_GENERAL_ERROR.
+#ifdef WITH_ECC
+	{
+		EC_GROUP* grp = OSSL::byteString2grp(params);
+		if (grp == NULL) return unusableEcParamsRv(params, false);
+		EC_GROUP_free(grp);
+	}
+#endif
+
 	// Set the parameters
 	ECParameters p;
 	p.setEC(params);
+	p.setUseExtraBits(useExtraBits);
 
 	// Generate key pair
 	AsymmetricKeyPair* kp = NULL;
@@ -5579,7 +6241,9 @@ CK_RV SoftHSM::generateEC
 
 				// Common Key Attributes
 				bOK = bOK && osobject->setAttribute(CKA_LOCAL,true);
-				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
+				CK_ULONG ulKeyGenMechanism = useExtraBits
+					? (CK_ULONG)CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS
+					: (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
 				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM,ulKeyGenMechanism);
 
 				// EC Public Key Attributes
@@ -5664,7 +6328,9 @@ CK_RV SoftHSM::generateEC
 
 				// Common Key Attributes
 				bOK = bOK && osobject->setAttribute(CKA_LOCAL,true);
-				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
+				CK_ULONG ulKeyGenMechanism = useExtraBits
+					? (CK_ULONG)CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS
+					: (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
 				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM,ulKeyGenMechanism);
 
 				// Common Private Key Attributes
@@ -5783,6 +6449,20 @@ CK_RV SoftHSM::generateED
 	CK_ULONG edKeyGenMech = (edKeyType == CKK_EC_MONTGOMERY)
 		? (CK_ULONG)CKM_EC_MONTGOMERY_KEY_PAIR_GEN
 		: (CK_ULONG)CKM_EC_EDWARDS_KEY_PAIR_GEN;
+
+	if (!isSingleDerValue(params.const_byte_str(), params.size())) return CKR_DOMAIN_PARAMS_INVALID; // plan 3.B′
+
+	// Refuse, with the §6.3 code, parameters that name no Edwards/Montgomery
+	// curve this engine implements — before generation, where the failure
+	// would be CKR_GENERAL_ERROR. This generator accepts both §6.3.10 forms.
+#ifdef WITH_EDDSA
+	{
+		int nid = OSSL::byteString2oid(params);
+		if (nid != EVP_PKEY_ED25519 && nid != EVP_PKEY_ED448 &&
+		    nid != EVP_PKEY_X25519 && nid != EVP_PKEY_X448)
+			return unusableEcParamsRv(params, true);
+	}
+#endif
 
 	// Set the parameters
 	ECParameters p;
@@ -7863,7 +8543,7 @@ CK_RV SoftHSM::deriveSymmetric
 				// attributes set to CK_TRUE
 				bool bNeverExtractable = baseKey->getBooleanValue(CKA_NEVER_EXTRACTABLE, false) &&
 										 otherKey->getBooleanValue(CKA_NEVER_EXTRACTABLE, false);
-				bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, bNeverExtractable);
+				bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, bNeverExtractable);
 			}
 			else if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
 				 pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE)
@@ -8585,6 +9265,242 @@ CK_RV SoftHSM::generateMLKEM
 	return rv;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Classic McEliece (BSI TR-02102-1 §2.4.2) — key helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+CK_RV SoftHSM::generateClassicMcEliece
+(CK_SESSION_HANDLE hSession,
+	CK_ATTRIBUTE_PTR pPublicKeyTemplate,
+	CK_ULONG ulPublicKeyAttributeCount,
+	CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
+	CK_ULONG ulPrivateKeyAttributeCount,
+	CK_OBJECT_HANDLE_PTR phPublicKey,
+	CK_OBJECT_HANDLE_PTR phPrivateKey,
+	CK_BBOOL isPublicKeyOnToken,
+	CK_BBOOL isPublicKeyPrivate,
+	CK_BBOOL isPrivateKeyOnToken,
+	CK_BBOOL isPrivateKeyPrivate)
+{
+	*phPublicKey = CK_INVALID_HANDLE;
+	*phPrivateKey = CK_INVALID_HANDLE;
+
+	// Get the session
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL)
+		return CKR_SESSION_HANDLE_INVALID;
+
+	// Get the token
+	Token* token = session->getToken();
+	if (token == NULL)
+		return CKR_GENERAL_ERROR;
+
+	// Extract desired key information: CKA_PARAMETER_SET selects one of the
+	// 10 Classic McEliece variants. Mandatory per spec — no silent default
+	// (same rule as ML-KEM/ML-DSA). The 10 CKP_CLASSIC_MCELIECE_* values are
+	// densely 0x1..0xA (implementation plan §3.1), so the shared min/max
+	// range helper applies directly, same as every other PQC family here.
+	CK_ULONG parameterSet = 0;
+	{
+		CK_RV psrv = extractParameterSet(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                 CKP_CLASSIC_MCELIECE_6688128, CKP_CLASSIC_MCELIECE_8192128F,
+		                                 parameterSet);
+		if (psrv != CKR_OK) return psrv;
+	}
+
+	// No CKA_SEED handling: unlike ML-KEM, Classic McEliece has no genuine
+	// deterministic-keygen capability to expose (liboqs's own
+	// _keypair_derand entry points report a zero-length seed — see
+	// ClassicMcElieceParameters.h). A caller supplying CKA_SEED anyway is
+	// rejected rather than silently ignored, mirroring the FFI layer's own
+	// check for this mechanism (rust/src/ffi.rs).
+	for (CK_ULONG i = 0; i < ulPrivateKeyAttributeCount; i++)
+		if (pPrivateKeyTemplate[i].type == CKA_SEED)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; i++)
+		if (pPublicKeyTemplate[i].type == CKA_SEED)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// Set the parameters
+	ClassicMcElieceParameters p;
+	p.setParameterSet(parameterSet);
+
+	// Generate key pair
+	AsymmetricKeyPair* kp = NULL;
+	AsymmetricAlgorithm* mceliece = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::CLASSICMCELIECE);
+	if (mceliece == NULL) return CKR_GENERAL_ERROR;
+	if (!mceliece->generateKeyPair(&kp, &p))
+	{
+		ERROR_MSG("Could not generate Classic McEliece key pair");
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_GENERAL_ERROR;
+	}
+
+	ClassicMcEliecePublicKey* pub = (ClassicMcEliecePublicKey*) kp->getPublicKey();
+	ClassicMcEliecePrivateKey* priv = (ClassicMcEliecePrivateKey*) kp->getPrivateKey();
+
+	CK_RV rv = CKR_OK;
+
+	// Create a public key using C_CreateObject
+	if (rv == CKR_OK)
+	{
+		const CK_ULONG maxAttribs = 32;
+		CK_OBJECT_CLASS publicKeyClass = CKO_PUBLIC_KEY;
+		CK_KEY_TYPE publicKeyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
+		CK_ATTRIBUTE publicKeyAttribs[maxAttribs] = {
+			{ CKA_CLASS, &publicKeyClass, sizeof(publicKeyClass) },
+			{ CKA_TOKEN, &isPublicKeyOnToken, sizeof(isPublicKeyOnToken) },
+			{ CKA_PRIVATE, &isPublicKeyPrivate, sizeof(isPublicKeyPrivate) },
+			{ CKA_KEY_TYPE, &publicKeyType, sizeof(publicKeyType) },
+		};
+		CK_ULONG publicKeyAttribsCount = 4;
+
+		if (ulPublicKeyAttributeCount > (maxAttribs - publicKeyAttribsCount))
+			rv = CKR_TEMPLATE_INCONSISTENT;
+		for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount && rv == CKR_OK; ++i)
+		{
+			switch (pPublicKeyTemplate[i].type)
+			{
+				case CKA_CLASS:
+				case CKA_TOKEN:
+				case CKA_PRIVATE:
+				case CKA_KEY_TYPE:
+					continue;
+				default:
+					publicKeyAttribs[publicKeyAttribsCount++] = pPublicKeyTemplate[i];
+			}
+		}
+
+		if (rv == CKR_OK)
+			rv = this->CreateObject(hSession, publicKeyAttribs, publicKeyAttribsCount, phPublicKey, OBJECT_OP_GENERATE);
+
+		if (rv == CKR_OK)
+		{
+			OSObject* osobject = (OSObject*)handleManager->getObject(*phPublicKey);
+			if (osobject == NULL_PTR || !osobject->isValid()) {
+				rv = CKR_FUNCTION_FAILED;
+			} else if (osobject->startTransaction()) {
+				bool bOK = true;
+
+				bOK = bOK && osobject->setAttribute(CKA_LOCAL, true);
+				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN;
+				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM, ulKeyGenMechanism);
+
+				// PKCS#11 v3.2: C_GenerateKeyPair sets CKA_ENCAPSULATE=true for public key
+				bOK = bOK && osobject->setAttribute(CKA_ENCAPSULATE, true);
+
+				// Classic McEliece Public Key Attributes — raw bytes (no SPKI
+				// builder exists: no registered AlgorithmIdentifier OID).
+				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)pub->getParameterSet());
+				ByteString pubValue;
+				if (isPublicKeyPrivate)
+					bOK = bOK && token->encrypt(pub->getValue(), pubValue);
+				else
+					pubValue = pub->getValue();
+				bOK = bOK && osobject->setAttribute(CKA_VALUE, pubValue);
+				// CKA_CHECK_VALUE: SHA-256(plaintext) → 3 bytes
+				{
+					ByteString kcv = computeAsymKCV(pub->getValue());
+					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+
+				if (bOK)
+					bOK = osobject->commitTransaction();
+				else
+					osobject->abortTransaction();
+
+				if (!bOK)
+					rv = CKR_FUNCTION_FAILED;
+			} else
+				rv = CKR_FUNCTION_FAILED;
+		}
+	}
+
+	// Create a private key using C_CreateObject
+	if (rv == CKR_OK)
+	{
+		const CK_ULONG maxAttribs = 32;
+		CK_OBJECT_CLASS privateKeyClass = CKO_PRIVATE_KEY;
+		CK_KEY_TYPE privateKeyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
+		CK_ATTRIBUTE privateKeyAttribs[maxAttribs] = {
+			{ CKA_CLASS, &privateKeyClass, sizeof(privateKeyClass) },
+			{ CKA_TOKEN, &isPrivateKeyOnToken, sizeof(isPrivateKeyOnToken) },
+			{ CKA_PRIVATE, &isPrivateKeyPrivate, sizeof(isPrivateKeyPrivate) },
+			{ CKA_KEY_TYPE, &privateKeyType, sizeof(privateKeyType) },
+		};
+		CK_ULONG privateKeyAttribsCount = 4;
+		if (ulPrivateKeyAttributeCount > (maxAttribs - privateKeyAttribsCount))
+			rv = CKR_TEMPLATE_INCONSISTENT;
+		for (CK_ULONG i = 0; i < ulPrivateKeyAttributeCount && rv == CKR_OK; ++i)
+		{
+			switch (pPrivateKeyTemplate[i].type)
+			{
+				case CKA_CLASS:
+				case CKA_TOKEN:
+				case CKA_PRIVATE:
+				case CKA_KEY_TYPE:
+				case CKA_PARAMETER_SET: // set directly after CreateObject
+					continue;
+				default:
+					privateKeyAttribs[privateKeyAttribsCount++] = pPrivateKeyTemplate[i];
+			}
+		}
+
+		if (rv == CKR_OK)
+			rv = this->CreateObject(hSession, privateKeyAttribs, privateKeyAttribsCount, phPrivateKey, OBJECT_OP_GENERATE);
+
+		if (rv == CKR_OK)
+		{
+			OSObject* osobject = (OSObject*)handleManager->getObject(*phPrivateKey);
+			if (osobject == NULL_PTR || !osobject->isValid()) {
+				rv = CKR_FUNCTION_FAILED;
+			} else if (osobject->startTransaction()) {
+				bool bOK = true;
+
+				bOK = bOK && osobject->setAttribute(CKA_LOCAL, true);
+				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN;
+				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM, ulKeyGenMechanism);
+
+				// PKCS#11 v3.2: C_GenerateKeyPair sets CKA_DECAPSULATE=true for private key
+				bOK = bOK && osobject->setAttribute(CKA_DECAPSULATE, true);
+
+				bool bAlwaysSensitive = osobject->getBooleanValue(CKA_SENSITIVE, false);
+				bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, bAlwaysSensitive);
+				bool bNeverExtractable = osobject->getBooleanValue(CKA_EXTRACTABLE, false) == false;
+				bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, bNeverExtractable);
+
+				// Classic McEliece Private Key Attributes — raw bytes.
+				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)priv->getParameterSet());
+				ByteString privValue;
+				if (isPrivateKeyPrivate)
+					bOK = bOK && token->encrypt(priv->getValue(), privValue);
+				else
+					privValue = priv->getValue();
+				bOK = bOK && osobject->setAttribute(CKA_VALUE, privValue);
+				// CKA_CHECK_VALUE: SHA-256(plaintext) → 3 bytes
+				{
+					ByteString kcv = computeAsymKCV(priv->getValue());
+					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+
+				if (bOK)
+					bOK = osobject->commitTransaction();
+				else
+					osobject->abortTransaction();
+
+				if (!bOK)
+					rv = CKR_FUNCTION_FAILED;
+			} else
+				rv = CKR_FUNCTION_FAILED;
+		}
+	}
+
+	cleanupKeyPair(mceliece, kp, NULL, phPublicKey, phPrivateKey, rv);
+
+	return rv;
+}
+
 CK_RV SoftHSM::getECDHPublicKey(ECPublicKey* publicKey, ECPrivateKey* privateKey, ByteString& pubData)
 {
 	if (publicKey == NULL) return CKR_ARGUMENTS_BAD;
@@ -8765,11 +9681,16 @@ bool SoftHSM::setECPrivateKey(OSObject* key, const ByteString &ber, Token* token
 {
 	// Raw scalar path: hardware HSM flows (e.g. GSMA SUCI) wrap the raw 32-byte (P-256)
 	// or 48-byte (P-384) private scalar directly under AES-KEY-WRAP / AES-GCM without a
-	// PKCS#8 envelope.  Detect by size (never >48 for supported curves) and the absence
-	// of a DER SEQUENCE header (0x30).  CKA_EC_PARAMS must be in the unwrap template and
-	// is already stored on the object via C_CreateObject; only CKA_VALUE needs setting.
-	bool isRawScalar = (ber.size() == 32 || ber.size() == 48) &&
-	                   (ber.size() == 0 || ber.const_byte_str()[0] != 0x30);
+	// PKCS#8 envelope, and BIP32 derivation stores its 32-byte scalar here too.
+	// CKA_EC_PARAMS is already on the object; only CKA_VALUE needs setting.
+	//
+	// Decided by SIZE alone. A PKCS#8 EC PrivateKeyInfo is never 32 or 48 bytes (the
+	// smallest, P-256 without the optional public key, is 67). This used to ALSO
+	// require the first byte not to be 0x30 (the DER SEQUENCE tag) — but a random
+	// scalar begins with 0x30 about once in 256, and such a key was then taken for DER,
+	// failed PKCS8Decode, and the derive/unwrap returned CKR_FUNCTION_FAILED
+	// (MechanismInfoEcAdvertisementTests::testBip32MasterKeyStartingWith0x30).
+	bool isRawScalar = (ber.size() == 32 || ber.size() == 48);
 	if (isRawScalar)
 	{
 		ByteString value;
@@ -8880,7 +9801,7 @@ CK_RV SoftHSM::MechParamCheckRSAPKCSOAEP(CK_MECHANISM_PTR pMechanism)
 	    pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_OAEP_PARAMS))
 	{
 		ERROR_MSG("pParameter must be of type CK_RSA_PKCS_OAEP_PARAMS");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	CK_RSA_PKCS_OAEP_PARAMS_PTR params = (CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
@@ -8908,22 +9829,22 @@ CK_RV SoftHSM::MechParamCheckRSAPKCSOAEP(CK_MECHANISM_PTR pMechanism)
 	if (!validCombo)
 	{
 		ERROR_MSG("Invalid hashAlg/mgf combination for RSA-OAEP");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->source != CKZ_DATA_SPECIFIED)
 	{
 		ERROR_MSG("source must be CKZ_DATA_SPECIFIED");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pSourceData != NULL)
 	{
 		ERROR_MSG("pSourceData must be NULL");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->ulSourceDataLen != 0)
 	{
 		ERROR_MSG("ulSourceDataLen must be 0");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	return CKR_OK;
 }
@@ -8940,19 +9861,19 @@ CK_RV SoftHSM::MechParamCheckRSAAESKEYWRAP(CK_MECHANISM_PTR pMechanism)
 	    pMechanism->ulParameterLen != sizeof(CK_RSA_AES_KEY_WRAP_PARAMS))
 	{
 		ERROR_MSG("pParameter must be of type CK_RSA_AES_KEY_WRAP_PARAMS");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	CK_RSA_AES_KEY_WRAP_PARAMS_PTR params = (CK_RSA_AES_KEY_WRAP_PARAMS_PTR)pMechanism->pParameter;
 	if (params->ulAESKeyBits != 128 && params->ulAESKeyBits != 192 && params->ulAESKeyBits != 256)
 	{
 		ERROR_MSG("length of the temporary AES key in bits can be only 128, 192 or 256");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pOAEPParams == NULL_PTR)
 	{
 		ERROR_MSG("pOAEPParams must be of type CK_RSA_PKCS_OAEP_PARAMS");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	// WS-1.1 (2026-08-29): this used to check ONLY that mgf fell in 1..5 and
 	// never looked at hashAlg at all — so CKM_RSA_AES_KEY_WRAP accepted any
@@ -8980,17 +9901,17 @@ CK_RV SoftHSM::MechParamCheckRSAAESKEYWRAP(CK_MECHANISM_PTR pMechanism)
 	if (params->pOAEPParams->source != CKZ_DATA_SPECIFIED)
 	{
 		ERROR_MSG("source must be CKZ_DATA_SPECIFIED");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pOAEPParams->pSourceData != NULL)
 	{
 		ERROR_MSG("pSourceData must be NULL");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pOAEPParams->ulSourceDataLen != 0)
 	{
 		ERROR_MSG("ulSourceDataLen must be 0");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	return CKR_OK;

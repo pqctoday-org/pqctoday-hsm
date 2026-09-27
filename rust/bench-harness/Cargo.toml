@@ -29,8 +29,12 @@ pqctoday-kmip = { path = "../../kmip" }
 # Blocking TLS for the KMIP arms: measure::run_point drives OS threads in
 # tight loops, which wants blocking sockets, not the server's tokio stack.
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
-rustls-pemfile = "2"
+# PEM parsing via `rustls::pki_types::pem::PemObject` (re-exported by rustls);
+# `rustls-pemfile` is unmaintained upstream (RUSTSEC-2025-0134) — dropped 2026-09-21.
 libloading = "0.8"
+# SHAKE probe (`xof` subcommand) — the same crate and version the engine
+# links; PKCS#11 v3.2 has no SHAKE digest mechanism to measure it through.
+sha3 = "0.10.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

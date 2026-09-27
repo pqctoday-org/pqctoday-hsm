@@ -45,6 +45,68 @@ pub const CKA_LABEL: u32 = 0x0000_0003;
 /// `CKA_ID` — PKCS#11 v3.2 standard attribute. Codepoint per pkcs11t.h.
 pub const CKA_ID: u32 = 0x0000_0102;
 
+/// Shared evidence emission for every `generate_*_keypair` entry point below
+/// that this module instruments — same record shape as `ffi::
+/// C_GenerateKeyPair` (see that function's own comment in `rust/src/
+/// ffi.rs`'s "Operation-evidence wrappers" block), so this repo's one
+/// evidence consumer needs no changes to recognise it. Caller has already
+/// checked that at least one of `logging` / `ring` is on; each sink is
+/// then gated individually here. `param_set` is what the caller asked for
+/// (0 when the mechanism has none), so a failed keygen still records the
+/// right algorithm in the ring.
+fn emit_generate_key_pair(
+    session: u32,
+    mechanism: u32,
+    param_set: u32,
+    result: &Result<(u32, u32), CkRv>,
+    dur_us: u64,
+    logging: bool,
+    ring: bool,
+) {
+    let (h_pub, h_priv, rv) = match result {
+        Ok((p, s)) => (*p, *s, CKR_OK),
+        Err(e) => (0, 0, *e),
+    };
+    if logging {
+        let (key_fields, custody) = if h_priv != 0 {
+            (
+                crate::oplog::key_fields(h_priv, mechanism),
+                crate::oplog::key_custody_fields(h_priv),
+            )
+        } else {
+            (
+                "key=- keytype=- paramset=-".to_string(),
+                "extractable=- sensitive=- never_extractable=- always_sensitive=- local=-".to_string(),
+            )
+        };
+        crate::oplog::emit(
+            "C_GenerateKeyPair",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x} dur={}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                custody,
+                h_pub,
+                h_priv,
+                crate::oplog::rv_name(rv),
+                rv,
+                dur_us
+            ),
+        );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_GENERATEKEYPAIR,
+            crate::behaviour::alg_from_ckm(mechanism, param_set),
+            rv,
+            0,
+            dur_us,
+        ));
+    }
+}
+
 // ── ML-KEM ──────────────────────────────────────────────────────────────────
 
 /// Generate an ML-KEM keypair. `parameter_set` ∈
@@ -98,7 +160,28 @@ fn ml_kem_keypair_impl(
     label: &str,
     extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
-    use ml_kem::{EncodedSizeUser, KemCore};
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+    let result = ml_kem_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
+    if logging || ring {
+        // One call site covers all three public entry points (plain,
+        // from_seed, from_seed_extractable) — see generate_ml_kem_keypair
+        // and its siblings, which all funnel through this function.
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_ML_KEM_KEY_PAIR_GEN, parameter_set, &result, dur, logging, ring);
+    }
+    result
+}
+
+fn ml_kem_keypair_inner(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+) -> Result<(u32, u32), CkRv> {
 
     if let Some(s) = seed {
         // FIPS 203 §7.1 — seed material is d ‖ z, 32 bytes each.
@@ -126,26 +209,28 @@ fn ml_kem_keypair_impl(
 
     // Crypto keygen — deterministic from d ‖ z when a seed is supplied
     // (FIPS 203 Algorithm 16), OsRng otherwise.
-    macro_rules! mlkem_gen {
-        ($t:ty) => {{
-            let (dk, ek) = match seed {
-                Some(s) => {
-                    let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
-                    let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
-                    <$t>::generate_deterministic(&d, &z)
-                }
-                None => <$t>::generate(&mut rand::rngs::OsRng),
-            };
-            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-        }};
-    }
-    match parameter_set {
-        CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
-        CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
-        CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
+    // Without a seed, d and z are drawn from the OS RNG in that order —
+    // what ml-kem's `generate(rng)` does — and expanded by the same
+    // KeyGen_internal (AWS-LC or ml-kem, crypto::handlers).
+    let drawn;
+    let dz: &[u8] = match seed {
+        Some(s) => s,
+        None => {
+            use rand::RngCore;
+            let mut b = [0u8; 64];
+            rand::rngs::OsRng.fill_bytes(&mut b[..32]);
+            rand::rngs::OsRng.fill_bytes(&mut b[32..]);
+            drawn = b;
+            &drawn
+        }
+    };
+    match crate::crypto::handlers::ml_kem_keygen_from_seed(parameter_set, dz) {
+        Some((ek, dk)) => {
+            pub_attrs.insert(CKA_VALUE, ek);
+            prv_attrs.insert(CKA_VALUE, dk);
+        }
         // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
-        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        None => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
@@ -220,6 +305,28 @@ fn ml_dsa_keypair_impl(
     label: &str,
     extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+    let result = ml_dsa_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
+    if logging || ring {
+        // One call site covers all three public entry points (plain,
+        // from_seed, from_seed_extractable) — see generate_ml_dsa_keypair
+        // and its siblings, which all funnel through this function.
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_ML_DSA_KEY_PAIR_GEN, parameter_set, &result, dur, logging, ring);
+    }
+    result
+}
+
+fn ml_dsa_keypair_inner(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+) -> Result<(u32, u32), CkRv> {
     if let Some(s) = seed {
         // FIPS 204 §3.6.1 — ξ is exactly 32 bytes.
         if s.len() != 32 {
@@ -244,32 +351,25 @@ fn ml_dsa_keypair_impl(
 
     // Crypto keygen — deterministic from ξ when a seed is supplied
     // (FIPS 204 Algorithm 6), OsRng otherwise.
-    macro_rules! mldsa_gen {
-        ($m:ident) => {{
-            use fips204::traits::{KeyGen, SerDes};
-            match seed {
-                Some(s) => {
-                    let xi: &[u8; 32] = s.try_into().expect("length checked");
-                    let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
-                    pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                    prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                }
-                None => match fips204::$m::try_keygen_with_rng(&mut rand::rngs::OsRng) {
-                    Ok((vk, sk)) => {
-                        pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                        prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                    }
-                    Err(_) => return Err(CKR_FUNCTION_FAILED),
-                },
-            }
-        }};
-    }
-    match parameter_set {
-        CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
-        CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
-        CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
+    // Without a seed, ξ is drawn from the OS RNG (FIPS 204 Algorithm 1
+    // line 1, what fips204's `try_keygen_with_rng` does) and expanded by
+    // KeyGen_internal (AWS-LC or fips204, crate::crypto::handlers).
+    let xi: [u8; 32] = match seed {
+        Some(s) => s.try_into().expect("length checked"),
+        None => {
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut b);
+            b
+        }
+    };
+    match crate::crypto::handlers::ml_dsa_keygen_from_seed(parameter_set, &xi) {
+        Some((pk, sk)) => {
+            pub_attrs.insert(CKA_VALUE, pk);
+            prv_attrs.insert(CKA_VALUE, sk);
+        }
         // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
-        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        None => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
@@ -415,14 +515,23 @@ pub fn generate_rsa_keypair(
     if !(2048..=4096).contains(&bits) {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let mut rng = rand::rngs::OsRng;
-    let private_key =
-        rsa::RsaPrivateKey::new(&mut rng, bits as usize).map_err(|_| CKR_FUNCTION_FAILED)?;
-    let public_key = rsa::RsaPublicKey::from(&private_key);
-
-    let sk_der = private_key.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
-    let n_bytes = public_key.n().to_bytes_be();
-    let e_bytes = public_key.e().to_bytes_be();
+    // Native fast path (AWS-LC) for the three sizes it generates; any other
+    // size in range keeps the pure-Rust generator (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    let fast = crate::crypto::awslc::rsa_generate(bits).transpose()?;
+    #[cfg(target_arch = "wasm32")]
+    let fast: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+    let (sk_der, n_bytes, e_bytes) = match fast {
+        Some(t) => t,
+        None => {
+            let mut rng = rand::rngs::OsRng;
+            let private_key = rsa::RsaPrivateKey::new(&mut rng, bits as usize)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+            let public_key = rsa::RsaPublicKey::from(&private_key);
+            let sk_der = private_key.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
+            (sk_der.as_bytes().to_vec(), public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
+        }
+    };
 
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
@@ -462,10 +571,17 @@ pub fn generate_rsa_keypair(
     pub_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
     store_ulong(&mut pub_attrs, CKA_MODULUS_BITS, bits);
 
-    // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO).
+    // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO). Rebuilt from the raw
+    // (n, e) components rather than a live key object, since the AWS-LC fast
+    // path above yields only the components, not an `rsa::RsaPublicKey`.
     use rsa::pkcs8::EncodePublicKey;
-    if let Ok(spki_der) = public_key.to_public_key_der() {
-        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
+    if let Ok(spki_key) = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(&n_bytes),
+        rsa::BigUint::from_bytes_be(&e_bytes),
+    ) {
+        if let Ok(spki_der) = spki_key.to_public_key_der() {
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
+        }
     }
 
     // Engine-internal packed CKA_VALUE on the public key so C_Encrypt
@@ -476,7 +592,7 @@ pub fn generate_rsa_keypair(
     packed.extend_from_slice(&n_bytes);
     packed.extend_from_slice(&e_bytes);
     pub_attrs.insert(CKA_VALUE, packed);
-    prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
+    prv_attrs.insert(CKA_VALUE, sk_der);
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
@@ -733,6 +849,22 @@ pub fn generate_ecdh_keypair(
 ///
 /// **Pre-condition**: `session` must be a valid R/W user session.
 pub fn generate_ed25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+    let result = generate_ed25519_keypair_inner(_session, cka_id, label);
+    if logging || ring {
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_EC_EDWARDS_KEY_PAIR_GEN, 0, &result, dur, logging, ring);
+    }
+    result
+}
+
+fn generate_ed25519_keypair_inner(
     _session: u32,
     cka_id: &[u8],
     label: &str,
@@ -1510,8 +1642,8 @@ pub fn register_ml_dsa_public_key(
 /// `CKA_DECAPSULATE=TRUE`, mirroring keygen defaults.
 ///
 /// The `ml-kem` backend's `DecapsulationKey::from_bytes` is infallible
-/// for a correct-length encoding, so the length check **is** the
-/// structural check for this family.
+/// for a correct-length encoding and never checks the embedded `h`, so the
+/// FIPS 203 §7.3 type + hash checks run here (`ml_kem_dk_check`).
 pub fn register_ml_kem_private_key(
     _session: u32,
     parameter_set: u32,
@@ -1521,6 +1653,10 @@ pub fn register_ml_kem_private_key(
 ) -> Result<u32, CkRv> {
     let (dk_len, _) = ml_kem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
     if dk_bytes.len() != dk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    // FIPS 203 §7.3 hash check.
+    if ml_kem_dk_check(parameter_set, dk_bytes) != Some(true) {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_private(
@@ -1549,6 +1685,10 @@ pub fn register_ml_kem_public_key(
 ) -> Result<u32, CkRv> {
     let (_, ek_len) = ml_kem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
     if ek_bytes.len() != ek_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    // FIPS 203 §7.2 modulus check.
+    if ml_kem_ek_check(parameter_set, ek_bytes) != Some(true) {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     let spki = match parameter_set {
@@ -1644,9 +1784,40 @@ pub fn register_frodokem_public_key(
     ))
 }
 
+/// Map a `CKP_CLASSIC_MCELIECE_*` PKCS#11 value to the fork crate's own
+/// `ParameterSet` enum — the single source of truth for the CKP<->variant
+/// mapping (its own `sizes()` is what backs `classic_mceliece_key_lens`
+/// below), mirroring `frodokem_algorithm`'s role for FrodoKEM.
+pub(crate) fn classic_mceliece_parameter_set(
+    parameter_set: u32,
+) -> Result<classic_mceliece_multi::ParameterSet, CkRv> {
+    use classic_mceliece_multi::ParameterSet::*;
+    match parameter_set {
+        CKP_CLASSIC_MCELIECE_348864 => Ok(Mceliece348864),
+        CKP_CLASSIC_MCELIECE_348864F => Ok(Mceliece348864f),
+        CKP_CLASSIC_MCELIECE_460896 => Ok(Mceliece460896),
+        CKP_CLASSIC_MCELIECE_460896F => Ok(Mceliece460896f),
+        CKP_CLASSIC_MCELIECE_6688128 => Ok(Mceliece6688128),
+        CKP_CLASSIC_MCELIECE_6688128F => Ok(Mceliece6688128f),
+        CKP_CLASSIC_MCELIECE_6960119 => Ok(Mceliece6960119),
+        CKP_CLASSIC_MCELIECE_6960119F => Ok(Mceliece6960119f),
+        CKP_CLASSIC_MCELIECE_8192128 => Ok(Mceliece8192128),
+        CKP_CLASSIC_MCELIECE_8192128F => Ok(Mceliece8192128f),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// `(pk_len, sk_len)` for a `CKP_CLASSIC_MCELIECE_*` value — thin wrapper
+/// around the fork crate's own `ParameterSet::sizes()` (which also returns
+/// `ct_len`, not needed by the two callers below), matching the shape
+/// `frodokem_key_lens` already established for FrodoKEM.
+pub(crate) fn classic_mceliece_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    let (pk, sk, _ct) = classic_mceliece_parameter_set(parameter_set).ok()?.sizes();
+    Some((pk, sk))
+}
+
 /// Register an existing Classic McEliece private (secret) key supplied as
-/// raw bytes. Scoped to `mceliece6688128` only (implementation plan Phase
-/// 0.5) — `parameter_set` MUST be `CKP_CLASSIC_MCELIECE_6688128`.
+/// raw bytes, for any of the 10 parameter sets.
 pub fn register_classic_mceliece_private_key(
     _session: u32,
     parameter_set: u32,
@@ -1654,10 +1825,9 @@ pub fn register_classic_mceliece_private_key(
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
-    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    if sk_bytes.len() != classic_mceliece_rust::CRYPTO_SECRETKEYBYTES {
+    let (_pk_len, sk_len) =
+        classic_mceliece_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if sk_bytes.len() != sk_len {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_private(
@@ -1674,8 +1844,8 @@ pub fn register_classic_mceliece_private_key(
     ))
 }
 
-/// Register an existing Classic McEliece public key supplied as raw bytes.
-/// Scoped to `mceliece6688128` only. No SPKI builder exists for Classic
+/// Register an existing Classic McEliece public key supplied as raw bytes,
+/// for any of the 10 parameter sets. No SPKI builder exists for Classic
 /// McEliece (no standard AlgorithmIdentifier OID is registered for it).
 pub fn register_classic_mceliece_public_key(
     _session: u32,
@@ -1684,10 +1854,9 @@ pub fn register_classic_mceliece_public_key(
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
-    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    if pk_bytes.len() != classic_mceliece_rust::CRYPTO_PUBLICKEYBYTES {
+    let (pk_len, _sk_len) =
+        classic_mceliece_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if pk_bytes.len() != pk_len {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_public(
@@ -1948,13 +2117,14 @@ pub fn generate_frodokem_keypair(
 
 // ── Classic McEliece (BSI TR-02102-1 §2.4.2) ─────────────────────────────────
 
-/// Generate a Classic McEliece keypair. Scoped to `mceliece6688128` only
-/// (see implementation plan Phase 0.5 — `classic-mceliece-rust` can only
-/// have one parameter-set feature compiled in at a time); `parameter_set`
-/// MUST be `CKP_CLASSIC_MCELIECE_6688128`. Returns `(public_handle,
-/// private_handle)`.
+/// Generate a Classic McEliece keypair, for any of the 10 parameter sets
+/// (see the McEliece all-parameter-sets implementation plan §4.2 — this
+/// dispatches through the `classic-mceliece-multi` fork's 10 namespaced
+/// modules instead of the single crate-level API the one-set-per-build
+/// upstream crate exposed). `parameter_set` is required, no silent default
+/// (same rule as ML-KEM). Returns `(public_handle, private_handle)`.
 ///
-/// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8`'s
+/// Unlike FrodoKEM, `classic-mceliece-multi` uses `rand 0.8`'s
 /// `CryptoRng`/`RngCore` (confirmed against its own `Cargo.toml`) — the
 /// same version the rest of this engine already uses, so
 /// `rand::rngs::OsRng` works directly here.
@@ -1964,9 +2134,7 @@ pub fn generate_classic_mceliece_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
+    let ps = classic_mceliece_parameter_set(parameter_set)?;
 
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
@@ -1982,9 +2150,54 @@ pub fn generate_classic_mceliece_keypair(
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
     let mut rng = rand::rngs::OsRng;
-    let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
-    pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
-    prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+    let (pk_bytes, sk_bytes): (Vec<u8>, Vec<u8>) = {
+        use classic_mceliece_multi as cmm;
+        use classic_mceliece_multi::ParameterSet::*;
+        match ps {
+            Mceliece348864 => {
+                let (pk, sk) = cmm::mceliece348864::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece348864f => {
+                let (pk, sk) = cmm::mceliece348864f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece460896 => {
+                let (pk, sk) = cmm::mceliece460896::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece460896f => {
+                let (pk, sk) = cmm::mceliece460896f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6688128 => {
+                let (pk, sk) = cmm::mceliece6688128::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6688128f => {
+                let (pk, sk) = cmm::mceliece6688128f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6960119 => {
+                let (pk, sk) = cmm::mceliece6960119::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6960119f => {
+                let (pk, sk) = cmm::mceliece6960119f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece8192128 => {
+                let (pk, sk) = cmm::mceliece8192128::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece8192128f => {
+                let (pk, sk) = cmm::mceliece8192128f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+        }
+    };
+    pub_attrs.insert(CKA_VALUE, pk_bytes);
+    prv_attrs.insert(CKA_VALUE, sk_bytes);
 
     finalize_and_register(_session, pub_attrs, prv_attrs)
 }
@@ -2195,6 +2408,65 @@ pub(crate) fn ml_kem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
     }
 }
 
+/// FIPS 203 §7.2 "Encapsulation key check" on a candidate `ek`:
+///   1. (Type check) `ek` is exactly 384k + 32 bytes for the parameter set;
+///   2. (Modulus check) `ByteEncode12(ByteDecode12(ek[0:384k])) == ek[0:384k]`,
+///      i.e. every encoded coefficient of t̂ lies in [0, q−1].
+///
+/// §7.2: "ML-KEM.Encaps shall not be run with an encapsulation key that has
+/// not been checked as above." The vendored `ml-kem` 0.2.3 exposes no
+/// validation function (its `EncapsulationKey::from_bytes` is infallible), so
+/// the check is built from the crate's OWN codec rather than a second
+/// implementation of it: `from_bytes` runs ByteDecode12, which reduces mod q
+/// (`ml-kem-patched/src/encode.rs` `byte_decode`, the `D::USIZE == 12` arm),
+/// and `as_bytes` runs ByteEncode12 and re-appends ρ verbatim. So the
+/// round-trip equals the input iff no coefficient was ≥ q.
+///
+/// `None` for a parameter set that is not ML-KEM (the caller owns that
+/// complaint); `Some(false)` when input checking failed.
+pub(crate) fn ml_kem_ek_check(parameter_set: u32, ek: &[u8]) -> Option<bool> {
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! check {
+        ($k:ty) => {{
+            let Ok(enc) = ml_kem::array::Array::try_from(ek) else {
+                return Some(false); // type check
+            };
+            let parsed = <$k as KemCore>::EncapsulationKey::from_bytes(&enc);
+            Some(parsed.as_bytes().as_slice() == ek) // modulus check
+        }};
+    }
+    match parameter_set {
+        CKP_ML_KEM_512 => check!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => check!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => check!(ml_kem::MlKem1024),
+        _ => None,
+    }
+}
+
+/// FIPS 203 §7.3 decapsulation-KEY input checks on a candidate `dk`:
+///   2. (Decapsulation key type check) `dk` is exactly 768k + 96 bytes;
+///   3. (Hash check) `H(dk[384k : 768k+32]) == dk[768k+32 : 768k+64]`,
+///      H = SHA3-256 (FIPS 203 §4.1).
+///
+/// §7.3 check 1 (ciphertext type check) is per-ciphertext and stays at the
+/// decapsulation call site. `dk` layout (Algorithm 16 line 3 / the crate's
+/// `concat_dk`): dk_PKE (384k) ‖ ek (384k+32) ‖ h (32) ‖ z (32). `h` is a
+/// hash of public data, so a variable-time comparison leaks nothing secret.
+///
+/// `None` for a parameter set that is not ML-KEM; `Some(false)` when input
+/// checking failed.
+pub(crate) fn ml_kem_dk_check(parameter_set: u32, dk: &[u8]) -> Option<bool> {
+    use sha3::Digest;
+    let (dk_len, ek_len) = ml_kem_key_lens(parameter_set)?;
+    if dk.len() != dk_len {
+        return Some(false); // type check
+    }
+    let ek_off = ek_len - 32; // 384k
+    let ek = &dk[ek_off..ek_off + ek_len];
+    let h = &dk[ek_off + ek_len..ek_off + ek_len + 32];
+    Some(sha3::Sha3_256::digest(ek).as_slice() == h) // hash check
+}
+
 /// FIPS 205 §9.1 parameter-set table: `CKP_SLH_DSA_*` → `(sk_len, pk_len)`
 /// = `(4n, 2n)` for n = 16 / 24 / 32. Taken from the `fips205` crate's
 /// per-variant `SK_LEN` / `PK_LEN` — same source keygen serializes from.
@@ -2253,9 +2525,35 @@ fn validate_ml_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Resul
     }
 }
 
+/// Integrity check for SLH-DSA private-key material arriving through a
+/// generic object path (`C_CreateObject`, `C_UnwrapKey`,
+/// `C_UnwrapKeyAuthenticated`), which do not go through
+/// [`register_slh_dsa_private_key`].
+///
+/// Runs the same checked `fips205` decode (PK.root recomputed from SK.seed
+/// and PK.seed) as that function, so every way a private key can enter the
+/// token rejects an inconsistent one. The sign path decodes without this
+/// check since 2026-09-23 (it re-checks PK.root against the hypertree it
+/// builds instead); before that, the sign-time decode was the only check
+/// these generic paths had.
+///
+/// Only a value of exactly the parameter set's `SK_LEN` is checked here. An
+/// unknown parameter set or any other length is left to the existing
+/// handling (the sign-time length check reports it), unchanged.
+pub(crate) fn check_slh_dsa_private_value(parameter_set: u32, sk_bytes: &[u8]) -> Result<(), CkRv> {
+    match slh_dsa_key_lens(parameter_set) {
+        Some((sk_len, _)) if sk_bytes.len() == sk_len => {
+            validate_slh_dsa_key(parameter_set, sk_bytes, true)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Structural import-time validation for SLH-DSA key material via the
-/// `fips205` `try_from_bytes` deserialization (mirrors the use-time
-/// handler path). Caller has already length-checked `bytes`.
+/// `fips205` `try_from_bytes` deserialization. For a private key that is the
+/// checked decode, which recomputes PK.root; the sign path deliberately uses
+/// the unchecked one (see `crypto::handlers::slh_dsa_sign!`). Caller has
+/// already length-checked `bytes`.
 fn validate_slh_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Result<(), CkRv> {
     use fips205::traits::SerDes;
     macro_rules! chk {
@@ -2639,17 +2937,62 @@ mod tests {
         close_session(session).unwrap();
     }
 
+    /// All 10 Classic McEliece parameter sets, one keygen each, through the
+    /// same native `generate_classic_mceliece_keypair` entry point the FFI
+    /// and KMIP layers both call — proves the dispatch added in the
+    /// all-parameter-sets implementation plan §4.2 actually reaches every
+    /// variant, not just the previously-shipped mceliece6688128 (the other
+    /// tests around this one predate that plan and only ever exercised
+    /// 6688128). Sizes are `classic-mceliece-multi`'s own
+    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` per module, which are
+    /// independently verified against the official Round-4 KAT vectors in
+    /// that crate's own `tests/kat_verification.rs`. Fast even in debug
+    /// builds thanks to `rust/Cargo.toml`'s `[profile.dev.package.classic-
+    /// mceliece-multi] opt-level = 3` override (§4.1 step 4) — no
+    /// `#[ignore]` needed.
+    #[test]
+    fn classic_mceliece_all_ten_parameter_sets_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let cases: [(u32, usize, usize); 10] = [
+            (CKP_CLASSIC_MCELIECE_348864, 261_120, 6_492),
+            (CKP_CLASSIC_MCELIECE_348864F, 261_120, 6_492),
+            (CKP_CLASSIC_MCELIECE_460896, 524_160, 13_608),
+            (CKP_CLASSIC_MCELIECE_460896F, 524_160, 13_608),
+            (CKP_CLASSIC_MCELIECE_6688128, 1_044_992, 13_932),
+            (CKP_CLASSIC_MCELIECE_6688128F, 1_044_992, 13_932),
+            (CKP_CLASSIC_MCELIECE_6960119, 1_047_319, 13_948),
+            (CKP_CLASSIC_MCELIECE_6960119F, 1_047_319, 13_948),
+            (CKP_CLASSIC_MCELIECE_8192128, 1_357_824, 14_120),
+            (CKP_CLASSIC_MCELIECE_8192128F, 1_357_824, 14_120),
+        ];
+        for (ps, expected_pk_len, expected_sk_len) in cases {
+            let session = fresh_session();
+            let (pub_h, prv_h) =
+                generate_classic_mceliece_keypair(session, ps, b"\x01", "mceliece-all-test")
+                    .unwrap_or_else(|e| panic!("keygen failed for ps={ps:#x}: {e:?}"));
+            assert!(pub_h > 0 && prv_h > 0 && pub_h != prv_h, "ps={ps:#x}");
+            assert_eq!(
+                get_object_value(pub_h).unwrap().len(),
+                expected_pk_len,
+                "pk length mismatch for ps={ps:#x}"
+            );
+            assert_eq!(
+                get_object_value(prv_h).unwrap().len(),
+                expected_sk_len,
+                "sk length mismatch for ps={ps:#x}"
+            );
+            close_session(session).unwrap();
+        }
+    }
+
     /// Classic McEliece (mceliece6688128 — BSI's recommended Category-5
     /// pick, §2.4.2) — pk = 1,044,992 bytes, sk = 13,932 bytes, verified
-    /// directly against `classic-mceliece-rust` v2.0.2's
-    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant.
-    ///
-    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-    /// takes minutes in an unoptimized debug build — too slow for every CI
-    /// run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_keygen` (release mode is fast).
+    /// directly against `classic-mceliece-multi`'s own
+    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant
+    /// (kept for its original historical name; superseded in coverage by
+    /// `classic_mceliece_all_ten_parameter_sets_keygen_produces_expected_length`
+    /// above, which now includes this exact case).
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_keygen_produces_expected_length() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -2666,9 +3009,8 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// Classic McEliece rejects any parameter set other than the one
-    /// scoped variant (Phase 0.5 — the crate can't compile in more than
-    /// one at a time).
+    /// Classic McEliece rejects any parameter set outside the 10 valid
+    /// `CKP_CLASSIC_MCELIECE_*` values.
     #[test]
     fn classic_mceliece_rejects_wrong_parameter_set() {
         let _guard = test_lock::acquire();
@@ -3347,6 +3689,55 @@ mod tests {
                 .unwrap_err(),
             CKR_ARGUMENTS_BAD,
         );
+        close_session(session).unwrap();
+    }
+
+    /// An SLH-DSA private key whose PK.root disagrees with its SK.seed /
+    /// PK.seed is refused where it enters the token — both through
+    /// `register_slh_dsa_private_key` and through `C_CreateObject` — now
+    /// that `C_Sign` decodes without recomputing PK.root. A key that gets
+    /// past import anyway (injected straight into the object table here)
+    /// still cannot sign: signing re-checks PK.root against the hypertree.
+    #[test]
+    fn slh_dsa_inconsistent_pk_root_rejected_at_import_and_sign() {
+        use crate::ffi::create_object_from_attrs;
+        use crate::native::sign::sign;
+        use crate::state::{allocate_handle_owned, store_bool, store_ulong};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let ps = CKP_SLH_DSA_SHA2_128F;
+        let (_, gen_prv) = generate_slh_dsa_keypair(session, ps, b"\x01", "gen").unwrap();
+        let good = get_object_value(gen_prv).unwrap();
+        let mut bad = good.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01; // PK.root is the last quarter of sk (FIPS 205 §9.1)
+
+        assert_eq!(
+            register_slh_dsa_private_key(session, ps, &bad, b"", "").unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+
+        let template = |value: &[u8]| {
+            let mut a: Attributes = std::collections::HashMap::new();
+            store_ulong(&mut a, CKA_CLASS, CKO_PRIVATE_KEY);
+            store_ulong(&mut a, CKA_KEY_TYPE, CKK_SLH_DSA);
+            store_ulong(&mut a, CKA_PARAMETER_SET, ps);
+            store_bool(&mut a, CKA_SIGN, true);
+            a.insert(CKA_VALUE, value.to_vec());
+            a
+        };
+        assert_eq!(create_object_from_attrs(session, template(&bad)), Err(CKR_ATTRIBUTE_VALUE_INVALID));
+        // The consistent key still imports through the same path and signs.
+        let imported = create_object_from_attrs(session, template(&good)).expect("good key imports");
+        assert!(sign(session, imported, CKM_SLH_DSA, b"m").is_ok());
+
+        // Bypass every import check: the sign-time PK.root check refuses it.
+        let mut injected = template(&bad);
+        store_ulong(&mut injected, CKA_PRIV_PARAM_SET, ps);
+        store_ulong(&mut injected, CKA_PRIV_ALGO_FAMILY, ALGO_SLH_DSA);
+        let h = allocate_handle_owned(session, injected);
+        assert_eq!(sign(session, h, CKM_SLH_DSA, b"m").unwrap_err(), CKR_FUNCTION_FAILED);
+
         close_session(session).unwrap();
     }
 

@@ -116,7 +116,7 @@ fn firmware_signing_key_rekeys_rsa2048_to_mldsa44_on_first_sign() {
     load(&deps, "migration-pqc.yaml");
     let resp = sign(
         &deps,
-        SignRequest { uid: priv_uid.clone(), data: b"release".to_vec(), cryptographic_parameters: None },
+        SignRequest { uid: priv_uid.clone(), data: b"release".to_vec(), cryptographic_parameters: None , init_indicator: None, final_indicator: None, correlation_value: None },
         &AuthContext::open(),
         "sign",
     )
@@ -335,8 +335,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
             data: ct,
             iv: Some(iv),
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
         &AuthContext::open(),
         "dec",
     )

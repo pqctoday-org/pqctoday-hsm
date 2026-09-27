@@ -11,7 +11,8 @@
 //!   Phase-4 `Session` wrapper).
 //! - **All planes** — `auditlog::CompositeSink` fanning to: `RingSink` (always),
 //!   `SseSink` (SSE stream; always), plus optional `JsonlSink` (`--audit-log`),
-//!   `SyslogSink` (`--syslog`), and `OtlpSink` (`--otlp-endpoint`).
+//!   `SyslogSink` (`--syslog`), `OtlpSink` (`--otlp-endpoint`), and
+//!   `BehaviourSink` (env `PQC_BEHAVIOUR_RING`, the appliance's behaviour ring).
 //! - **Network** — TLS listener on `--listen <addr>`. Cert from
 //!   `--tls-cert / --tls-key`, or auto-generated self-signed for sandbox.
 
@@ -21,7 +22,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink};
+use pqctoday_kmip::auditlog::{
+    AuditSink, BehaviourSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink,
+};
 use pqctoday_kmip::cert_init::init_certs_if_missing;
 use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode, TenancyMode};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
@@ -200,8 +203,35 @@ struct Cli {
     #[arg(long = "auth-user")]
     auth_user: Vec<String>,
 
-    /// TLS posture: `permissive` (default, historical behaviour) or
+    /// Enable the §6.1.32 `Interop` operation (Begin / End / Reset).
+    ///
+    /// KMIP 3.0 §6.1.32: Interop "SHALL NOT be available in a production
+    /// server" — it exists so a conformance run can bracket and reset test
+    /// cases. Off by default; the OASIS replay harness passes this flag.
+    #[arg(long = "enable-interop", default_value_t = false)]
+    enable_interop: bool,
+
+    /// TLS posture: `basic` (**default since 2026-09-07**), `permissive`, or
     /// `quantum-safe`.
+    ///
+    /// The default changed from `permissive` to `basic` so the posture this
+    /// server SHIPS with is the one its Baseline Server conformance claim is
+    /// measured under. `permissive` remains available and is a deliberate
+    /// choice to make, not the silent default: it offers TLS 1.2 and
+    /// `TLS13_AES_128_GCM_SHA256`, which §3.1.2 forbids, so a server running
+    /// it is NOT conformant however green the corpus replay looks. Existing
+    /// TLS 1.2 clients need `--tls-profile permissive` after this change.
+    ///
+    /// `basic` enforces KMIP 3.0 Profiles §3.1 "Basic Authentication Suite" —
+    /// the suite the **Baseline Server** conformance clause (§6.2) requires:
+    /// TLS 1.3 only, and exactly the two §3.1.2 cipher suites. The default
+    /// `permissive` posture does NOT satisfy §3.1.2, which ends "SHALL NOT
+    /// support any cipher suite not listed above": rustls's defaults include
+    /// `TLS13_AES_128_GCM_SHA256` and TLS 1.2 suites the clause omits. Use
+    /// `basic` when the Baseline conformance claim has to hold on the wire.
+    /// (§3.1.2's TLS 1.2 list is static-RSA CBC, which rustls does not
+    /// implement, so 1.3-only is the conformant posture available — §3.1.1
+    /// makes 1.2 a SHOULD, not a SHALL.)
     ///
     /// `quantum-safe` enforces KMIP 3.0 Profiles §3.3 "Quantum Safe
     /// Authentication Suite": TLS 1.3 only (§3.3.1 makes TLS 1.2 a SHALL
@@ -220,7 +250,7 @@ struct Cli {
     /// posture without a rebuild: the sandbox runtime is distroless, so
     /// exec-form CMD cannot expand variables and there is no shell to do it
     /// in. Reading the env here keeps the escape hatch available.
-    #[arg(long = "tls-profile", default_value = "permissive",
+    #[arg(long = "tls-profile", default_value = "basic",
           env = "KMIP_TLS_PROFILE", value_parser = TlsProfile::parse)]
     tls_profile: TlsProfile,
 
@@ -320,6 +350,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref url) = cli.otlp_endpoint {
         sink_legs.push(Arc::new(OtlpSink::spawn(url)?));
         tracing::info!("audit log → OTLP/HTTP {url}");
+    }
+    // Environment, not a flag: the same variable the PKCS#11 engines and the
+    // remoting services read, so one unit-file setting covers every producer.
+    if let Some(sink) = BehaviourSink::from_env() {
+        sink_legs.push(Arc::new(sink));
+        tracing::info!("audit log → behaviour ring {}", std::env::var("PQC_BEHAVIOUR_RING").unwrap_or_default());
     }
     let sink: Arc<dyn AuditSink> = Arc::new(CompositeSink::new(sink_legs));
 
@@ -562,6 +598,7 @@ async fn main() -> anyhow::Result<()> {
         tenancy_mode,
         strict_tenants,
         auto_composite: !cli.no_auto_composite,
+        interop_enabled: cli.enable_interop,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

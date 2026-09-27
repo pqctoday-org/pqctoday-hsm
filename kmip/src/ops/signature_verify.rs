@@ -46,6 +46,35 @@ pub fn signature_verify(
     correlation_id: &str,
 ) -> Result<SignatureVerifyResponse> {
     let started = OffsetDateTime::now_utc();
+    // §multi-part (R3) — accumulate the parts and run the ordinary one-shot
+    // path at `Final Indicator`. This mirrors the ENGINE's own convention
+    // (`rust/src/state.rs` SIGN_MULTIPART_ACC: C_SignUpdate accumulates,
+    // C_SignFinal calls the one-shot), and it is the only correct shape for
+    // pure ML-DSA / SLH-DSA, which must see the whole message.
+    let mut req = req;
+    if super::helpers::is_streaming(req.init_indicator, &req.correlation_value) {
+        let taken = req.correlation_value.take();
+        match super::helpers::buffered_stream_step(
+            deps,
+            crate::kmip30::Operation::SignatureVerify,
+            Some(&req.uid),
+            auth,
+            req.init_indicator,
+            req.final_indicator,
+            taken,
+            &req.data,
+        )
+        .map_err(|e| fail_err(deps, correlation_id, "SignatureVerify", e))?
+        {
+            super::helpers::StreamStep::More(cv) => {
+                return Ok(SignatureVerifyResponse { uid: req.uid, validity: crate::kmip30::SignatureValidity::Invalid, correlation_value: Some(cv) });
+            }
+            super::helpers::StreamStep::Done(all) => {
+                req.data = all;
+            }
+        }
+    }
+
     emit_request(
         deps,
         correlation_id,
@@ -196,6 +225,7 @@ pub fn signature_verify(
                     return Ok(SignatureVerifyResponse {
                         uid: req.uid,
                         validity: SignatureValidity::Invalid,
+                        correlation_value: None,
                     });
                 }
                 Err(e) => return Err(e),
@@ -279,7 +309,10 @@ pub fn signature_verify(
     };
     emit_success(deps, correlation_id, "SignatureVerify");
 
-    Ok(SignatureVerifyResponse { uid: req.uid, validity })
+    // §4.13.5 — a completed verification counts, whatever its verdict:
+    // the object WAS used as the subject of the operation.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::SignatureVerify);
+    Ok(SignatureVerifyResponse { uid: req.uid, validity, correlation_value: None })
 }
 
 /// Test-only stand-in for the engine-less unit tests; production fails closed.
@@ -363,7 +396,10 @@ mod tests {
             data: b"x".to_vec(),
             signature: vec![0u8; 32],
             cryptographic_parameters: None,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(
             err.result_reason(),
             crate::error::ResultReason::IncompatibleCryptographicUsageMask
@@ -376,7 +412,7 @@ mod tests {
         active(&d, "u");
         let data = b"hello world".to_vec();
         let sig = placeholder_signature("u", &data);
-        let r = signature_verify(&d, SignatureVerifyRequest { uid: "u".into(), data, signature: sig, cryptographic_parameters: None }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        let r = signature_verify(&d, SignatureVerifyRequest { uid: "u".into(), data, signature: sig, cryptographic_parameters: None , init_indicator: None, final_indicator: None, correlation_value: None }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.validity, SignatureValidity::Valid);
     }
 
@@ -389,7 +425,10 @@ mod tests {
             data: b"hello".to_vec(),
             signature: vec![0xff; 32],
             cryptographic_parameters: None,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.validity, SignatureValidity::Invalid);
     }
 
@@ -426,7 +465,10 @@ mod tests {
             data: vec![],
             signature: vec![],
             cryptographic_parameters: None,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // success — Verify is permitted in Deactivated state per §3.4
     }
 
@@ -463,7 +505,10 @@ mod tests {
             data: vec![],
             signature: vec![],
             cryptographic_parameters: None,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         // KMIP 3.0 §11 — Destroyed is an FSM-rejection state. See
         // `ops::helpers::non_active_state_error` for the citation.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);

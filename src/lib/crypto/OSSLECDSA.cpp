@@ -44,6 +44,10 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/objects.h>
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/param_build.h>
+#include <openssl/rand.h>
 #include <string.h>
 
 // Helper: convert OpenSSL DER-encoded ECDSA_SIG to raw r||s (PKCS#11 format)
@@ -94,12 +98,160 @@ static unsigned char* rawSigToDer(const unsigned char* raw, size_t orderLen, siz
 	return der;
 }
 
+// ── CKM_PQCTODAY_ECDSA_EXPLICIT_K ───────────────────────────────────────────
+// ECDSA with the caller's nonce k: a deliberate key-recovery primitive for
+// teaching (SECURITY.md). OpenSSL 3.x has no public API that signs with a
+// supplied k, so FIPS 186-5 §6.4.1 steps 3-9 are done here directly with the
+// (non-deprecated) BN / EC_GROUP / EC_POINT API, k supplied instead of
+// generated. Only P-256 / P-384 / P-521.
+
+// The key's group, when it is one this mechanism covers. `tooSmall` reports a
+// known curve below the advertised 256-bit minimum (P-224).
+static EC_GROUP* explicitKGroup(EVP_PKEY* pkey, bool& tooSmall)
+{
+	tooSmall = false;
+	char name[80] = { 0 };
+	if (EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME,
+	                                   name, sizeof(name), NULL) != 1)
+		return NULL;
+	int nid = OBJ_txt2nid(name);
+	if (nid == NID_secp224r1)
+	{
+		tooSmall = true;
+		return NULL;
+	}
+	if (nid != NID_X9_62_prime256v1 && nid != NID_secp384r1 && nid != NID_secp521r1)
+		return NULL;
+	return EC_GROUP_new_by_curve_name(nid);
+}
+
+// k is exactly the order's byte length and 1 <= k < n. Loads it into `k`.
+static bool explicitKInRange(const EC_GROUP* grp, const void* param, size_t paramLen, BIGNUM* k)
+{
+	const BIGNUM* n = EC_GROUP_get0_order(grp);
+	if (param == NULL || n == NULL) return false;
+	if (paramLen != (size_t)BN_num_bytes(n)) return false;
+	if (BN_bin2bn((const unsigned char*)param, (int)paramLen, k) == NULL) return false;
+	return !BN_is_zero(k) && BN_cmp(k, n) < 0;
+}
+
+SignParamCheck::Type OSSLECDSA::checkSignParameters(PrivateKey* privateKey, const AsymMech::Type mechanism,
+                                                     const void* param, const size_t paramLen)
+{
+	if (mechanism != AsymMech::ECDSA_EXPLICIT_K) return SignParamCheck::OK;
+	if (!privateKey->isOfType(OSSLECPrivateKey::type)) return SignParamCheck::KEY_TYPE_INCONSISTENT;
+	EVP_PKEY* pkey = ((OSSLECPrivateKey*)privateKey)->getOSSLKey();
+	if (pkey == NULL) return SignParamCheck::KEY_TYPE_INCONSISTENT;
+	bool tooSmall = false;
+	EC_GROUP* grp = explicitKGroup(pkey, tooSmall);
+	if (grp == NULL)
+		return tooSmall ? SignParamCheck::KEY_SIZE_RANGE : SignParamCheck::KEY_TYPE_INCONSISTENT;
+	BIGNUM* k = BN_secure_new();
+	bool ok = k != NULL && explicitKInRange(grp, param, paramLen, k);
+	BN_clear_free(k);
+	EC_GROUP_free(grp);
+	return ok ? SignParamCheck::OK : SignParamCheck::PARAM_INVALID;
+}
+
+// r || s, each the order's byte length, from R = k·G, r = x(R) mod n,
+// s = k^-1 (z + r·d) mod n, where z is the leftmost min(N, 8·len) bits of the
+// input (FIPS 186-5 §6.4.1 step 2, N = bit length of n).
+static bool signExplicitK(EVP_PKEY* pkey, const ByteString& input,
+                          const void* param, size_t paramLen, ByteString& signature)
+{
+	bool tooSmall = false;
+	EC_GROUP* grp = explicitKGroup(pkey, tooSmall);
+	BN_CTX* bnctx = BN_CTX_secure_new();
+	BIGNUM* d = NULL;
+	BIGNUM* k = BN_secure_new();
+	BIGNUM* kinv = BN_secure_new();
+	BIGNUM* t = BN_secure_new();
+	BIGNUM* z = BN_new();
+	BIGNUM* x = BN_new();
+	BIGNUM* r = BN_new();
+	BIGNUM* s = BN_new();
+	EC_POINT* R = NULL;
+	bool ok = false;
+
+	do
+	{
+		if (grp == NULL || bnctx == NULL || k == NULL || kinv == NULL || t == NULL ||
+		    z == NULL || x == NULL || r == NULL || s == NULL)
+			break;
+		const BIGNUM* n = EC_GROUP_get0_order(grp);
+		const int nBits = BN_num_bits(n);
+		const size_t nBytes = (size_t)BN_num_bytes(n);
+		if (!explicitKInRange(grp, param, paramLen, k)) break;
+		BN_set_flags(k, BN_FLG_CONSTTIME);
+		if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &d) != 1) break;
+
+		const size_t take = std::min(input.size(), nBytes);
+		if (take == 0)
+			BN_zero(z);
+		else if (BN_bin2bn(input.const_byte_str(), (int)take, z) == NULL)
+			break;
+		if (take * 8 > (size_t)nBits && !BN_rshift(z, z, (int)(take * 8 - nBits))) break;
+
+		R = EC_POINT_new(grp);
+		if (R == NULL ||
+		    !EC_POINT_mul(grp, R, k, NULL, NULL, bnctx) ||
+		    !EC_POINT_get_affine_coordinates(grp, R, x, NULL, bnctx) ||
+		    !BN_nnmod(r, x, n, bnctx))
+			break;
+		// r = 0 or s = 0: FIPS 186-5 says choose another k; with k fixed by
+		// the caller there is no other, so no signature can be produced.
+		if (BN_is_zero(r)) break;
+		if (BN_mod_inverse(kinv, k, n, bnctx) == NULL ||
+		    !BN_mod_mul(t, r, d, n, bnctx) ||
+		    !BN_mod_add(t, t, z, n, bnctx) ||
+		    !BN_mod_mul(s, kinv, t, n, bnctx) ||
+		    BN_is_zero(s))
+			break;
+
+		signature.resize(2 * nBytes);
+		if (BN_bn2binpad(r, &signature[0], (int)nBytes) < 0 ||
+		    BN_bn2binpad(s, &signature[nBytes], (int)nBytes) < 0)
+			break;
+		ok = true;
+	} while (false);
+
+	if (!ok) ERROR_MSG("ECDSA explicit-k signing failed");
+	EC_POINT_free(R);
+	BN_clear_free(d);
+	BN_clear_free(k);
+	BN_clear_free(kinv);
+	BN_clear_free(t);
+	BN_free(z);
+	BN_free(x);
+	BN_free(r);
+	BN_free(s);
+	BN_CTX_free(bnctx);
+	EC_GROUP_free(grp);
+	return ok;
+}
+
 // Signing functions
 bool OSSLECDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 		     ByteString& signature, const AsymMech::Type mechanism,
-		     const void* /* param = NULL */, const size_t /* paramLen = 0 */)
+		     const void* param /* = NULL */, const size_t paramLen /* = 0 */)
 {
 	const EVP_MD* md = NULL;
+
+	if (mechanism == AsymMech::ECDSA_EXPLICIT_K)
+	{
+		if (!privateKey->isOfType(OSSLECPrivateKey::type))
+		{
+			ERROR_MSG("Invalid key type supplied");
+			return false;
+		}
+		EVP_PKEY* pkey = ((OSSLECPrivateKey*)privateKey)->getOSSLKey();
+		if (pkey == NULL)
+		{
+			ERROR_MSG("Could not get the OpenSSL private key");
+			return false;
+		}
+		return signExplicitK(pkey, dataToSign, param, paramLen, signature);
+	}
 
 	if (mechanism != AsymMech::ECDSA)
 	{
@@ -418,6 +570,144 @@ bool OSSLECDSA::decrypt(PrivateKey* /*privateKey*/, const ByteString& /*encrypte
 }
 
 // Key factory
+// FIPS 186-5 A.2.2, "Key Pair Generation Using Extra Random Bits": draw
+// len(n)+64 random bits, reduce modulo (n-1) and add 1. PKCS#11 v3.2 exposes
+// this as CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS — a mechanism distinct from
+// CKM_EC_KEY_PAIR_GEN precisely because the two differ in how the private
+// scalar is drawn. This mirrors the Rust engine's ec_extra_bits_scalar()
+// (rust/src/ffi.rs) so both engines build the key by the same construction.
+//
+// OpenSSL exposes no knob for the generation method, so the scalar is drawn
+// here and the key assembled from (group, private, public) via
+// EVP_PKEY_fromdata. The public point has to be supplied explicitly:
+// fromdata will not derive it from the private scalar.
+static EVP_PKEY* ecGenerateKeyExtraBits(int nid, const char* curve_name)
+{
+	EVP_PKEY*       pkey      = NULL;
+	EC_GROUP*       grp       = NULL;
+	BN_CTX*         bnctx     = NULL;
+	const BIGNUM*   order     = NULL;
+	BIGNUM*         nMinus1   = NULL;
+	BIGNUM*         c         = NULL;
+	BIGNUM*         d         = NULL;
+	EC_POINT*       pubPt     = NULL;
+	unsigned char*  rndBits   = NULL;
+	unsigned char*  pubBuf    = NULL;
+	size_t          pubLen    = 0;
+	size_t          rndLen    = 0;
+	int             orderBits = 0;
+	OSSL_PARAM_BLD* bld       = NULL;
+	OSSL_PARAM*     params    = NULL;
+	EVP_PKEY_CTX*   ctx       = NULL;
+
+	grp = EC_GROUP_new_by_curve_name(nid);
+	if (grp == NULL)
+	{
+		ERROR_MSG("Failed to load EC group for extra-bits key generation");
+		goto done;
+	}
+
+	order = EC_GROUP_get0_order(grp);
+	if (order == NULL || BN_is_zero(order))
+	{
+		ERROR_MSG("EC group has no usable order for extra-bits key generation");
+		goto done;
+	}
+	orderBits = BN_num_bits(order);
+
+	// len(n) + 64 bits, rounded up to whole bytes
+	rndLen  = (size_t)((orderBits + 64 + 7) / 8);
+	rndBits = (unsigned char*) OPENSSL_malloc(rndLen);
+	bnctx   = BN_CTX_new();
+	nMinus1 = BN_new();
+	d       = BN_secure_new();
+	if (rndBits == NULL || bnctx == NULL || nMinus1 == NULL || d == NULL)
+	{
+		ERROR_MSG("Out of memory in extra-bits EC key generation");
+		goto done;
+	}
+
+	if (RAND_bytes(rndBits, (int)rndLen) != 1)
+	{
+		ERROR_MSG("RAND_bytes failed in extra-bits EC key generation");
+		goto done;
+	}
+
+	c = BN_bin2bn(rndBits, (int)rndLen, NULL);
+	if (c == NULL)
+	{
+		ERROR_MSG("Failed to import random bits in extra-bits EC key generation");
+		goto done;
+	}
+
+	// d = (c mod (n-1)) + 1, so 1 <= d <= n-1
+	if (BN_copy(nMinus1, order) == NULL ||
+	    BN_sub_word(nMinus1, 1) != 1 ||
+	    BN_mod(d, c, nMinus1, bnctx) != 1 ||
+	    BN_add_word(d, 1) != 1)
+	{
+		ERROR_MSG("Scalar reduction failed in extra-bits EC key generation");
+		goto done;
+	}
+
+	// Q = d * G
+	pubPt = EC_POINT_new(grp);
+	if (pubPt == NULL || EC_POINT_mul(grp, pubPt, d, NULL, NULL, bnctx) != 1)
+	{
+		ERROR_MSG("Failed to compute the public point in extra-bits EC key generation");
+		goto done;
+	}
+
+	pubLen = EC_POINT_point2oct(grp, pubPt, POINT_CONVERSION_UNCOMPRESSED, NULL, 0, bnctx);
+	if (pubLen == 0)
+	{
+		ERROR_MSG("Failed to size the public point in extra-bits EC key generation");
+		goto done;
+	}
+	pubBuf = (unsigned char*) OPENSSL_malloc(pubLen);
+	if (pubBuf == NULL ||
+	    EC_POINT_point2oct(grp, pubPt, POINT_CONVERSION_UNCOMPRESSED, pubBuf, pubLen, bnctx) != pubLen)
+	{
+		ERROR_MSG("Failed to encode the public point in extra-bits EC key generation");
+		goto done;
+	}
+
+	bld = OSSL_PARAM_BLD_new();
+	if (bld == NULL ||
+	    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, curve_name, 0) != 1 ||
+	    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, d) != 1 ||
+	    OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pubBuf, pubLen) != 1)
+	{
+		ERROR_MSG("Failed to build key parameters in extra-bits EC key generation");
+		goto done;
+	}
+	params = OSSL_PARAM_BLD_to_param(bld);
+	ctx    = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+	if (params == NULL || ctx == NULL ||
+	    EVP_PKEY_fromdata_init(ctx) <= 0 ||
+	    EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
+	{
+		ERROR_MSG("EVP_PKEY_fromdata failed in extra-bits EC key generation (0x%08X)", ERR_get_error());
+		pkey = NULL;
+		goto done;
+	}
+
+done:
+	if (ctx     != NULL) EVP_PKEY_CTX_free(ctx);
+	if (params  != NULL) OSSL_PARAM_free(params);
+	if (bld     != NULL) OSSL_PARAM_BLD_free(bld);
+	if (pubBuf  != NULL) OPENSSL_free(pubBuf);
+	if (pubPt   != NULL) EC_POINT_free(pubPt);
+	if (d       != NULL) BN_clear_free(d);
+	if (c       != NULL) BN_clear_free(c);
+	if (nMinus1 != NULL) BN_free(nMinus1);
+	if (rndBits != NULL) OPENSSL_clear_free(rndBits, rndLen);
+	if (bnctx   != NULL) BN_CTX_free(bnctx);
+	if (grp     != NULL) EC_GROUP_free(grp);
+
+	return pkey;
+}
+
 bool OSSLECDSA::generateKeyPair(AsymmetricKeyPair** ppKeyPair, AsymmetricParameters* parameters, RNG* /*rng = NULL */)
 {
 	// Check parameters
@@ -447,6 +737,22 @@ bool OSSLECDSA::generateKeyPair(AsymmetricKeyPair** ppKeyPair, AsymmetricParamet
 	{
 		ERROR_MSG("Failed to get curve name for ECDSA key generation");
 		return false;
+	}
+
+	// CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS draws the private scalar itself
+	// (FIPS 186-5 A.2.2) rather than letting the provider choose a method
+	if (params->getUseExtraBits())
+	{
+		EVP_PKEY* xpkey = ecGenerateKeyExtraBits(nid, curve_name);
+		if (xpkey == NULL)
+			return false;
+
+		OSSLECKeyPair* xkp = new OSSLECKeyPair();
+		((OSSLECPublicKey*) xkp->getPublicKey())->setFromOSSL(xpkey);
+		((OSSLECPrivateKey*) xkp->getPrivateKey())->setFromOSSL(xpkey);
+		*ppKeyPair = xkp;
+		EVP_PKEY_free(xpkey);
+		return true;
 	}
 
 	// Generate the key-pair via EVP_PKEY_CTX

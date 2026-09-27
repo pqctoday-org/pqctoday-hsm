@@ -402,12 +402,18 @@ and each has a hands-on surface:
   granted usage allocation can't be silently re-budgeted (§4.69). Try it:
   Learn walkthrough 9, and the Batch tab's "Rollback reaches Encapsulate"
   recipe.
-- **Conformance baseline.** The native CI gate pins an exact 97 PASS /
-  5 deprecated-skip on the 102 OASIS tests. The playground's Corpus Replay
-  matches it except three honestly-labelled wasm-seam skips — the native
-  TLS listener's MaximumResponseSize enforcement, which `KmipPlayground::
-  submit`'s direct `dispatch()` call has no seam for (94 PASS / 5 deprecated
-  / 3 transport-skip, still summing to the same 97 the native gate pins).
+- **Conformance baseline.** The native CI gate pins an exact 99 PASS /
+  3 deprecated-skip on the 102 OASIS tests (DSA Register no longer among
+  the skips — accepted for storage, **G4**). The playground's own Corpus
+  Replay now matches it EXACTLY (99 PASS / 3 SKIP_DEPRECATED / 0
+  everything else, re-measured 2026-09-08 against the wasm bundle rebuilt
+  from hsm #229) — full parity, no wasm-seam gap left at all. Two hub-side
+  bugs were hiding behind the Interop-gate failure until then: the hub's
+  own XML parser had a stale copy of the exact type-aliasing bug hsm's G1
+  fixed (Identifier/Reference/NameReference silently downgraded to
+  TextString), and `classify.ts` still hard-skipped the two DSA
+  transcripts as deprecated after G4 made them genuinely pass. Both fixed
+  the same day.
   The RNG-seed-mode gap this used to also list is closed: the three
   per-test-RngSeedMode corpus tests now pass by booting the wasm engine
   pinned to each test's mode via its constructor. Re-verified 2026-07-10

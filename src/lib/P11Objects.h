@@ -91,6 +91,24 @@ protected:
 	bool initialized;
 };
 
+// C2 (2026-09-07) — PKCS#11 v3.2 §4.7. A trust object binds trusted usages to
+// one certificate, identified by CKA_ISSUER + CKA_SERIAL_NUMBER and confirmed
+// against CKA_HASH_OF_CERTIFICATE. The class existed in the header but had no
+// implementation here, so C_CreateObject refused it outright while the Rust
+// engine accepted one with any attributes at all.
+class P11TrustObj : public P11Object
+{
+public:
+	// Constructor
+	P11TrustObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
 class P11DataObj : public P11Object
 {
 public:
@@ -460,6 +478,34 @@ class P11MLKEMPrivateKeyObj : public P11PrivateKeyObj
 public:
 	// Constructor
 	P11MLKEMPrivateKeyObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
+// ─── Classic McEliece (BSI TR-02102-1 §2.4.2, PKCS#11 v3.2 vendor extension) ─
+
+class P11ClassicMcEliecePublicKeyObj : public P11PublicKeyObj
+{
+public:
+	// Constructor
+	P11ClassicMcEliecePublicKeyObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
+class P11ClassicMcEliecePrivateKeyObj : public P11PrivateKeyObj
+{
+public:
+	// Constructor
+	P11ClassicMcEliecePrivateKeyObj();
 
 	// Add attributes
 	virtual bool init(OSObject *inobject);

@@ -1,5 +1,16 @@
 # openpgp-pkcs11-sequoia
 
+> **pqctoday fork note:** this crate is vendored from upstream
+> [`heiko/openpgp-pkcs11`](https://codeberg.org/heiko/openpgp-pkcs11) — the
+> content below is the **upstream** README and describes upstream's own
+> devices/examples (YubiKey, YubiHSM, generic SoftHSMv2 at
+> `/usr/lib64/softhsm/libsofthsm.so`). It predates and does not mention this
+> fork's actual purpose: **post-quantum OpenPGP** (composite ML-DSA/ML-KEM
+> signing and decryption, plus standalone Ed448) against **softhsmv3**. See
+> [`../README.md`](../README.md) for the fork-specific overview and
+> [`../docs/PQC_PGP_IMPLEMENTATION_PLAN.md`](../docs/PQC_PGP_IMPLEMENTATION_PLAN.md)
+> for the PQC design this fork actually implements.
+
 [![crates.io openpgp-pkcs11-sequoia](https://img.shields.io/crates/v/openpgp-pkcs11-sequoia.svg)](https://crates.io/crates/openpgp-pkcs11-sequoia)
 [![docs.rs openpgp-pkcs11-sequoia](https://img.shields.io/badge/docs.rs-openpgp--pkcs11--sequoia-66c2a5?logo=docs.rs)](https://docs.rs/openpgp-pkcs11-sequoia)
 [![status-badge](https://ci.codeberg.org/api/badges/heiko/openpgp-pkcs11/status.svg)](https://ci.codeberg.org/heiko/openpgp-pkcs11)

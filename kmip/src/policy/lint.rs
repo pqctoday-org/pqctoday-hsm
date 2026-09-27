@@ -489,7 +489,11 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
         ("BIKE-", |s| matches!(s, "L1" | "L3" | "L5")),
         ("FrodoKEM-", |s| matches!(s, "640" | "976" | "1344")),
         ("Classic-McEliece-", |s| {
-            matches!(s, "348864" | "460896" | "6688128" | "6960119" | "8192128")
+            matches!(
+                s,
+                "348864" | "348864f" | "460896" | "460896f" | "6688128" | "6688128f"
+                    | "6960119" | "6960119f" | "8192128" | "8192128f"
+            )
         }),
     ];
     known_prefixes_suffixes
@@ -568,6 +572,7 @@ mod tests {
             "SLH-DSA-SHA2-128s",
             "SLH-DSA-SHAKE-256f", "HMAC-SHA-256", "LMS", "HSS", "XMSS", "XMSS-MT",
             "Falcon-1024", "HQC-192", "BIKE-L3", "FrodoKEM-1344", "Classic-McEliece-8192128",
+            "Classic-McEliece-8192128f", "Classic-McEliece-348864f",
             "Ed25519", "X25519", "SHA-256", "RSA-PKCS1-v1_5", "ECDSA-SHA1",
             "X25519MLKEM768", "SecP256r1MLKEM768",
             // A6.2 (2026-08-28 gaps-remediation plan).

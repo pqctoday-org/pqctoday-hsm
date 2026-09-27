@@ -10,7 +10,9 @@ use elliptic_curve::sec1::EncodedPoint as EcPublicKey;
 use p256::NistP256;
 use p384::NistP384;
 use p521::NistP521;
-use rsa::{BigUint, PublicKeyParts, RsaPublicKey};
+// `PublicKeyParts` moved from the crate root to `rsa::traits` in rsa 0.9.
+use rsa::traits::PublicKeyParts;
+use rsa::{BigUint, RsaPublicKey};
 use x509::der::write::{der_integer, der_sequence};
 
 /// OpenPGP key type (needed for ECC keys)

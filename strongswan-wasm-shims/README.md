@@ -9,6 +9,21 @@ them to `Makefile.am`.
 All source is `#ifdef __EMSCRIPTEN__` — on native builds these files are
 effectively empty, so shipping them alongside the core tree is safe.
 
+**Not a standalone crate** — there's no build step to run from inside this
+directory. Build from the repo root:
+
+```bash
+bash scripts/build-strongswan-wasm.sh
+```
+
+which fetches/patches strongSwan 6.0.5, copies these shims in, and (unless
+`SKIP_INSTALL_TO_HUB=1` is set) installs the resulting `strongswan.{js,wasm}`
+into the [`pqctoday-hub`](https://github.com/pqctoday/pqctoday-hub) app's
+`public/wasm/` — a separate repo, which is the actual consumer of this WASM
+bundle (in-browser IPsec/IKEv2 VPN simulation). This README documents the
+per-file purpose/exports and the C↔JS ABI; for current working/known-broken
+status and the "what works today" summary, see [`STATUS.md`](STATUS.md).
+
 ## Files
 
 | File | Purpose | Exports |

@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU32;
 use wasm_bindgen::prelude::*;
 
 use crate::constants::*;
@@ -30,6 +29,10 @@ pub const CURVE_P256: u32 = 256;
 pub const CURVE_P384: u32 = 384;
 pub const CURVE_P521: u32 = 521;
 pub const CURVE_K256: u32 = 257;
+/// NIST P-224 (secp224r1). ECDSA sign/verify only (E13, 2026-09-25): an
+/// imported P-224 key signs and verifies; C_GenerateKeyPair and ECDH stay
+/// P-256 and up, as their advertised ranges say.
+pub const CURVE_P224: u32 = 224;
 /// Curve identifiers this engine RECOGNISES from `CKA_EC_PARAMS` but does not
 /// implement. Kept distinct from "undecodable" so [`decode_ec_params`] can
 /// answer `CKR_CURVE_NOT_SUPPORTED` rather than `CKR_DOMAIN_PARAMS_INVALID`.
@@ -62,6 +65,21 @@ pub const CURVE_UNSUPPORTED: u32 = u32::MAX;
 /// this engine does not implement — `CKR_CURVE_NOT_SUPPORTED`. The
 /// implicitCA form (`NULL`, tag `0x05`) is forbidden outright and is
 /// reported as an invalid representation.
+/// RFC 7748 §6.1: X25519 with a low-order peer point yields the all-zero
+/// shared secret whatever our private key is, and "the check for the all-zero
+/// value results in failure"; RFC 9180 §7.1.4 makes that check a MUST for
+/// DHKEM(X25519). `None` for a non-contributory result, so every X25519 call
+/// site refuses it the way its X448 sibling already refuses a low-order point
+/// (the x448 crate returns `None` from `PublicKey::from_bytes` / `x448()`).
+/// Register row rust-no-contributory-behaviour-check-ecdh.
+pub fn x25519_contributory(ss: x25519_dalek::SharedSecret) -> Option<x25519_dalek::SharedSecret> {
+    if ss.was_contributory() {
+        Some(ss)
+    } else {
+        None
+    }
+}
+
 pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
     use crate::constants::{CKR_CURVE_NOT_SUPPORTED, CKR_DOMAIN_PARAMS_INVALID};
     if params.len() < 2 {
@@ -71,7 +89,11 @@ pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
     let len = params[1] as usize;
     // Only short-form DER lengths occur for these values (the longest named
     // curve OID is well under 127 bytes).
-    if params[1] & 0x80 != 0 || params.len() < 2 + len {
+    // Exactly ONE complete DER value (plan 3.B′, 2026-09-27): a valid OID
+    // followed by stray bytes used to be accepted here (the tail ignored), as
+    // it was by the C++ engine's OpenSSL decoder. It is not a valid
+    // representation of the Parameters CHOICE.
+    if params[1] & 0x80 != 0 || params.len() != 2 + len {
         return Err(CKR_DOMAIN_PARAMS_INVALID);
     }
     let body = &params[2..2 + len];
@@ -80,6 +102,8 @@ pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
         0x06 => Ok(match body {
             // 1.2.840.10045.3.1.7  prime256v1 / P-256
             [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => CURVE_P256,
+            // 1.3.132.0.33  secp224r1 / P-224
+            [0x2b, 0x81, 0x04, 0x00, 0x21] => CURVE_P224,
             // 1.3.132.0.34  secp384r1 / P-384
             [0x2b, 0x81, 0x04, 0x00, 0x22] => CURVE_P384,
             // 1.3.132.0.35  secp521r1 / P-521
@@ -101,6 +125,7 @@ pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
             let name = core::str::from_utf8(body).map_err(|_| CKR_DOMAIN_PARAMS_INVALID)?;
             Ok(match name {
                 "P-256" | "prime256v1" | "secp256r1" => CURVE_P256,
+                "P-224" | "secp224r1" => CURVE_P224,
                 "P-384" | "secp384r1" => CURVE_P384,
                 "P-521" | "secp521r1" => CURVE_P521,
                 "secp256k1" => CURVE_K256,
@@ -136,6 +161,18 @@ pub enum DigestCtx {
     Sha512(sha2::Sha512),
     Sha3_256(sha3::Sha3_256),
     Sha3_512(sha3::Sha3_512),
+    // §3 Wave 1 (2026-09-07) — the remaining FIPS 180-4 truncated variants
+    // and FIPS 202 sizes the C++ engine has always advertised. `sha2` and
+    // `sha3` already provided all five; only the plumbing was missing.
+    Sha224(sha2::Sha224),
+    Sha512_224(sha2::Sha512_224),
+    Sha512_256(sha2::Sha512_256),
+    Sha3_224(sha3::Sha3_224),
+    Sha3_384(sha3::Sha3_384),
+    /// §3 Wave 2 — SHA-1, for C++ parity (decision D2).
+    Sha1(sha1::Sha1),
+    /// §3 Wave 3 — MD5. Historical; verification of legacy artefacts.
+    Md5(md5::Md5),
     /// G11 — Keccak-256 (vendor CKM_KECCAK_256). Buffers data for single-shot finalize.
     Keccak256(Vec<u8>),
     /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
@@ -378,6 +415,16 @@ pub(crate) fn attr_is_attribute_array(attr_type: u32) -> bool {
         crate::constants::CKA_WRAP_TEMPLATE
             | crate::constants::CKA_UNWRAP_TEMPLATE
             | crate::constants::CKA_DERIVE_TEMPLATE
+            // 2026-09-07. The two KEM template attributes were missing here,
+            // which was a latent instance of the exact bug the S2 comment in
+            // absorb_template_attrs describes: without this, a caller setting
+            // CKA_ENCAPSULATE_TEMPLATE had the raw CK_ATTRIBUTE structs copied
+            // — pointers into caller memory that dangle the moment the call
+            // returns — instead of the flattened, self-contained blob. v3.3
+            // makes the deep copy an explicit MUST (key_objects.md:67-135);
+            // v3.2 left it unstated, which is why it was missed.
+            | crate::constants::CKA_ENCAPSULATE_TEMPLATE
+            | crate::constants::CKA_DECAPSULATE_TEMPLATE
     )
 }
 
@@ -586,8 +633,11 @@ macro_rules! slh_dsa_sign {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         match crate::crypto::handlers::get_slh_dsa_ph($mech) {
             Some(ph) => sk
                 .try_hash_sign($msg, $ctx, &ph, !$deterministic)
@@ -644,8 +694,11 @@ macro_rules! slh_dsa_sign_phm {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
             .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
         sk.try_hash_sign_phm($phm, $ctx, &ph, !$deterministic)
@@ -683,16 +736,29 @@ macro_rules! slh_dsa_sign_internal {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         // `_test_only_raw_sign` is FIPS 205 `slh_sign_internal(M, SK, addrnd)`:
         // it signs the bare message (no `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ the deterministic variant (addrnd = PK.seed); `Some(r)` ⇒
         // the hedged variant with the explicit ACVP/OASIS `<Random>` addrnd.
-        match $addrnd {
+        //
+        // The `deprecated` allow is scoped to this expression, not the crate.
+        // Upstream marks the raw primitive "_test_only_" because it bypasses
+        // the ctx framing; bypassing that framing is exactly what this macro
+        // needs, and the comment above says why. 24 of the crate's warnings
+        // came from here and 12 from its verify twin — 36 of 43 — which is
+        // enough noise to bury a real one, and did: the CKM_ECDSA_SHA1 defect
+        // this session was found in the handful of warnings left over.
+        #[allow(deprecated)]
+        let __sig = match $addrnd {
             Some(r) => sk._test_only_raw_sign(&mut crate::crypto::handlers::FixedRng::new(r), $msg, true),
             None => sk._test_only_raw_sign(&mut rand::rngs::OsRng, $msg, false),
-        }
+        };
+        __sig
         .map_err(|_| CKR_FUNCTION_FAILED)
         .map(|s| Into::<Vec<u8>>::into(s))
     }};
@@ -700,19 +766,27 @@ macro_rules! slh_dsa_sign_internal {
 
 #[macro_export]
 macro_rules! slh_dsa_sign_external_rnd {
-    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr) => {{
+    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr, $ph:expr) => {{
         use fips205::traits::Signer;
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         // External `SLH-DSA.Sign` (with `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ deterministic (hedged=false → addrnd = PK.seed); `Some(r)` ⇒
         // hedged with the explicit `<Random>` addrnd drawn from `FixedRng`.
-        match $addrnd {
-            Some(r) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
-            None => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
+        // `$ph = Some(ph)` ⇒ HashSLH-DSA (FIPS 205 Algorithm 23, message
+        // hashed internally), the form `slh_dsa_verify!` checks for a
+        // pre-hash mechanism.
+        match ($ph, $addrnd) {
+            (Some(ph), Some(r)) => sk.try_hash_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, &ph, true),
+            (Some(ph), None) => sk.try_hash_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, &ph, false),
+            (None, Some(r)) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
+            (None, None) => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
         }
         .map_err(|_| CKR_FUNCTION_FAILED)
         .map(|s| Into::<Vec<u8>>::into(s))
@@ -730,7 +804,11 @@ macro_rules! slh_dsa_verify_internal {
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         let sig: <$ps as fips205::traits::Verifier>::Signature =
             $sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
-        match vk._test_only_raw_verify($msg, &sig) {
+        // Scoped allow — see the sign macro above for why the "_test_only_"
+        // primitive is the correct one here.
+        #[allow(deprecated)]
+        let __ok = vk._test_only_raw_verify($msg, &sig);
+        match __ok {
             Ok(true) => Ok(()),
             _ => Err(CKR_SIGNATURE_INVALID),
         }
@@ -775,19 +853,47 @@ pub fn sign_slh_dsa_external_rnd(
     ctx: &[u8],
     addrnd: Option<&[u8]>,
 ) -> Result<Vec<u8>, u32> {
+    sign_slh_dsa_external_rnd_ph(None, ps, sk_bytes, msg, ctx, addrnd)
+}
+
+/// **HashSLH-DSA** external-interface signing with explicit `addrnd` — the
+/// pre-hash counterpart to [`sign_slh_dsa_external_rnd`] (FIPS 205
+/// Algorithm 23 `hash_slh_sign`, the form [`verify_slh_dsa`] checks).
+/// `addrnd = None` is the deterministic variant, byte-identical to
+/// [`sign_slh_dsa`] with `deterministic = true`.
+pub fn sign_hash_slh_dsa_external_rnd(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
+    let ph = get_slh_dsa_ph(mech).ok_or(CKR_MECHANISM_INVALID)?;
+    sign_slh_dsa_external_rnd_ph(Some(ph), ps, sk_bytes, msg, ctx, addrnd)
+}
+
+fn sign_slh_dsa_external_rnd_ph(
+    ph: Option<fips205::Ph>,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
     match ps {
-        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -1197,14 +1303,18 @@ pub fn sign_ml_dsa(
     ctx: &[u8],
     deterministic: bool,
 ) -> Result<Vec<u8>, u32> {
+    // AWS-LC CPU path (crypto::awslc_pq): pure ML-DSA, hedged only. The
+    // deterministic variant and every HashML-DSA mechanism stay on fips204.
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if mech == CKM_ML_DSA && !deterministic {
+        if let Some(sig) = crate::crypto::awslc_pq::mldsa_sign(ps, sk_bytes, msg, ctx) {
+            return Ok(sig);
+        }
+    }
     use fips204::traits::Signer;
-    macro_rules! ml_dsa_sign {
-        ($variant:path) => {{
-            type Sk = <$variant as KeyGen>::PrivateKey;
-            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    macro_rules! sign_with {
+        ($sk:expr) => {{
+            let sk = $sk;
             let result = match (get_ml_dsa_ph(mech), deterministic) {
                 (Some(ph), false) => sk.try_hash_sign(msg, ctx, &ph),
                 (Some(ph), true) => sk.try_hash_sign_with_rng(&mut ZeroRng, msg, ctx, &ph),
@@ -1216,13 +1326,37 @@ pub fn sign_ml_dsa(
                 .map(|s| Into::<Vec<u8>>::into(s))
         }};
     }
-    use fips204::traits::KeyGen;
-    match ps {
-        CKP_ML_DSA_44 => ml_dsa_sign!(fips204::ml_dsa_44::KG),
-        CKP_ML_DSA_65 | 0 => ml_dsa_sign!(fips204::ml_dsa_65::KG),
-        CKP_ML_DSA_87 => ml_dsa_sign!(fips204::ml_dsa_87::KG),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
-    }
+    // Native: the cached expanded key (skDecode + NTTs + ExpandA once per
+    // key; crypto::mldsa_keycache). Byte-identical to decoding per call,
+    // which the wasm build keeps.
+    #[cfg(not(target_arch = "wasm32"))]
+    let expanded = crate::crypto::mldsa_keycache::get(ps, sk_bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    return match &*expanded {
+        crate::crypto::mldsa_keycache::Expanded::P44(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P65(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P87(sk) => sign_with!(sk.as_ref()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    return {
+        use fips204::traits::KeyGen;
+        macro_rules! decoded {
+            ($variant:path) => {{
+                type Sk = <$variant as KeyGen>::PrivateKey;
+                let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                    sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                sign_with!(&sk)
+            }};
+        }
+        match ps {
+            CKP_ML_DSA_44 => decoded!(fips204::ml_dsa_44::KG),
+            CKP_ML_DSA_65 | 0 => decoded!(fips204::ml_dsa_65::KG),
+            CKP_ML_DSA_87 => decoded!(fips204::ml_dsa_87::KG),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        }
+    };
 }
 
 /// Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6: sign an ALREADY-HASHED
@@ -1368,6 +1502,21 @@ pub fn sign_ml_dsa_external_mu(
     }
 }
 
+/// Hedged external-µ signing with a fresh OS-random `rnd` — what `C_Sign`
+/// does for `CKM_ML_DSA_EXTERNAL_MU` without `CKH_DETERMINISTIC_REQUIRED`.
+/// AWS-LC signs it when routed (it draws its own rnd); otherwise the rnd is
+/// drawn here and [`sign_ml_dsa_external_mu`] signs, exactly as before.
+pub fn sign_ml_dsa_external_mu_hedged(ps: u32, sk_bytes: &[u8], mu: &[u8]) -> Result<Vec<u8>, u32> {
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if let Some(sig) = crate::crypto::awslc_pq::mldsa_sign_mu(ps, sk_bytes, mu) {
+        return Ok(sig);
+    }
+    use rand::RngCore;
+    let mut rnd = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut rnd);
+    sign_ml_dsa_external_mu(ps, sk_bytes, mu, rnd)
+}
+
 /// ML-DSA external-µ verification — counterpart to [`sign_ml_dsa_external_mu`].
 pub fn verify_ml_dsa_external_mu(
     ps: u32,
@@ -1375,6 +1524,10 @@ pub fn verify_ml_dsa_external_mu(
     mu: &[u8],
     sig_bytes: &[u8],
 ) -> Result<(), u32> {
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if let Some(ok) = crate::crypto::awslc_pq::mldsa_verify_mu(ps, pk_bytes, mu, sig_bytes) {
+        return if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) };
+    }
     use fips204::traits::Verifier;
     let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
     macro_rules! ver {
@@ -1414,23 +1567,183 @@ pub fn sign_ml_dsa_external_rnd(
     ctx: &[u8],
     rnd: [u8; 32],
 ) -> Result<Vec<u8>, u32> {
-    use fips204::traits::{SerDes, Signer};
+    sign_ml_dsa_external_rnd_ph(None, ps, sk_bytes, message, ctx, rnd)
+}
+
+/// **HashML-DSA** external-interface signing with an explicit 32-byte
+/// randomizer — the pre-hash counterpart to [`sign_ml_dsa_external_rnd`]
+/// (FIPS 204 Algorithm 4 `HashML-DSA.Sign`, `(1‖|ctx|‖ctx‖OID‖PH(M))`
+/// framing, the message hashed internally with the mechanism's hash — the
+/// form [`verify_ml_dsa`] checks). `rnd = [0u8; 32]` is the deterministic
+/// variant, byte-identical to [`sign_ml_dsa`] with `deterministic = true`.
+pub fn sign_hash_ml_dsa_external_rnd(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    let ph = get_ml_dsa_ph(mech).ok_or(CKR_MECHANISM_INVALID)?;
+    sign_ml_dsa_external_rnd_ph(Some(ph), ps, sk_bytes, message, ctx, rnd)
+}
+
+fn sign_ml_dsa_external_rnd_ph(
+    ph: Option<fips204::Ph>,
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    use fips204::traits::Signer;
     macro_rules! sign_with {
+        ($sk:expr) => {{
+            match &ph {
+                Some(ph) => $sk.try_hash_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx, ph),
+                None => $sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx),
+            }
+            .map(|s| Into::<Vec<u8>>::into(s))
+            .map_err(|_| CKR_FUNCTION_FAILED)
+        }};
+    }
+    // Native: the cached expanded key, as in [`sign_ml_dsa`].
+    #[cfg(not(target_arch = "wasm32"))]
+    let expanded = crate::crypto::mldsa_keycache::get(ps, sk_bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    return match &*expanded {
+        crate::crypto::mldsa_keycache::Expanded::P44(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P65(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P87(sk) => sign_with!(sk.as_ref()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    return {
+        use fips204::traits::SerDes;
+        macro_rules! decoded {
+            ($m:ident) => {{
+                let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
+                    sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                sign_with!(sk)
+            }};
+        }
+        match ps {
+            CKP_ML_DSA_44 => decoded!(ml_dsa_44),
+            CKP_ML_DSA_65 | 0 => decoded!(ml_dsa_65),
+            CKP_ML_DSA_87 => decoded!(ml_dsa_87),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        }
+    };
+}
+
+/// FIPS 204 Algorithm 6 `ML-DSA.KeyGen_internal(ξ)` → `(pk, sk)` in the
+/// FIPS 204 encodings. Every ML-DSA key generation in the engine goes through
+/// here (the engine always keeps ξ as CKA_SEED). AWS-LC when routed — the
+/// output is byte-identical — else fips204. `None` for an unknown set.
+pub fn ml_dsa_keygen_from_seed(ps: u32, xi: &[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)> {
+    use fips204::traits::{KeyGen, SerDes};
+    macro_rules! keygen_with {
         ($m:ident) => {{
-            let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx)
-                .map(|s| Into::<Vec<u8>>::into(s))
-                .map_err(|_| CKR_FUNCTION_FAILED)
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(keys) = crate::crypto::awslc_pq::mldsa_keygen_from_seed(ps, xi) {
+                return Some(keys);
+            }
+            let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
+            Some((SerDes::into_bytes(vk).to_vec(), SerDes::into_bytes(sk).to_vec()))
         }};
     }
     match ps {
-        CKP_ML_DSA_44 => sign_with!(ml_dsa_44),
-        CKP_ML_DSA_65 | 0 => sign_with!(ml_dsa_65),
-        CKP_ML_DSA_87 => sign_with!(ml_dsa_87),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        CKP_ML_DSA_44 => keygen_with!(ml_dsa_44),
+        CKP_ML_DSA_65 => keygen_with!(ml_dsa_65),
+        CKP_ML_DSA_87 => keygen_with!(ml_dsa_87),
+        _ => None,
+    }
+}
+
+/// FIPS 203 Algorithm 16 `ML-KEM.KeyGen_internal(d, z)`, `dz = d ‖ z`
+/// (64 bytes, length checked by the caller) → `(ek, dk)`. AWS-LC when routed
+/// (byte-identical), else ml-kem. `None` for an unknown set.
+pub fn ml_kem_keygen_from_seed(ps: u32, dz: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! keygen_with {
+        ($t:ty) => {{
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(keys) = crate::crypto::awslc_pq::mlkem_keygen_from_seed(ps, dz) {
+                return Some(keys);
+            }
+            let d = ml_kem::B32::try_from(&dz[..32]).ok()?;
+            let z = ml_kem::B32::try_from(&dz[32..64]).ok()?;
+            let (dk, ek) = <$t>::generate_deterministic(&d, &z);
+            Some((ek.as_bytes().as_slice().to_vec(), dk.as_bytes().as_slice().to_vec()))
+        }};
+    }
+    if dz.len() != 64 {
+        return None;
+    }
+    match ps {
+        CKP_ML_KEM_512 => keygen_with!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => keygen_with!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => keygen_with!(ml_kem::MlKem1024),
+        _ => None,
+    }
+}
+
+/// FIPS 203 Algorithm 17 `ML-KEM.Encaps_internal(ek, m)` → `(c, K)`.
+/// Callers draw `m` (32 bytes) from their RNG in one `fill_bytes`, exactly
+/// the draw ml-kem's own `encapsulate(rng)` makes, so moving the
+/// randomness out of the crate changes no output (ACVP-seeded RNGs
+/// included). Errors are the ones the engine's encapsulation sites already
+/// returned: `ek` of the wrong length → `CKR_KEY_TYPE_INCONSISTENT`, unknown
+/// set → `CKR_ARGUMENTS_BAD`.
+pub fn ml_kem_encaps(ps: u32, ek_bytes: &[u8], m: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), u32> {
+    use ml_kem::{EncapsulateDeterministic, EncodedSizeUser, KemCore};
+    macro_rules! encaps {
+        ($t:ty) => {{
+            let ek_enc = ml_kem::array::Array::try_from(ek_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(out) = crate::crypto::awslc_pq::mlkem_encaps(ps, ek_bytes, m) {
+                return Ok(out);
+            }
+            let ek = <$t as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
+            let m = ml_kem::B32::from(*m);
+            let (ct, ss) = ek.encapsulate_deterministic(&m).map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok((ct.as_slice().to_vec(), ss.as_slice().to_vec()))
+        }};
+    }
+    match ps {
+        CKP_ML_KEM_512 => encaps!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => encaps!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => encaps!(ml_kem::MlKem1024),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// FIPS 203 Algorithm 18 `ML-KEM.Decaps_internal(dk, c)` → `K`, with implicit
+/// rejection. Errors as at the engine's decapsulation sites: `dk` of the
+/// wrong length → `CKR_KEY_TYPE_INCONSISTENT`, `c` of the wrong length →
+/// `CKR_ARGUMENTS_BAD`, unknown set → `CKR_ARGUMENTS_BAD`.
+pub fn ml_kem_decaps(ps: u32, dk_bytes: &[u8], ct: &[u8]) -> Result<Vec<u8>, u32> {
+    use ml_kem::kem::Decapsulate;
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! decaps {
+        ($t:ty) => {{
+            let dk_enc = ml_kem::array::Array::try_from(dk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let ct_enc = ml_kem::array::Array::try_from(ct).map_err(|_| CKR_ARGUMENTS_BAD)?;
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(ss) = crate::crypto::awslc_pq::mlkem_decaps(ps, dk_bytes, ct) {
+                return Ok(ss);
+            }
+            let dk = <$t as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
+            let ss = Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok(ss.as_slice().to_vec())
+        }};
+    }
+    match ps {
+        CKP_ML_KEM_512 => decaps!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => decaps!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => decaps!(ml_kem::MlKem1024),
+        _ => Err(CKR_ARGUMENTS_BAD),
     }
 }
 
@@ -1625,6 +1938,52 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
         // but SHA-512/224, SHA-512/256, and SHA3-224/384 were still
         // missing). `hmac_prf`'s widening in `kmip/` needs a real engine
         // mechanism to dispatch to, not just a KMIP-layer match arm.
+        // §3 Wave 4 — AES-CMAC (SP 800-38B). Key length selects the AES
+        // variant, exactly as the SP 800-108 double-pipeline path already
+        // does with cmac::Cmac<aes::AesNNN>.
+        CKM_AES_CMAC => {
+            use cmac::Mac as _;
+            let tag = match key_bytes.len() {
+                16 => {
+                    let mut m = cmac::Cmac::<aes08::Aes128>::new_from_slice(key_bytes)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                24 => {
+                    let mut m = cmac::Cmac::<aes08::Aes192>::new_from_slice(key_bytes)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                32 => {
+                    let mut m = cmac::Cmac::<aes08::Aes256>::new_from_slice(key_bytes)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                _ => return Err(CKR_KEY_SIZE_RANGE),
+            };
+            Ok(tag)
+        }
+        CKM_MD5_HMAC => {
+            let mut mac = Hmac::<md5::Md5>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA_1_HMAC => {
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA224_HMAC => {
+            let mut mac = Hmac::<sha2::Sha224>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         CKM_SHA512_224_HMAC => {
             let mut mac = Hmac::<sha2::Sha512_224>::new_from_slice(key_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -1713,16 +2072,47 @@ pub fn sign_rsa(
     msg: &[u8],
     pss_salt_len: Option<usize>,
 ) -> Result<Vec<u8>, u32> {
+    // Native fast path (AWS-LC). `None` = not handled here; fall through to
+    // the pure-Rust implementation below, which remains the conformance
+    // reference for every mechanism AWS-LC does not expose (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(r) = crate::crypto::awslc::rsa_sign(mech, sk_bytes, msg, pss_salt_len) {
+        return r;
+    }
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::signature::SignatureEncoding;
     let private_key =
         rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // BLINDED, via `RandomizedSigner` rather than `Signer` — the two differ in
+    // exactly the way that matters here. On the same `SigningKey`,
+    // `Signer::try_sign` calls the crate's `sign::<DummyRng>(None, ..)`
+    // (rsa-0.9.10 src/pkcs1v15/signing_key.rs:156), i.e. NO blinding of the
+    // modular exponentiation, while `RandomizedSigner::try_sign_with_rng`
+    // calls `sign(Some(rng), ..)` (:145) and does blind. This is the pure-Rust
+    // fallback for the RSA v1.5 variants AWS-LC does not expose (MD5, SHA-1,
+    // SHA-224, SHA-3), so on native these ALWAYS land here — unblinded
+    // private-key math is the Marvin-class exposure the rest of this file
+    // works to avoid, and `pss_sign!` directly below already used the blinded
+    // signer. This only makes the two consistent.
+    //
+    // The signature bytes are unchanged: PKCS#1 v1.5 is deterministic (no
+    // salt), and the blinding factor is divided back out inside the crate, so
+    // the output is identical. Note what did NOT already cover this:
+    // `wave2_3_legacy_rsa_combos_round_trip` only round-trips (sign, then
+    // verify), which passes whether or not the bytes changed, and
+    // `awslc_rsa_signatures_verify_and_are_deterministic` covers only
+    // SHA-256/384/512 — the mechanisms AWS-LC handles, which never reach this
+    // macro. `v15_blinded_signing_is_byte_identical_and_deterministic` below
+    // was added with this change to pin it for the legacy mechanisms that do.
     macro_rules! pkcs1v15_sign {
         ($hash:ty) => {{
             use rsa::pkcs1v15::SigningKey;
-            use rsa::signature::Signer;
+            use rsa::signature::RandomizedSigner;
             let signing_key = SigningKey::<$hash>::new(private_key);
-            let sig = signing_key.sign(msg);
+            let mut rng = rand::rngs::OsRng;
+            let sig = signing_key
+                .try_sign_with_rng(&mut rng, msg)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_vec())
         }};
     }
@@ -1749,6 +2139,17 @@ pub fn sign_rsa(
         CKM_SHA512_RSA_PKCS_PSS => pss_sign!(sha2::Sha512, 64),
         CKM_SHA3_384_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_384),
         CKM_SHA3_384_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_384, 48),
+        CKM_MD5_RSA_PKCS => pkcs1v15_sign!(md5::Md5),
+        CKM_SHA1_RSA_PKCS => pkcs1v15_sign!(sha1::Sha1),
+        CKM_SHA1_RSA_PKCS_PSS => pss_sign!(sha1::Sha1, 20),
+        CKM_SHA224_RSA_PKCS => pkcs1v15_sign!(sha2::Sha224),
+        CKM_SHA224_RSA_PKCS_PSS => pss_sign!(sha2::Sha224, 28),
+        CKM_SHA3_224_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_224),
+        CKM_SHA3_224_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_224, 28),
+        CKM_SHA3_256_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_256),
+        CKM_SHA3_256_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_256, 32),
+        CKM_SHA3_512_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_512),
+        CKM_SHA3_512_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_512, 64),
         // Raw PKCS#1 v1.5: the caller supplies the bytes (already a DigestInfo
         // or arbitrary data); no hashing, no DigestInfo prefix.
         CKM_RSA_PKCS => private_key
@@ -1808,6 +2209,8 @@ fn ecdsa_mech_digest(mech: u32, msg: &[u8]) -> Option<Vec<u8>> {
         CKM_ECDSA_SHA384 => sha2::Sha384::digest(msg).to_vec(),
         CKM_ECDSA_SHA512 => sha2::Sha512::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
+        CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+        CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_256 => sha3::Sha3_256::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_384 => sha3::Sha3_384::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_512 => sha3::Sha3_512::digest(msg).to_vec(),
@@ -1825,6 +2228,7 @@ fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
     let field: usize = match curve {
         CURVE_P521 => 66,
         CURVE_P384 => 48,
+        CURVE_P224 => 28,
         _ => 32, // CURVE_P256 / CURVE_K256
     };
     if digest.len() >= field {
@@ -1837,7 +2241,202 @@ fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// Public-key validation for an imported EC-family public key, run by
+/// C_CreateObject before the object exists (CKR_PUBLIC_KEY_INVALID, §5.1.6).
+/// `point` is the bare encoding: SEC1 for the Weierstrass curves, the RFC 8032
+/// / RFC 7748 bytes for Edwards / Montgomery.
+///
+/// - P-224/256/384/521, secp256k1: SEC1 decode, which rejects a coordinate
+///   outside [0, p) and a point not on the curve. These curves have cofactor
+///   1, so any on-curve point other than the identity (which SEC1 cannot
+///   encode in the forms accepted here) generates the full prime-order group.
+/// - Ed25519 / Ed448: the encoding must be canonical (it re-encodes to the same
+///   bytes), decode to a curve point, and lie in the prime-order subgroup
+///   (L*Q = identity) without being the identity. A check for "small order"
+///   alone is not enough: a MIXED-order point (prime-order part plus a
+///   torsion part) is not small-order and still fails L*Q = identity.
+/// - X25519 / X448: RFC 7748 accepts every u-coordinate of the right length,
+///   so only the length is checked.
+///
+/// A curve this function does not know is left to the existing paths (Ok).
+pub fn validate_ec_public_point(curve: u32, point: &[u8]) -> Result<(), u32> {
+    let bad = Err(CKR_PUBLIC_KEY_INVALID);
+    match curve {
+        CURVE_P224 => p224::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P256 => p256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P384 => p384::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P521 => p521::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_K256 => k256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_ED25519 => {
+            let Ok(bytes) = <[u8; 32]>::try_from(point) else { return bad };
+            let c = curve25519_dalek::edwards::CompressedEdwardsY(bytes);
+            match c.decompress() {
+                Some(q) if q.compress() == c && q.is_torsion_free() && !q.is_small_order() => Ok(()),
+                _ => bad,
+            }
+        }
+        CURVE_ED448 => {
+            let Ok(bytes) = <[u8; 57]>::try_from(point) else { return bad };
+            let c = ed448_goldilocks::CompressedEdwardsY(bytes);
+            // decompress() itself rejects off-curve points and any point with a
+            // torsion component (it tests is_torsion_free).
+            match Option::<ed448_goldilocks::AffinePoint>::from(c.decompress()) {
+                // Compare the DECODED point with the identity: the crate's
+                // CompressedEdwardsY::IDENTITY is all zeros, not RFC 8032's
+                // encoding of the identity (y = 1).
+                Some(q) if q.compress().0 == bytes && q != ed448_goldilocks::AffinePoint::IDENTITY => Ok(()),
+                _ => bad,
+            }
+        }
+        CURVE_X25519 => if point.len() == 32 { Ok(()) } else { bad },
+        CURVE_X448 => if point.len() == 56 { Ok(()) } else { bad },
+        _ => Ok(()),
+    }
+}
+
+/// (field bytes, order bits) for the curves CKM_PQCTODAY_ECDSA_EXPLICIT_K
+/// supports. `None` for any other curve — including 0, the "curve unknown"
+/// value C_CreateObject leaves for an undecodable CKA_EC_PARAMS, which is
+/// deliberately not guessed to be P-256 here.
+fn explicit_k_curve(curve: u32) -> Option<(usize, usize)> {
+    match curve {
+        CURVE_P256 => Some((32, 256)),
+        CURVE_P384 => Some((48, 384)),
+        CURVE_P521 => Some((66, 521)),
+        _ => None,
+    }
+}
+
+/// FIPS 186-5 §6.4.1 step 2: z is the leftmost min(N, hashlen) bits of the
+/// input, N the bit length of n — returned zero-padded to the field width so
+/// the ecdsa hazmat layer reduces it as-is. Byte-level truncation alone (what
+/// `fit_digest_to_curve` does) is exact only when N is a multiple of 8; on
+/// P-521 a 66-byte input would keep 528 bits instead of 521.
+fn bits2int_field(input: &[u8], order_bits: usize, field_len: usize) -> Vec<u8> {
+    let take = input.len().min(order_bits.div_ceil(8));
+    let mut v = input[..take].to_vec();
+    let excess = (v.len() * 8).saturating_sub(order_bits);
+    if excess > 0 {
+        let mut carry = 0u8;
+        for b in v.iter_mut() {
+            let next = *b << (8 - excess);
+            *b = (*b >> excess) | carry;
+            carry = next;
+        }
+    }
+    let mut out = vec![0u8; field_len - v.len()];
+    out.extend_from_slice(&v);
+    out
+}
+
+/// CKM_PQCTODAY_ECDSA_EXPLICIT_K's parameter check, run at C_SignInit so a
+/// bad k is CKR_MECHANISM_PARAM_INVALID there (§5.13.1) rather than a failure
+/// at C_Sign: k must be exactly the order's byte length and 1 <= k < n.
+/// A key on a curve the mechanism does not cover is refused with one of the
+/// two key codes §5.13.1 lists for C_SignInit: CKR_KEY_SIZE_RANGE for P-224
+/// (below the advertised 256-bit minimum), CKR_KEY_TYPE_INCONSISTENT for any
+/// other curve (secp256k1). CKR_CURVE_NOT_SUPPORTED is not used: §6.3 scopes
+/// it to creating, generating, deriving or unwrapping a key.
+pub fn ecdsa_explicit_k_check(curve: u32, k: &[u8]) -> Result<(), u32> {
+    use p256::elliptic_curve::{Field, PrimeField};
+    let (field_len, _) = explicit_k_curve(curve).ok_or(if curve == CURVE_P224 {
+        CKR_KEY_SIZE_RANGE
+    } else {
+        CKR_KEY_TYPE_INCONSISTENT
+    })?;
+    if k.len() != field_len {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    macro_rules! in_range {
+        ($crv:ident) => {{
+            let s = Option::<$crv::Scalar>::from($crv::Scalar::from_repr(
+                $crv::FieldBytes::clone_from_slice(k),
+            ));
+            matches!(s, Some(s) if !bool::from(s.is_zero()))
+        }};
+    }
+    let ok = match curve {
+        CURVE_P256 => in_range!(p256),
+        CURVE_P384 => in_range!(p384),
+        _ => in_range!(p521),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CKR_MECHANISM_PARAM_INVALID)
+    }
+}
+
+/// ECDSA with the caller's nonce: (r, s) with R = k·G, r = x(R) mod n,
+/// s = k⁻¹(z + r·d) mod n (FIPS 186-5 §6.4.1 steps 3-9 with k supplied rather
+/// than generated). A deliberate key-recovery primitive — see SECURITY.md.
+/// `input` is the caller's digest, conditioned by bits2int exactly like
+/// CKM_ECDSA; the result is r || s, each the order's byte length.
+pub fn sign_ecdsa_explicit_k(
+    curve: u32,
+    sk_bytes: &[u8],
+    input: &[u8],
+    k: &[u8],
+) -> Result<Vec<u8>, u32> {
+    use p256::elliptic_curve::PrimeField;
+    ecdsa_explicit_k_check(curve, k)?;
+    let Some((field_len, order_bits)) = explicit_k_curve(curve) else {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    };
+    let z = bits2int_field(input, order_bits, field_len);
+    macro_rules! sign_with {
+        ($crv:ident, $Curve:ty) => {{
+            let d = $crv::SecretKey::from_slice(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?
+                .to_nonzero_scalar();
+            let k = Option::<$crv::Scalar>::from($crv::Scalar::from_repr(
+                $crv::FieldBytes::clone_from_slice(k),
+            ))
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            let (sig, _) = ecdsa::hazmat::sign_prehashed::<$Curve, _>(
+                d.as_ref(),
+                k,
+                &$crv::FieldBytes::clone_from_slice(&z),
+            )
+            // r = 0 or s = 0: FIPS 186-5 says pick another k; with a fixed k
+            // there is no other, so the signature cannot be produced.
+            .map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok(sig.to_bytes().to_vec())
+        }};
+    }
+    match curve {
+        CURVE_P256 => sign_with!(p256, p256::NistP256),
+        CURVE_P384 => sign_with!(p384, p384::NistP384),
+        _ => sign_with!(p521, p521::NistP521),
+    }
+}
+
+/// P-224 ECDSA over an already-conditioned (FIPS 186-5 §6.4) digest, with
+/// the same RFC 6979 deterministic nonce as the other curves (see
+/// `sign_ecdsa`'s header comment).
+fn sign_prehash_p224(sk_bytes: &[u8], digest: &[u8]) -> Result<Vec<u8>, u32> {
+    use p224::ecdsa::signature::hazmat::PrehashSigner;
+    let sk = p224::ecdsa::SigningKey::from_slice(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let sig: p224::ecdsa::Signature = sk.sign_prehash(digest).map_err(|_| CKR_FUNCTION_FAILED)?;
+    Ok(sig.to_bytes().to_vec())
+}
+
+fn verify_prehash_p224(pk_bytes: &[u8], digest: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
+    use p224::ecdsa::signature::hazmat::PrehashVerifier;
+    let vk = p224::ecdsa::VerifyingKey::from_sec1_bytes(pk_bytes)
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let sig = p224::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    vk.verify_prehash(digest, &sig).map_err(|_| CKR_SIGNATURE_INVALID)
+}
+
 pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+    // ECDSA stays on the pure-Rust `p256`/`p384`/`p521` crates deliberately:
+    // they sign with RFC 6979 DETERMINISTIC nonces, and this engine's
+    // contract relies on that (see verbs_v32's MultiPart_ECDSA FSM test —
+    // one-shot and Update/Final must produce the SAME signature). aws-lc-rs
+    // has no deterministic-ECDSA API (only randomized `EcdsaKeyPair::sign`),
+    // so routing ECDSA there would silently break reproducibility for a ~2x
+    // speedup. RSA (no nonce) and ECDH (no signature) still use AWS-LC.
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Signer;
@@ -1896,6 +2495,10 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
         // SHA-3 prehash variants on P-256 — manually hash then sign prehash bytes
         (CKM_ECDSA_SHA3_224, CURVE_P256)
         | (CKM_ECDSA_SHA3_224, 0)
+        | (CKM_ECDSA_SHA224, CURVE_P256)
+        | (CKM_ECDSA_SHA224, 0)
+        | (CKM_ECDSA_SHA1, CURVE_P256)
+        | (CKM_ECDSA_SHA1, 0)
         | (CKM_ECDSA_SHA3_256, CURVE_P256)
         | (CKM_ECDSA_SHA3_256, 0) => {
             use p256::ecdsa::signature::hazmat::PrehashSigner;
@@ -1904,6 +2507,8 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
                 _ => sha3::Sha3_256::digest(msg).to_vec(),
             };
             let sig: p256::ecdsa::Signature =
@@ -1930,36 +2535,52 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
         // CKM_ECDSA raw (pre-hashed) — PKCS#11 v3.2 §6.3.12
         // Spec: caller supplies the digest; token signs it directly; truncation done internally by token.
         // PrehashSigner accepts the digest bytes and signs without re-hashing.
+        // E11 (2026-09-25): §6.3.12 takes any input length, and FIPS 186-5
+        // §6.4.1 uses the leftmost min(N, len) bits — so the input is
+        // conditioned by fit_digest_to_curve first. The RustCrypto prehash
+        // API refuses inputs shorter than half the field (a 32-byte digest
+        // on P-521 was CKR_FUNCTION_FAILED); zero-extension keeps the
+        // integer value, and inputs of at least half the field sign exactly
+        // as before.
         (CKM_ECDSA, CURVE_P256) | (CKM_ECDSA, 0) => {
             use p256::ecdsa::signature::hazmat::PrehashSigner;
             let sk = p256::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: p256::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: p256::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_P256, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         (CKM_ECDSA, CURVE_P384) => {
             use p384::ecdsa::signature::hazmat::PrehashSigner;
             let sk = p384::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: p384::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: p384::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_P384, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         (CKM_ECDSA, CURVE_P521) => {
             use p521::ecdsa::signature::hazmat::PrehashSigner;
             let sk = p521::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: p521::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: p521::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_P521, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
+        }
+        // P-224 (E13): raw input conditioned per FIPS 186-5 §6.4 like the
+        // hash-composite arms below.
+        (CKM_ECDSA, CURVE_P224) => {
+            sign_prehash_p224(sk_bytes, &fit_digest_to_curve(CURVE_P224, msg.to_vec()))
         }
         (CKM_ECDSA, CURVE_K256) => {
             use k256::ecdsa::signature::hazmat::PrehashSigner;
             let sk = k256::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: k256::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: k256::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_K256, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         // ── T1 (round-2) — residual (hash-mech, named-curve) pairs ─────────
@@ -1968,12 +2589,13 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
         // (256, 521) range without a dedicated arm above dispatches here:
         // digest per the mechanism, FIPS 186-5 §6.4 leftmost-bits
         // conditioning, then prehash-sign on the key's curve.
-        (m, CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256) => {
+        (m, CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256 | CURVE_P224) => {
             let digest = match ecdsa_mech_digest(m, msg) {
                 Some(d) => fit_digest_to_curve(curve, d),
                 None => return Err(CKR_MECHANISM_INVALID),
             };
             match curve {
+                CURVE_P224 => sign_prehash_p224(sk_bytes, &digest),
                 CURVE_P256 => {
                     use p256::ecdsa::signature::hazmat::PrehashSigner;
                     let sk = p256::ecdsa::SigningKey::from_slice(sk_bytes)
@@ -2134,7 +2756,35 @@ fn sign_ed25519_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u
     Ok(sig)
 }
 
-pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+/// Ed25519ph / Ed448ph (RFC 8032 §5.1 / §5.2).
+///
+/// `context` is `CK_EDDSA_PARAMS.pContextData`. It is a REQUIRED parameter
+/// rather than an `Option` with a default on purpose: until 2026-09-26 both
+/// call sites passed `None` unconditionally, so a caller that supplied a
+/// context got a signature over the WRONG scheme — the context is bound into
+/// the dom2/dom4 prefix fed to both hash calls, so ignoring it changes the
+/// signed message while still returning CKR_OK and a structurally valid
+/// signature. Nothing observable told the caller. Making the argument
+/// mandatory means a new call site has to decide rather than inherit a silent
+/// default.
+///
+/// PKCS#11 v3.2 Table 73 lists Ed25519ph/Ed448ph with Mechanism Param
+/// *Required* and Context Data *Optional*, and v3.2 delegates the scheme
+/// itself to RFC 8032 — so an empty context is the legitimate no-context case
+/// and must stay byte-identical to the previous behaviour, which is why the
+/// empty case still passes `None` rather than `Some(&[])`. Those are NOT the
+/// same construction: `Some(&[])` would still take dalek's context path.
+///
+/// Unlike Ed25519**ctx** above, this needs no hand-rolled dom2: dalek's
+/// `sign_prehashed` hardcodes the Ed25519ph flag byte whenever a context is
+/// given, which is precisely what pre-hash mode wants. That same hardcoding is
+/// what forced `sign_ed25519_ctx` to be written out by hand.
+pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    // RFC 8032 caps the context at 255 bytes; same check as sign_eddsa_ctx.
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let ctx_opt = if context.is_empty() { None } else { Some(context) };
     match sk_bytes.len() {
         32 => {
             use sha2::Digest;
@@ -2142,7 +2792,7 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
             key_bytes.copy_from_slice(sk_bytes);
             let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             let prehash = sha2::Sha512::new().chain_update(msg);
-            sk.sign_prehashed(prehash, None)
+            sk.sign_prehashed(prehash, ctx_opt)
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
@@ -2158,7 +2808,7 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
             let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
-            sk.sign_prehashed(None, prehash)
+            sk.sign_prehashed(ctx_opt, prehash)
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
@@ -2175,6 +2825,17 @@ pub fn hmac_general_base(mech: u32) -> Option<(u32, usize)> {
         CKM_SHA512_HMAC_GENERAL => Some((CKM_SHA512_HMAC, 64)),
         CKM_SHA3_256_HMAC_GENERAL => Some((CKM_SHA3_256_HMAC, 32)),
         CKM_SHA3_512_HMAC_GENERAL => Some((CKM_SHA3_512_HMAC, 64)),
+        // §3 Wave 1 — the _GENERAL variants of every HMAC this engine can
+        // actually compute. The second element is the FULL mac length; the
+        // caller's CK_MAC_GENERAL_PARAMS truncates from there.
+        CKM_SHA224_HMAC_GENERAL => Some((CKM_SHA224_HMAC, 28)),
+        CKM_SHA512_224_HMAC_GENERAL => Some((CKM_SHA512_224_HMAC, 28)),
+        CKM_SHA512_256_HMAC_GENERAL => Some((CKM_SHA512_256_HMAC, 32)),
+        CKM_SHA3_224_HMAC_GENERAL => Some((CKM_SHA3_224_HMAC, 28)),
+        CKM_SHA3_384_HMAC_GENERAL => Some((CKM_SHA3_384_HMAC, 48)),
+        CKM_RIPEMD160_HMAC_GENERAL => Some((CKM_RIPEMD160_HMAC, 20)),
+        CKM_SHA_1_HMAC_GENERAL => Some((CKM_SHA_1_HMAC, 20)),
+        CKM_MD5_HMAC_GENERAL => Some((CKM_MD5_HMAC, 16)),
         _ => None,
     }
 }
@@ -2256,9 +2917,18 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
                 .filter(|v| *v != 0)
                 .or_else(|| get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).filter(|v| *v != 0))
                 .unwrap_or(CKP_XMSS_SHA2_10_256);
-            // SHAKE256_10_192 is the one n=24 set (SP 800-208): len=51, h=10.
-            if xmss_param == CKP_XMSS_SHAKE256_10_192 {
-                return 4 + 24 + (51 + 10) * 24;
+            // SP 800-208's n=24 sets — SHAKE256/192 (§4, Tables 14/16) AND
+            // SHA-256/192 (§5.2, Table 12) — both use len=51 regardless of
+            // height: the WOTS+ chain count is a function of n and the
+            // Winternitz parameter w, not of the tree height h.
+            let n24_height: Option<u32> = match xmss_param {
+                CKP_XMSS_SHAKE256_10_192 | CKP_XMSS_SHA2_10_192 => Some(10),
+                CKP_XMSS_SHAKE256_16_192 | CKP_XMSS_SHA2_16_192 => Some(16),
+                CKP_XMSS_SHAKE256_20_192 | CKP_XMSS_SHA2_20_192 => Some(20),
+                _ => None,
+            };
+            if let Some(h) = n24_height {
+                return 4 + 24 + (51 + h) * 24;
             }
             let h: u32 = match xmss_param {
                 CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 | CKP_XMSS_SHAKE256_16_256 => 16,
@@ -2326,14 +2996,27 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             hss_sig_len(levels, lms_param, lmots_param)
         }
         CKM_SHA256_HMAC | CKM_SHA3_256_HMAC => 32,
-        CKM_RIPEMD160_HMAC => 20,
+        CKM_RIPEMD160_HMAC | CKM_SHA_1_HMAC => 20,
+        CKM_MD5_HMAC => 16,
+        CKM_AES_CMAC => 16,
         CKM_SHA384_HMAC => 48,
         CKM_SHA512_HMAC | CKM_SHA3_512_HMAC => 64,
+        // R2'a — the four variants sign_hmac already implemented but which
+        // nothing could reach: truncated SHA-2 (FIPS 180-4 §6.6/§6.7) and the
+        // two remaining SHA-3 sizes (FIPS 202).
+        CKM_SHA224_HMAC | CKM_SHA512_224_HMAC | CKM_SHA3_224_HMAC => 28,
+        CKM_SHA512_256_HMAC => 32,
+        CKM_SHA3_384_HMAC => 48,
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-        | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => 512,
+        | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS
+        | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+        | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+        | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+        | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+        | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => 512,
         // ECDSA — sig size = 2 × ⌈curve_bits / 8⌉, independent of the hash. The
         // SHA384/SHA3-384 hardcode for 96-byte was wrong for P-256 + P-521 etc;
         // size MUST come from the key's curve, not the hash mechanism.
@@ -2344,11 +3027,14 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         | CKM_ECDSA_SHA384
         | CKM_ECDSA_SHA512
         | CKM_ECDSA_SHA3_224
+        | CKM_ECDSA_SHA224
+        | CKM_ECDSA_SHA1
         | CKM_ECDSA_SHA3_256
         | CKM_ECDSA_SHA3_384
         | CKM_ECDSA_SHA3_512 => match ps {
             CURVE_P521 => 132,
             CURVE_P384 => 96,
+            CURVE_P224 => 56, // E13
             _ => 64, // CURVE_P256, CURVE_K256, and default
         },
         // Ed448 (2026-08-27) — CKM_EDDSA/_PH cover both curves (§6.3.14), and
@@ -2428,6 +3114,15 @@ pub fn verify_ml_dsa(
     sig_bytes: &[u8],
     ctx: &[u8],
 ) -> Result<(), u32> {
+    // AWS-LC CPU path (crypto::awslc_pq): pure ML-DSA only; HashML-DSA stays
+    // on fips204. `None` (wrong lengths, refused key) falls through, so the
+    // error codes below are unchanged.
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if mech == CKM_ML_DSA {
+        if let Some(ok) = crate::crypto::awslc_pq::mldsa_verify(ps, pk_bytes, msg, sig_bytes, ctx) {
+            return if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) };
+        }
+    }
     use fips204::traits::Verifier;
     match ps {
         CKP_ML_DSA_44 => {
@@ -2722,6 +3417,37 @@ pub fn verify_hmac(mech: u32, key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) ->
 /// keeps the historical two-candidate acceptance: sLen = hashLen and
 /// sLen = modOctets - hashLen - 2 (OpenSSL's `rsa_pss_saltlen:auto`), which
 /// the KMIP conformance suite depends on.
+/// E14 (2026-09-25) — the public key for RSA signature VERIFICATION.
+///
+/// FIPS 186-5 §A.1.1 requires an odd public exponent with 2^16 < e < 2^256.
+/// `rsa::RsaPublicKey::new` additionally caps e at 2^33 - 1
+/// (`RsaPublicKey::MAX_PUB_EXPONENT`), so valid FIPS 186-5 keys — NIST's
+/// RSA-SigVer-FIPS186-5 sample uses 52- and 56-bit exponents — could not be
+/// verified at all. Every key the constructor accepts is still built by it,
+/// unchanged. Only an exponent above its cap gets a second look: it is
+/// accepted when it is odd, below 2^256 and below n, with the constructor's
+/// own modulus checks (odd n, at most `MAX_SIZE` bits) applied here.
+/// Signing and encryption keep the constructor's bound.
+fn rsa_verifying_key(n_bytes: &[u8], e_bytes: &[u8]) -> Result<rsa::RsaPublicKey, u32> {
+    let n = rsa::BigUint::from_bytes_be(n_bytes);
+    let e = rsa::BigUint::from_bytes_be(e_bytes);
+    if let Ok(k) = rsa::RsaPublicKey::new(n.clone(), e.clone()) {
+        return Ok(k);
+    }
+    let odd = |b: &[u8]| b.last().is_some_and(|x| x & 1 == 1);
+    let fips_186_5_wide_e = e.bits() > 33
+        && e.bits() <= 256
+        && odd(e_bytes)
+        && e < n
+        && odd(n_bytes)
+        && n.bits() <= rsa::RsaPublicKey::MAX_SIZE;
+    if fips_186_5_wide_e {
+        Ok(rsa::RsaPublicKey::new_unchecked(n, e))
+    } else {
+        Err(CKR_KEY_TYPE_INCONSISTENT)
+    }
+}
+
 pub fn verify_rsa(
     mech: u32,
     n_bytes: &[u8],
@@ -2730,13 +3456,18 @@ pub fn verify_rsa(
     sig_bytes: &[u8],
     pss_salt_len: Option<usize>,
 ) -> Result<(), u32> {
-    use rsa::signature::Verifier;
     if n_bytes.is_empty() || e_bytes.is_empty() {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let n = rsa::BigUint::from_bytes_be(n_bytes);
-    let e = rsa::BigUint::from_bytes_be(e_bytes);
-    let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // Native fast path (AWS-LC). `None` = not handled here; fall through to
+    // the pure-Rust implementation below, which remains the conformance
+    // reference for every mechanism AWS-LC does not expose (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(r) = crate::crypto::awslc::rsa_verify(mech, n_bytes, e_bytes, msg, sig_bytes, pss_salt_len) {
+        return r.and_then(|ok| if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) });
+    }
+    use rsa::signature::Verifier;
+    let public_key = rsa_verifying_key(n_bytes, e_bytes)?;
 
     macro_rules! pkcs1v15_verify {
         ($hash:ty) => {{
@@ -2783,7 +3514,18 @@ pub fn verify_rsa(
         CKM_SHA384_RSA_PKCS_PSS => pss_verify!(sha2::Sha384, 48),
         CKM_SHA512_RSA_PKCS_PSS => pss_verify!(sha2::Sha512, 64),
         CKM_SHA3_384_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_384),
+        CKM_MD5_RSA_PKCS => pkcs1v15_verify!(md5::Md5),
+        CKM_SHA1_RSA_PKCS => pkcs1v15_verify!(sha1::Sha1),
+        CKM_SHA224_RSA_PKCS => pkcs1v15_verify!(sha2::Sha224),
+        CKM_SHA3_224_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_224),
+        CKM_SHA3_256_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_256),
+        CKM_SHA3_512_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_512),
         CKM_SHA3_384_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_384, 48),
+        CKM_SHA1_RSA_PKCS_PSS => pss_verify!(sha1::Sha1, 20),
+        CKM_SHA224_RSA_PKCS_PSS => pss_verify!(sha2::Sha224, 28),
+        CKM_SHA3_224_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_224, 28),
+        CKM_SHA3_256_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_256, 32),
+        CKM_SHA3_512_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_512, 64),
         // Raw PKCS#1 v1.5 — caller-supplied bytes, no DigestInfo prefix.
         CKM_RSA_PKCS => public_key
             .verify(rsa::Pkcs1v15Sign::new_unprefixed(), msg, sig_bytes)
@@ -2811,9 +3553,7 @@ pub fn verify_rsa_pss_bare(
     if n_bytes.is_empty() || e_bytes.is_empty() {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let n = rsa::BigUint::from_bytes_be(n_bytes);
-    let e = rsa::BigUint::from_bytes_be(e_bytes);
-    let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let public_key = rsa_verifying_key(n_bytes, e_bytes)?;
     macro_rules! pss_verify_prehashed {
         ($hash:ty) => {
             public_key
@@ -2837,6 +3577,7 @@ pub fn verify_ecdsa(
     msg: &[u8],
     sig_bytes: &[u8],
 ) -> Result<(), u32> {
+    // ECDSA verify stays on pure Rust alongside signing (see sign_ecdsa).
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Verifier;
@@ -2901,6 +3642,10 @@ pub fn verify_ecdsa(
         // SHA-3 prehash variants on P-256 — manually hash then verify prehash bytes
         (CKM_ECDSA_SHA3_224, CURVE_P256)
         | (CKM_ECDSA_SHA3_224, 0)
+        | (CKM_ECDSA_SHA224, CURVE_P256)
+        | (CKM_ECDSA_SHA224, 0)
+        | (CKM_ECDSA_SHA1, CURVE_P256)
+        | (CKM_ECDSA_SHA1, 0)
         | (CKM_ECDSA_SHA3_256, CURVE_P256)
         | (CKM_ECDSA_SHA3_256, 0) => {
             use p256::ecdsa::signature::hazmat::PrehashVerifier;
@@ -2911,6 +3656,8 @@ pub fn verify_ecdsa(
                 p256::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
             let hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
                 _ => sha3::Sha3_256::digest(msg).to_vec(),
             };
             vk.verify_prehash(&hash, &sig)
@@ -2943,7 +3690,7 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p256::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_P256, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         (CKM_ECDSA, CURVE_P384) => {
@@ -2952,7 +3699,7 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p384::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_P384, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         (CKM_ECDSA, CURVE_P521) => {
@@ -2961,28 +3708,34 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p521::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_P521, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
+        (CKM_ECDSA, CURVE_P224) => verify_prehash_p224(
+            pk_bytes,
+            &fit_digest_to_curve(CURVE_P224, msg.to_vec()),
+            sig_bytes,
+        ),
         (CKM_ECDSA, CURVE_K256) => {
             use k256::ecdsa::signature::hazmat::PrehashVerifier;
             let vk = k256::ecdsa::VerifyingKey::from_sec1_bytes(pk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 k256::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_K256, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         // ── T1 (round-2) — residual (hash-mech, named-curve) pairs ─────────
         // Mirror of the sign_ecdsa catch-all: digest per the mechanism,
         // FIPS 186-5 §6.4 leftmost-bits conditioning, prehash-verify on the
         // key's curve. Covers every advertised pair without a dedicated arm.
-        (m, CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256) => {
+        (m, CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256 | CURVE_P224) => {
             let digest = match ecdsa_mech_digest(m, msg) {
                 Some(d) => fit_digest_to_curve(curve, d),
                 None => return Err(CKR_MECHANISM_INVALID),
             };
             match curve {
+                CURVE_P224 => verify_prehash_p224(pk_bytes, &digest, sig_bytes),
                 CURVE_P256 => {
                     use p256::ecdsa::signature::hazmat::PrehashVerifier;
                     let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(pk_bytes)
@@ -3026,6 +3779,18 @@ pub fn verify_ecdsa(
     }
 }
 
+/// RFC 8032 §5.2.2/§5.2.3 (Ed448): a point is encoded as 57 bytes whose last
+/// byte carries the x sign in its top bit and whose other seven bits (448 to
+/// 454) are zero. In a signature, R is bytes 0..57, so byte 56 must be 0x00
+/// or 0x80. `ed448_goldilocks` decodes R ignoring those bits, so a signature
+/// whose R sets them — and whose S was computed over those modified bytes —
+/// verified (Wycheproof ed448_test.json tcIds 63-65, InvalidEncoding; register
+/// row rust-ed448-accepts-noncanonical-r). Checked before any curve
+/// arithmetic by every Ed448 verifier here.
+fn ed448_r_unused_bits_clear(sig: &[u8]) -> bool {
+    sig.len() == 114 && sig[56] & 0x7f == 0
+}
+
 pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
     match pk_bytes.len() {
         32 => {
@@ -3042,6 +3807,9 @@ pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(),
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if !ed448_r_unused_bits_clear(sig_arr) {
+                return Err(CKR_SIGNATURE_INVALID);
+            }
             let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
@@ -3063,6 +3831,9 @@ pub fn verify_eddsa_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: 
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if !ed448_r_unused_bits_clear(sig_arr) {
+                return Err(CKR_SIGNATURE_INVALID);
+            }
             let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
@@ -3117,7 +3888,20 @@ fn verify_ed25519_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[
     }
 }
 
-pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
+/// Verify twin of [`sign_eddsa_ph`]. `context` is mandatory for the same
+/// reason: a verify that silently drops the context would reject signatures
+/// this engine's own signer produces for the same mechanism and parameters,
+/// which is the failure mode the ECDSA_SHA1 digest-mismatch bug had.
+pub fn verify_eddsa_ph(
+    pk_bytes: &[u8],
+    msg: &[u8],
+    sig_bytes: &[u8],
+    context: &[u8],
+) -> Result<(), u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let ctx_opt = if context.is_empty() { None } else { Some(context) };
     match pk_bytes.len() {
         32 => {
             use sha2::Digest;
@@ -3128,7 +3912,7 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
             let prehash = sha2::Sha512::new().chain_update(msg);
-            vk.verify_prehashed(prehash, None, &sig)
+            vk.verify_prehashed(prehash, ctx_opt, &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         57 => {
@@ -3139,11 +3923,14 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if !ed448_r_unused_bits_clear(sig_arr) {
+                return Err(CKR_SIGNATURE_INVALID);
+            }
             let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
             let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
-            vk.verify_prehashed(&sig, None, prehash)
+            vk.verify_prehashed(&sig, ctx_opt, prehash)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -3153,6 +3940,184 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Ed25519ph / Ed448ph with a NON-EMPTY context (2026-09-26).
+    ///
+    /// `sign_eddsa_ph` and `verify_eddsa_ph` passed `None` for the context
+    /// unconditionally, so `CK_EDDSA_PARAMS.pContextData` was accepted and
+    /// silently discarded. RFC 8032 binds the context into the dom2/dom4
+    /// prefix fed to BOTH hash calls, so the engine returned CKR_OK and a
+    /// structurally valid signature over a DIFFERENT scheme than the caller
+    /// selected. Nothing observable distinguished it.
+    ///
+    /// The vectors these assertions run on were already checked into
+    /// `tests/acvp/` — NIST ACVP EDDSA-SigGen-1.0 pre-hash groups, 10 Ed25519ph
+    /// and 10 Ed448ph cases, every one independently re-verified against
+    /// OpenSSL 3.6.3 through OSSL_SIGNATURE_PARAM_INSTANCE +
+    /// OSSL_SIGNATURE_PARAM_CONTEXT_STRING before adoption. **No test loaded
+    /// them.** The defect did not survive for want of evidence; it survived
+    /// because the evidence was orphaned. That is worth stating plainly,
+    /// because it is a different failure than a missing corpus and it is not
+    /// fixed by adding vectors.
+    ///
+    /// Signature equality is asserted, not just verify-accepts: a sign/verify
+    /// pair that drops the context on both sides round-trips perfectly against
+    /// itself while disagreeing with every other implementation — the same
+    /// self-consistent-but-wrong shape as the CKM_ECDSA_SHA1 digest mismatch.
+    #[test]
+    fn eddsa_ph_binds_context_matching_nist_acvp_vectors() {
+        for (json, want_scheme, sk_len) in [
+            (
+                include_str!("../../../tests/acvp/eddsa_test.json"),
+                "Ed25519ph",
+                32usize,
+            ),
+            (
+                include_str!("../../../tests/acvp/eddsa_ed448_test.json"),
+                "Ed448ph",
+                57usize,
+            ),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+            let sets = v["vectorSets"].as_array().expect("vectorSets");
+            let mut checked = 0usize;
+            let mut with_ctx = 0usize;
+            for set in sets {
+                if set["scheme"].as_str() != Some(want_scheme) {
+                    continue;
+                }
+                for t in set["tests"].as_array().expect("tests") {
+                    let d = unhex(t["d"].as_str().expect("d"));
+                    let q = unhex(t["q"].as_str().expect("q"));
+                    let msg = unhex(t["message"].as_str().expect("message"));
+                    let ctx = unhex(t["context"].as_str().unwrap_or(""));
+                    let want = unhex(t["signature"].as_str().expect("signature"));
+                    let id = t["id"].as_str().unwrap_or("?");
+                    assert_eq!(d.len(), sk_len, "{want_scheme} {id}: seed length");
+
+                    let got = sign_eddsa_ph(&d, &msg, &ctx)
+                        .unwrap_or_else(|e| panic!("{want_scheme} {id}: sign failed 0x{e:x}"));
+                    assert_eq!(
+                        got, want,
+                        "{want_scheme} {id}: signature mismatch with a {}-byte context \
+                         — the context is not reaching the dom2/dom4 prefix",
+                        ctx.len()
+                    );
+                    verify_eddsa_ph(&q, &msg, &got, &ctx)
+                        .unwrap_or_else(|e| panic!("{want_scheme} {id}: verify failed 0x{e:x}"));
+
+                    // A different context MUST produce a different signature,
+                    // and the original signature MUST NOT verify under it.
+                    // Without this, an implementation that ignores the context
+                    // still passes everything above.
+                    let mut other = ctx.clone();
+                    other.push(0xAA);
+                    if other.len() <= 255 {
+                        let got_other = sign_eddsa_ph(&d, &msg, &other).expect("sign other ctx");
+                        assert_ne!(
+                            got_other, got,
+                            "{want_scheme} {id}: changing the context did not change the \
+                             signature — the context is being ignored"
+                        );
+                        assert!(
+                            verify_eddsa_ph(&q, &msg, &got, &other).is_err(),
+                            "{want_scheme} {id}: signature verified under the WRONG context"
+                        );
+                    }
+
+                    checked += 1;
+                    if !ctx.is_empty() {
+                        with_ctx += 1;
+                    }
+                }
+            }
+            // Reachability: an assertion loop that ran zero times proves
+            // nothing, and a corpus of empty contexts would not exercise the
+            // defect at all.
+            assert!(checked > 0, "{want_scheme}: no vectors were exercised");
+            assert!(
+                with_ctx > 0,
+                "{want_scheme}: every vector had an EMPTY context, so this test \
+                 cannot detect a dropped context"
+            );
+        }
+    }
+
+    /// RFC 8032 caps the context at 255 bytes; 256 must be rejected as a
+    /// parameter error rather than truncated or passed through.
+    #[test]
+    fn eddsa_ph_rejects_oversized_context() {
+        let seed = [7u8; 32];
+        let too_long = vec![0u8; 256];
+        assert_eq!(
+            sign_eddsa_ph(&seed, b"msg", &too_long),
+            Err(CKR_MECHANISM_PARAM_INVALID)
+        );
+        assert_eq!(
+            sign_eddsa_ph(&seed, b"msg", &vec![0u8; 255]).map(|_| ()),
+            Ok(()),
+            "255 bytes is the documented maximum and must be accepted"
+        );
+    }
+
+    /// X1 follow-up (2026-09-07). Every hash-composite ECDSA mechanism this
+    /// engine advertises must ROUND-TRIP: the digest `sign_ecdsa` computes
+    /// and the digest `verify_ecdsa` computes have to be the same one.
+    ///
+    /// This is not hypothetical. `CKM_ECDSA_SHA1` on P-256 is dispatched by
+    /// a shared outer match arm that hands several mechanisms to one
+    /// prehash block, and the INNER hash match in the verify half was
+    /// missing its `CKM_ECDSA_SHA1` case — so signing hashed with SHA-1
+    /// while verifying hashed with SHA3-256 (the arm's `_` fallback), and no
+    /// signature the engine produced under that mechanism could ever be
+    /// verified by it. The mechanism was advertised the whole time.
+    ///
+    /// Testing only that sign succeeds, or only that verify accepts some
+    /// externally-produced signature, would have missed it. Test the seam.
+    #[test]
+    fn every_advertised_ecdsa_p256_mechanism_round_trips() {
+        // A fixed, non-trivial P-256 scalar (1..=32), so the test is
+        // deterministic and does not depend on key generation.
+        let sk_bytes: Vec<u8> = (1u8..=32).collect();
+        let sk = p256::ecdsa::SigningKey::from_slice(&sk_bytes).unwrap();
+        let pk_bytes = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+
+        let msg = b"round-trip the seam, not the halves";
+
+        // Exactly the mechanisms whose outer dispatch arm names P-256.
+        for mech in [
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA224,
+            CKM_ECDSA_SHA1,
+            CKM_ECDSA_SHA3_224,
+            CKM_ECDSA_SHA3_256,
+        ] {
+            let sig = sign_ecdsa(mech, CURVE_P256, &sk_bytes, msg)
+                .unwrap_or_else(|e| panic!("sign_ecdsa(0x{mech:x}) failed: 0x{e:x}"));
+            verify_ecdsa(mech, CURVE_P256, &pk_bytes, msg, &sig)
+                .unwrap_or_else(|e| panic!("verify_ecdsa(0x{mech:x}) rejected the engine's own signature: 0x{e:x}"));
+
+            // And the mechanism must actually bind the hash: a signature
+            // over a different message must NOT verify. Without this, a
+            // sign/verify pair that both hashed with the WRONG-but-same
+            // algorithm would still pass the check above.
+            assert!(
+                verify_ecdsa(mech, CURVE_P256, &pk_bytes, b"a different message", &sig).is_err(),
+                "0x{mech:x}: signature verified against the wrong message"
+            );
+        }
+    }
 
     fn decode_hex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -3409,6 +4374,142 @@ e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b
         )
     }
 
+    /// Blinding the v1.5 signing path must not change what it outputs.
+    ///
+    /// `sign_rsa`'s `pkcs1v15_sign!` uses `RandomizedSigner` so the private-key
+    /// exponentiation is blinded (the unblinded `Signer` was a Marvin-class
+    /// exposure on the legacy mechanisms AWS-LC declines). PKCS#1 v1.5 has no
+    /// salt and the crate divides the blinding factor back out, so two signs of
+    /// the same message under the same key MUST be byte-identical. If a future
+    /// change swapped in a genuinely randomized construction, this fails —
+    /// which is the point, because every existing test here only round-trips
+    /// and would keep passing.
+    ///
+    /// Deliberately uses SHA-1 and MD5: those are exactly the mechanisms AWS-LC
+    /// does not expose, so they reach the pure-Rust macro this guards. A
+    /// SHA-256 case would be answered by AWS-LC and prove nothing about it.
+    #[test]
+    fn v15_blinded_signing_is_byte_identical_and_deterministic() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        for (mech, name) in [(CKM_SHA1_RSA_PKCS, "SHA-1 v1.5"), (CKM_MD5_RSA_PKCS, "MD5 v1.5")] {
+            // Confirm the premise: AWS-LC must decline these, or this test is
+            // silently exercising the fast path instead of the blinded macro.
+            #[cfg(not(target_arch = "wasm32"))]
+            assert!(
+                crate::crypto::awslc::rsa_sign(mech, &sk, S6_MSG, None).is_none(),
+                "{name}: premise broken — AWS-LC now handles this, so this test no longer covers the pure-Rust macro"
+            );
+
+            let a = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: first sign failed 0x{rv:x}"));
+            let b = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: second sign failed 0x{rv:x}"));
+            assert_eq!(a, b, "{name}: blinded v1.5 signing must stay deterministic");
+            assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &a, None), Ok(()), "{name}: verify");
+            assert_eq!(a.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
+        }
+    }
+
+    /// §3 Waves 2-3 — the legacy RSA combos (SHA-1, MD5) round-trip, reject
+    /// tampering, and produce DISTINCT PKCS#1 v1.5 signatures from each other
+    /// and from a modern hash, which is what proves each is bound to its own
+    /// DigestInfo prefix rather than silently sharing one.
+    #[test]
+    fn wave2_3_legacy_rsa_combos_round_trip() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        let mut sigs: Vec<(u32, Vec<u8>)> = Vec::new();
+        for (mech, name) in [
+            (CKM_SHA1_RSA_PKCS, "SHA-1 v1.5"),
+            (CKM_MD5_RSA_PKCS, "MD5 v1.5"),
+            (CKM_SHA256_RSA_PKCS, "SHA-256 v1.5 (control)"),
+        ] {
+            let sig = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: sign failed 0x{rv:x}"));
+            assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &sig, None), Ok(()), "{name}: verify");
+            let mut bad = sig.clone();
+            *bad.last_mut().unwrap() ^= 0x01;
+            assert_ne!(verify_rsa(mech, &n, &e, S6_MSG, &bad, None), Ok(()), "{name}: tampered");
+            sigs.push((mech, sig));
+        }
+        for i in 0..sigs.len() {
+            for j in (i + 1)..sigs.len() {
+                assert_ne!(
+                    sigs[i].1, sigs[j].1,
+                    "0x{:x} and 0x{:x} share a signature — wrong DigestInfo prefix",
+                    sigs[i].0, sigs[j].0
+                );
+            }
+        }
+        // SHA-1 PSS is signature-scheme-distinct, not just prefix-distinct.
+        let pss = sign_rsa(CKM_SHA1_RSA_PKCS_PSS, &sk, S6_MSG, None).expect("SHA-1 PSS sign");
+        assert_eq!(
+            verify_rsa(CKM_SHA1_RSA_PKCS_PSS, &n, &e, S6_MSG, &pss, None),
+            Ok(()),
+            "SHA-1 PSS must verify"
+        );
+    }
+
+    /// §3 Wave 1b (2026-09-07) — the RSA hash combos added for C++ parity.
+    /// Round-trips every one through the real sign/verify dispatch with the
+    /// S6 key, and asserts a tampered signature is REJECTED — a verify that
+    /// accepts everything would pass a round-trip-only test.
+    ///
+    /// PKCS#1 v1.5 additionally has a property worth pinning: it is
+    /// deterministic and the DigestInfo prefix differs per hash, so two
+    /// different mechanisms over the same message must NOT produce the same
+    /// signature. If a new arm were wired to the wrong digest, the round-trip
+    /// would still pass; this catches that.
+    #[test]
+    fn wave1b_rsa_hash_combos_round_trip_and_reject_tampering() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        let mut v15_sigs: Vec<(u32, Vec<u8>)> = Vec::new();
+
+        for (mech, name) in [
+            (CKM_SHA224_RSA_PKCS, "SHA-224 v1.5"),
+            (CKM_SHA3_224_RSA_PKCS, "SHA3-224 v1.5"),
+            (CKM_SHA3_256_RSA_PKCS, "SHA3-256 v1.5"),
+            (CKM_SHA3_512_RSA_PKCS, "SHA3-512 v1.5"),
+            (CKM_SHA224_RSA_PKCS_PSS, "SHA-224 PSS"),
+            (CKM_SHA3_224_RSA_PKCS_PSS, "SHA3-224 PSS"),
+            (CKM_SHA3_256_RSA_PKCS_PSS, "SHA3-256 PSS"),
+            (CKM_SHA3_512_RSA_PKCS_PSS, "SHA3-512 PSS"),
+        ] {
+            let sig = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: sign failed 0x{rv:x}"));
+            assert_eq!(
+                verify_rsa(mech, &n, &e, S6_MSG, &sig, None),
+                Ok(()),
+                "{name}: must verify its own signature"
+            );
+            let mut bad = sig.clone();
+            *bad.last_mut().unwrap() ^= 0x01;
+            assert_ne!(
+                verify_rsa(mech, &n, &e, S6_MSG, &bad, None),
+                Ok(()),
+                "{name}: a tampered signature must NOT verify"
+            );
+            if !name.contains("PSS") {
+                v15_sigs.push((mech, sig));
+            }
+        }
+
+        // Each v1.5 mechanism carries its own DigestInfo prefix, so no two may
+        // coincide — that is what proves each arm is bound to the right hash.
+        for i in 0..v15_sigs.len() {
+            for j in (i + 1)..v15_sigs.len() {
+                assert_ne!(
+                    v15_sigs[i].1, v15_sigs[j].1,
+                    "0x{:x} and 0x{:x} produced identical PKCS#1 v1.5 signatures — \
+                     one of them is wired to the wrong digest",
+                    v15_sigs[i].0, v15_sigs[j].0
+                );
+            }
+        }
+    }
+
     /// PKCS#1 v1.5 is deterministic — our signature must byte-match OpenSSL's,
     /// and OpenSSL's must verify (S6 KAT cross-check).
     #[test]
@@ -3600,5 +4701,193 @@ cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac956
             );
             assert!(spki.algorithm.parameters.is_none(), "CKP {ckp}: RFC 9909 requires ABSENT parameters");
         }
+    }
+
+    // ── AWS-LC ⇄ pure-Rust cross-engine equivalence ─────────────────────────
+    //
+    // The AWS-LC fast path is only correct if it is bit-compatible with the
+    // pure-Rust reference at the wire: a signature one produces MUST verify
+    // under the other, and a key one generates MUST be usable by the other.
+    // These tests would fail closed if a format assumption (PKCS#8 in,
+    // fixed r‖s out, SEC1 point, big-endian n/e) were wrong. They run only on
+    // native, where the fast path is compiled.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_rsa_signatures_verify_and_are_deterministic() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        // PKCS#1 v1.5 is deterministic: AWS-LC and `rsa` MUST produce the SAME
+        // bytes for the same key+message, and each MUST verify the other's.
+        for (mech, name) in [
+            (CKM_SHA256_RSA_PKCS, "SHA-256"),
+            (CKM_SHA384_RSA_PKCS, "SHA-384"),
+            (CKM_SHA512_RSA_PKCS, "SHA-512"),
+        ] {
+            let fast = crate::crypto::awslc::rsa_sign(mech, &sk, S6_MSG, None)
+                .expect("AWS-LC handles this mech")
+                .unwrap_or_else(|rv| panic!("{name}: awslc sign 0x{rv:x}"));
+            assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &fast, None), Ok(()),
+                "{name}: pure-Rust must verify AWS-LC's v1.5 signature");
+            assert_eq!(fast.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
+        }
+        // PSS is deliberately NOT routed to AWS-LC (salt-agnostic verify lives
+        // only in the pure-Rust path); confirm the fast path declines it.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, None).is_none(),
+            "PSS must fall through to pure-Rust, not AWS-LC");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_generated_rsa_key_interops_both_directions() {
+        use crate::constants::*;
+        let (sk_der, n, e) = crate::crypto::awslc::rsa_generate(2048)
+            .expect("AWS-LC generates 2048")
+            .expect("keygen ok");
+        // Sign with AWS-LC, verify with pure Rust…
+        let sig = crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS, &sk_der, S6_MSG, None)
+            .unwrap().unwrap();
+        assert_eq!(verify_rsa(CKM_SHA256_RSA_PKCS, &n, &e, S6_MSG, &sig, None), Ok(()));
+        // …and sign the SAME PKCS#8 key with pure Rust, verify with AWS-LC.
+        let sig2 = sign_rsa(CKM_SHA256_RSA_PKCS, &sk_der, S6_MSG, None).unwrap();
+        assert_eq!(
+            crate::crypto::awslc::rsa_verify(CKM_SHA256_RSA_PKCS, &n, &e, S6_MSG, &sig2, None),
+            Some(Ok(true)),
+            "AWS-LC must verify a signature over its own generated key made by the rsa crate",
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_v15_encrypt_roundtrips_through_pure_rust_decrypt() {
+        use crate::constants::*;
+        // AWS-LC encrypts (public op) from raw (n,e); the pure-Rust engine
+        // decrypts with the matching PKCS#8 key. If the component packing or
+        // padding disagreed, the plaintext would not survive the round trip.
+        let (sk, n, e) = s6_key();
+        let msg = b"v1.5 encrypt cross-engine";
+        let ct = crate::crypto::awslc::rsa_pkcs1_encrypt_components(&n, &e, msg)
+            .expect("AWS-LC encrypts from components")
+            .expect("encrypt ok");
+        assert_eq!(ct.len(), n.len(), "v1.5 ciphertext is one modulus wide");
+        // Decrypt via AWS-LC (constant-time path) and confirm the plaintext.
+        let pt = crate::crypto::awslc::rsa_pkcs1_decrypt(&sk, &ct)
+            .expect("AWS-LC decrypts")
+            .expect("decrypt ok");
+        assert_eq!(pt, msg, "AWS-LC v1.5 encrypt→decrypt must round-trip");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_declines_what_it_cannot_do() {
+        use crate::constants::*;
+        let (sk, _n, _e) = s6_key();
+        // Raw CKM_RSA_PKCS (unprefixed) — AWS-LC has no equivalent, MUST decline.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_RSA_PKCS, &sk, S6_MSG, None).is_none());
+        // A non-default PSS salt length — MUST decline so the caller's choice is honoured.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, Some(20)).is_none());
+        // A hash AWS-LC does not pair with RSA here (SHA-1) — MUST decline.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA1_RSA_PKCS, &sk, S6_MSG, None).is_none());
+        // An unsupported RSA size at keygen — MUST decline.
+        assert!(crate::crypto::awslc::rsa_generate(2560).is_none());
+    }
+
+}
+
+#[cfg(test)]
+mod x25519_contributory_tests {
+    use super::x25519_contributory;
+
+    fn unhex32(s: &str) -> [u8; 32] {
+        let v: Vec<u8> = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect();
+        v.try_into().unwrap()
+    }
+
+    /// Every RFC 7748 / libsodium low-order u-coordinate is refused; RFC 7748
+    /// §6.1's own Alice/Bob exchange (a contributory result) is not.
+    #[test]
+    fn low_order_points_are_refused_and_rfc7748_exchange_is_not() {
+        let sk = x25519_dalek::StaticSecret::from(unhex32(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+        ));
+        for u in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ] {
+            let ss = sk.diffie_hellman(&x25519_dalek::PublicKey::from(unhex32(u)));
+            assert!(x25519_contributory(ss).is_none(), "low-order u {u} must be refused");
+        }
+        // RFC 7748 §6.1: Alice's private key with Bob's public key.
+        let bob = unhex32("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let ss = x25519_contributory(sk.diffie_hellman(&x25519_dalek::PublicKey::from(bob)))
+            .expect("a genuine exchange is contributory");
+        assert_eq!(
+            ss.as_bytes(),
+            &unhex32("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        );
+    }
+}
+
+#[cfg(test)]
+mod ed448_r_encoding_tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Wycheproof ed448_test.json (C2SP/wycheproof testvectors_v1 @ 3fa63dd0,
+    /// byte-identical to the hub's vendored copy), group index 3, tcIds 63/64/65:
+    /// "modified bit 448/449/454 in R. Bits 448 to 454 of R are unused and must
+    /// be zero" — result invalid, flag InvalidEncoding. The Rust engine returned
+    /// CKR_OK on all three (hub ACVP harness, register row
+    /// rust-ed448-accepts-noncanonical-r). The same bytes with R's last byte put
+    /// back to 0x80 (only the x sign bit, bit 455) are the valid signature.
+    const PK: &str = "419610a534af127f583b04818cdb7f0ff300b025f2e01682bcae33fd691cee039511df0cddc690ee978426e8b38e50ce5af7dcfba50f704c00";
+    const MSG: &str = "313233343030";
+    const TC63: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff2811adf92201088e051ee48b57aecf46edfc68e5baeed5ae4910ba5681d370f75ab593811e18293ef0808581c254196bcbf2b4c454136a6711b00";
+    const TC64: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff2825e06c3999e8308be439c40940b0075d3e4f65147c1608cbe6e9c432e33bed6686f9393ae2568f0ad60febcb4b6179c0d90d034e7c3c4681000";
+    const TC65: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff2c02456bbd141df048dbf1843be6d5fef402483314c2af547b361a09f3319489eaede43404df9faf634c1298d678b5261c808b0be3726013e3900";
+
+    #[test]
+    fn wycheproof_unused_r_bits_are_refused() {
+        let (pk, msg) = (unhex(PK), unhex(MSG));
+        for (tc, hex) in [(63, TC63), (64, TC64), (65, TC65)] {
+            let sig = unhex(hex);
+            assert_eq!(
+                verify_eddsa(&pk, &msg, &sig),
+                Err(CKR_SIGNATURE_INVALID),
+                "Wycheproof ed448 tcId {tc}: a set unused bit of R must be rejected"
+            );
+        }
+    }
+
+    /// Positive control: Wycheproof ed448_test.json group 0, tcId 5 — a VALID
+    /// signature under the same key over the same message ("123400"), whose R
+    /// has only the x sign bit set in its last byte. It must keep verifying,
+    /// so the refusal above is about the unused bits, not the key or message.
+    const TC5_VALID: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff28060a05236fc9c1682b0e55b60a082c9a57bffe61ef4dda5ce65df539805122b3a09a05976d41ad68ab52df85428152c57da93531e5d16920e00";
+
+    #[test]
+    fn wycheproof_valid_signature_same_key_still_verifies() {
+        assert_eq!(verify_eddsa(&unhex(PK), &unhex(MSG), &unhex(TC5_VALID)), Ok(()));
+    }
+
+    /// The rule itself, applied by all three Ed448 verifiers (plain, ctx, ph)
+    /// before any curve arithmetic: byte 56 of the signature is R's last byte,
+    /// and only its top bit (bit 455, the x sign) may be set.
+    #[test]
+    fn unused_r_bits_rule() {
+        let mut sig = unhex(TC5_VALID);
+        assert!(ed448_r_unused_bits_clear(&sig));
+        for bit in 0..7 {
+            sig[56] = 0x80 | (1 << bit);
+            assert!(!ed448_r_unused_bits_clear(&sig), "bit {} of R's last byte", 448 + bit);
+        }
+        assert!(!ed448_r_unused_bits_clear(&sig[..113]), "wrong length is not a clean encoding");
     }
 }

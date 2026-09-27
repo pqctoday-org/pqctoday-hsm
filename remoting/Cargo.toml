@@ -12,6 +12,7 @@ members = ["proto", "core", "grpc", "rest", "acceptance"]
 fips204 = { path = "../rust/fips204-patched" }
 fips205 = { path = "../rust/fips205-patched" }
 hbs-lms = { path = "../rust/hbs-lms-patched" }
+xmss = { path = "../rust/xmss-patched" }
 
 [profile.dev]
 # aws-lc-rs/cmake+clang builds are slow; keep incremental dev builds fast.

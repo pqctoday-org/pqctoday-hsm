@@ -29,6 +29,21 @@ WASM_BINDGEN_VERSION="0.2.117"                       # MUST match wasm/Cargo.tom
 HUB_SHIM_DIR="$HUB/src/wasm/kmip"
 HUB_WASM_DIR="$HUB/public/wasm/rust-kmip"
 
+# --no-stage is the flag form of NO_STAGE=1; see the staging section for why it
+# exists. Unknown arguments are rejected rather than ignored: this script's
+# whole job is to write build output into two repositories, so silently
+# swallowing a mistyped flag is the wrong default.
+for arg in "$@"; do
+  case "$arg" in
+    --no-stage) NO_STAGE=1 ;;
+    -h|--help)
+      echo "usage: $(basename "$0") [--no-stage]"
+      echo "  --no-stage   build the wasm artefacts only; stage nothing into $HUB"
+      exit 0 ;;
+    *) echo "$(basename "$0"): unknown argument '$arg'" >&2; exit 2 ;;
+  esac
+done
+
 # FrodoKEM's largest matrix (the 1344 parameter set's n×n generation) exceeds
 # wasm32-unknown-unknown's default ~1MiB shadow stack even in a --release
 # build — reproduced directly: `native::encrypt::encapsulate` traps with
@@ -113,6 +128,25 @@ if [[ "${SKIP_SMOKE:-0}" != "1" ]]; then
 fi
 
 # ── 4. Stage into the hub ────────────────────────────────────────────────────
+# NO_STAGE=1 (or --no-stage) builds the wasm artefacts and stops before any of
+# it reaches the hub checkout.
+#
+# 2026-09-25, and this is a correctness fix rather than a convenience: the
+# gate's "wasm CACP smoke" step needs wasm/pkg_node/, which is gitignored, so
+# on a fresh worktree the only way to produce it was to run this script — which
+# then staged a build from whatever branch that worktree was on into
+# pqctoday-hub and stamped its commit into the corpus manifest. Running the HSM
+# gate should never modify a different repository, least of all with artefacts
+# from an unmerged branch. Observed live: a feature branch's SHA replaced a
+# released build's in the hub's manifest.json.
+if [[ "${NO_STAGE:-0}" == "1" ]]; then
+  echo ""
+  echo "[kmip-wasm] NO_STAGE=1 — built wasm artefacts only, nothing staged into the hub."
+  echo "  pkg_node:    $WASM_CRATE/pkg_node"
+  echo "  pkg_bundler: $WASM_CRATE/pkg_bundler"
+  exit 0
+fi
+
 # The bundler shim (`_bg.js`) imports `_bg.wasm` by relative path, so the whole
 # pkg must stay together for Vite — copy it verbatim into src/wasm/kmip/. Also
 # drop the raw .wasm into public/ for the Web-Worker fetch+instantiate path.

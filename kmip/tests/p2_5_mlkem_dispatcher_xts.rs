@@ -258,8 +258,7 @@ fn ml_kem_dispatcher_roundtrip(alg: KmipAlgorithm, dk_bytes: Vec<u8>, ek_bytes: 
             data: enc.ciphertext.clone(),
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
     ) {
         DecryptResult::Ok(d) => d,
         DecryptResult::Failed(r) => panic!("decapsulate failed via dispatcher: reason={r:?}"),
@@ -271,7 +270,8 @@ fn ml_kem_dispatcher_roundtrip(alg: KmipAlgorithm, dk_bytes: Vec<u8>, ek_bytes: 
 
     // ── NEGATIVE: short/tampered ciphertext → honest CKR-mapped failure ──
     // A wrong-length ciphertext is caught by the engine's length check
-    // (`CKR_ARGUMENTS_BAD`), which the K1 CKR→KMIP map surfaces as
+    // (`CKR_WRAPPED_KEY_LEN_RANGE`, PKCS#11 v3.2 §5.18.9 — was
+    // `CKR_ARGUMENTS_BAD`), which the K1 CKR→KMIP map surfaces as
     // `InvalidField` — NOT a bogus shared secret.
     let mut short = enc.ciphertext.clone();
     short.truncate(short.len() - 1);
@@ -282,14 +282,13 @@ fn ml_kem_dispatcher_roundtrip(alg: KmipAlgorithm, dk_bytes: Vec<u8>, ek_bytes: 
             data: short,
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
     ) {
         DecryptResult::Failed(reason) => assert_eq!(
             reason,
             Some(ResultReason::InvalidField.to_wire_value()),
             "{alg:?} decap of a short ciphertext must fail with the K1 CKR-mapping \
-             result (CKR_ARGUMENTS_BAD → InvalidField), not return a secret"
+             result (CKR_WRAPPED_KEY_LEN_RANGE → InvalidField), not return a secret"
         ),
         DecryptResult::Ok(_) => {
             panic!("{alg:?} decap of a truncated ciphertext must NOT succeed")
@@ -377,8 +376,7 @@ fn ml_kem_768_corrupt_ciphertext_yields_different_secret_via_dispatcher() {
             data: corrupt,
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
     ) {
         DecryptResult::Ok(d) => d,
         DecryptResult::Failed(r) => {

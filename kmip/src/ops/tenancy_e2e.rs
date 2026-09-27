@@ -126,7 +126,10 @@ mod tests {
             uid: ckp.private_key_uid.clone(),
             data: b"alice's data".to_vec(),
             cryptographic_parameters: None,
-        }));
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}));
         let alice_sign_resp = dispatch_with_transport_identity(&deps, sign_req, Some(alice.clone()));
         assert_eq!(
             alice_sign_resp.batch_items[0].result_status,
@@ -152,7 +155,10 @@ mod tests {
             uid: ckp.private_key_uid.clone(),
             data: b"bob trying to sign with alice's key".to_vec(),
             cryptographic_parameters: None,
-        }));
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}));
         let bob_sign_resp = dispatch_with_transport_identity(&deps, bob_sign_req, Some(bob.clone()));
         assert_eq!(
             bob_sign_resp.batch_items[0].result_status,
@@ -469,8 +475,7 @@ mod tests {
             data: ct_and_tag.clone(),
             iv: Some(iv.clone()),
             cryptographic_parameters: None,
-            aad: None,
-        }));
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None }));
         let bob_dec_resp = dispatch_with_transport_identity(&deps, bob_dec_req, Some(bob));
         assert_eq!(
             bob_dec_resp.batch_items[0].result_status,
@@ -490,8 +495,7 @@ mod tests {
             data: ct_and_tag,
             iv: Some(iv),
             cryptographic_parameters: None,
-            aad: None,
-        }));
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None }));
         let alice_dec_resp = dispatch_with_transport_identity(&deps, alice_dec_req, Some(alice));
         assert_eq!(
             alice_dec_resp.batch_items[0].result_status,
@@ -737,7 +741,10 @@ mod tests {
                 uid: uid.to_string(),
                 cryptographic_parameters: None,
                 data: b"authenticate me".to_vec(),
-            }))
+                init_indicator: None,
+                final_indicator: None,
+                correlation_value: None,
+}))
         };
 
         // Bob's MAC with Alice's key — denied at the owner check.
@@ -818,7 +825,10 @@ mod tests {
                     ..Default::default()
                 },
                 data: b"defer me".to_vec(),
-            });
+                init_indicator: None,
+                final_indicator: None,
+                correlation_value: None,
+});
             RequestMessage {
                 header: RequestHeader {
                     asynchronous_indicator: Some(AsynchronousIndicator::Mandatory),

@@ -99,6 +99,7 @@ wasm/rust/
 .gate-ok-*
 build_conf/
 build_union/
+build_union_linux/
 build_consumers/
 build_consumers_wasm/
 build_audit_0812/
@@ -110,3 +111,6 @@ build_defects/
 strongswan-pkcs11/tests/keygen_pkcs11_key
 strongswan-pkcs11/tests/test_pkcs11_conn
 strongswan-pkcs11/tests/test_pkcs11_kem
+
+# Release wasm the local gate builds for the ACVP harness (plan 2.B)
+rust/pkg-acvp/

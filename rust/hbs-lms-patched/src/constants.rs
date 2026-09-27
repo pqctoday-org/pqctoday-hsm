@@ -88,6 +88,24 @@ pub const fn get_hash_chain_count(winternitz_parameter: usize, output_size: usiz
     HASH_CHAIN_COUNTS[w_i * 3 + o_i]
 }
 
+/// RFC 8554 §4.1 / Appendix B: the checksum left shift ls = 16 - v*w, where
+/// u = ceil(8n/w) and v = ceil((floor(lg((2^w - 1) * u)) + 1) / w). It depends
+/// on the hash output size n as well as on w: for w = 1 it is 7 at n = 32 but
+/// 8 at n = 24 (and n = 16). Until 2026-09-27 this crate hard-coded the n = 32
+/// values for every hash family, so LMOTS_SHA256_N24_W1 and
+/// LMOTS_SHAKE_N24_W1 computed a wrong checksum — the engine rejected valid
+/// NIST signatures and produced signatures no other implementation accepts
+/// (register row rust-lms-m24-verify-fails).
+pub const fn checksum_left_shift(winternitz_parameter: usize, output_size: usize) -> u8 {
+    let w = winternitz_parameter;
+    let u = (8 * output_size + w - 1) / w;
+    let max_sum = ((1usize << w) - 1) * u;
+    // floor(lg(max_sum)) + 1 is the bit length of max_sum.
+    let bits = (usize::BITS - max_sum.leading_zeros()) as usize;
+    let v = (bits + w - 1) / w;
+    (16 - v * w) as u8
+}
+
 pub const fn lmots_signature_length(hash_size: usize, hash_chain_count: usize) -> usize {
     size_of::<u32>()                                                // LMOTS Parameter TypeId
         + hash_size                                                 // Signature Randomizer
@@ -184,3 +202,4 @@ mod tests {
         assert_eq!(get_hash_chain_count(8, 16), 18);
     }
 }
+

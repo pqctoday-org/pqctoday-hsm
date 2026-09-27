@@ -122,7 +122,7 @@ pub fn get(
         ));
     }
 
-    // KMIP 3.0 §6.1.21 Get returns the managed object exactly as the
+    // KMIP 3.0 §6.1.25 Get returns the managed object exactly as the
     // server holds it. Three-tier material lookup:
     //   1. Client-supplied bytes captured at Register/Import time
     //      (`obj.key_material`) — Profiles §4.1.1 item 7 carve-out for

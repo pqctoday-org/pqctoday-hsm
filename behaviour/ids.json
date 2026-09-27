@@ -1,0 +1,149 @@
+{
+  "$comment": "Single source for the 8-byte behaviour record's id tables. Edit THIS file, then run `python3 behaviour/gen.py` to regenerate rust/src/behaviour/ids.rs and src/lib/common/BehaviourIds.h (both checked in; tests fail if they drift). Ids are append-only: never renumber, never reuse.",
+  "version": 1,
+  "record": {
+    "bytes": ["src", "op", "alg", "result", "client", "size", "latency", "dt"],
+    "size": "floor(log2(input bytes)); 0 when 0 or unknown",
+    "latency": "floor(log2(microseconds)); 0 when unknown",
+    "dt": "floor(log2(microseconds since the previous record from this process)); 255 for the first record",
+    "client": "1 + (fnv1a32(identity) % 255); 0 = local / no identity"
+  },
+  "src": [
+    { "id": 1, "name": "kmip-data" },
+    { "id": 2, "name": "kmip-admin" },
+    { "id": 3, "name": "policy" },
+    { "id": 4, "name": "p11-remoting-grpc" },
+    { "id": 5, "name": "p11-remoting-rest" },
+    { "id": 6, "name": "p11-local" },
+    { "id": 7, "name": "tls" },
+    { "id": 8, "name": "auth" }
+  ],
+  "op": {
+    "kmip": {
+      "$comment": "KMIP 3.0 Operation enumeration wire values (kmip/src/kmip30/ops.rs); name = the audit event's `op` string.",
+      "entries": [
+        { "id": 1, "name": "Create" }, { "id": 2, "name": "CreateKeyPair" }, { "id": 3, "name": "Register" },
+        { "id": 4, "name": "ReKey" }, { "id": 5, "name": "DeriveKey" }, { "id": 6, "name": "Certify" },
+        { "id": 7, "name": "ReCertify" }, { "id": 8, "name": "Locate" }, { "id": 9, "name": "Check" },
+        { "id": 10, "name": "Get" }, { "id": 11, "name": "GetAttributes" }, { "id": 12, "name": "GetAttributeList" },
+        { "id": 13, "name": "AddAttribute" }, { "id": 14, "name": "ModifyAttribute" }, { "id": 15, "name": "DeleteAttribute" },
+        { "id": 16, "name": "ObtainLease" }, { "id": 17, "name": "GetUsageAllocation" }, { "id": 18, "name": "Activate" },
+        { "id": 19, "name": "Revoke" }, { "id": 20, "name": "Destroy" }, { "id": 21, "name": "Archive" },
+        { "id": 22, "name": "Recover" }, { "id": 23, "name": "Validate" }, { "id": 24, "name": "Query" },
+        { "id": 25, "name": "Cancel" }, { "id": 26, "name": "Poll" }, { "id": 27, "name": "Notify" },
+        { "id": 28, "name": "Put" }, { "id": 29, "name": "ReKeyKeyPair" }, { "id": 30, "name": "DiscoverVersions" },
+        { "id": 31, "name": "Encrypt" }, { "id": 32, "name": "Decrypt" }, { "id": 33, "name": "Sign" },
+        { "id": 34, "name": "SignatureVerify" }, { "id": 35, "name": "MAC" }, { "id": 36, "name": "MACVerify" },
+        { "id": 37, "name": "RNGRetrieve" }, { "id": 38, "name": "RNGSeed" }, { "id": 39, "name": "Hash" },
+        { "id": 40, "name": "CreateSplitKey" }, { "id": 41, "name": "JoinSplitKey" }, { "id": 42, "name": "Import" },
+        { "id": 43, "name": "Export" }, { "id": 44, "name": "Log" }, { "id": 45, "name": "Login" },
+        { "id": 46, "name": "Logout" }, { "id": 47, "name": "DelegatedLogin" }, { "id": 48, "name": "AdjustAttribute" },
+        { "id": 49, "name": "SetAttribute" }, { "id": 50, "name": "SetEndpointRole" }, { "id": 51, "name": "Pkcs11" },
+        { "id": 52, "name": "Interop" }, { "id": 53, "name": "ReProvision" }, { "id": 54, "name": "SetDefaults" },
+        { "id": 55, "name": "SetConstraints" }, { "id": 56, "name": "GetConstraints" }, { "id": 57, "name": "QueryAsynchronousRequests" },
+        { "id": 58, "name": "Process" }, { "id": 59, "name": "Ping" }, { "id": 60, "name": "CreateGroup" },
+        { "id": 61, "name": "Obliterate" }, { "id": 62, "name": "CreateUser" }, { "id": 63, "name": "CreateCredential" },
+        { "id": 64, "name": "Deactivate" }, { "id": 65, "name": "Encapsulate" }, { "id": 66, "name": "Decapsulate" }
+      ]
+    },
+    "kmip-admin": {
+      "$comment": "Admin/policy-plane route patterns as record_admin_request receives them (kmip/cryptopolicy-manager/manager.rs admin_route_pattern).",
+      "entries": [
+        { "id": 1, "name": "/healthz" }, { "id": 2, "name": "/version" }, { "id": 3, "name": "/openapi.yaml" },
+        { "id": 4, "name": "/api/v1/policies" }, { "id": 5, "name": "/api/v1/policies/{name}" },
+        { "id": 6, "name": "/api/v1/active" }, { "id": 7, "name": "/api/v1/validate" }, { "id": 8, "name": "/api/v1/dry-run" },
+        { "id": 9, "name": "/api/v1/audit" }, { "id": 10, "name": "/api/v1/audit/stream" },
+        { "id": 11, "name": "/api/v1/active-modules" }, { "id": 12, "name": "/api/v1/active-modules/{name}" },
+        { "id": 13, "name": "/api/v1/config/uncovered-ops" }
+      ]
+    },
+    "policy": {
+      "$comment": "Only the non-Allow outcomes get their own record; an Allow is folded into the KMIP record's result byte.",
+      "entries": [
+        { "id": 1, "name": "deny" }, { "id": 2, "name": "warn" }, { "id": 3, "name": "rekey-planned" }, { "id": 4, "name": "activated" }
+      ]
+    },
+    "pkcs11": {
+      "$comment": "PKCS#11 entry points that carry evidence today (the PQCEV op= names). Add here when a new entry point is instrumented.",
+      "entries": [
+        { "id": 1, "name": "C_SignInit" }, { "id": 2, "name": "C_Sign" }, { "id": 3, "name": "C_SignFinal" },
+        { "id": 4, "name": "C_VerifyInit" }, { "id": 5, "name": "C_Verify" }, { "id": 6, "name": "C_VerifyFinal" },
+        { "id": 7, "name": "C_GenerateKeyPair" }, { "id": 8, "name": "C_EncapsulateKey" }, { "id": 9, "name": "C_DecapsulateKey" }
+      ]
+    },
+    "tls": {
+      "entries": [ { "id": 1, "name": "kmip" }, { "id": 2, "name": "admin" } ]
+    },
+    "auth": {
+      "$comment": "PQCAUTH surface= tokens (rust/src/authlog.rs).",
+      "entries": [ { "id": 1, "name": "kmip-credential" }, { "id": 2, "name": "kmip-tls-handshake" }, { "id": 3, "name": "remoting-pin" } ]
+    }
+  },
+  "alg": {
+    "$comment": "One id per algorithm family + parameter set, shared by KMIP names and PKCS#11 (mechanism, CKA_PARAMETER_SET) pairs. `ckm` lists [mechanism hex, parameter set] pairs; a parameter set of 0 means 'any/absent'. Family-level ids (RSA, ECDSA, ...) are used where the exact size is not cheaply known at the emit site.",
+    "entries": [
+      { "id": 1,  "name": "ML-DSA-44",          "ckm": [["0x0000001D", 1], ["0x0000001C", 1], ["0x0000001F", 1], ["0x0000403C", 1]] },
+      { "id": 2,  "name": "ML-DSA-65",          "ckm": [["0x0000001D", 2], ["0x0000001C", 2], ["0x0000001F", 2], ["0x0000403C", 2]] },
+      { "id": 3,  "name": "ML-DSA-87",          "ckm": [["0x0000001D", 3], ["0x0000001C", 3], ["0x0000001F", 3], ["0x0000403C", 3]] },
+      { "id": 4,  "name": "ML-KEM-512",         "ckm": [["0x00000017", 1], ["0x0000000F", 1]] },
+      { "id": 5,  "name": "ML-KEM-768",         "ckm": [["0x00000017", 2], ["0x0000000F", 2]] },
+      { "id": 6,  "name": "ML-KEM-1024",        "ckm": [["0x00000017", 3], ["0x0000000F", 3]] },
+      { "id": 7,  "name": "SLH-DSA-SHA2-128s",  "ckm": [["0x0000002E", 1],  ["0x0000002D", 1],  ["0x00000034", 1]] },
+      { "id": 8,  "name": "SLH-DSA-SHAKE-128s", "ckm": [["0x0000002E", 2],  ["0x0000002D", 2],  ["0x00000034", 2]] },
+      { "id": 9,  "name": "SLH-DSA-SHA2-128f",  "ckm": [["0x0000002E", 3],  ["0x0000002D", 3],  ["0x00000034", 3]] },
+      { "id": 10, "name": "SLH-DSA-SHAKE-128f", "ckm": [["0x0000002E", 4],  ["0x0000002D", 4],  ["0x00000034", 4]] },
+      { "id": 11, "name": "SLH-DSA-SHA2-192s",  "ckm": [["0x0000002E", 5],  ["0x0000002D", 5],  ["0x00000034", 5]] },
+      { "id": 12, "name": "SLH-DSA-SHAKE-192s", "ckm": [["0x0000002E", 6],  ["0x0000002D", 6],  ["0x00000034", 6]] },
+      { "id": 13, "name": "SLH-DSA-SHA2-192f",  "ckm": [["0x0000002E", 7],  ["0x0000002D", 7],  ["0x00000034", 7]] },
+      { "id": 14, "name": "SLH-DSA-SHAKE-192f", "ckm": [["0x0000002E", 8],  ["0x0000002D", 8],  ["0x00000034", 8]] },
+      { "id": 15, "name": "SLH-DSA-SHA2-256s",  "ckm": [["0x0000002E", 9],  ["0x0000002D", 9],  ["0x00000034", 9]] },
+      { "id": 16, "name": "SLH-DSA-SHAKE-256s", "ckm": [["0x0000002E", 10], ["0x0000002D", 10], ["0x00000034", 10]] },
+      { "id": 17, "name": "SLH-DSA-SHA2-256f",  "ckm": [["0x0000002E", 11], ["0x0000002D", 11], ["0x00000034", 11]] },
+      { "id": 18, "name": "SLH-DSA-SHAKE-256f", "ckm": [["0x0000002E", 12], ["0x0000002D", 12], ["0x00000034", 12]] },
+      { "id": 19, "name": "HSS",                "ckm": [["0x00004033", 0], ["0x00004032", 0]] },
+      { "id": 20, "name": "XMSS",               "ckm": [["0x00004036", 0], ["0x00004034", 0]] },
+      { "id": 21, "name": "XMSSMT",             "ckm": [["0x00004037", 0], ["0x00004035", 0]] },
+      { "id": 22, "name": "RSA",                "ckm": [["0x00000000", 0], ["0x00000001", 0], ["0x00000003", 0], ["0x00000006", 0], ["0x00000009", 0], ["0x0000000D", 0], ["0x0000000E", 0], ["0x00000040", 0], ["0x00000041", 0], ["0x00000042", 0], ["0x00000043", 0], ["0x00000044", 0], ["0x00000045", 0], ["0x00000046", 0], ["0x00000047", 0], ["0x00000060", 0], ["0x00000063", 0]] },
+      { "id": 23, "name": "ECDSA",              "ckm": [["0x00001040", 0], ["0x00001041", 0], ["0x00001042", 0], ["0x00001043", 0], ["0x00001044", 0], ["0x00001045", 0], ["0x00001046", 0], ["0x00001047", 0], ["0x00001048", 0], ["0x00001049", 0], ["0x0000104A", 0], ["0x0000140B", 0]] },
+      { "id": 24, "name": "EdDSA",              "ckm": [["0x00001057", 0], ["0x00001055", 0], ["0x80001057", 0]] },
+      { "id": 25, "name": "ECDH",               "ckm": [["0x00001050", 0], ["0x00001056", 0]] },
+      { "id": 26, "name": "AES",                "ckm": [["0x00001080", 0], ["0x00001081", 0], ["0x00001082", 0], ["0x00001085", 0], ["0x00001086", 0], ["0x00001087", 0], ["0x0000108A", 0], ["0x00002109", 0], ["0x0000210A", 0], ["0x0000210B", 0]] },
+      { "id": 27, "name": "HMAC",               "ckm": [["0x00000251", 0], ["0x00000261", 0], ["0x00000271", 0], ["0x000002B1", 0], ["0x00000252", 0], ["0x00000262", 0], ["0x00000272", 0], ["0x000002B2", 0], ["0x80000100", 0], ["0x80000101", 0]] },
+      { "id": 28, "name": "ChaCha20",           "ckm": [["0x00001225", 0], ["0x00001226", 0], ["0x00004021", 0]] }
+    ],
+    "other": 255
+  },
+  "result": [
+    { "id": 0, "name": "ok" },
+    { "id": 1, "name": "policy-deny" },
+    { "id": 2, "name": "auth-fail" },
+    { "id": 3, "name": "caller-error" },
+    { "id": 4, "name": "internal-error" },
+    { "id": 5, "name": "warn-rekey" }
+  ],
+  "ckr_class": {
+    "$comment": "CK_RV -> result class. CKR_OK -> ok; listed values -> the named class; any other non-zero CK_RV -> caller-error.",
+    "auth-fail": ["0x000000A0", "0x000000A1", "0x000000A2", "0x000000A3", "0x000000A4", "0x000001B8", "0x00000100", "0x00000101", "0x00000102", "0x00000103", "0x00000104", "0x00000105", "0x000000B5", "0x000000B7", "0x000000B8"],
+    "internal-error": ["0x00000002", "0x00000005", "0x00000006", "0x00000009", "0x0000000A", "0x00000030", "0x00000031", "0x00000032", "0x00000054", "0x000000E0", "0x000000E1", "0x000000E2", "0x00000120", "0x00000121", "0x00000160", "0x00000180", "0x00000190", "0x00000191", "0x000001A0", "0x000001A1"]
+  },
+  "kmip_reason_class": {
+    "$comment": "KmipResponseSent.result.reason (the ResultReason variant name) -> result class. Success -> ok; any other reason -> caller-error.",
+    "policy-deny": ["PermissionDenied"],
+    "auth-fail": ["AuthenticationNotSuccessful", "NotAuthorised", "BadPassword", "InvalidTicket", "AttestationRequired", "AttestationFailed"],
+    "internal-error": ["InternalServerError", "CryptographicFailure", "ProtectionStorageUnavailable", "PrivateProtectionStorageUnavailable", "PublicProtectionStorageUnavailable", "ServerLimitExceeded", "ResponseTooLarge"]
+  },
+  "http_status_class": {
+    "$comment": "kmip-admin records: HTTP status -> result class. 2xx/3xx -> ok; 401/403 -> auth-fail; other 4xx -> caller-error; 5xx -> internal-error."
+  },
+  "vectors": {
+    "$comment": "Golden records. Both engines' tests encode these inputs and must produce exactly `hex` (little-endian u64 = byte 0 first). `dt_us` is the gap the writer computed; -1 means 'first record'.",
+    "entries": [
+      { "src": "p11-local", "op": "C_Sign", "alg": "ML-DSA-65", "result": "ok", "client": 0, "size_bytes": 32, "latency_us": 1500, "dt_us": -1, "hex": "0602020000050aff" },
+      { "src": "p11-remoting-grpc", "op": "C_GenerateKeyPair", "alg": "ML-KEM-768", "result": "ok", "client": 0, "size_bytes": 0, "latency_us": 900, "dt_us": 2048, "hex": "040705000000090b" },
+      { "src": "p11-local", "op": "C_SignInit", "alg": "", "result": "caller-error", "client": 0, "size_bytes": 0, "latency_us": 0, "dt_us": 1, "hex": "0601000300000000" },
+      { "src": "kmip-data", "op": "Sign", "alg": "ML-DSA-87", "result": "policy-deny", "client": 17, "size_bytes": 0, "latency_us": 12000, "dt_us": 1000000, "hex": "0121030111000d13" },
+      { "src": "auth", "op": "remoting-pin", "alg": "", "result": "auth-fail", "client": 200, "size_bytes": 0, "latency_us": 0, "dt_us": 0, "hex": "08030002c8000000" },
+      { "src": "tls", "op": "kmip", "alg": "", "result": "ok", "client": 0, "size_bytes": 0, "latency_us": 0, "dt_us": 65536, "hex": "0701000000000010" }
+    ]
+  }
+}

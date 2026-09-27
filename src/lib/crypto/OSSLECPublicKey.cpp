@@ -212,6 +212,41 @@ EVP_PKEY* OSSLECPublicKey::getOSSLKey()
 	EVP_PKEY_CTX_free(ctx);
 	OSSL_PARAM_free(params);
 
+	// Public key validation (added 2026-09-25). EVP_PKEY_fromdata IMPORTS a
+	// point; it does not check it. Without this, an EC public key whose point is
+	// off the curve, or has a coordinate outside [0,p), or lies outside the
+	// prime-order subgroup, was accepted and usable.
+	//
+	// Note on the standard, because it is easy to overstate: PKCS#11 v3.2 does
+	// NOT require this. CKR_PUBLIC_KEY_INVALID occurs exactly once in the whole
+	// specification and only permissively — "This error code may be returned by
+	// C_CreateObject, when the public key is created, or by C_VerifyInit..." —
+	// and chapter 6 carries no validation mandate (all 22 X9.62 references are
+	// about point and parameter ENCODING). The requirement being met here is
+	// NIST SP 800-56A §5.6.2.3.3, which the ACVP KeyVer test groups exercise.
+	// So this is a security and ACVP fix, not a conformance one.
+	//
+	// EVP_PKEY_public_check is used rather than a hand-rolled test because for
+	// EC it checks all three conditions INCLUDING the prime-order subgroup. That
+	// distinction is load-bearing: every invalid KeyVer vector available is
+	// either off-curve or coordinate-out-of-range and none is small-order, so an
+	// on-curve-plus-range check would drive the vector failures to zero while
+	// still admitting a small-order point — passing the tests and leaving the
+	// small-subgroup attack open. A range check must also compare against the
+	// field prime, not the byte length, for the same reason: a length test
+	// accepts an out-of-range value that happens to be the right width.
+	if (pkey != NULL)
+	{
+		EVP_PKEY_CTX* cctx = EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL);
+		if (cctx == NULL || EVP_PKEY_public_check(cctx) <= 0)
+		{
+			ERROR_MSG("EC public key failed public-key validation (0x%08X)", ERR_get_error());
+			EVP_PKEY_free(pkey);
+			pkey = NULL;
+		}
+		if (cctx != NULL) EVP_PKEY_CTX_free(cctx);
+	}
+
 	return pkey;
 }
 #endif

@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -44,6 +45,16 @@ pub enum ServerError {
     Wire(#[from] WireError),
     #[error("rcgen cert: {0}")]
     Rcgen(String),
+    /// A rejected TLS handshake specifically (wrong/absent client cert),
+    /// as distinct from every other `Io` failure this connection can hit
+    /// after the handshake succeeds (docs/remediation-plan-auth-visibility-
+    /// evidence-log-09102026.md, Gap 1). Kept separate from `Io` rather than
+    /// folded in: `record_tls_handshake("kmip")` only fires on a
+    /// *successful* accept, so this is the one place that knows a handshake
+    /// specifically failed rather than some other I/O error later in the
+    /// same connection.
+    #[error("TLS handshake rejected: {0}")]
+    TlsHandshake(String),
 }
 
 /// Which TLS posture the listener enforces.
@@ -77,6 +88,26 @@ pub enum TlsProfile {
     /// costume. Against this profile, the only thing that changes is the
     /// group — so the difference is the premium.
     ClassicalBaseline,
+    /// KMIP Profiles §3.1 **Basic Authentication Suite** — the suite the
+    /// Baseline Server conformance clause (§6.2) actually requires.
+    ///
+    /// §3.1.1: servers SHALL support TLS 1.3 (1.2 is only SHOULD).
+    /// §3.1.2: for TLS 1.3, exactly `TLS13-CHACHA20-POLY1305-SHA256` and
+    /// `TLS13-AES-256-GCM-SHA384`; the clause ends "SHALL NOT support any
+    /// cipher suite not listed above".
+    ///
+    /// **TLS 1.3 only, deliberately.** §3.1.2's TLS 1.2 list is static-RSA
+    /// CBC (`TLS_RSA_WITH_AES_256_CBC_SHA256` and friends), which rustls does
+    /// not implement — static-RSA key exchange has no forward secrecy.
+    /// Offering TLS 1.2 with any OTHER suite would breach the SHALL NOT, so
+    /// the conformant posture available here is 1.3-only, which §3.1.1
+    /// permits. Stated explicitly because "§3.1 conformant" would otherwise
+    /// read as full §3.1.2 coverage.
+    ///
+    /// Differs from [`TlsProfile::QuantumSafe`] only in key exchange: §3.1
+    /// says nothing about groups, so the classical ones stay. §3.3 is the
+    /// quantum-safe posture and remains separate.
+    Basic,
 }
 
 impl TlsProfile {
@@ -87,9 +118,10 @@ impl TlsProfile {
             "permissive" => Ok(Self::Permissive),
             "quantum-safe" | "quantum_safe" => Ok(Self::QuantumSafe),
             "classical-baseline" | "classical_baseline" => Ok(Self::ClassicalBaseline),
+            "basic" => Ok(Self::Basic),
             other => Err(format!(
-                "unknown TLS profile {other:?} (expected 'permissive', 'quantum-safe' \
-                 or 'classical-baseline')"
+                "unknown TLS profile {other:?} (expected 'permissive', 'basic', \
+                 'quantum-safe' or 'classical-baseline')"
             )),
         }
     }
@@ -137,6 +169,21 @@ pub fn quantum_safe_provider() -> rustls::crypto::CryptoProvider {
     }
 }
 
+/// The §3.1 Basic Authentication Suite provider — exactly the two cipher
+/// suites §3.1.2 permits for TLS 1.3, over rustls's default (classical) key
+/// exchange groups. Drops `TLS13_AES_128_GCM_SHA256`, which is on by default
+/// and which the clause does not list.
+pub fn basic_suite_provider() -> rustls::crypto::CryptoProvider {
+    use rustls::crypto::aws_lc_rs;
+    rustls::crypto::CryptoProvider {
+        cipher_suites: vec![
+            aws_lc_rs::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        ],
+        ..aws_lc_rs::default_provider()
+    }
+}
+
 /// The measurement baseline's provider: [`quantum_safe_provider`] with the
 /// hybrid groups swapped for classical ones. Everything else — provider,
 /// suites — is deliberately identical, so a comparison isolates the group.
@@ -169,6 +216,14 @@ pub fn tls_profile_summary(profile: TlsProfile) -> String {
              groups X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024 \
              [all three §3.3.3 groups; SecP384r1MLKEM1024 composed locally, \
              OpenSSL-3.6-interop-proven]"
+                .to_string()
+        }
+        TlsProfile::Basic => {
+            "basic (KMIP 3.0 Profiles §3.1 Basic Authentication Suite): TLS1.3 \
+             only; suites TLS13_CHACHA20_POLY1305_SHA256, \
+             TLS13_AES_256_GCM_SHA384 [exactly §3.1.2's TLS1.3 list; \
+             AES_128_GCM_SHA256 deliberately absent]; classical groups \
+             [§3.1 does not constrain key exchange — see §3.3 for that]"
                 .to_string()
         }
     }
@@ -205,6 +260,15 @@ fn profile_builder(
                 .with_protocol_versions(&[&rustls::version::TLS13])
                 .map_err(|e| ServerError::Tls(format!("quantum-safe TLS setup: {e}")))
         }
+        TlsProfile::Basic => {
+            ServerConfig::builder_with_provider(Arc::new(basic_suite_provider()))
+                // §3.1.1 — TLS 1.3 is the SHALL; 1.2 is only a SHOULD, and
+                // the 1.2 suites §3.1.2 lists are static-RSA CBC, which
+                // rustls does not implement. 1.3-only is therefore the
+                // conformant posture available here.
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| ServerError::Tls(format!("basic TLS setup: {e}")))
+        }
     }
 }
 
@@ -222,12 +286,11 @@ pub fn tls_from_pem_with_profile(
 ) -> Result<Arc<ServerConfig>, ServerError> {
     let cert_bytes = std::fs::read(cert_pem_path)?;
     let key_bytes = std::fs::read(key_pem_path)?;
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_bytes[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ServerError::Tls(format!("cert: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &key_bytes[..])
-        .map_err(|e| ServerError::Tls(format!("key: {e}")))?
-        .ok_or_else(|| ServerError::Tls("no private key in PEM".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|e| ServerError::Tls(format!("key: {e}")))?;
     let config = profile_builder(profile)?
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -302,14 +365,13 @@ pub fn tls_mtls_with_profile(
     client_ca_pem: &[u8],
     profile: TlsProfile,
 ) -> Result<Arc<ServerConfig>, ServerError> {
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &server_cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(server_cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ServerError::Tls(format!("server cert: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &server_key_pem[..])
-        .map_err(|e| ServerError::Tls(format!("server key: {e}")))?
-        .ok_or_else(|| ServerError::Tls("no server private key".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(server_key_pem)
+        .map_err(|e| ServerError::Tls(format!("server key: {e}")))?;
     let mut root_store = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &client_ca_pem[..]) {
+    for cert in CertificateDer::pem_slice_iter(client_ca_pem) {
         root_store
             .add(cert.map_err(|e| ServerError::Tls(format!("client CA: {e}")))?)
             .map_err(|e| ServerError::Tls(format!("root store add: {e}")))?;
@@ -330,6 +392,7 @@ pub fn tls_mtls_with_profile(
         TlsProfile::Permissive => rustls::crypto::ring::default_provider(),
         TlsProfile::QuantumSafe => quantum_safe_provider(),
         TlsProfile::ClassicalBaseline => classical_baseline_provider(),
+        TlsProfile::Basic => basic_suite_provider(),
     });
     let verifier =
         WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), verifier_provider)
@@ -354,7 +417,7 @@ pub async fn serve(addr: SocketAddr, tls: Arc<ServerConfig>, deps: Arc<Deps>) ->
         let acceptor = acceptor.clone();
         let deps = Arc::clone(&deps);
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, acceptor, deps).await {
+            if let Err(e) = handle_conn(stream, acceptor, deps, peer).await {
                 tracing::warn!("conn {peer} closed with error: {e}");
             }
         });
@@ -365,8 +428,16 @@ async fn handle_conn(
     stream: TcpStream,
     acceptor: TlsAcceptor,
     deps: Arc<Deps>,
+    peer: SocketAddr,
 ) -> Result<(), ServerError> {
-    let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
+    let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
+        crate::metrics::record_auth_failure(
+            "kmip-tls-handshake",
+            "handshake-rejected",
+            Some(&peer.to_string()),
+        );
+        ServerError::TlsHandshake(e.to_string())
+    })?;
     crate::metrics::record_tls_handshake("kmip");
     // K14 mTLS — when the ServerConfig was built by [`tls_mtls`], the
     // handshake above already verified the client certificate chain
@@ -388,8 +459,15 @@ async fn handle_conn(
     // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
     // transport-agnostic — the wasm `submit()` entry point applies the same
     // check), so the response coming back here is already correctly capped.
+    // Captured before `request` moves into the blocking closure below —
+    // needed after `response` comes back to tell "no credential at all"
+    // from "a credential that didn't verify" (Gap 1, §1.3's `reason`
+    // values). `None` here means this connection never reached dispatch at
+    // all (a wire-decode failure, not an auth outcome).
+    let mut had_credential: Option<bool> = None;
     let response = match decode_request_message(&frame_bytes) {
         Ok(request) => {
+            had_credential = Some(!request.header.authentication.is_empty());
             // S-8 — the dispatch is synchronous and does real crypto (ML-DSA /
             // ML-KEM, plus the engine's global mutex). Run it on the blocking
             // pool so a slow op can't stall the tokio reactor and starve other
@@ -415,6 +493,27 @@ async fn handle_conn(
         // than replaced with another guess.
         Err(e) => wire_error_response(&e),
     };
+    // Gap 1, §1.3 — the request-level auth gate (dispatcher/mod.rs's
+    // `authenticate_request`) fails EVERY batch item with the same
+    // `AuthenticationNotSuccessful` reason (K14) when it rejects a request,
+    // so checking the first item is sufficient to detect that outcome; a
+    // response with no items at all cannot be this case. `had_credential`
+    // tells "no credential offered" from "one was offered and didn't
+    // verify" — the dispatcher itself does not currently distinguish those
+    // two beyond that boolean either (see authenticate_request's control
+    // flow: a missing-Credential fallthrough and a failed-verify
+    // fallthrough both just return `Err(())`).
+    if had_credential.is_some()
+        && response.batch_items.first().map(|item| item.result_reason)
+            == Some(Some(crate::error::ResultReason::AuthenticationNotSuccessful.to_wire_value()))
+    {
+        let reason = if had_credential == Some(false) {
+            "missing-credential"
+        } else {
+            "bad-credential"
+        };
+        crate::metrics::record_auth_failure("kmip-credential", reason, Some(&peer.to_string()));
+    }
     // Did the client just hand us the server role on this channel? §6.1.61 says
     // the swap applies to "the current client-to-server communication channel"
     // and that it "remains as established" — so the decision is made from the
@@ -570,7 +669,7 @@ impl PushEndpoint {
     }
 }
 
-/// Ask the peer what it speaks and what it can do (§6.1.21, §6.1.39, issued by
+/// Ask the peer what it speaks and what it can do (§6.1.21, §6.1.47, issued by
 /// the server — two of item 10's five operations).
 ///
 /// Both questions tolerate silence. A peer that treats our request as an opaque
@@ -602,7 +701,7 @@ where
         return endpoint;
     }
 
-    // §6.1.39 — only the operation list bears on what we may push.
+    // §6.1.47 — only the operation list bears on what we may push.
     let ask = crate::kmip30::wire::encode_query_message(
         &[crate::kmip30::QueryFunction::QueryOperations],
         now,
@@ -673,8 +772,30 @@ fn wire_error_response(err: &WireError) -> crate::kmip30::ResponseMessage {
     // KMIP 3.0 §11 — a recognisable-but-unsupported ProtocolVersion is
     // `Unsupported Protocol Version` (0x3f), not `Invalid Message` (0x04)
     // which is reserved for genuinely malformed frames (K1, finding K-3).
+    //
+    // G10 (2026-09-06) — every other WireError used to collapse to
+    // `Invalid Message`, so a client could not tell an unknown tag from a
+    // malformed frame from a type mismatch. §11.48 names each of these; the
+    // reasons existed in the spec, just not in this enum.
     let reason = match err {
         WireError::UnsupportedVersion { .. } => ResultReason::UnsupportedProtocolVersion,
+        // A structurally sound frame naming a tag/enum this server does not
+        // know: `Unknown Tag` (0x3d) / `Unknown Enumeration` (0x3b).
+        WireError::UnexpectedTag { .. } => ResultReason::UnknownTag,
+        WireError::UnknownEnum { .. } => ResultReason::UnknownEnumeration,
+        // Right tag, wrong item type — §11.48 `Invalid Data Type` (0x1c).
+        WireError::BadType { .. } => ResultReason::InvalidDataType,
+        // NOT `Missing Data` (0x06). This function is the whole-message
+        // decode failure path: a message missing a required *envelope* field
+        // (Request Header, Batch Item) genuinely is malformed, which is what
+        // `Invalid Message` means and what the K-3 decision recorded. Missing
+        // Data belongs to per-operation payload validation, which fails
+        // through `KmipError` on the batch item instead. It falls through to
+        // the `_` arm below.
+        // The bytes themselves would not parse: `Codec Error` (0x26).
+        WireError::Codec(_) => ResultReason::CodecError,
+        WireError::UnsupportedKeyFormat { .. } => ResultReason::KeyFormatTypeNotSupported,
+        WireError::UnsupportedAttribute { .. } => ResultReason::UnsupportedAttribute,
         _ => ResultReason::InvalidMessage,
     };
     ResponseMessage {
@@ -838,6 +959,8 @@ mod tests {
             Some(0x0000_003f),
             "Unsupported Protocol Version codepoint per OASIS enums JSON"
         );
+        // A missing envelope field is a malformed message, not `Missing Data`
+        // (which is per-payload validation, reported on the batch item).
         let resp = wire_error_response(&WireError::Missing {
             tag: 0x42_0077,
             name: "Request Header",
@@ -846,5 +969,24 @@ mod tests {
             resp.batch_items[0].result_reason,
             Some(ResultReason::InvalidMessage as u32)
         );
+
+        // G10 (2026-09-06) — these three used to collapse to Invalid Message
+        // too, so a client could not tell an unknown tag from a type mismatch
+        // from unparseable bytes. §11.48 names each one.
+        let resp = wire_error_response(&WireError::UnknownEnum { field: "Operation", value: 0x999 });
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_003b), "Unknown Enumeration");
+
+        let resp = wire_error_response(&WireError::UnexpectedTag {
+            got: 0x42_0001, expected: 0x42_0077, name: "Request Header",
+        });
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_003d), "Unknown Tag");
+
+        let resp = wire_error_response(&WireError::BadType {
+            tag: 0x42_0094, name: "Unique Identifier", msg: "wrong type".into(),
+        });
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_001c), "Invalid Data Type");
+
+        let resp = wire_error_response(&WireError::Codec("truncated".into()));
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_0026), "Codec Error");
     }
 }

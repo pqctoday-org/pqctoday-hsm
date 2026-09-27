@@ -511,6 +511,21 @@
         "core::hmac_general_truncation_and_verify_round_trip"
       ],
       "justification": "CKM_SHA256_HMAC_GENERAL, the truncatable counterpart of CKM_SHA256_HMAC (CK_MAC_GENERAL_PARAMS: one native-width CK_ULONG truncation length). sign_init/verify_init are generic mechanism-u64 + raw-parameter-bytes passthroughs \u2014 no remoting-layer wiring was needed, only proof it actually works over the wire. Proves: (a) Sign truncates to the requested length, not the full 32-byte HMAC; (b) Verify accepts the exact truncated MAC; (c) a full-length MAC is correctly REJECTED under a truncation-length context, not silently accepted as a prefix match. Added 2026-08-29 alongside the native engine's own CKM_*_HMAC_GENERAL family (fix/acvp-hmac-general-aes-kwp)."
+    },
+    "2F": {
+      "disposition": "RPC",
+      "case_ids": [],
+      "justification": "Oracle-backed checks added by gap-closure plan 2.F (2026-09-27) for derive/keygen/KEM mechanisms the C++ harness never exercised: SHA-2/SHA-3 *_KEY_DERIVATION, HKDF_DATA, SP800-108 double pipeline (NIST ACVP), X25519/X448 (RFC 7748), ECDH1 cofactor, AES-XTS and EC W_EXTRA_BITS keygen, Classic McEliece. They reach the engine through the same C_DeriveKey / C_GenerateKey(Pair) / C_Encapsulate/DecapsulateKey RPCs every other derive/keygen category uses; no mechanism-specific remoting behaviour exists to case separately."
+    },
+    "NonForwardCoverage": {
+      "disposition": "N/A-local",
+      "case_ids": [],
+      "justification": "A structural check inside the C++ compliance harness itself (plan 2.F): every advertised mechanism without a forward operation must be named by a test that passed in the same run. It inspects the harness's own report, not engine behaviour, so it has no remoting counterpart."
+    },
+    "StructPacking": {
+      "disposition": "N/A-local",
+      "case_ids": [],
+      "justification": "Plan 3.C (ruling 2026-09-26): the harness measures sizeof vs the 1-byte-packed size of CK_INFO, CK_SLOT_INFO, CK_TOKEN_INFO, CK_SESSION_INFO and CK_MECHANISM_INFO and records a cited XFAIL against v3.2 \u00a72.1 where they differ. Structure layout is a property of the in-process C ABI; the remoting layer serialises each field explicitly, so there is no wire counterpart."
     }
   }
 }

@@ -100,6 +100,7 @@ pub(crate) fn center_mod(m: i32) -> i32 {
 pub(crate) fn mat_vec_mul<const K: usize, const L: usize>(
     a_hat: &[[T; L]; K], u_hat: &[T; L],
 ) -> [T; K] {
+    profile_phase!(Multiplication);
     let mut w_hat = [T0; K];
     let u_hat_mont = to_mont(u_hat);
     for i in 0..K {

@@ -55,6 +55,11 @@ bool MacAlgorithm::setIV(const ByteString& /*iv*/)
 	return false;
 }
 
+bool MacAlgorithm::setKmacParams(size_t /*outputLen*/, const ByteString& /*customization*/)
+{
+	return false;
+}
+
 size_t MacAlgorithm::getOutputMacSize() const
 {
 	return (truncatedMacSize > 0) ? truncatedMacSize : getMacSize();

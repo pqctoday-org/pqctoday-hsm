@@ -34,6 +34,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -47,6 +48,10 @@
 #include "OSSLMLKEMPublicKey.h"
 #include "OSSLMLKEMPrivateKey.h"
 #include "OSSLMLKEM.h"
+#include "ClassicMcEliecePublicKey.h"
+#include "ClassicMcEliecePrivateKey.h"
+#include "OSSLClassicMcEliece.h"
+#include "vendor_mechanisms.h"
 #include "P11Attributes.h"
 #include "P11Objects.h"
 // ECDH-as-KEM (2026-07-25 remediation) — CKM_ECDH1_DERIVE under
@@ -117,6 +122,60 @@ CK_RV SoftHSM::getMLKEMPublicKey(MLKEMPublicKey* publicKey, Token* token, OSObje
 	return CKR_OK;
 }
 
+CK_RV SoftHSM::getClassicMcEliecePrivateKey(ClassicMcEliecePrivateKey* privateKey, Token* token, OSObject* key)
+{
+	if (privateKey == NULL) return CKR_ARGUMENTS_BAD;
+	if (token == NULL) return CKR_ARGUMENTS_BAD;
+	if (key == NULL) return CKR_ARGUMENTS_BAD;
+
+	bool isKeyPrivate = key->getBooleanValue(CKA_PRIVATE, false);
+
+	// Classic McEliece Private Key Attributes: CKA_PARAMETER_SET + CKA_VALUE (raw bytes)
+	CK_ULONG parameterSet = key->getUnsignedLongValue(CKA_PARAMETER_SET, CKK_VENDOR_DEFINED);
+	ByteString value;
+	if (isKeyPrivate)
+	{
+		if (!token->decrypt(key->getByteStringValue(CKA_VALUE), value))
+			return CKR_GENERAL_ERROR;
+	}
+	else
+	{
+		value = key->getByteStringValue(CKA_VALUE);
+	}
+
+	privateKey->setParameterSet(parameterSet);
+	privateKey->setValue(value);
+
+	return CKR_OK;
+}
+
+CK_RV SoftHSM::getClassicMcEliecePublicKey(ClassicMcEliecePublicKey* publicKey, Token* token, OSObject* key)
+{
+	if (publicKey == NULL) return CKR_ARGUMENTS_BAD;
+	if (token == NULL) return CKR_ARGUMENTS_BAD;
+	if (key == NULL) return CKR_ARGUMENTS_BAD;
+
+	bool isKeyPrivate = key->getBooleanValue(CKA_PRIVATE, false);
+
+	// Classic McEliece Public Key Attributes: CKA_PARAMETER_SET + CKA_VALUE (raw bytes)
+	CK_ULONG parameterSet = key->getUnsignedLongValue(CKA_PARAMETER_SET, CKK_VENDOR_DEFINED);
+	ByteString value;
+	if (isKeyPrivate)
+	{
+		if (!token->decrypt(key->getByteStringValue(CKA_VALUE), value))
+			return CKR_GENERAL_ERROR;
+	}
+	else
+	{
+		value = key->getByteStringValue(CKA_VALUE);
+	}
+
+	publicKey->setParameterSet(parameterSet);
+	publicKey->setValue(value);
+
+	return CKR_OK;
+}
+
 // Generate an ML-KEM key pair (FIPS 203, PKCS#11 v3.2)
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,14 +195,23 @@ CK_RV SoftHSM::C_EncapsulateKey
 )
 {
 	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
 	const std::string keyFields = (logging && pMechanism != NULL_PTR)
 		? opLogKeyFields(hSession, hPublicKey, pMechanism->mechanism)
 		: std::string("key=- keytype=- paramset=-");
+	const uint8_t alg = (ring && pMechanism != NULL_PTR)
+		? behaviourAlg(hSession, hPublicKey, pMechanism->mechanism)
+		: BehaviourIds::ALG_NONE;
+	const uint64_t t0 = (logging || ring) ? BehaviourRing::nowMicros() : 0;
 
 	unsigned long secretLen = 0;
 	CK_RV rv = encapsulateKeyImpl(hSession, pMechanism, hPublicKey, pTemplate,
 	                              ulAttributeCount, pCiphertext, pulCiphertextLen,
 	                              phKey, logging ? &secretLen : NULL);
+
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_ENCAPSULATEKEY, alg, rv, 0, dur));
 
 	if (logging)
 	{
@@ -155,7 +223,7 @@ CK_RV SoftHSM::C_EncapsulateKey
 		else               snprintf(secret, sizeof(secret), "-");
 
 		OpLog::emit("C_EncapsulateKey",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
@@ -163,10 +231,82 @@ CK_RV SoftHSM::C_EncapsulateKey
 		            (unsigned long)(pulCiphertextLen != NULL_PTR ? *pulCiphertextLen : 0),
 		            secret,
 		            (pCiphertext == NULL_PTR) ? 1 : 0,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;
+}
+
+// CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE enforcement.
+//
+// PKCS#11 v3.2 defines both constants (pkcs11t.h) and then never mentions them
+// again — no table row, zero occurrences in the specification text. The v3.3
+// working draft supplies both the rows and SHALL-level enforcement:
+//
+//   encapsulate — "an attribute set that will be compared against the
+//     attributes of the key to be encapsulated … If any attribute conflict
+//     occurs … SHALL return CKR_KEY_HANDLE_INVALID"
+//     (key_management_functions.md:762-771)
+//   decapsulate — "… added to attributes of the key to be decapsulated. If the
+//     attributes do not conflict with the user supplied attribute template …
+//     SHALL return CKR_TEMPLATE_INCONSISTENT" (:868-878)
+//
+// Adopted under the standing v3.2-baseline / v3.3-fills-gaps rule (CLAUDE.md).
+//
+// "The key to be encapsulated" is read as the key being CREATED:
+// C_EncapsulateKey takes a template and produces phKey, so no pre-existing key
+// exists to compare against. That is the only coherent reading for a KEM, and
+// it is why this compares against the CALLER'S pTemplate rather than a stored
+// OSObject — which also means the private-value decryption the
+// CKA_WRAP_TEMPLATE check must perform (SoftHSM_keygen.cpp:1595) does not apply
+// here: nothing has been stored or encrypted yet.
+//
+// One helper, called at all four sites (ML-KEM and ECDH-as-KEM, encapsulate and
+// decapsulate). The Rust engine had exactly the failure that four copies
+// produce, on the same day: one of three creation sites guarded, enforcement
+// silently doing nothing for the rest.
+static bool kemTemplatePermits(OSObject* kemKey, CK_ATTRIBUTE_TYPE templateAttr,
+                               CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount)
+{
+	if (kemKey == NULL_PTR || !kemKey->attributeExists(templateAttr))
+		return true;
+
+	OSAttribute attr = kemKey->getAttribute(templateAttr);
+	if (!attr.isAttributeMapAttribute())
+		return true;
+
+	typedef std::map<CK_ATTRIBUTE_TYPE,OSAttribute> attrmap_type;
+	const attrmap_type& map = attr.getAttributeMapValue();
+	if (map.empty())
+		return true;
+
+	for (attrmap_type::const_iterator it = map.begin(); it != map.end(); ++it)
+	{
+		bool found = false;
+		for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
+		{
+			if (pTemplate[i].type != it->first) continue;
+			found = true;
+
+			ByteString required;
+			if (!it->second.peekValue(required))
+				return false;
+
+			if (pTemplate[i].pValue == NULL_PTR)
+				return false;
+			ByteString supplied((unsigned char*)pTemplate[i].pValue, pTemplate[i].ulValueLen);
+			if (supplied != required)
+				return false;
+			break;
+		}
+		// A restriction the caller did not answer is a conflict, not a pass:
+		// the key may only produce keys matching the set, and an unstated
+		// attribute does not match a stated one.
+		if (!found)
+			return false;
+	}
+	return true;
 }
 
 CK_RV SoftHSM::encapsulateKeyImpl
@@ -190,7 +330,12 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	if (pMechanism->mechanism == CKM_ECDH1_DERIVE)
 		return this->encapsulateECDH(hSession, hPublicKey, pTemplate, ulAttributeCount, pCiphertext, pulCiphertextLen, phKey);
 
-	// Only CKM_ML_KEM is supported (besides CKM_ECDH1_DERIVE above)
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE)
+		return this->encapsulateClassicMcEliece(hSession, hPublicKey, pTemplate, ulAttributeCount,
+		                                         pCiphertext, pulCiphertextLen, phKey, opLogSecretLen);
+
+	// Only CKM_ML_KEM is supported (besides CKM_ECDH1_DERIVE and
+	// CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE above)
 	if (pMechanism->mechanism != CKM_ML_KEM)
 	{
 		ERROR_MSG("C_EncapsulateKey: unsupported mechanism %lu", pMechanism->mechanism);
@@ -219,6 +364,14 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
 	if (rv != CKR_OK) return rv;
 
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+	// CKR_KEY_FUNCTION_NOT_PERMITTED", and §5.18.8 lists only the former for
+	// C_EncapsulateKey, so the key-type test runs before the CKA_ENCAPSULATE
+	// test (G-8 finding E6, 2026-09-25).
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
+	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
+		return CKR_KEY_TYPE_INCONSISTENT;
+
 	// Check capability
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -228,11 +381,6 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	// (its convention: CKR_MECHANISM_INVALID for a disallowed mechanism).
 	if (!isMechanismPermitted(keyObj, pMechanism->mechanism))
 		return CKR_MECHANISM_INVALID;
-
-	// Check key type
-	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
-	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
-		return CKR_KEY_TYPE_INCONSISTENT;
 
 	// Load the ML-KEM algorithm
 	AsymmetricAlgorithm* mlkem = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::MLKEM);
@@ -311,6 +459,10 @@ CK_RV SoftHSM::encapsulateKeyImpl
 
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// v3.3: the encapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_ENCAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_KEY_HANDLE_INVALID;
 
 	// Check write authorization
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
@@ -397,6 +549,25 @@ CK_RV SoftHSM::encapsulateKeyImpl
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -412,6 +583,10 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
 	// PKCS#11 v3.2 §6.8.2 Table 103 — CKA_VALUE_LEN is the "Length in bytes of
@@ -471,14 +646,24 @@ CK_RV SoftHSM::C_DecapsulateKey
 )
 {
 	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
 	const std::string keyFields = (logging && pMechanism != NULL_PTR)
 		? opLogKeyFields(hSession, hPrivateKey, pMechanism->mechanism)
 		: std::string("key=- keytype=- paramset=-");
+	const uint8_t alg = (ring && pMechanism != NULL_PTR)
+		? behaviourAlg(hSession, hPrivateKey, pMechanism->mechanism)
+		: BehaviourIds::ALG_NONE;
+	const uint64_t t0 = (logging || ring) ? BehaviourRing::nowMicros() : 0;
 
 	unsigned long secretLen = 0;
 	CK_RV rv = decapsulateKeyImpl(hSession, pMechanism, hPrivateKey, pTemplate,
 	                              ulAttributeCount, pCiphertext, ulCiphertextLen,
 	                              phKey, logging ? &secretLen : NULL);
+
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_DECAPSULATEKEY, alg, rv,
+		                                       (uint64_t)ulCiphertextLen, dur));
 
 	if (logging)
 	{
@@ -489,14 +674,15 @@ CK_RV SoftHSM::C_DecapsulateKey
 		// No probe field: decapsulation takes the ciphertext by value and has no
 		// length-query form to distinguish.
 		OpLog::emit("C_DecapsulateKey",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            keyFields.c_str(),
 		            (unsigned long)ulCiphertextLen,
 		            secret,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;
@@ -524,7 +710,12 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	if (pMechanism->mechanism == CKM_ECDH1_DERIVE)
 		return this->decapsulateECDH(hSession, hPrivateKey, pTemplate, ulAttributeCount, pCiphertext, ulCiphertextLen, phKey);
 
-	// Only CKM_ML_KEM is supported (besides CKM_ECDH1_DERIVE above)
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE)
+		return this->decapsulateClassicMcEliece(hSession, hPrivateKey, pTemplate, ulAttributeCount,
+		                                         pCiphertext, ulCiphertextLen, phKey, opLogSecretLen);
+
+	// Only CKM_ML_KEM is supported (besides CKM_ECDH1_DERIVE and
+	// CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE above)
 	if (pMechanism->mechanism != CKM_ML_KEM)
 	{
 		ERROR_MSG("C_DecapsulateKey: unsupported mechanism %lu", pMechanism->mechanism);
@@ -585,6 +776,24 @@ CK_RV SoftHSM::decapsulateKeyImpl
 		return CKR_GENERAL_ERROR;
 	}
 
+	// FIPS 203 §7.3 check 1 (ciphertext type check): c must be exactly the
+	// length of THIS key's parameter set. The old test only asked whether the
+	// length belonged to ANY parameter set, so a 768-byte ML-KEM-512
+	// ciphertext handed to an ML-KEM-768 key fell through to
+	// CKR_WRAPPED_KEY_INVALID. PKCS#11 v3.2 §5.1.6 defines
+	// CKR_WRAPPED_KEY_LEN_RANGE for input "invalid solely on the basis of its
+	// length", and §5.18.9 lists it for C_DecapsulateKey. Same shape as the
+	// Classic McEliece arm below, and as the Rust engine
+	// (fix/mlkem-input-checks-0925).
+	const CK_ULONG expectedCtLen =
+		(CK_ULONG)((MLKEMPrivateKey*)privateKey)->getCiphertextLength();
+	if (expectedCtLen == 0 || ulCiphertextLen != expectedCtLen)
+	{
+		mlkem->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
+		return CKR_WRAPPED_KEY_LEN_RANGE;
+	}
+
 	// Perform decapsulation
 	ByteString ciphertext;
 	ciphertext.resize(ulCiphertextLen);
@@ -595,8 +804,6 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	{
 		mlkem->recyclePrivateKey(privateKey);
 		CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
-		if (ulCiphertextLen != 768 && ulCiphertextLen != 1088 && ulCiphertextLen != 1568)
-			return CKR_WRAPPED_KEY_LEN_RANGE;
 		return CKR_WRAPPED_KEY_INVALID;
 	}
 
@@ -623,6 +830,10 @@ CK_RV SoftHSM::decapsulateKeyImpl
 
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// v3.3: the decapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_DECAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Check write authorization
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
@@ -701,6 +912,25 @@ CK_RV SoftHSM::decapsulateKeyImpl
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -716,6 +946,10 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
 	// §6.8.2 Table 103 — CKA_VALUE_LEN is the PLAINTEXT length, captured before
@@ -802,6 +1036,15 @@ CK_RV SoftHSM::encapsulateECDH
 	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
 	if (rv != CKR_OK) return rv;
 
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+	// CKR_KEY_FUNCTION_NOT_PERMITTED", and §5.18.8 lists only the former for
+	// C_EncapsulateKey, so the key-type test runs before the CKA_ENCAPSULATE
+	// test (G-8 finding E6, 2026-09-25).
+	CK_ULONG peerKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
+	    (peerKeyType != CKK_EC && peerKeyType != CKK_EC_MONTGOMERY))
+		return CKR_KEY_TYPE_INCONSISTENT;
+
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
@@ -810,11 +1053,6 @@ CK_RV SoftHSM::encapsulateECDH
 	// CKM_ECDH1_DERIVE (see encapsulateKeyImpl), so the mechanism is fixed.
 	if (!isMechanismPermitted(keyObj, CKM_ECDH1_DERIVE))
 		return CKR_MECHANISM_INVALID;
-
-	CK_ULONG peerKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
-	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
-	    (peerKeyType != CKK_EC && peerKeyType != CKK_EC_MONTGOMERY))
-		return CKR_KEY_TYPE_INCONSISTENT;
 
 	// Peer's raw public point — PKCS#11 v3.2 Table 78 stores this under
 	// CKA_EC_POINT for BOTH CKK_EC and CKK_EC_MONTGOMERY (confirmed against
@@ -952,6 +1190,10 @@ CK_RV SoftHSM::encapsulateECDH
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
 
+	// v3.3: the encapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_ENCAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_KEY_HANDLE_INVALID;
+
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
 	if (rv != CKR_OK) return rv;
 
@@ -1033,6 +1275,25 @@ CK_RV SoftHSM::encapsulateECDH
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -1048,6 +1309,10 @@ CK_RV SoftHSM::encapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
 	// secret, captured before the wipe below.
@@ -1207,6 +1472,10 @@ CK_RV SoftHSM::decapsulateECDH
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
 
+	// v3.3: the decapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_DECAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_TEMPLATE_INCONSISTENT;
+
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
 	if (rv != CKR_OK) return rv;
 
@@ -1283,6 +1552,25 @@ CK_RV SoftHSM::decapsulateECDH
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -1298,6 +1586,10 @@ CK_RV SoftHSM::decapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
 	// secret, captured before the wipe below.
@@ -1336,3 +1628,486 @@ CK_RV SoftHSM::decapsulateECDH
 	return CKR_OK;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Classic McEliece (BSI TR-02102-1 §2.4.2) — CKM_PQCTODAY_CLASSIC_MCELIECE_
+// ENCAPSULATE under C_EncapsulateKey/C_DecapsulateKey, one mechanism for both
+// directions (same convention as CKM_ML_KEM). Structured as separate
+// self-contained bodies rather than folded into encapsulateKeyImpl/
+// decapsulateKeyImpl's ML-KEM-shaped code, matching how CKM_ECDH1_DERIVE is
+// already split out above — the shared "build a generic-secret key object
+// from the result" tail is duplicated rather than parameterised, since the
+// two mechanisms differ in every step ahead of it (key type, algorithm
+// object, reconstruction helper, ciphertext-length source).
+// ─────────────────────────────────────────────────────────────────────────────
+
+CK_RV SoftHSM::encapsulateClassicMcEliece
+(
+	CK_SESSION_HANDLE hSession,
+	CK_OBJECT_HANDLE hPublicKey,
+	CK_ATTRIBUTE_PTR pTemplate,
+	CK_ULONG ulAttributeCount,
+	CK_BYTE_PTR pCiphertext,
+	CK_ULONG_PTR pulCiphertextLen,
+	CK_OBJECT_HANDLE_PTR phKey,
+	unsigned long* opLogSecretLen
+)
+{
+	// Get the session
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	// Get the token
+	Token* token = session->getToken();
+	if (token == NULL) return CKR_GENERAL_ERROR;
+
+	// Get the public key object
+	OSObject* keyObj = (OSObject*)handleManager->getObject(hPublicKey, session->getSlot()->getSlotID());
+	if (keyObj == NULL_PTR || !keyObj->isValid()) return CKR_KEY_HANDLE_INVALID;
+
+	CK_BBOOL isKeyOnToken = keyObj->getBooleanValue(CKA_TOKEN, false);
+	CK_BBOOL isKeyPrivate = keyObj->getBooleanValue(CKA_PRIVATE, false);
+
+	// Check user credentials
+	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
+	if (rv != CKR_OK) return rv;
+
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+	// CKR_KEY_FUNCTION_NOT_PERMITTED", and §5.18.8 lists only the former for
+	// C_EncapsulateKey, so the key-type test runs before the CKA_ENCAPSULATE
+	// test (G-8 finding E6, 2026-09-25).
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
+	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_PQCTODAY_CLASSIC_MCELIECE)
+		return CKR_KEY_TYPE_INCONSISTENT;
+
+	// Check capability
+	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	if (!isMechanismPermitted(keyObj, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE))
+		return CKR_MECHANISM_INVALID;
+
+	// Load the Classic McEliece algorithm
+	AsymmetricAlgorithm* mceliece = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::CLASSICMCELIECE);
+	if (mceliece == NULL) return CKR_MECHANISM_INVALID;
+
+	// Reconstruct the public key
+	PublicKey* publicKey = mceliece->newPublicKey();
+	if (publicKey == NULL)
+	{
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_HOST_MEMORY;
+	}
+	if (getClassicMcEliecePublicKey((ClassicMcEliecePublicKey*)publicKey, token, keyObj) != CKR_OK)
+	{
+		mceliece->recyclePublicKey(publicKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_GENERAL_ERROR;
+	}
+
+	// Determine the expected ciphertext length from the parameter set
+	ClassicMcEliecePublicKey* mceliecePub = (ClassicMcEliecePublicKey*)publicKey;
+	CK_ULONG expectedCtLen = (CK_ULONG)mceliecePub->getCiphertextLength();
+
+	// Size query: pCiphertext is NULL
+	if (pCiphertext == NULL_PTR)
+	{
+		*pulCiphertextLen = expectedCtLen;
+		mceliece->recyclePublicKey(publicKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_OK;
+	}
+
+	// Buffer size check
+	if (*pulCiphertextLen < expectedCtLen)
+	{
+		*pulCiphertextLen = expectedCtLen;
+		mceliece->recyclePublicKey(publicKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_BUFFER_TOO_SMALL;
+	}
+
+	// Perform encapsulation
+	ByteString ciphertext;
+	ByteString sharedSecret;
+	if (!((OSSLClassicMcEliece*)mceliece)->encapsulate(publicKey, ciphertext, sharedSecret))
+	{
+		mceliece->recyclePublicKey(publicKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_GENERAL_ERROR;
+	}
+
+	// Write ciphertext to caller's buffer
+	memcpy(pCiphertext, ciphertext.const_byte_str(), ciphertext.size());
+	*pulCiphertextLen = (CK_ULONG)ciphertext.size();
+
+	// Captured here, before sharedSecret is moved into the key object and wiped.
+	if (opLogSecretLen != NULL) *opLogSecretLen = (unsigned long)sharedSecret.size();
+
+	mceliece->recyclePublicKey(publicKey);
+	CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+
+	// Create the shared-secret key object from pTemplate
+	CK_OBJECT_CLASS objClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+	CK_BBOOL isOnToken = CK_FALSE;
+	CK_BBOOL isPrivate = CK_TRUE;
+	CK_CERTIFICATE_TYPE dummy;
+	if (pTemplate == NULL_PTR && ulAttributeCount > 0)
+		return CKR_ARGUMENTS_BAD;
+	rv = extractObjectInformation(pTemplate, ulAttributeCount, objClass, keyType, dummy, isOnToken, isPrivate, true);
+	if (rv != CKR_OK && rv != CKR_TEMPLATE_INCOMPLETE)
+	{
+		ERROR_MSG("C_EncapsulateKey: extractObjectInformation failed");
+		return rv;
+	}
+
+	if (objClass != CKO_SECRET_KEY)
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// Check write authorization
+	rv = haveWrite(session->getState(), isOnToken, isPrivate);
+	if (rv != CKR_OK) return rv;
+
+	// Build attribute list for the new secret key
+	const CK_ULONG maxAttribs = 32;
+	CK_ATTRIBUTE secretAttribs[maxAttribs] = {
+		{ CKA_CLASS,    &objClass,  sizeof(objClass)  },
+		{ CKA_TOKEN,    &isOnToken, sizeof(isOnToken)  },
+		{ CKA_PRIVATE,  &isPrivate, sizeof(isPrivate)  },
+		{ CKA_KEY_TYPE, &keyType,   sizeof(keyType)    },
+	};
+	CK_ULONG secretAttribsCount = 4;
+
+	bool kcvGenerate = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+
+	if (ulAttributeCount > (maxAttribs - secretAttribsCount))
+		return CKR_TEMPLATE_INCONSISTENT;
+	for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
+	{
+		switch (pTemplate[i].type)
+		{
+			case CKA_CLASS:
+			case CKA_TOKEN:
+			case CKA_PRIVATE:
+			case CKA_KEY_TYPE:
+				continue;
+			case CKA_VALUE:
+				return CKR_ATTRIBUTE_VALUE_INVALID;
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kcvGenerate,
+				                                     kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				continue;
+			}
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(CK_ULONG*)pTemplate[i].pValue != (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				continue;
+			default:
+				if (secretAttribsCount >= maxAttribs)
+					return CKR_TEMPLATE_INCONSISTENT;
+				secretAttribs[secretAttribsCount++] = pTemplate[i];
+		}
+	}
+
+	ByteString kcv;
+	if (kcvGenerate)
+	{
+		kcv = computeSecretKeyKCV(keyType, sharedSecret);
+		if (kcvSupplied && kcv != kcvWanted)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
+	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
+	if (rv != CKR_OK) return rv;
+
+	OSObject* osobject = (OSObject*)handleManager->getObject(*phKey);
+	if (osobject == NULL_PTR || !osobject->isValid())
+		return CKR_FUNCTION_FAILED;
+
+	if (!osobject->startTransaction())
+		return CKR_FUNCTION_FAILED;
+
+	bool bOK = true;
+	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
+	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
+	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
+
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
+	ByteString storedValue;
+	if (isPrivate)
+		bOK = bOK && token->encrypt(sharedSecret, storedValue);
+	else
+		storedValue = sharedSecret;
+	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
+	if (kcv.size() == 3)
+		bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+	sharedSecret.wipe();
+	storedValue.wipe();
+
+	if (bOK)
+		bOK = osobject->commitTransaction();
+	else
+		osobject->abortTransaction();
+
+	if (!bOK)
+	{
+		OSObject* osk = (OSObject*)handleManager->getObject(*phKey);
+		handleManager->destroyObject(*phKey);
+		if (osk) osk->destroyObject();
+		*phKey = CK_INVALID_HANDLE;
+		return CKR_FUNCTION_FAILED;
+	}
+
+	return CKR_OK;
+}
+
+CK_RV SoftHSM::decapsulateClassicMcEliece
+(
+	CK_SESSION_HANDLE hSession,
+	CK_OBJECT_HANDLE hPrivateKey,
+	CK_ATTRIBUTE_PTR pTemplate,
+	CK_ULONG ulAttributeCount,
+	CK_BYTE_PTR pCiphertext,
+	CK_ULONG ulCiphertextLen,
+	CK_OBJECT_HANDLE_PTR phKey,
+	unsigned long* opLogSecretLen
+)
+{
+	// Get the session
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	// Get the token
+	Token* token = session->getToken();
+	if (token == NULL) return CKR_GENERAL_ERROR;
+
+	// Get the private key object
+	OSObject* keyObj = (OSObject*)handleManager->getObject(hPrivateKey, session->getSlot()->getSlotID());
+	if (keyObj == NULL_PTR || !keyObj->isValid()) return CKR_UNWRAPPING_KEY_HANDLE_INVALID;
+
+	CK_BBOOL isKeyOnToken = keyObj->getBooleanValue(CKA_TOKEN, false);
+	CK_BBOOL isKeyPrivate = keyObj->getBooleanValue(CKA_PRIVATE, true);
+
+	// Check user credentials
+	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
+	if (rv != CKR_OK) return rv;
+
+	// Check capability
+	if (!keyObj->getBooleanValue(CKA_DECAPSULATE, false))
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	if (!isMechanismPermitted(keyObj, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE))
+		return CKR_MECHANISM_INVALID;
+
+	// Check key type
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PRIVATE_KEY ||
+	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_PQCTODAY_CLASSIC_MCELIECE)
+		return CKR_KEY_TYPE_INCONSISTENT;
+
+	// Load the Classic McEliece algorithm
+	AsymmetricAlgorithm* mceliece = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::CLASSICMCELIECE);
+	if (mceliece == NULL) return CKR_MECHANISM_INVALID;
+
+	// Reconstruct the private key
+	PrivateKey* privateKey = mceliece->newPrivateKey();
+	if (privateKey == NULL)
+	{
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_HOST_MEMORY;
+	}
+	if (getClassicMcEliecePrivateKey((ClassicMcEliecePrivateKey*)privateKey, token, keyObj) != CKR_OK)
+	{
+		mceliece->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_GENERAL_ERROR;
+	}
+
+	// Unlike ML-KEM's fixed 3-value ciphertext-length list, each Classic
+	// McEliece parameter set has its own single valid ciphertext length
+	// (96-208 bytes, see ClassicMcEliecePublicKey::paramSetToSizes) — derive
+	// it from the reconstructed private key's own parameter set rather than
+	// hard-coding all 10 values here.
+	ClassicMcEliecePrivateKey* mceliecePriv = (ClassicMcEliecePrivateKey*)privateKey;
+	CK_ULONG expectedCtLen = (CK_ULONG)mceliecePriv->getCiphertextLength();
+	if (ulCiphertextLen != expectedCtLen)
+	{
+		mceliece->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_WRAPPED_KEY_LEN_RANGE;
+	}
+
+	// Perform decapsulation
+	ByteString ciphertext;
+	ciphertext.resize(ulCiphertextLen);
+	memcpy(&ciphertext[0], pCiphertext, ulCiphertextLen);
+
+	ByteString sharedSecret;
+	if (!((OSSLClassicMcEliece*)mceliece)->decapsulate(privateKey, ciphertext, sharedSecret))
+	{
+		mceliece->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_WRAPPED_KEY_INVALID;
+	}
+
+	mceliece->recyclePrivateKey(privateKey);
+	CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+
+	// Captured here, before sharedSecret is moved into the key object and wiped.
+	if (opLogSecretLen != NULL) *opLogSecretLen = (unsigned long)sharedSecret.size();
+
+	// Create the shared-secret key object from pTemplate
+	CK_OBJECT_CLASS objClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+	CK_BBOOL isOnToken = CK_FALSE;
+	CK_BBOOL isPrivate = CK_TRUE;
+	CK_CERTIFICATE_TYPE dummy;
+	if (pTemplate == NULL_PTR && ulAttributeCount > 0)
+		return CKR_ARGUMENTS_BAD;
+	rv = extractObjectInformation(pTemplate, ulAttributeCount, objClass, keyType, dummy, isOnToken, isPrivate, true);
+	if (rv != CKR_OK && rv != CKR_TEMPLATE_INCOMPLETE)
+	{
+		ERROR_MSG("C_DecapsulateKey: extractObjectInformation failed");
+		return rv;
+	}
+
+	if (objClass != CKO_SECRET_KEY)
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// Check write authorization
+	rv = haveWrite(session->getState(), isOnToken, isPrivate);
+	if (rv != CKR_OK) return rv;
+
+	// Build attribute list for the new secret key
+	const CK_ULONG maxAttribs = 32;
+	CK_ATTRIBUTE secretAttribs[maxAttribs] = {
+		{ CKA_CLASS,    &objClass,  sizeof(objClass)  },
+		{ CKA_TOKEN,    &isOnToken, sizeof(isOnToken)  },
+		{ CKA_PRIVATE,  &isPrivate, sizeof(isPrivate)  },
+		{ CKA_KEY_TYPE, &keyType,   sizeof(keyType)    },
+	};
+	CK_ULONG secretAttribsCount = 4;
+
+	bool kcvGenerate = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+
+	if (ulAttributeCount > (maxAttribs - secretAttribsCount))
+		return CKR_TEMPLATE_INCONSISTENT;
+	for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
+	{
+		switch (pTemplate[i].type)
+		{
+			case CKA_CLASS:
+			case CKA_TOKEN:
+			case CKA_PRIVATE:
+			case CKA_KEY_TYPE:
+				continue;
+			case CKA_VALUE:
+				return CKR_ATTRIBUTE_VALUE_INVALID;
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kcvGenerate,
+				                                     kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				continue;
+			}
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(CK_ULONG*)pTemplate[i].pValue != (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				continue;
+			default:
+				if (secretAttribsCount >= maxAttribs)
+					return CKR_TEMPLATE_INCONSISTENT;
+				secretAttribs[secretAttribsCount++] = pTemplate[i];
+		}
+	}
+
+	ByteString kcv;
+	if (kcvGenerate)
+	{
+		kcv = computeSecretKeyKCV(keyType, sharedSecret);
+		if (kcvSupplied && kcv != kcvWanted)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
+	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
+	if (rv != CKR_OK) return rv;
+
+	OSObject* osobject = (OSObject*)handleManager->getObject(*phKey);
+	if (osobject == NULL_PTR || !osobject->isValid())
+		return CKR_FUNCTION_FAILED;
+
+	if (!osobject->startTransaction())
+		return CKR_FUNCTION_FAILED;
+
+	bool bOK = true;
+	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
+	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
+	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
+
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
+	ByteString storedValue;
+	if (isPrivate)
+		bOK = bOK && token->encrypt(sharedSecret, storedValue);
+	else
+		storedValue = sharedSecret;
+	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
+	if (kcv.size() == 3)
+		bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+	sharedSecret.wipe();
+	storedValue.wipe();
+
+	if (bOK)
+		bOK = osobject->commitTransaction();
+	else
+		osobject->abortTransaction();
+
+	if (!bOK)
+	{
+		OSObject* osk = (OSObject*)handleManager->getObject(*phKey);
+		handleManager->destroyObject(*phKey);
+		if (osk) osk->destroyObject();
+		*phKey = CK_INVALID_HANDLE;
+		return CKR_FUNCTION_FAILED;
+	}
+
+	return CKR_OK;
+}

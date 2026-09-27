@@ -68,7 +68,10 @@ from conformance.harness.oasis_codec import (  # noqa: E402
 
 KMIP_ROOT = HERE.parent.parent
 CORPUS_DIR = KMIP_ROOT / "conformance/oasis_corpus"
-REPORT_DIR = KMIP_ROOT / "conformance"
+# REPLAY_REPORT_DIR (2026-09-27) redirects the report so a second replay can
+# run beside the gate's without overwriting the committed REPLAY_REPORT.* —
+# check_concurrent_replay.py uses it.
+REPORT_DIR = Path(os.environ.get("REPLAY_REPORT_DIR") or (KMIP_ROOT / "conformance"))
 SERVER_BINARY = KMIP_ROOT / "target/release/pqctoday-kmip"
 
 # Phase 6 (6.1) — the transcript name of whichever test `run_test` is
@@ -130,10 +133,17 @@ IMPLEMENTED_OPS: set[str] = {
 # `SKIP_DEPRECATED` rather than `FAIL` and are removed from the
 # headline pass-rate denominator.
 _DEPRECATED_ALGO_TESTS: dict[str, str] = {
-    # `KmipAlgorithm = DSA` (0x05). Classical DSA discrete-log signatures.
-    "BL-M-12-30.xml": "DSA — deprecated (NIST SP 800-186 §5.4)",
-    "BL-M-13-30.xml": "DSA — deprecated (NIST SP 800-186 §5.4)",
-    # `KmipAlgorithm = 3DES / DES3` (0x02). Triple-DES.
+    # BL-M-12-30 / BL-M-13-30 (Transparent DSA key Register) were skipped here
+    # until 2026-09-07. They are no longer: the Baseline Server conformance
+    # clause (§6.2) requires ALL mandatory test cases to pass, so skipping them
+    # meant the Baseline claim could not honestly be made. DSA is now accepted
+    # for STORAGE ONLY — `KmipAlgorithm::to_pkcs11_mech` returns None for every
+    # operation, so the server holds the key material and returns it but can
+    # neither generate a DSA key nor sign or verify with one.
+    #
+    # `KmipAlgorithm = 3DES / DES3` (0x02). Triple-DES. These stay skipped:
+    # they belong to the Symmetric Key Foundry for FIPS profile, which this
+    # server does not claim, so refusing them costs no conformance claim.
     "SKFF-M-4-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
     "SKFF-M-8-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
     "SKFF-M-12-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
@@ -892,6 +902,31 @@ def _values_equal(
         return True
     # XML always gives us strings; the decoder gives us typed values.
     # Coerce to a canonical form for the comparison.
+    # BigInteger — §9.6.5 is variable-length two's-complement big-endian,
+    # padded to an 8-byte boundary. The XML carries the RAW HEX BYTES and the
+    # decoder returns a Python int (`int.from_bytes(..., signed=True)`), so the
+    # two sides can never be `==` however correct the server is, and the
+    # padding is not semantic anyway. Compare NUMERICALLY.
+    #
+    # Found 2026-09-07 by un-skipping BL-M-13-30: the server returned exactly
+    # the bytes the corpus specifies and the harness reported a mismatch
+    # between `'0000...fca682ce...'` and `13232376895198612407...` — the same
+    # number written two ways. Nothing else in the corpus compares a
+    # BigInteger leaf on a response, which is why this went unnoticed.
+    if ttlv_type == "BigInteger":
+        def _as_int(v: Any) -> int | None:
+            if isinstance(v, int):
+                return v
+            sv = str(v)
+            try:
+                if all(c in "0123456789abcdefABCDEF" for c in sv) and len(sv) % 2 == 0:
+                    return int.from_bytes(bytes.fromhex(sv), "big", signed=True)
+                return int(sv, 0)
+            except (ValueError, TypeError):
+                return None
+        e_i, a_i = _as_int(expected), _as_int(actual)
+        return e_i is not None and a_i is not None and e_i == a_i
+
     if ttlv_type in ("Integer", "LongInteger", "DateTime", "DateTimeExtended", "Interval"):
         try:
             return int(str(expected), 0) == int(actual)
@@ -971,7 +1006,14 @@ class Server:
             self.proc.kill()
 
 
-def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Server:
+def free_port() -> int:
+    """A port the OS reports free right now (bind 127.0.0.1:0, read, close)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_server(port: int | None = None, extra_args: list[str] | None = None) -> Server:
     """Spawn ``pqctoday-kmip`` with volatile store + self-signed TLS.
 
     Caller is responsible for ``Server.stop()`` — even on test failures —
@@ -979,35 +1021,80 @@ def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Serve
     pin a server-operator-choice flag for one run — e.g. ``--rng-seed-mode``
     (see ``_RNG_SEED_MODE_TESTS`` below) — without touching every other
     test's default config.
+
+    Port (2026-09-27): by default the OS picks a free one per server. This
+    used to be a fixed walk 10001, 10002, … identical in every run, so two
+    replays in one container (two gates in different worktrees, or a
+    leftover server from an aborted run) collided with "Address already in
+    use" — and worse, the readiness probe below could then connect to the
+    OTHER replay's server and report it as ours. So: an OS-assigned port,
+    one retry if it was taken in the gap before our bind, and the server
+    only counts as ready if OUR process is still alive once the port
+    answers.
     """
     if not SERVER_BINARY.exists():
         raise SystemExit(
             f"server binary missing: {SERVER_BINARY}\n"
             f"run `cargo build --release --bin pqctoday-kmip` first"
         )
-    proc = subprocess.Popen(
-        # --no-auto-composite: composite-key plan §7.1 — the corpus was recorded
-        # against one managed object per Create; keep it that way here.
-        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory", "--no-auto-composite", *(extra_args or [])],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
+    # G3 (2026-09-06) — `KMIP_TLS_PROFILE` runs the whole replay under a
+    # chosen TLS posture. It exists because the conformance evidence was
+    # being measured under the DEFAULT posture, which does not satisfy
+    # Profiles §3.1.2 (it offers AES-128-GCM and TLS 1.2 suites the clause
+    # forbids) — while the report claimed Baseline Server conformance, and
+    # §6.2 requires the §3.1 suite. Set it to `basic` to measure under a
+    # conformant posture. A per-test `extra_args` still wins, since those
+    # pin a specific operator choice the transcript depends on.
+    _profile = os.environ.get("KMIP_TLS_PROFILE")
+    _profile_args = (
+        ["--tls-profile", _profile]
+        if _profile and not any(a == "--tls-profile" for a in (extra_args or []))
+        else []
     )
-    # Poll port until it's accepting; bail after 5 s.
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                return Server(proc=proc, host="127.0.0.1", port=port)
-        except (ConnectionRefusedError, OSError):
+    attempts = 1 if port is not None else 2
+    for attempt in range(attempts):
+        p = port if port is not None else free_port()
+        # R6 (2026-09-07) — §6.1.32 says Interop "SHALL NOT be available in a
+        # production server", so the server now refuses it unless started with
+        # --enable-interop. THIS is the conformance harness, which is exactly the
+        # context the operation exists for, so it opts in. A deployed server does
+        # not, which is the point of the flag.
+        proc = subprocess.Popen(
+            [str(SERVER_BINARY), "--listen", f"127.0.0.1:{p}", "--store-memory",
+            # --no-auto-composite: composite-key plan §7.1 — the corpus was
+            # recorded against one managed object per Create; keep it that way.
+            "--enable-interop", "--no-auto-composite", *_profile_args, *(extra_args or [])],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        # Poll port until it's accepting; bail after 5 s. Ready means the
+        # port answers AND our process is still running a moment later — a
+        # server that lost the bind exits at once, while whatever else holds
+        # the port would still answer the probe.
+        deadline = time.time() + 5.0
+        while time.time() < deadline and proc.poll() is None:
+            try:
+                with socket.create_connection(("127.0.0.1", p), timeout=0.3):
+                    pass
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.1)
+                continue
             time.sleep(0.1)
-    proc.terminate()
-    out, err = proc.communicate(timeout=1)
-    raise SystemExit(
-        f"server didn't open port {port} within 5 s\n"
-        f"stdout: {out[:500]!r}\n"
-        f"stderr: {err[:500]!r}"
-    )
+            if proc.poll() is None:
+                return Server(proc=proc, host="127.0.0.1", port=p)
+            break
+        if proc.poll() is None:
+            proc.terminate()
+        out, err = proc.communicate(timeout=2)
+        if b"Address already in use" in err and attempt + 1 < attempts:
+            continue
+        raise SystemExit(
+            f"server didn't open port {p} within 5 s (attempt {attempt + 1}/{attempts})\n"
+            f"stdout: {out[:500]!r}\n"
+            f"stderr: {err[:500]!r}"
+        )
+    raise AssertionError("unreachable")
 
 
 def send_request(srv: Server, request_bytes: bytes, timeout: float = 5.0) -> bytes:
@@ -1298,14 +1385,6 @@ def main(argv: list[str]) -> int:
     by_name = {p.name: p for p in paths}
     results: list[TestResult] = []
     consumed: set[str] = set()  # chain members already scored, skip in the main loop
-    port_counter = 0
-
-    def next_port() -> int:
-        nonlocal port_counter
-        port_counter += 1
-        # See the per-test cycling comment above — same rationale.
-        return 10000 + (port_counter % 5000)
-
     for i, path in enumerate(paths, 1):
         name = path.name
         if name in consumed:
@@ -1317,7 +1396,7 @@ def main(argv: list[str]) -> int:
         # old standalone behavior — legitimately unresolvable without its
         # precondition, which is the correct debug-mode signal).
         if group is not None and all(g in by_name for g in group) and name == group[0]:
-            srv = start_server(port=next_port())
+            srv = start_server()
             shared_bindings = Bindings()
             try:
                 for member_name in group:
@@ -1329,15 +1408,15 @@ def main(argv: list[str]) -> int:
                 srv.stop()
             continue
 
-        # Cycle the listen port per test. Re-binding a single fixed port
-        # hundreds of times in quick succession exhausts TIME_WAIT slots on
-        # some platforms (macOS), making `start_server` time out mid-run.
-        # A rotating port over a wide range avoids the collision; the range
-        # is bounded so it stays inside the ephemeral space.
+        # A fresh port per test. Re-binding a single fixed port hundreds of
+        # times in quick succession exhausts TIME_WAIT slots on some
+        # platforms (macOS), making `start_server` time out mid-run. The
+        # port is now OS-assigned (see start_server), which keeps that
+        # property and no longer collides with a second replay.
         extra_args: list[str] = []
         if (mode := _RNG_SEED_MODE_TESTS.get(name)) is not None:
             extra_args = ["--rng-seed-mode", mode]
-        srv = start_server(port=next_port(), extra_args=extra_args)
+        srv = start_server(extra_args=extra_args)
         try:
             r = run_test(srv, path)
         finally:

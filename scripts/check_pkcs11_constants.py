@@ -46,6 +46,47 @@ FUNC_HEADER = REPO / "src" / "lib" / "pkcs11" / "pkcs11f.h"
 CANONICAL_F = REPO / "docs" / "refs" / "pkcs11f-canonical-v3.2.h"
 MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 
+# ---------------------------------------------------------------------------
+# V33_CORRECTIONS — sanctioned departures from the pinned canonical v3.2
+# header, under the project's standing precedence rule:
+#
+#     PKCS#11 v3.2 (the published OASIS Standard) is the baseline. The OASIS
+#     PKCS 11 TC's v3.3 working tree governs WHERE v3.2 HAS A GAP OR A PLAIN
+#     ERROR. It does not otherwise supersede v3.2: the reported Cryptoki
+#     version stays 3.2, and citations continue to reference the v3.2 OS,
+#     because v3.3 is an unpublished working draft that still moves
+#     (docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/PROVENANCE.md).
+#
+# Every entry needs a reason and a citation naming the v3.3 file:line and the
+# snapshot commit, so a reader can check the correction rather than trust it.
+# An entry here is NOT a licence to drift — the value must match v3.3 exactly,
+# and anything not listed still fails against canonical v3.2.
+V33_CORRECTIONS = {
+    "CKA_ENCAPSULATE_TEMPLATE": {
+        "v32": 0x0000062A,
+        "v33": 0x4000062A,
+        "reason": (
+            "v3.2 omits CKF_ARRAY_ATTRIBUTE (0x40000000) on this attribute, though "
+            "it is an array attribute exactly like CKA_WRAP_TEMPLATE, "
+            "CKA_UNWRAP_TEMPLATE and CKA_DERIVE_TEMPLATE, all of which DO carry it "
+            "in v3.2 (pkcs11t.h:574-576). A plain omission, not a design choice."
+        ),
+        "citation": (
+            "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/headers/"
+            "pkcs11t.h:658 (OASIS PKCS 11 TC working tree, commit 2b25dd8)"
+        ),
+    },
+    "CKA_DECAPSULATE_TEMPLATE": {
+        "v32": 0x0000062B,
+        "v33": 0x4000062B,
+        "reason": "Same omission as CKA_ENCAPSULATE_TEMPLATE, same correction.",
+        "citation": (
+            "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/headers/"
+            "pkcs11t.h:659 (OASIS PKCS 11 TC working tree, commit 2b25dd8)"
+        ),
+    },
+}
+
 # sha256 of the canonical OASIS PKCS#11 v3.2 pkcs11t.h pinned in F1.
 # https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/pkcs11t.h
 CANONICAL_SHA256 = "95738fdcd9b5c9c73f55f9132aefa87354556cec1c46f681b8a2000b8b5dbccb"
@@ -130,9 +171,19 @@ PINNED = {
     "CKP_XMSS_SHAKE_10_256": (0x07, "iana"),
     "CKP_XMSS_SHAKE_16_256": (0x08, "iana"),
     "CKP_XMSS_SHAKE_20_256": (0x09, "iana"),
+    "CKP_XMSS_SHAKE256_10_256": (0x10, "iana"),
     "CKP_XMSS_SHAKE256_16_256": (0x11, "iana"),
     "CKP_XMSS_SHAKE256_20_256": (0x12, "iana"),
     "CKP_XMSS_SHAKE256_10_192": (0x13, "iana"),
+    "CKP_XMSS_SHAKE256_16_192": (0x14, "iana"),
+    "CKP_XMSS_SHAKE256_20_192": (0x15, "iana"),
+    # XMSS SHA-256/192 sets (SP 800-208 Table 12, distinct id space from the
+    # SHAKE256/192 sets above — both engines lacked this family entirely
+    # until the SP 800-208 gap-closure fix; ids continue the same IANA "XMSS
+    # Signatures" registry sequence at the next unused slots).
+    "CKP_XMSS_SHA2_10_192": (0x0D, "iana"),
+    "CKP_XMSS_SHA2_16_192": (0x0E, "iana"),
+    "CKP_XMSS_SHA2_20_192": (0x0F, "iana"),
     # XMSS-MT parameter sets (RFC 8391 §8 numeric IDs, matching C++
     # xmssmt_parse_oid)
     "CKP_XMSSMT_SHA2_20_2_256": (0x01, "iana"),
@@ -222,11 +273,15 @@ PINNED = {
     "CKP_FRODOKEM_1344_AES": (0x05, "param-set"),
     "CKP_FRODOKEM_1344_SHAKE": (0x06, "param-set"),
     "CKP_CLASSIC_MCELIECE_6688128": (0x01, "param-set"),
-    # legacy bare BIP32 codepoints (pre vendor-space migration, still accepted)
-    "CKA_BIP32_CHAIN_CODE_LEGACY": (0x1021, "legacy"),
-    "CKA_BIP32_CHILD_INDEX_LEGACY": (0x1022, "legacy"),
-    "CKM_BIP32_MASTER_DERIVE_LEGACY": (0x105B, "legacy"),
-    "CKM_BIP32_CHILD_DERIVE_LEGACY": (0x105C, "legacy"),
+    "CKP_CLASSIC_MCELIECE_348864": (0x02, "param-set"),
+    "CKP_CLASSIC_MCELIECE_348864F": (0x03, "param-set"),
+    "CKP_CLASSIC_MCELIECE_460896": (0x04, "param-set"),
+    "CKP_CLASSIC_MCELIECE_460896F": (0x05, "param-set"),
+    "CKP_CLASSIC_MCELIECE_6688128F": (0x06, "param-set"),
+    "CKP_CLASSIC_MCELIECE_6960119": (0x07, "param-set"),
+    "CKP_CLASSIC_MCELIECE_6960119F": (0x08, "param-set"),
+    "CKP_CLASSIC_MCELIECE_8192128": (0x09, "param-set"),
+    "CKP_CLASSIC_MCELIECE_8192128F": (0x0a, "param-set"),
     # naming drift from spec constants (values equal the spec ones)
     "CKP_PBKDF2_HMAC_SHA256": (0x04, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA256
     "CKP_PBKDF2_HMAC_SHA384": (0x05, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA384
@@ -255,6 +310,10 @@ PINNED = {
     "CKM_HPKE_KEM_KEY_PAIR_GEN": (0x80000013, "vendor"),
     "CKM_HPKE": (0x80000014, "vendor"),
     "CKK_HPKE_KEM": (0x80000003, "vendor"),
+    # ECDSA with a caller-supplied nonce k — a deliberate key-recovery
+    # teaching primitive (SECURITY.md). Next free mechanism codepoint after
+    # CKM_HPKE in the priv allocation ledger.
+    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": (0x80000015, "vendor"),
     # CK_HPKE_KDF_TYPE (RFC 9180 §7.2 kdf_id), CK_HPKE_AEAD_TYPE (§7.3
     # aead_id), CK_HPKE_MODE_TYPE (§5.1 mode byte) — small-integer selector
     # enums, not object attributes or standalone codepoints, same category
@@ -539,6 +598,21 @@ def check_canonical(spec: dict) -> list:
         if name not in spec:
             errors.append(f"CANONICAL-DELTA  {name} (0x{val:08x}) missing from local header")
         elif spec[name] != val:
+            fix = V33_CORRECTIONS.get(name)
+            # A sanctioned v3.3 correction must match BOTH sides exactly: the
+            # canonical file must still hold the v3.2 value (or the pin has
+            # moved under us) and the local header must hold the v3.3 one (or
+            # this is ordinary drift wearing a v3.3 label).
+            if fix and val == fix["v32"] and spec[name] == fix["v33"]:
+                continue
+            if fix:
+                errors.append(
+                    f"CANONICAL-DELTA  {name}: listed in V33_CORRECTIONS but the "
+                    f"values do not match it — local=0x{spec[name]:08x} "
+                    f"canonical=0x{val:08x}, expected local=0x{fix['v33']:08x} "
+                    f"canonical=0x{fix['v32']:08x}"
+                )
+                continue
             errors.append(
                 f"CANONICAL-DELTA  {name}: local=0x{spec[name]:08x} "
                 f"canonical=0x{val:08x}"
@@ -615,6 +689,165 @@ def check_manifest(spec: dict) -> list:
     return errors
 
 
+def check_manifest_vendor(vend: dict, rust: dict) -> list:
+    """The manifest's vendor blocks must mirror what the engines define.
+
+    Added 2026-09-27. `active` / `active_key_types` claimed to mirror the priv
+    allocation authority but nothing read them: they still listed the four
+    FrodoKEM / McEliece mechanisms of 2026-07-06 while the engines had grown
+    to sixteen vendor mechanisms (HPKE, ECDSA_EXPLICIT_K, and the nineteen
+    allocations registered in authority §1.4.2 on 2026-09-23). The authority
+    file itself lives in the private repo, so CI cannot hash it; the engines'
+    own definitions are the public stand-in, and the authority's completeness
+    check (check_completeness above) already ties those back to it.
+    """
+    errors = []
+    if not MANIFEST.exists():
+        return [f"MANIFEST-MISSING  {MANIFEST} not found"]
+    data = json.loads(MANIFEST.read_text())
+    for block, prefix in (("active", "CKM_"), ("active_key_types", "CKK_")):
+        engines = {}
+        for src in (vend, rust):
+            for name, val in src.items():
+                if name.startswith(prefix) and 0x80000000 <= val < 0xFFFFFFFF:
+                    engines[name] = val
+        listed = {
+            e.get("symbol"): int(cp, 16)
+            for cp, e in data.get(block, {}).items() if not cp.startswith("_")
+        }
+        for name, val in sorted(engines.items()):
+            if name not in listed:
+                errors.append(f"MANIFEST-VENDOR  {name} = 0x{val:08x} defined by an "
+                              f"engine but missing from manifest `{block}`")
+            elif listed[name] != val:
+                errors.append(f"MANIFEST-VENDOR  {name}: manifest `{block}`="
+                              f"0x{listed[name]:08x} engines=0x{val:08x}")
+        for name, val in sorted(listed.items()):
+            if name not in engines:
+                errors.append(f"MANIFEST-VENDOR  {name} = 0x{val:08x} in manifest "
+                              f"`{block}` but defined by neither engine")
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# VENDOR_PRESENCE — which sources each vendor allocation MUST appear in.
+#
+# Added 2026-09-23. check_source() below iterates the constants a source
+# CONTAINS, so it catches a wrong value and an unregistered name but is
+# structurally blind to a constant being ABSENT. That is how six allocations
+# registered here and shipped by the Rust engine stayed missing from
+# vendor_mechanisms.h while this gate reported OK.
+#
+# Deliberately derived from WHICH ENGINE IMPLEMENTS WHAT, not from the current
+# contents of either file. A map populated by observation would encode the
+# status quo as intent and pass trivially — it could never report that today's
+# state is wrong, which is the only thing worth checking.
+#
+#   "both"  — part of the PKCS#11 vendor surface; both engines must define it
+#   "rust"  — Rust-engine internal or Rust-only feature; C++ must NOT need it
+#   "cpp"   — C++-engine internal; Rust carries its own CKA_PRIV_* equivalent
+VENDOR_PRESENCE = {
+    # Public vendor surface — registered in the priv allocation authority §1.4
+    # and part of what a PKCS#11 caller can see. Both engines define these.
+    "CKA_LMOTS_PARAM_SET": "both",
+    "CKA_LMS_PARAM_SET": "both",
+    "CKA_XMSS_PARAM_SET": "both",
+    "CKA_XMSSMT_PARAM_SET": "both",
+    "CKK_PQCTODAY_CLASSIC_MCELIECE": "both",
+    "CKK_PQCTODAY_FRODOKEM": "both",
+    "CKK_HPKE_KEM": "both",
+    "CKM_KECCAK_256": "both",
+    "CKM_PQCTODAY_SPLIT_KEY": "both",
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN": "both",
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE": "both",
+    "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN": "both",
+    "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": "both",
+    "CKM_HPKE_KEM_KEY_PAIR_GEN": "both",
+    "CKM_HPKE": "both",
+    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": "both",
+
+    # Engine-internal storage. These never cross the PKCS#11 boundary — the
+    # Rust engine labels them so in its own source ("Private attribute: stores
+    # the parameter set on generated keys"). The two engines solved the same
+    # problem separately and do NOT share values: C++ CKA_STATEFUL_KEY_STATE is
+    # 0x80000101 where Rust CKA_PRIV_STATEFUL_KEY_STATE is 0xffff0005, and
+    # likewise CKA_LEAF_INDEX / CKA_PRIV_LEAF_INDEX. Requiring either engine to
+    # carry the other's would be wrong, not merely noisy.
+    "CKA_PRIV_PARAM_SET": "rust",
+    "CKA_PRIV_ALGO_FAMILY": "rust",
+    "CKA_PRIV_OWNER_SESSION": "rust",
+    "CKA_PRIV_SLOT_ID": "rust",
+    "CKA_PRIV_STATEFUL_KEY_STATE": "rust",
+    "CKA_PRIV_LEAF_INDEX": "rust",
+    "CKA_PRIV_XMSS_KEYS_REMAINING": "rust",
+    "CKA_STATEFUL_KEY_STATE": "cpp",
+    "CKA_LEAF_INDEX": "cpp",
+
+    # Rust-engine-only, and SETTLED as such on 2026-09-25 (these two carried a
+    # "NOT settled — flagged for a maintainer decision" note for months). Both
+    # were examined against the v3.2 spec and measured against both engines
+    # before deciding, because the obvious-looking answer was wrong in each
+    # case. Neither should move to "both": doing so makes the gate demand a
+    # C++ header entry that nothing in C++ could use.
+    #
+    # CKM_EC_MONTGOMERY_KEY_DERIVE (0x80000011) — redundant, not missing.
+    #   v3.2 §6.3.17 defines the STANDARD mechanism as covering both curve
+    #   families: CKM_ECDH1_DERIVE "is a mechanism for key derivation ... as
+    #   defined in [ANSI X9.63] for short Weierstrass EC keys and [RFC 7748]
+    #   for Montgomery keys". Measured (tests/differential scenario
+    #   create.encapsulate.ecdh_x25519): with an X25519 key, BOTH engines
+    #   answer CKR_OK to C_EncapsulateKey and C_DecapsulateKey under
+    #   CKM_ECDH1_DERIVE and agree on the 32-byte shared secret, and BOTH
+    #   answer CKR_MECHANISM_INVALID to this vendor mechanism in that path.
+    #   So the standard mechanism already is the portable way to ask for this,
+    #   and the vendor allocation earns nothing in C++.
+    #
+    # CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED (0x80000001) — unreachable in
+    #   C++ by construction. It is returned by exactly one place,
+    #   state_snapshot.rs's deserialize_token_state, when a snapshot carries
+    #   the superseded V1 magic. Token-state snapshots exist only because
+    #   openssl.wasm is built -sEXIT_RUNTIME=1 and loses all in-memory state
+    #   on teardown; the C++ engine has a file-backed token directory and so
+    #   has no snapshot format to reject. There is also no standard code to
+    #   borrow instead: v3.2 says of the nearest candidate,
+    #   "CKR_SAVED_STATE_INVALID: This value can only be returned by
+    #   C_SetOperationState", which this is not.
+    "CKM_EC_MONTGOMERY_KEY_DERIVE": "rust",
+    "CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED": "rust",
+}
+
+
+def check_completeness(vend: dict, rust: dict) -> list:
+    """Every PINNED vendor allocation must be PRESENT where it belongs.
+
+    The counterpart to check_source(): that one validates what a source
+    contains, this one validates what it is missing.
+    """
+    errors = []
+    for name, (val, kind) in sorted(PINNED.items()):
+        if kind != "vendor":
+            continue
+        where = VENDOR_PRESENCE.get(name)
+        if where is None:
+            errors.append(
+                f"UNCLASSIFIED  {name} = 0x{val:08x} is PINNED kind=vendor but "
+                f"absent from VENDOR_PRESENCE — say which sources must define "
+                f"it ('both' / 'rust' / 'cpp') rather than leaving it unchecked"
+            )
+            continue
+        if where in ("both", "cpp") and name not in vend:
+            errors.append(
+                f"MISSING     {name} = 0x{val:08x} expected in "
+                f"src/lib/vendor_mechanisms.h ({where}) but not defined there"
+            )
+        if where in ("both", "rust") and name not in rust:
+            errors.append(
+                f"MISSING     {name} = 0x{val:08x} expected in "
+                f"rust/src/constants.rs ({where}) but not defined there"
+            )
+    return errors
+
+
 def main() -> int:
     spec = parse_header(HEADER)
     if len(spec) < 900:
@@ -641,6 +874,10 @@ def main() -> int:
          check_source("vendor-hdr", vend, spec) + check_duplicates("vendor-hdr", vend)),
         ("kmip/pkcs11-mech-manifest.json (standard_pkcs11_v3_2)",
          check_manifest(spec)),
+        ("vendor allocation completeness (present, not just correct)",
+         check_completeness(vend, rust)),
+        ("kmip/pkcs11-mech-manifest.json (active vendor blocks vs engines)",
+         check_manifest_vendor(vend, rust)),
     ]
 
     total_errors = 0

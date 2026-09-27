@@ -90,7 +90,7 @@ impl Tag {
     pub const ACTIVATION_DATE: Tag = Tag(0x42_00_01);
     pub const APPLICATION_DATA: Tag = Tag(0x42_00_02);
     pub const APPLICATION_NAMESPACE: Tag = Tag(0x42_00_03);
-    /// `0x42000d` is **(Reserved)** in the KMIP 3.0 tag table (§11.57) — the
+    /// `0x42000d` is **(Reserved)** in the KMIP 3.0 tag table (§11.58) — the
     /// string "Batch Count" appears nowhere in the spec; batch items are
     /// position-correlated in 3.0, not counted by a dedicated tag (see
     /// `kmip30/message.rs` for the real, spec-correct envelope). This

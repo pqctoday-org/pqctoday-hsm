@@ -50,7 +50,7 @@ pub fn wrap_master_key(pin: &[u8], master_key: &[u8; MASTER_KEY_LEN]) -> Result<
     let nonce_bytes: [u8; NONCE_LEN] = random_bytes()?;
     let wrap_key = derive_wrap_key(pin, &salt);
     let cipher = Aes256Gcm::new_from_slice(&wrap_key).map_err(|_| CryptoError)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = &Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, Payload { msg: master_key, aad: b"" })
         .map_err(|_| CryptoError)?;
@@ -73,7 +73,7 @@ pub fn unwrap_master_key(pin: &[u8], wrapped: &[u8]) -> Result<[u8; MASTER_KEY_L
     let ciphertext = &wrapped[SALT_LEN + NONCE_LEN..];
     let wrap_key = derive_wrap_key(pin, &salt);
     let cipher = Aes256Gcm::new_from_slice(&wrap_key).map_err(|_| CryptoError)?;
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = &Nonce::try_from(nonce_bytes).map_err(|_| CryptoError)?;
     let plaintext = cipher
         .decrypt(nonce, Payload { msg: ciphertext, aad: b"" })
         .map_err(|_| CryptoError)?;
@@ -93,7 +93,7 @@ pub fn generate_master_key() -> Result<[u8; MASTER_KEY_LEN], CryptoError> {
 pub fn encrypt_attr(master_key: &[u8; MASTER_KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let nonce_bytes: [u8; NONCE_LEN] = random_bytes()?;
     let cipher = Aes256Gcm::new_from_slice(master_key).map_err(|_| CryptoError)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = &Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, Payload { msg: plaintext, aad: b"" })
         .map_err(|_| CryptoError)?;
@@ -110,7 +110,7 @@ pub fn decrypt_attr(master_key: &[u8; MASTER_KEY_LEN], blob: &[u8]) -> Result<Ve
     let nonce_bytes = &blob[..NONCE_LEN];
     let ciphertext = &blob[NONCE_LEN..];
     let cipher = Aes256Gcm::new_from_slice(master_key).map_err(|_| CryptoError)?;
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = &Nonce::try_from(nonce_bytes).map_err(|_| CryptoError)?;
     cipher
         .decrypt(nonce, Payload { msg: ciphertext, aad: b"" })
         .map_err(|_| CryptoError)

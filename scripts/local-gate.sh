@@ -7,24 +7,27 @@
 # before you push — GitHub is not a test platform.
 #
 # What it runs (in order; each step must pass):
+#   0. PKCS#11 mechanism ledger (per-CKM_*, both engines, static)
 #   1. kmip  cargo test                       — ~600 unit + integration tests
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
-#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
-#   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
-#   6. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
-#   7. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
-#   8. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
-#   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
-#  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
-#  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
-#  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
-#  14. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
+#   4. OASIS corpus provenance (the XML is the OASIS XML)
+#   5. OASIS byte vectors match that XML (drift guard, added 2026-09-07)
+#   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (99/0/3)
+#   7. wasm  smoke.cjs                         — CACP bundle boots + round-trips
+#   8. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
+#   9. cross-engine PKCS#11 differential harness (every scenario vs exceptions.json)
+#  10. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
+#  11. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
+#  12. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
+#  13. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#  14. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
+#  15. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
+#  16. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
 #                            engines (27 PASS / 0 FAIL / 0 XFAIL / 0 XPASS)  [opt-in]
 #
-# Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
+# Steps 8-9 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
 # stale invisibly while opt-in (the Rust report 45 source-commits behind
 # HEAD; the differential harness never run at all outside a manual
@@ -60,6 +63,7 @@
 #   bash scripts/local-gate.sh --javajce-remote  # + JavaJCE-remote suite (needs pqc-dev-sandbox + live pqc-grpc)
 #   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
+#   bash scripts/local-gate.sh --host=user@host --cpp  # run on another host (scripts/remote-gate.sh)
 #
 # Rust steps run inside the warm OrbStack container ($RUST_CONTAINER, default
 # pqc-rust) which mounts ~/Antigravity → /ag with a prebuilt cargo cache.
@@ -112,6 +116,23 @@ else
 fi
 JAVAJCE_DIR="$ROOT/JavaJCE"
 JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
+
+# --host=<user@host> (2026-09-27): run this gate for the current commit on
+# another machine and write the local marker only on a PASS there at the same
+# commit and tree. All of that logic, and why it is sound, is in
+# scripts/remote-gate.sh; this only dispatches. Without --host nothing below
+# changes: the local run is the default.
+GATE_HOST=""
+GATE_PASS=()
+for arg in "$@"; do
+  case "$arg" in
+    --host=*) GATE_HOST="${arg#--host=}" ;;
+    *) GATE_PASS+=("$arg") ;;
+  esac
+done
+if [[ -n "$GATE_HOST" ]]; then
+  exec bash "$ROOT/scripts/remote-gate.sh" "$GATE_HOST" "${GATE_PASS[@]+"${GATE_PASS[@]}"}"
+fi
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
@@ -203,6 +224,140 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
   if bash -c "set -o pipefail; $2"; then ok "$1"; else bad "$1"; fi
 }
 
+# ── parallel step groups (2026-09-08) ────────────────────────────────────────
+# The steps below were entirely sequential, one `docker exec` at a time, on a
+# machine with 18 idle cores and (after this same change) 62GB given to the
+# container instead of 16GB. Several of them touch completely different
+# crates/workspaces (kmip, rust, remoting, wasm) and have no dependency on one
+# another — the only reason they ever waited in line was that this script
+# asked them to.
+#
+# The one real hazard, and it is not hypothetical (see the CARGO_TARGET_DIR_FOR_RUN
+# comment above this function): two `cargo` invocations sharing ONE target
+# directory concurrently can make cargo believe a fingerprint is fresh when it
+# was built by the OTHER invocation with different features/profile, and reuse
+# the wrong artifact — silently. That is what happened on 2026-09-02 between
+# concurrent WORKTREES; running kmip/rust/remoting cargo commands concurrently
+# WITHIN one gate invocation, sharing $CARGO_TARGET_DIR_FOR_RUN, is the same
+# hazard one level down. So each parallel lane below gets its OWN target
+# directory (a subdirectory of this run's already-isolated one) — no two
+# concurrent cargo processes ever point at the same target dir. Steps that
+# stay logically sequential (the three kmip sub-steps: same crate, same
+# reasoning as the original comments on each) run one after another WITHIN a
+# single lane/subshell, so they still share a target dir safely, in series.
+declare -a BG_PIDS=() BG_NAMES=() BG_LOGS=()
+GATE_PARLOGS="$(mktemp -d "${TMPDIR:-/tmp}/gate-parallel.XXXXXX")"
+trap 'rm -rf "$GATE_PARLOGS"' EXIT
+
+dexec_lane() { # cmd, lane — like dexec, but isolated to its own target dir
+  docker exec -e CARGO_TARGET_DIR="$CARGO_TARGET_DIR_FOR_RUN/lanes/$2" "$RUST_CONTAINER" bash -c "set -o pipefail; $1"
+}
+
+run_step_bg() { # name, command(run in container), lane
+  STEP=$((STEP+1))
+  local step_no=$STEP name="$1" cmd="$2" lane="$3"
+  local log="$GATE_PARLOGS/step-$step_no.log"
+  say "step $step_no: $name (parallel, lane=$lane)"
+  ( dexec_lane "$cmd" "$lane" > "$log" 2>&1 ) &
+  BG_PIDS+=("$!"); BG_NAMES+=("$name"); BG_LOGS+=("$log")
+}
+
+run_step_bg_host() { # name, command(run on host)
+  STEP=$((STEP+1))
+  local step_no=$STEP name="$1" cmd="$2"
+  local log="$GATE_PARLOGS/step-$step_no.log"
+  say "step $step_no: $name (parallel, host)"
+  ( bash -c "set -o pipefail; $cmd" > "$log" 2>&1 ) &
+  BG_PIDS+=("$!"); BG_NAMES+=("$name"); BG_LOGS+=("$log")
+}
+
+# A lane that must stay sequential WITHIN itself (same crate as its
+# sibling sub-steps — see the kmip group below) but should still run
+# CONCURRENTLY with the other lanes: run_step_bg_seq queues a (name, cmd)
+# pair against a lane name without launching anything; launch_seq_lanes
+# starts exactly one background subshell per distinct lane afterward, which
+# runs that lane's queued commands one at a time, in the order queued — so
+# two commands in the same lane never share a target dir AT THE SAME TIME,
+# only in succession, which is what the CARGO_TARGET_DIR_FOR_RUN comment
+# above requires. check_gate_steps_can_fail.py parses this exactly like
+# run_step/run_step_bg (same `func "name" \n "cmd"` shape), so a step
+# written this way gets the same UNFAILABLE/NARROWED scrutiny as any other.
+declare -a SEQ_NAMES=() SEQ_CMDS=() SEQ_STEPS=() SEQ_LANES=()
+declare -a LANE_PIDS=() LANE_LANE_NAMES=()
+
+run_step_bg_seq() { # name, command(run in container), lane
+  STEP=$((STEP+1))
+  say "step $STEP: $1 (parallel, lane=$3, sequential within lane)"
+  SEQ_NAMES+=("$1"); SEQ_CMDS+=("$2"); SEQ_STEPS+=("$STEP"); SEQ_LANES+=("$3")
+}
+
+launch_seq_lanes() { # backgrounds one subshell per distinct lane queued above.
+                      # Each queued step gets its OWN rc file (step-N.rc,
+                      # next to its step-N.log) written by exactly one command
+                      # — no shared per-lane file to count lines in, and no
+                      # ambiguity if a lane's subshell dies partway through:
+                      # every step downstream of the death simply has no rc
+                      # file, which join_seq_lanes reports as a plain FAILED
+                      # rather than crashing the whole gate on a bad array
+                      # index (the bug this replaced: a shared lane-wide rc
+                      # file occasionally came back one line short of what
+                      # every step's own log proved had actually run to
+                      # completion — cause unconfirmed, consequence fixed by
+                      # removing the shared file entirely).
+  local lane i seen l2 log rc_file
+  local -a seen_lanes=()
+  for lane in "${SEQ_LANES[@]}"; do
+    seen=0
+    for l2 in "${seen_lanes[@]:-}"; do [ "$l2" = "$lane" ] && seen=1 && break; done
+    [ "$seen" -eq 1 ] && continue
+    seen_lanes+=("$lane")
+    (
+      for i in "${!SEQ_LANES[@]}"; do
+        [ "${SEQ_LANES[$i]}" = "$lane" ] || continue
+        log="$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.log"
+        rc_file="$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.rc"
+        dexec_lane "${SEQ_CMDS[$i]}" "$lane" > "$log" 2>&1
+        echo "$?" > "$rc_file"
+      done
+    ) &
+    LANE_PIDS+=("$!"); LANE_LANE_NAMES+=("$lane")
+  done
+}
+
+join_seq_lanes() { # waits for every lane started by launch_seq_lanes, THEN
+                    # prints each queued step's output and calls ok()/bad()
+                    # in the order it was queued — waiting for every lane
+                    # first, rather than per-lane, means a step's own rc file
+                    # is always fully written by the time anything reads it.
+  local li i rc
+  for li in "${!LANE_PIDS[@]}"; do
+    wait "${LANE_PIDS[$li]}"
+  done
+  for i in "${!SEQ_NAMES[@]}"; do
+    cat "$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.log"
+    rc="$(cat "$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.rc" 2>/dev/null)"
+    if [ "$rc" = "0" ]; then
+      ok "${SEQ_NAMES[$i]}"
+    else
+      bad "${SEQ_NAMES[$i]} (lane rc file: ${rc:-<missing — lane may have died early>})"
+    fi
+  done
+  SEQ_NAMES=(); SEQ_CMDS=(); SEQ_STEPS=(); SEQ_LANES=(); LANE_PIDS=(); LANE_LANE_NAMES=()
+}
+
+join_bg_group() { # waits for every job launched by run_step_bg(_host) since
+                   # the last join, in launch order, printing each one's
+                   # captured output and calling ok()/bad() exactly as if it
+                   # had run in place — same verdict semantics, different timing.
+  local i rc
+  for i in "${!BG_PIDS[@]}"; do
+    wait "${BG_PIDS[$i]}"; rc=$?
+    cat "${BG_LOGS[$i]}"
+    if [ "$rc" -eq 0 ]; then ok "${BG_NAMES[$i]}"; else bad "${BG_NAMES[$i]}"; fi
+  done
+  BG_PIDS=(); BG_NAMES=(); BG_LOGS=()
+}
+
 # ── steps ───────────────────────────────────────────────────────────────────
 
 # WS-0.4 (2026-08-30): every tests/acvp/*.json vector file must carry a real,
@@ -211,43 +366,95 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
 # on the host (pure Python + network, nothing container-specific needed) and
 # first, before anything else: nothing downstream is trustworthy if the
 # vectors it's testing against might be self-generated or drifted.
+# Step 0 in spirit: the gate checks ITSELF before it checks anything else.
+# Four times on 2026-09-07 a guard turned out to be protecting a defect rather
+# than catching it, twice in this very file — a step that printed compiler
+# errors and then declared success, and a step that ran 1032 tests while
+# checking 10. Both are the same class: a verdict that cannot carry a failure.
+# `check_gate_steps_can_fail.py` re-runs that judgement mechanically, and is
+# sabotage-verified against both of those historical bugs.
+run_step_host "gate self-check (every step can fail)" \
+  "cd '$ROOT' && python3 scripts/check_gate_steps_can_fail.py"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
+# Plan item 2.C (ruled 2026-09-26: fail, no allowlist; live 2026-09-27 at zero
+# orphans). Every tracked vector file under the test-vector roots must be
+# named by a CODE line of some loader — a file only a comment or a provenance
+# checker mentions is an orphan. Its scope and counts print on every run.
+run_step_host "test-vector reachability (every vector file is loaded by code)" \
+  "cd $ROOT && python3 scripts/check_vector_reachability.py"
+
+# X2' (2026-09-07): per-CKM_* ledger of what each engine implements, checked
+# against the two source files that BUILD the advertised lists — no engine is
+# built or run, so it costs nothing and can sit up front with the other pure
+# checks. Catches a mechanism added to an engine with no recorded decision, a
+# ledger row that overstates, and a new header mechanism with no row at all —
+# none of which the differential harness can see, because exceptions.json's
+# LEGAL-MECHANISM-SET excuses `mech*` wholesale.
+run_step_host "PKCS#11 mechanism ledger (per-CKM_*, both engines)" \
+  "cd $ROOT && python3 scripts/check_pkcs11_mechanism_ledger.py"
+
 ensure_container
 
-# slh_dsa_sigver_and_siggen is excluded here (-- --skip) and run separately
-# below with --nocapture: it's the one genuinely slow test in this suite
-# (12 SLH-DSA parameter sets, parallelized across threads but still ~200s
-# dominated by the slowest "s" set — 633s before parallelizing), and running
-# it a second time here would silently double real wall-clock cost every
-# gate invocation for no benefit — it's already exercised, just not in this
-# step. --skip matches by substring, so this also skips nothing else by
-# accident: no other test name contains this string.
-run_step "kmip cargo test" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+# Everything below down to the "join_bg_group" call is one parallel batch:
+# kmip (its own 3 sub-steps, kept sequential WITHIN this lane — same crate,
+# same reasoning each sub-step's original comment already gave), the rust
+# engine, remoting, and the wasm type-check are four independent lanes, each
+# with its own isolated target dir (see the block above run_step_bg's
+# definition for why that isolation is required, not optional); the wasm
+# smoke test and the differential harness run on the host, where there is no
+# shared-target-dir hazard at all. None of these five things touch a file the
+# others write, so nothing is gained by making them wait in line.
+# Migrated to `cargo nextest` 2026-09-08 — measured 3m12s wall-clock for this
+# ENTIRE crate (1016 tests, cold compile included) versus cargo test's default
+# of running each of the 33 separate integration-test FILES as its own
+# process, one at a time: parallelism only ever happened within a single
+# binary, never across the crate's many binaries, so most of the machine sat
+# idle for the whole step regardless of how many cores it had. nextest runs
+# every binary concurrently against one shared thread pool instead. Its exit
+# code is directly trustworthy (verified by sabotage: a deliberately failed
+# assertion produced exit 100, propagated correctly through PIPESTATUS)
+# without any of the pipefail/grep/awk machinery the cargo-test steps below
+# needed just to get a verdict that couldn't be silently defeated — there is
+# no pipe in any of these commands at all now, so there is nothing for
+# pipefail to matter to.
+#
+# slh_dsa_sigver_and_siggen is still excluded here and run separately below
+# with --no-capture: it's the one genuinely slow test in this suite (12
+# SLH-DSA parameter sets, ~200s dominated by the slowest "s" set), and running
+# it a second time here would silently double real wall-clock cost every gate
+# invocation for no benefit — it's already exercised, just not in this step.
+# --skip matches by substring, so this also skips nothing else by accident:
+# no other test name contains this string.
+run_step_bg_seq "kmip cargo test" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast -- --skip slh_dsa_sigver_and_siggen" \
+  kmip
 
 # Progress-logged separately (not folded into the step above) so a slow run
-# reads as "12 parameter sets in flight," not silence — --nocapture shows the
-# eprintln! lines cargo otherwise captures and discards on a passing test;
-# `tee /dev/stderr` preserves them in the gate log (which redirects both
-# stdout+stderr) while still letting grep see the stream for fail-detection.
-run_step "kmip known-slow mechanisms (live progress)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   true"
+# reads as "12 parameter sets in flight," not silence — nextest's own SLOW
+# marker (crossing 60s, then 120s) already does this automatically, so
+# --no-capture here is belt-and-braces rather than load-bearing the way
+# --nocapture was for cargo test.
+run_step_bg_seq "kmip known-slow mechanisms (live progress)" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --test acvp_roundtrip slh_dsa_sigver_and_siggen --no-capture" \
+  kmip
 
-run_step "kmip local-only suites (--include-ignored)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet --test policy_op_layer -- --include-ignored 2>&1 | grep -E 'test result'"
+# The verdict covers the WHOLE run: nextest's own exit code, not a narrower
+# re-run of one binary (the historic bug this step's old comment recorded —
+# a verdict taken from `--test policy_op_layer` alone, 10 of 1032 tests,
+# while the other 1022 passed silently — cannot recur here because there is
+# no second, narrower command left to accidentally decide the exit status).
+run_step_bg_seq "kmip local-only suites (--include-ignored)" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --run-ignored all" \
+  kmip
 
-# tee before each grep below: cargo's own "test X has been running for over
-# 60 seconds" liveness warning survives --quiet but was being discarded by
-# the grep filtering (same fix as kmip cargo test above) — pass/fail still
-# comes from the grep/awk exit codes via dexec's pipefail, unchanged.
-run_step "rust engine cargo test" \
-  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+launch_seq_lanes
+
+run_step_bg "rust engine cargo test" \
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast" \
+  rust-engine
 
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
 # all before 2026-08-26 — its three-transport parity suite
@@ -269,22 +476,42 @@ run_step "rust engine cargo test" \
 # them without re-measuring, and do not remove #[ignore] from v21b without
 # first re-measuring its cost; 326s per run would take this step from
 # ~seconds to 5+ minutes for every contributor.
-run_step "remoting gRPC+REST services + three-transport parity" \
-  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
-   cd $AG_CONTAINER_ROOT/remoting && python3 scripts/check_coverage_ledger.py"
-
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
 run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
 
-run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
+# Immediately after the corpus check, and for the same reason. That step asks
+# "is the XML the OASIS XML?"; this asks "are the committed byte vectors what
+# that XML actually produces?" — a question NOTHING asked before 2026-09-07.
+# The Rust suites (oasis_codec_roundtrip.rs and friends) round-trip the
+# committed .bin files through our own codec, so a vector that no longer
+# matches its source XML still round-trips perfectly; the corpus is never
+# consulted. Four vectors were stale from the 2026-07 CSD02 refresh until
+# 2026-09-06 and surfaced only by accident, when an unrelated regeneration
+# changed their size. --check writes nothing.
+run_step "OASIS byte vectors match the XML corpus (1358 vectors)" \
+  "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check"
+
+run_step "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
    mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
    python3 conformance/harness/dispatcher_replay.py >/dev/null && \
    python3 conformance/assert_replay_report.py && \
    python3 conformance/check_report_fresh.py"
+
+# Migrated to nextest along with the steps above. The old `tee /dev/stderr`
+# existed because cargo test's own summary line ("85 passed, 1 failed")
+# discards the failing test's NAME — on 2026-09-07 that gap led to a real
+# failure being explained away with a stored assumption instead of
+# diagnosed, since the name was never printed and the run wasn't
+# reproducible afterwards. nextest prints a `FAIL [time] (n/total) crate::test
+# full::test::name` line for every failure as part of its normal output, so
+# the name is never lost in the first place — nothing to route around.
+run_step_bg "remoting gRPC+REST services + three-transport parity" \
+  "cd $AG_CONTAINER_ROOT/remoting && cargo nextest run --no-fail-fast && \
+   python3 scripts/check_coverage_ledger.py" \
+  remoting
 
 # Does the wasm target still COMPILE? The smoke step below cannot answer that:
 # it runs the already-staged bundle, so a source change that breaks the wasm
@@ -293,15 +520,86 @@ run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
 # without a cfg gate, the whole gate went green, and the breakage was found days
 # later when someone tried to rebuild the bundle. A type-check is cheap; a full
 # wasm build is not, so this checks rather than builds.
-run_step "wasm target still compiles (cargo check)" \
-  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+# `cmd | grep ... && exit 1` CANNOT fail once dexec sets pipefail: when the
+# real command errors, the PIPELINE's status is that error (not grep's 0), so
+# `&&` short-circuits and `exit 1` never runs — control falls to the statement
+# after the `;`, which reports success. Found 2026-09-07: this step printed two
+# E0063 errors and then "wasm32 type-check clean ✓" in the same breath, letting
+# a genuinely broken wasm crate through. Take the verdict from the compiler's
+# own status via PIPESTATUS[0] instead; grep stays purely for display.
+run_step_bg "wasm target still compiles (cargo check)" \
+  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  wasm32 type-check clean'" \
+  wasm-check
 
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
-# Runs the STAGED bundle — see the check above for why that is not sufficient on
-# its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source change
-# to regenerate it.
-run_step_host "wasm CACP smoke" \
-  "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
+# Runs the STAGED bundle — see the check above for why that is not sufficient
+# on its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source
+# change to regenerate it.
+#
+# wasm/pkg_node/ is gitignored, so a fresh worktree has never had one and this
+# step failed there on a missing module rather than on anything about the code.
+# Build it on demand, with --no-stage: without that flag the build also copies
+# its output into the sibling pqctoday-hub checkout and stamps the current
+# commit into that repo's corpus manifest, so running this gate in a feature
+# worktree quietly restaged the hub from an unmerged branch (observed
+# 2026-09-25). A gate must not modify a different repository.
+run_step_bg_host "wasm CACP smoke" \
+  "cd '$ROOT/wasm' && { [ -f pkg_node/pqctoday_kmip_wasm.js ] || NO_STAGE=1 bash '$ROOT/scripts/build-kmip-wasm.sh' --no-stage >/tmp/gate-wasm-pkgnode.log 2>&1; } && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
+
+# Was a manual-only tool until 2026-08-23 — never wired into any gate,
+# despite being the instrument the 2026-08 remediation added specifically
+# "to gate the rest from rotting." Builds BOTH engines fresh (see the
+# script's own header for why that matters) and diffs every observable
+# outcome across every registered scenario; only divergences already recorded with a
+# citation in tests/differential/exceptions.json are allowed. Runs in the
+# Linux validation container so the same compiler and shared-library format
+# are used on every development host. Its dedicated build and cargo lane
+# keep it isolated from the Rust and KMIP jobs above.
+run_step_bg "cross-engine PKCS#11 differential harness" \
+  "cd $AG_CONTAINER_ROOT && P11DIFF_BUILD_DIR=build_union_linux bash scripts/run-differential-harness.sh --jobs 4 2>&1 | tail -15" \
+  differential
+
+# These three touch $AG_KMIP but nothing else in the batch does, and none of
+# them shares a target dir with a debug test build: the two Python checks
+# below build nothing at all (pure XML/JSON/committed-.bin comparisons — the
+# CARGO_TARGET_DIR a lane sets is simply irrelevant to them), and the replay's
+# own `cargo build --release` is a different profile from every debug test
+# build above, so it was never sharing compiled work with them regardless of
+# when it runs. All three moved into the batch 2026-09-08 — they used to run
+# sequentially afterward for no reason stronger than "they happen to also
+# touch kmip/", which is not a real dependency.
+#
+# Cheap, and it's queued before the replay for the same reason it always ran
+# before it: if the corpus is not the corpus we think it is, the replay
+# figure is measuring something else — kept in reading order even though
+# nothing here enforces it at run time.
+run_step_bg "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+  "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py" \
+  oasis-checks
+
+# Immediately after the corpus check, and for the same reason. That step asks
+# "is the XML the OASIS XML?"; this asks "are the committed byte vectors what
+# that XML actually produces?" — a question NOTHING asked before 2026-09-07.
+# The Rust suites (oasis_codec_roundtrip.rs and friends) round-trip the
+# committed .bin files through our own codec, so a vector that no longer
+# matches its source XML still round-trips perfectly; the corpus is never
+# consulted. Four vectors were stale from the 2026-07 CSD02 refresh until
+# 2026-09-06 and surfaced only by accident, when an unrelated regeneration
+# changed their size. --check writes nothing.
+run_step_bg "OASIS byte vectors match the XML corpus (1358 vectors)" \
+  "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check" \
+  oasis-checks
+
+run_step_bg "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
+  "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
+   mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
+   python3 conformance/harness/dispatcher_replay.py >/dev/null && \
+   python3 conformance/assert_replay_report.py && \
+   python3 conformance/check_report_fresh.py" \
+  oasis-replay
+
+join_bg_group
+join_seq_lanes
 
 # Was opt-in (--rust-p11) until 2026-08-23. The Rust engine's own conformance
 # report went 45 source-commits stale while this was skippable — a default
@@ -312,12 +610,21 @@ run_step_host "wasm CACP smoke" \
 # per-section results every time it runs to completion; the freshness check
 # right after confirms the regenerated report actually matches what's
 # committed (or fails loudly if it doesn't — see check_pkcs11_reports_fresh.py).
+# Kept sequential, AFTER the parallel batch above rather than inside it: this
+# is the one place a lane's isolated target dir would cost more than it
+# saves — it wants the "rust engine cargo test" lane's own build of the same
+# rust/ crate to already be warm, not a second cold compile of it running at
+# the same time.
 STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
 # wasm-pack is built but not on the container's PATH — plain `wasm-pack` here
 # fails with "command not found" and always has, invisibly, because this step
 # was opt-in until now. Full path, matching how it was actually invoked by
 # hand before this step was promoted to default. Found 2026-08-23.
-if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' /cargo-target/release/wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
+# Stack: 8 MiB, the same value rust/build-wasm-bundle.sh ships. This step used
+# 2 MiB until 2026-09-27, so the gate validated a configuration nobody ships;
+# with 2 MiB the ACVP harness dies at SLH-DSA-192f ("memory access out of
+# bounds", a wasm stack overflow). Keep the two in step.
+if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=8388608' /cargo-target/release/wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
    && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ) \
    && ( cd "$ROOT" && python3 scripts/check_pkcs11_reports_fresh.py --rust ); then
   ok "Rust PKCS#11 v3.2 conformance (report regenerated + fresh)"
@@ -325,14 +632,25 @@ else
   bad "Rust PKCS#11 v3.2 conformance (report regenerated regardless — check it, or check_pkcs11_reports_fresh.py, for the real failure)"
 fi
 
-# Was a manual-only tool until 2026-08-23 — never wired into any gate,
-# despite being the instrument the 2026-08 remediation added specifically
-# "to gate the rest from rotting." Builds BOTH engines fresh (see the
-# script's own header for why that matters) and diffs every observable
-# outcome across 49 scenarios; only divergences already recorded with a
-# citation in tests/differential/exceptions.json are allowed.
-run_step_host "cross-engine PKCS#11 differential harness (49 scenarios)" \
-  "cd '$ROOT' && bash scripts/run-differential-harness.sh 2>&1 | tail -15"
+# Plan item 2.B (2026-09-27): the NIST ACVP wasm harness, Rust engine only,
+# on every gate run. Its scope is in its name on purpose — the C++ half needs
+# an Emscripten toolchain that exists nowhere here (plan 2.E), so a name that
+# claimed "the ACVP harness" would reassure about an engine it never loads.
+# It runs against a RELEASE build with the 8 MiB stack and the acvp feature —
+# the configuration rust/build-wasm-bundle.sh ships — built here into the
+# gitignored rust/pkg-acvp/ (the conformance step's rust/pkg is a --dev build,
+# on which the SLH-DSA "s" sets take minutes each; release runs the whole
+# harness in about a minute). wasm/rust/ is gitignored and nothing else
+# populates it, so the step stages the two files itself, and installs the
+# harness's npm dependencies (asn1js) when a fresh worktree lacks them.
+# The harness's exit code is the verdict: since 2.A it FAILs, rather than
+# SKIPs, a mechanism missing from C_GetMechanismList and an HSS import error;
+# known engine defects are pinned as XFAIL by register id and turn into a
+# FAIL if they start passing.
+run_step "ACVP harness wasm build (Rust, release, 8 MiB stack, acvp feature)" \
+  "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=8388608' /cargo-target/release/wasm-pack build --release --target bundler --out-dir pkg-acvp -- --features acvp >/dev/null 2>&1"
+run_step_host "ACVP wasm harness — Rust engine only (C++ WASM half not exercised)" \
+  "cd '$ROOT' && (test -d node_modules/asn1js || npm ci --silent --no-audit --no-fund) && mkdir -p wasm/rust && cp rust/pkg-acvp/softhsmrustv3_bg.js rust/pkg-acvp/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
 
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
@@ -458,6 +776,17 @@ if [[ $RUN_TLS_INTEROP == 1 ]]; then
      cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
+# Shared between --javajce and --javajce-remote (both grep a Surefire log for
+# this same aggregate line) — must be defined unconditionally, not inside
+# either block below: running --javajce-remote alone used to crash on
+# "AGG_PATTERN: unbound variable" under this script's own `set -u`, since it
+# was previously declared only inside the --javajce block and nothing ever
+# ran --javajce-remote by itself to notice. Found 2026-09-08 doing exactly
+# that for the first time. Definition itself (why this exact pattern, the
+# end-anchor, the dual INFO/ERROR prefix) is unchanged — see the comment that
+# used to sit directly above it, now above --javajce's own use of it below.
+AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+
 if [[ $RUN_JAVAJCE == 1 ]]; then
   # JDK 27's javax.crypto.KDF (JEP 478) and the JEP 527 TLS 1.3 hybrid-KEM
   # path this provider bridges to both need the JDK 27 RC — only
@@ -468,6 +797,43 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   STEP=$((STEP+1)); say "step $STEP: JavaJCE provider suite (mvn test, pqc-dev-sandbox)"
   ensure_sandbox_container
   GATE_DEST=/tmp/hsm-javajce-gate
+
+  # 2026-09-07 — build the engine this step tests AGAINST, from this commit.
+  #
+  # Until now the suite ran against $SANDBOX_CONTAINER's INSTALLED
+  # /usr/local/lib/softhsm/libsofthsmv3.so, which is baked into the image and
+  # was dated 2026-09-01. So the step validated today's Java against a native
+  # engine months old, and would keep reporting green as the two drifted
+  # apart. That is not hypothetical: it was found by adding a JavaJCE test for
+  # CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, which the installed engine did not have —
+  # the Java was correct and the engine was stale, and no gate run could have
+  # told the difference. ANY engine-side change was invisible here.
+  #
+  # $SANDBOX_CONTAINER has cmake, g++ and OpenSSL 3.6.3, so it can build its
+  # own. It MUST build its own: its glibc differs from $RUST_CONTAINER's, so
+  # the --cpp step's binaries are not interchangeable (JavaJCE/README.md).
+  #
+  # The build directory is kept between runs so an unchanged tree relinks
+  # rather than rebuilds. Only the files CMake needs are copied — the two
+  # *.in templates are easy to forget and configure fails without them.
+  JCE_ENGINE_SRC=/tmp/hsm-jce-engine
+  say "  building the C++ engine inside $SANDBOX_CONTAINER (so the suite tests THIS commit's engine)"
+  if ! dexec_sandbox "mkdir -p $JCE_ENGINE_SRC" \
+     || ! tar czf - -C "$ROOT" CMakeLists.txt cmake src config.h.in.cmake softhsmv3.pc.in 2>/dev/null \
+          | docker exec -i "$SANDBOX_CONTAINER" tar xzf - -C "$JCE_ENGINE_SRC" 2>/dev/null \
+     || ! dexec_sandbox "cd $JCE_ENGINE_SRC && \
+            (test -f b/CMakeCache.txt || cmake -S . -B b -DCMAKE_BUILD_TYPE=Release \
+               -DWITH_RIPEMD160=ON -DOPENSSL_ROOT_DIR=/usr/local/ssl >/tmp/jce-engine-cmake.log 2>&1) && \
+            LD_LIBRARY_PATH=/usr/local/ssl/lib64 cmake --build b --target softhsmv3 -j\$(nproc) \
+              >/tmp/jce-engine-build.log 2>&1"; then
+    bad "JavaJCE provider suite — could not build the engine inside $SANDBOX_CONTAINER (see /tmp/jce-engine-cmake.log and /tmp/jce-engine-build.log inside it)"
+  fi
+  JCE_MODULE="$JCE_ENGINE_SRC/b/src/lib/libsofthsmv3.so"
+  # Fail loudly rather than silently falling back to the installed engine —
+  # a silent fallback is exactly the failure this whole block removes.
+  if ! dexec_sandbox "test -f $JCE_MODULE"; then
+    bad "JavaJCE provider suite — engine built but $JCE_MODULE is missing"
+  fi
   # Maven emits real ANSI color escapes even under `docker exec` with no
   # TTY (confirmed live — `[INFO]` is genuinely `\x1b[1;34mINFO\x1b[m]` on
   # the wire, not just a terminal-rendering artifact) — strip them before
@@ -493,12 +859,13 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   # ", Time elapsed: ... -- in <ClassName>" text, hence the `$` anchor;
   # it is tagged [ERROR] instead of [INFO] on a real failure, hence
   # matching either prefix (a genuine failure still won't match the
-  # "Failures: 0" requirement itself).
-  AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+  # "Failures: 0" requirement itself). Definition (shared with --javajce-remote
+  # below) lives above both blocks now — see that comment for why.
   if dexec_sandbox "rm -rf $GATE_DEST/JavaJCE && mkdir -p $GATE_DEST" \
      && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST/JavaJCE" >/dev/null 2>&1 \
      && dexec_sandbox "cd $GATE_DEST/JavaJCE && \
           export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+          export PKCS11_MODULE=$JCE_MODULE && \
           mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-gate.log; \
           grep -E '$AGG_PATTERN' /tmp/javajce-gate.log >/dev/null"; then
     ok "JavaJCE provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-gate.log | tail -1"))"
@@ -538,14 +905,25 @@ if [[ $RUN_JAVAJCE_REMOTE == 1 ]]; then
             "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/remoting/proto/proto/pkcs11_remote.proto" >/dev/null 2>&1 \
        && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE && \
             export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
-            mvn -o install -DskipTests -q" \
+            mvn -o install -DskipTests 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-remote-install.log" \
        && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE-remote && \
             export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
             mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-remote-gate.log; \
             grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log >/dev/null"; then
       ok "JavaJCE-remote provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log | tail -1"))"
     else
-      bad "JavaJCE-remote provider suite — see /tmp/javajce-remote-gate.log inside $SANDBOX_CONTAINER for the real failure"
+      # Name BOTH logs, and say which is which. This step runs two Maven
+      # invocations and only the second one wrote a log, so a failure in the
+      # first (the JavaJCE `install`) used to print "see
+      # /tmp/javajce-remote-gate.log" for a file that did not exist —
+      # 2026-09-25, when an uncached maven-jar-plugin broke `install` and the
+      # message sent the reader to a nonexistent file. `install` now logs too,
+      # and dropped `-q` so that log has something in it.
+      #
+      # Note `install` reaches the `jar` phase while --javajce's `test` does
+      # not, so this step can fail on a missing plugin that --javajce never
+      # needs — which is why "but --javajce passed" is not evidence here.
+      bad "JavaJCE-remote provider suite — inside $SANDBOX_CONTAINER see /tmp/javajce-remote-install.log (JavaJCE 'mvn -o install', runs first) then /tmp/javajce-remote-gate.log (JavaJCE-remote 'mvn -o test')"
     fi
   fi
 fi

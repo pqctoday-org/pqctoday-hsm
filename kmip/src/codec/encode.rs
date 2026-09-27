@@ -96,6 +96,14 @@ fn encode_value(value: &Value, buf: &mut BytesMut) {
         Value::TextString(s) => {
             buf.put_slice(s.as_bytes());
         }
+        // §10.1.2 — Identifier / Reference / Name Reference are UTF-8 byte
+        // sequences, encoded exactly as a Text String; only the type byte
+        // (0x0C/0x0D/0x0E, written by the caller from `Value::item_type()`)
+        // distinguishes them. Padding to 8 bytes is applied by the shared
+        // path below, same as Text String (§10.1.4).
+        Value::Identifier(s) | Value::Reference(s) | Value::NameReference(s) => {
+            buf.put_slice(s.as_bytes());
+        }
         Value::ByteString(bytes) => {
             buf.put_slice(bytes);
         }

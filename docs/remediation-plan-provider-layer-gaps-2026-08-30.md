@@ -4,6 +4,21 @@
 **Supersedes/extends:** WS-10 in `docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md`, which checked both providers against only 4 engine-level fixes. This document re-verifies those 4 and adds 7 new items surfaced by today's Rust WS-8 mechanism work.
 **Status:** PLAN ONLY — nothing in this document has been executed. The *engine-side* work it depends on (`fix/ws1-4-and-ws2-rust-gaps`) has moved since §0/§3 were written — see §7 for the current, re-verified state. As of this revision it is merged with current `main` (HEAD `f337cf7`), its own local gate is in progress, and it is not yet pushed or merged into `main` itself. Q-0 below is revised accordingly in §7.4.
 
+> **Status correction, 2026-09-07 (H1).** The branch topology in §0/§3/§7 is
+> stale in the direction of *understating* progress. `feat/jdk27-jca-provider`
+> is merged (PR #193, 2026-08-31), as are two later provider passes (#197
+> parenthesising the MODE_gcm/MODE_ccm macros, #198 a doc sweep plus a
+> full-provider mechanism validation). A 2026-09-06 re-audit confirmed
+> against `origin/main` that JavaJCE and the vendored OpenSSL provider both
+> carry the engine's current mechanism set — GMAC, CCM, XTS, OFB, CFB1/8/128,
+> the SP 800-108 double-pipeline KDF, `CKM_*_HMAC_GENERAL` and
+> `CKM_AES_KEY_WRAP_KWP` are all really dispatched, not stubbed.
+> **One item from this document is genuinely still open: Q-6**, the Rust-only
+> `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`, absent from the C++ engine and from
+> both providers (`keymgmt.c` still hardcodes `CKM_EC_KEY_PAIR_GEN`). It is
+> carried as item X1 of
+> `remediation-plan-pkcs11-v32-phase2-09072026.md`.
+
 ## 0. Branch topology — read this before touching anything
 
 Provider-layer gaps here are computed across **three branches that have each diverged from a common ancestor in a different direction**, not one working tree, and not a simple two-line "engine vs. providers" split. An earlier draft of this document got this wrong (see §3) — the corrected picture:

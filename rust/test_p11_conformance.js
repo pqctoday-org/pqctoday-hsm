@@ -30,7 +30,8 @@ const CKR = {
   ATTRIBUTE_TYPE_INVALID: 0x12, ATTRIBUTE_VALUE_INVALID: 0x13,
   DATA_LEN_RANGE: 0x21, ENCRYPTED_DATA_INVALID: 0x40,
   FUNCTION_NOT_PARALLEL: 0x51, FUNCTION_NOT_SUPPORTED: 0x54,
-  KEY_HANDLE_INVALID: 0x60, KEY_FUNCTION_NOT_PERMITTED: 0x68, KEY_UNEXTRACTABLE: 0x6a,
+  KEY_HANDLE_INVALID: 0x60, KEY_TYPE_INCONSISTENT: 0x63, KEY_FUNCTION_NOT_PERMITTED: 0x68,
+  KEY_UNEXTRACTABLE: 0x6a,
   MECHANISM_INVALID: 0x70, MECHANISM_PARAM_INVALID: 0x71,
   OBJECT_HANDLE_INVALID: 0x82, OPERATION_ACTIVE: 0x90, OPERATION_NOT_INITIALIZED: 0x91,
   SESSION_HANDLE_INVALID: 0xb3, SESSION_PARALLEL_NOT_SUPPORTED: 0xb4,
@@ -58,7 +59,8 @@ const CKA = {
 };
 const CKO = { DATA: 0, CERTIFICATE: 1, PUBLIC_KEY: 2, PRIVATE_KEY: 3, SECRET_KEY: 4 };
 const CKC = { X_509: 0, X_509_ATTR_CERT: 1, WTLS: 2 };
-const CKK = { RSA: 0x00, AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03 };
+const CKK = { RSA: 0x00, AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03,
+  EC_EDWARDS: 0x40, EC_MONTGOMERY: 0x41 };
 const CKM = {
   RSA_PKCS_KEY_PAIR_GEN: 0x00, RSA_PKCS: 0x01, RSA_X_509: 0x03,
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
@@ -144,6 +146,11 @@ const CKF = { RW_SESSION: 2, SERIAL_SESSION: 4 };
 const CKP = {
   ML_DSA_65: 2, ML_KEM_768: 2, SLH_DSA_SHA2_128F: 3,
   FRODOKEM_640_AES: 0x1,
+  // CKP_CLASSIC_MCELIECE_348864 (src/constants.rs) — the smallest/fastest
+  // of the 10 parameter sets (261,120-byte public key vs. up to
+  // 1,357,824 for the largest), chosen for the same reason FRODOKEM_640_AES
+  // was above.
+  CLASSIC_MCELIECE_348864: 0x2,
   PBKDF2_HMAC_SHA256: 0x04, PBKDF2_HMAC_SHA384: 0x05, PBKDF2_HMAC_SHA512: 0x06,
 };
 const CKU = { SO: 0, USER: 1 };
@@ -304,10 +311,16 @@ const OID_X448 = oidBytes([0x2b, 0x65, 0x6f]); // 1.3.101.111 (RFC 8410)
 // EC/Edwards/Montgomery keypair generation — one shared helper for
 // CKM_EC_KEY_PAIR_GEN / CKM_EC_EDWARDS_KEY_PAIR_GEN / CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
 // which only differ in mechanism id and the CKA_EC_PARAMS OID (§6.3.9/§6.3.14/§6.7).
+// The template's CKA_KEY_TYPE follows the mechanism: §5.18.2 makes a key type
+// inconsistent with the generation mechanism CKR_TEMPLATE_INCONSISTENT, which
+// the engine enforces for Edwards/Montgomery since 2026-09-25 (E10) — this
+// helper used to send CKK_EC for all three and relied on it being overwritten.
 function genEc(hSession, mech, ecParams, extraPub = [], extraPrv = []) {
-  const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.EC },
+  const kt = mech === CKM.EC_EDWARDS_KEY_PAIR_GEN ? CKK.EC_EDWARDS
+    : mech === CKM.EC_MONTGOMERY_KEY_PAIR_GEN ? CKK.EC_MONTGOMERY : CKK.EC;
+  const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: kt },
     { type: CKA.EC_PARAMS, bytes: ecParams }, { type: CKA.VERIFY, bool: true }, ...extraPub];
-  const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.EC },
+  const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: kt },
     { type: CKA.SIGN, bool: true }, { type: CKA.DERIVE, bool: true }, ...extraPrv];
   const hPub = alloc(4), hPrv = alloc(4);
   const rv = w._C_GenerateKeyPair(hSession, buildMech(mech),
@@ -413,8 +426,15 @@ const aes = genAes(hS);
 check('C_GenerateKey(AES-256) → OK', aes.rv, CKR.OK);
 check('C_SignInit with nonexistent key → KEY_HANDLE_INVALID',
   w._C_SignInit(hS, buildMech(CKM.ML_DSA), 0x7fffffff), CKR.KEY_HANDLE_INVALID);
+// CKM_AES_CMAC (0x108a, pkcs11t.h): a mechanism an AES key IS the right type
+// for, so the only thing wrong is the missing CKA_SIGN. This check used
+// CKM_SHA256_HMAC until 2026-09-25 — an AES key is the wrong type for HMAC,
+// and §5.1.6 gives CKR_KEY_TYPE_INCONSISTENT priority over
+// CKR_KEY_FUNCTION_NOT_PERMITTED, which the engine now honours (E5/E6).
 check('C_SignInit on AES key without CKA_SIGN → KEY_FUNCTION_NOT_PERMITTED',
-  w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC), aes.h), CKR.KEY_FUNCTION_NOT_PERMITTED);
+  w._C_SignInit(hS, buildMech(0x108a /*CKM_AES_CMAC*/), aes.h), CKR.KEY_FUNCTION_NOT_PERMITTED);
+check('C_SignInit(CKM_SHA256_HMAC) on an AES key → KEY_TYPE_INCONSISTENT (§5.1.6 priority, E5/E6)',
+  w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC), aes.h), CKR.KEY_TYPE_INCONSISTENT);
 
 section('R3.6 — CKA_PARAMETER_SET required for PQC keygen (§6.67.2)');
 check('ML-DSA keygen WITH param set → OK', genMlDsa(hS, true).rv, CKR.OK);
@@ -843,18 +863,30 @@ section('E8 — HMAC general-length (§6.x CK_MAC_GENERAL_PARAMS)');
 
 section('E2 — RSA-PSS params validated (§6.4.5)');
 {
-  // bad mgf in CK_RSA_PKCS_PSS_PARAMS must be rejected at SignInit.
-  // (Uses a dummy key handle — param validation precedes key-type checks
-  // only for mechanism params parsed at init; key check runs first, so
-  // generate a real RSA keypair is slow; instead use an AES key with SIGN.)
-  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
-    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
-    { type: CKA.VALUE, bytes: new Uint8Array(32) }, { type: CKA.SIGN, bool: true }]);
+  // bad mgf in CK_RSA_PKCS_PSS_PARAMS must be rejected at init. The key is
+  // an imported RSA PUBLIC key (C_CreateObject — no slow keygen) used with
+  // C_VerifyInit, which parses the same CK_RSA_PKCS_PSS_PARAMS. Until
+  // 2026-09-25 this used a GENERIC_SECRET key with C_SignInit; the engine now
+  // checks the key type first (§5.1.6, E5), so a wrong-type key no longer
+  // reaches the parameter check it was meant to exercise.
+  const n = new Uint8Array(128).fill(0x5a); n[0] = 0xc3; n[127] = 0x01;
+  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.RSA }, { type: CKA.MODULUS, bytes: n },
+    { type: CKA.PUBLIC_EXPONENT, bytes: new Uint8Array([0x01, 0x00, 0x01]) },
+    { type: CKA.VERIFY, bool: true }]);
   const hp = alloc(4);
-  w._C_CreateObject(hS, tpl, 4, hp);
+  check('fixture: RSA-1024 public key via C_CreateObject → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
   const pssBad = new Uint8Array(new Uint32Array([CKM.SHA256, 99 /*bad mgf*/, 32]).buffer);
   check('PSS params with bad MGF → MECHANISM_PARAM_INVALID',
-    w._C_SignInit(hS, buildMech(0x43 /*CKM_SHA256_RSA_PKCS_PSS*/, pssBad), readU32(hp)),
+    w._C_VerifyInit(hS, buildMech(0x43 /*CKM_SHA256_RSA_PKCS_PSS*/, pssBad), readU32(hp)),
+    CKR.MECHANISM_PARAM_INVALID);
+  // E9 / D6 (2026-09-25): a short (1-byte) or absent CK_RSA_PKCS_PSS_PARAMS is
+  // a malformed parameter too — it used to fall back to defaults.
+  check('PSS params 1 byte long → MECHANISM_PARAM_INVALID (E9)',
+    w._C_VerifyInit(hS, buildMech(0x43, new Uint8Array([0])), readU32(hp)),
+    CKR.MECHANISM_PARAM_INVALID);
+  check('PSS params absent → MECHANISM_PARAM_INVALID (E9, §6.1.11 "It has a parameter")',
+    w._C_VerifyInit(hS, buildMech(0x43), readU32(hp)),
     CKR.MECHANISM_PARAM_INVALID);
 }
 
@@ -1528,16 +1560,93 @@ section('WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)');
   const issuer = new TextEncoder().encode('CN=Test Root CA');
   const serial = new Uint8Array([0x01, 0x02, 0x03]);
 
+  // Footnote 2 makes CKA_HASH_OF_CERTIFICATE mandatory once the object
+  // vouches for something (anything other than UNKNOWN/NOT_TRUSTED), because
+  // that is when binding the assertion to the RIGHT certificate matters.
+  // This template originally omitted it and was accepted — the engine had no
+  // CKO_TRUST validation at all, so the test was asserting that an illegal
+  // template succeeds.
+  const certHash = new Uint8Array(20).fill(0xab); // SHA-1-sized, per the default
   const tpl = buildTpl([
     { type: CKA.CLASS, ulong: CKO_TRUST },
     { type: CKA_TRUST.ISSUER, bytes: issuer },
     { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+    { type: CKA_TRUST.HASH_OF_CERTIFICATE, bytes: certHash },
     { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.TRUSTED) },
     { type: CKA_TRUST.TRUST_CODE_SIGNING, bytes: ulongBytes(CKT.TRUST_ANCHOR) },
   ]);
   const hp = alloc(4);
-  check('C_CreateObject(CKO_TRUST) → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
+  check('C_CreateObject(CKO_TRUST) → OK', w._C_CreateObject(hS, tpl, 6, hp), CKR.OK);
   const hTrust = readU32(hp);
+
+  // §4.7 mandatory-attribute rules. Footnote 1: CKA_ISSUER and
+  // CKA_SERIAL_NUMBER identify the certificate the object speaks about, so
+  // without them it asserts trust about nothing and can never be looked up.
+  {
+    const noIssuer = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+    ]);
+    check('C_CreateObject(CKO_TRUST) without CKA_ISSUER → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, noIssuer, 2, alloc(4)), CKR.TEMPLATE_INCOMPLETE);
+
+    const noSerial = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+    ]);
+    check('C_CreateObject(CKO_TRUST) without CKA_SERIAL_NUMBER → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, noSerial, 2, alloc(4)), CKR.TEMPLATE_INCOMPLETE);
+
+    // Footnote 2: asserting CKT_TRUSTED with no certificate hash.
+    const noHash = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+      { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.TRUSTED) },
+    ]);
+    check('C_CreateObject(CKO_TRUST) asserting trust without a cert hash → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, noHash, 4, alloc(4)), CKR.TEMPLATE_INCOMPLETE);
+
+    // ...but the same template is legal when it asserts NOTHING: footnote 2
+    // exempts an object whose every trust value is UNKNOWN or NOT_TRUSTED.
+    const benign = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+      { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.NOT_TRUSTED) },
+    ]);
+    check('C_CreateObject(CKO_TRUST) asserting only NOT_TRUSTED, no hash → OK',
+      w._C_CreateObject(hS, benign, 4, alloc(4)), CKR.OK);
+
+    // CK_TRUST is a closed set of five values.
+    const badValue = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+      { type: CKA_TRUST.HASH_OF_CERTIFICATE, bytes: certHash },
+      { type: CKA_TRUST.TRUST_IPSEC_IKE, bytes: ulongBytes(99) },
+    ]);
+    check('C_CreateObject(CKO_TRUST) with an out-of-domain CK_TRUST → ATTRIBUTE_VALUE_INVALID',
+      w._C_CreateObject(hS, badValue, 5, alloc(4)), CKR.ATTRIBUTE_VALUE_INVALID);
+  }
+
+  // §4.7 prose defaults: CKA_PRIVATE defaults FALSE, and
+  // CKA_NAME_HASH_ALGORITHM "defaults to SHA-1 if not present" — neither was
+  // materialised before, so a caller could not tell which hash the
+  // certificate digest had been computed with.
+  {
+    const outPriv = buildTpl([{ type: CKA.PRIVATE, bytes: new Uint8Array(1) }]);
+    check('CKA_PRIVATE defaults to FALSE on a trust object',
+      w._C_GetAttributeValue(hS, hTrust, outPriv, 1), CKR.OK);
+    check('  value is CK_FALSE',
+      new Uint8Array(mem().buffer, readU32(outPriv + 4), 1)[0], 0);
+
+    const outAlg = buildTpl([{ type: CKA_TRUST.NAME_HASH_ALGORITHM, bytes: new Uint8Array(4) }]);
+    check('CKA_NAME_HASH_ALGORITHM defaults to SHA-1',
+      w._C_GetAttributeValue(hS, hTrust, outAlg, 1), CKR.OK);
+    check('  value is CKM_SHA_1 (0x220)',
+      new Uint32Array(mem().buffer, readU32(outAlg + 4), 1)[0], 0x220);
+  }
 
   // Round-trip CKA_ISSUER and a CK_TRUST-typed attribute byte-exact. Two
   // separate single-attribute queries (rather than packed into one) so the
@@ -3087,20 +3196,55 @@ section('G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 
   }
 }
 
-// CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN / _ENCAPSULATE (0x80000003 /
-// 0x80000004) — DELIBERATE, DOCUMENTED GAP, not silently skipped. The
-// engine's own native test suite marks every mceliece6688128 keygen test
-// `#[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see
-// doc comment"]` (src/ffi.rs, classic_mceliece_6688128_round_trip and
-// neighboring tests). This harness's wasm build is `--dev` (unoptimized,
-// per this file's own header comment and scripts/local-gate.sh), and the
-// public/private key sizes for this mechanism are ~1 MB each (ffi.rs's
-// mechanism-info table: 1_044_992 bytes min==max) — a real keygen here
-// would make every conformance run multi-minutes slower, is a structural
-// (not laziness) barrier, and Classic McEliece is scoped to exactly ONE
-// parameter set (mceliece6688128) per the implementation plan referenced in
-// src/ffi.rs, so there is no smaller/faster variant to substitute. Left
-// untested here — a real, separate finding, not silently covered.
+section('G8b — Classic McEliece (BSI TR-02102-1 §2.4.2, all 10 parameter sets)');
+{
+  // CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN / _ENCAPSULATE (0x80000003 /
+  // 0x80000004). The gap this closes: before the implementation plan
+  // (2026-09-08) landed, Classic McEliece was scoped to exactly ONE
+  // parameter set (mceliece6688128, ~1 MB keys) whose keygen was
+  // `#[ignore = "...minutes-slow in debug builds"]` in the engine's own
+  // native test suite — a real, structural barrier for a `--dev` wasm
+  // build, not laziness, so this section was left as a documented gap
+  // rather than silently skipped. Two things changed: all 10 parameter
+  // sets are now implemented, including 348864 (261,120-byte public key,
+  // the smallest of the ten), and rust/Cargo.toml's
+  // `[profile.dev.package.classic-mceliece-multi] opt-level = 3` override
+  // (added by the same plan) makes even debug-mode keygen fast — the
+  // override is package-scoped, not target-scoped, so it applies to this
+  // wasm32 build exactly as it does to native. Same real encap/decap SEAM
+  // discipline as the FrodoKEM block above.
+  {
+    const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.PARAMETER_SET, ulong: CKP.CLASSIC_MCELIECE_348864 }];
+    const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.PARAMETER_SET, ulong: CKP.CLASSIC_MCELIECE_348864 }];
+    const hPub = alloc(4), hPrv = alloc(4);
+    const rv = w._C_GenerateKeyPair(hS, buildMech(CKM.CLASSIC_MCELIECE_KEY_PAIR_GEN),
+      buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
+    check('CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN (348864, previously untested) → OK', rv, CKR.OK);
+    const mPub = readU32(hPub), mPrv = readU32(hPrv);
+
+    const ctLenP = alloc(4); writeU32(ctLenP, 0);
+    const hSSp = alloc(4);
+    w._C_EncapsulateKey(hS, buildMech(CKM.CLASSIC_MCELIECE_ENCAPSULATE), mPub, 0, 0, 0, ctLenP, hSSp);
+    const ctLen = readU32(ctLenP);
+    const ctP = alloc(ctLen); writeU32(ctLenP, ctLen);
+    check('C_EncapsulateKey(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, previously untested) → OK',
+      w._C_EncapsulateKey(hS, buildMech(CKM.CLASSIC_MCELIECE_ENCAPSULATE), mPub, 0, 0, ctP, ctLenP, hSSp), CKR.OK);
+    const hEncapSS = readU32(hSSp);
+    const encapOut = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(64) }]);
+    check('read encapsulator shared-secret CKA_VALUE → OK', w._C_GetAttributeValue(hS, hEncapSS, encapOut, 1), CKR.OK);
+    const encapSS = Buffer.from(new Uint8Array(mem().buffer, readU32(encapOut + 4), readU32(encapOut + 8)));
+
+    const hDecapSS = alloc(4);
+    check('C_DecapsulateKey(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, previously untested) → OK',
+      w._C_DecapsulateKey(hS, buildMech(CKM.CLASSIC_MCELIECE_ENCAPSULATE), mPrv, 0, 0, ctP, ctLen, hDecapSS), CKR.OK);
+    const hDecap = readU32(hDecapSS);
+    const decapOut = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(64) }]);
+    check('read decapsulator shared-secret CKA_VALUE → OK', w._C_GetAttributeValue(hS, hDecap, decapOut, 1), CKR.OK);
+    const decapSS = Buffer.from(new Uint8Array(mem().buffer, readU32(decapOut + 4), readU32(decapOut + 8)));
+    check('Classic McEliece: encapsulate → decapsulate agree on the SAME shared secret (real SEAM)',
+      encapSS.equals(decapSS) ? 1 : 0, 1);
+  }
+}
 
 section('G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new)');
 {
@@ -3351,7 +3495,7 @@ end of every run, not hand-edited.
 **Regenerate:** \`scripts/local-gate.sh --rust-p11\` (see below), or manually:
 \`\`\`
 docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \\
-  RUSTFLAGS="-C link-arg=-zstack-size=2097152" \\
+  RUSTFLAGS="-C link-arg=-zstack-size=8388608" \\
   wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp'
 cd rust && node test_p11_conformance.js
 \`\`\`

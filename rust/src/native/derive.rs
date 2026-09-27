@@ -157,6 +157,12 @@ pub(crate) fn digest_of(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
         CKM_SHA3_256_KEY_DERIVATION => sha3::Sha3_256::digest(data).to_vec(),
         CKM_SHA3_384_KEY_DERIVATION => sha3::Sha3_384::digest(data).to_vec(),
         CKM_SHA3_512_KEY_DERIVATION => sha3::Sha3_512::digest(data).to_vec(),
+        CKM_SHA512_224_KEY_DERIVATION => sha2::Sha512_224::digest(data).to_vec(),
+        CKM_SHA512_256_KEY_DERIVATION => sha2::Sha512_256::digest(data).to_vec(),
+        // CKM_SHAKE_256_KEY_DERIVATION is deliberately NOT here: SHAKE is an
+        // XOF, so its output length is the caller's CKA_VALUE_LEN rather than
+        // a property of the mechanism, and this function has no length to work
+        // with. It is handled in C_DeriveKey, where the template is visible.
         _ => return Err(CKR_MECHANISM_INVALID),
     })
 }
@@ -187,6 +193,10 @@ pub fn digest(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
         CKM_SHA3_256 => sha3::Sha3_256::digest(data).to_vec(),
         CKM_SHA3_384 => sha3::Sha3_384::digest(data).to_vec(),
         CKM_SHA3_512 => sha3::Sha3_512::digest(data).to_vec(),
+        CKM_SHA224 => sha2::Sha224::digest(data).to_vec(),
+        CKM_SHA512_224 => sha2::Sha512_224::digest(data).to_vec(),
+        CKM_SHA512_256 => sha2::Sha512_256::digest(data).to_vec(),
+        CKM_SHA3_224 => sha3::Sha3_224::digest(data).to_vec(),
         _ => return Err(CKR_MECHANISM_INVALID),
     })
 }
@@ -610,6 +620,24 @@ mod tests {
         assert_eq!(
             digest(CKM_SHA3_256, b"abc").unwrap(),
             hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
+        );
+        // §3 Wave 1 (2026-09-07) — the digests added for C++ parity, against
+        // the same NIST "abc" vectors.
+        assert_eq!(
+            digest(CKM_SHA224, b"abc").unwrap(),
+            hex("23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7")
+        );
+        assert_eq!(
+            digest(CKM_SHA512_224, b"abc").unwrap(),
+            hex("4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa")
+        );
+        assert_eq!(
+            digest(CKM_SHA512_256, b"abc").unwrap(),
+            hex("53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23")
+        );
+        assert_eq!(
+            digest(CKM_SHA3_224, b"abc").unwrap(),
+            hex("e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf")
         );
         assert_eq!(
             digest(CKM_SHA3_384, b"abc").unwrap(),

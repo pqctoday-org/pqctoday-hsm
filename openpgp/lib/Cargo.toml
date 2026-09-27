@@ -39,7 +39,14 @@ picky-asn1-x509 = "0.9"
 # Distinct from the `ossl` crate sequoia's crypto-openssl backend uses; both
 # dynamically link the same libcrypto. See PQC_PGP_IMPLEMENTATION_PLAN.md §5.
 openssl = "0.10"
-rsa = "0.7"
+# 0.9 (not 0.7): 0.7.2 is inside all three open `rsa` advisories — both Marvin
+# GHSAs (<= 0.9.6) and GHSA-9c48-w39g-hm26 (<= 0.9.9, panic on a prime == 1).
+# 0.9.10 is outside all three, and is already the version every other
+# workspace here resolves. This crate's only private-key use is
+# `RsaPrivateKey::from_components` to derive CRT params before uploading a key
+# into the HSM; the real RSA decrypt goes through the PKCS#11 session, not this
+# crate, so no Marvin decrypt oracle rides on it either way.
+rsa = "0.9"
 sha2 = "0.10"
 # ML-KEM composite KEM combiner (plan §4, draft-ietf-openpgp-pqc §4.2.1):
 # SHA3-256 for the KEK derivation and RFC 3394 AES key-unwrap for the ESK.
@@ -51,4 +58,4 @@ zeroize = "1"
 # the default Nettle backend has no ML-DSA/ML-KEM. See plan §1/§2.1.
 sequoia-openpgp = { git = "https://gitlab.com/sequoia-pgp/sequoia", rev = "3d05138bf1536e63886e7a079fa50aeb080ab573", default-features = false, features = ["crypto-openssl", "compression"] }
 x509 = "0.2"
-x509-certificate = "0.20"
+x509-certificate = "0.25"

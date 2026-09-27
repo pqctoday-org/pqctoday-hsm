@@ -53,6 +53,35 @@ pub fn mac(
     correlation_id: &str,
 ) -> Result<MacResponse> {
     let started = OffsetDateTime::now_utc();
+    // §multi-part (R3) — accumulate the parts and run the ordinary one-shot
+    // path at `Final Indicator`. This mirrors the ENGINE's own convention
+    // (`rust/src/state.rs` SIGN_MULTIPART_ACC: C_SignUpdate accumulates,
+    // C_SignFinal calls the one-shot), and it is the only correct shape for
+    // pure ML-DSA / SLH-DSA, which must see the whole message.
+    let mut req = req;
+    if super::helpers::is_streaming(req.init_indicator, &req.correlation_value) {
+        let taken = req.correlation_value.take();
+        match super::helpers::buffered_stream_step(
+            deps,
+            crate::kmip30::Operation::MAC,
+            Some(&req.uid),
+            auth,
+            req.init_indicator,
+            req.final_indicator,
+            taken,
+            &req.data,
+        )
+        .map_err(|e| fail_err(deps, correlation_id, "MAC", e))?
+        {
+            super::helpers::StreamStep::More(cv) => {
+                return Ok(MacResponse { uid: req.uid, mac_data: Vec::new(), correlation_value: Some(cv) });
+            }
+            super::helpers::StreamStep::Done(all) => {
+                req.data = all;
+            }
+        }
+    }
+
     emit_request(deps, correlation_id, "MAC", format!("uid={} data_len={}", req.uid, req.data.len()));
 
     // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
@@ -110,7 +139,7 @@ pub fn mac(
     };
 
     emit_success(deps, correlation_id, "MAC");
-    Ok(MacResponse { uid: req.uid, mac_data: mac_bytes })
+    Ok(MacResponse { uid: req.uid, mac_data: mac_bytes, correlation_value: None })
 }
 
 // ── MACVerify ──────────────────────────────────────────────────────────────
@@ -122,6 +151,35 @@ pub fn mac_verify(
     correlation_id: &str,
 ) -> Result<MacVerifyResponse> {
     let started = OffsetDateTime::now_utc();
+    // §multi-part (R3) — accumulate the parts and run the ordinary one-shot
+    // path at `Final Indicator`. This mirrors the ENGINE's own convention
+    // (`rust/src/state.rs` SIGN_MULTIPART_ACC: C_SignUpdate accumulates,
+    // C_SignFinal calls the one-shot), and it is the only correct shape for
+    // pure ML-DSA / SLH-DSA, which must see the whole message.
+    let mut req = req;
+    if super::helpers::is_streaming(req.init_indicator, &req.correlation_value) {
+        let taken = req.correlation_value.take();
+        match super::helpers::buffered_stream_step(
+            deps,
+            crate::kmip30::Operation::MACVerify,
+            Some(&req.uid),
+            auth,
+            req.init_indicator,
+            req.final_indicator,
+            taken,
+            &req.data,
+        )
+        .map_err(|e| fail_err(deps, correlation_id, "MACVerify", e))?
+        {
+            super::helpers::StreamStep::More(cv) => {
+                return Ok(MacVerifyResponse { uid: req.uid, validity: crate::kmip30::SignatureValidity::Invalid, correlation_value: Some(cv) });
+            }
+            super::helpers::StreamStep::Done(all) => {
+                req.data = all;
+            }
+        }
+    }
+
     emit_request(deps, correlation_id, "MACVerify",
                  format!("uid={} data_len={} mac_len={}", req.uid, req.data.len(), req.mac_data.len()));
 
@@ -184,7 +242,7 @@ pub fn mac_verify(
     };
 
     emit_success(deps, correlation_id, "MACVerify");
-    Ok(MacVerifyResponse { uid: req.uid, validity })
+    Ok(MacVerifyResponse { uid: req.uid, validity, correlation_value: None })
 }
 
 // ── Hash ───────────────────────────────────────────────────────────────────
@@ -219,12 +277,111 @@ pub fn hash(deps: &Deps, req: HashRequest, correlation_id: &str) -> Result<HashR
         }
     }
 
+    // §6.1.30 multi-part (R3). Hash is the one streaming operation this crate
+    // can carry alone: `compute_hash` is in-process sha2/sha3, never an engine
+    // call, so the stream keeps REAL incremental state and the parts are never
+    // buffered. Same dispatch rule as Decrypt — an Init opens a stream, a
+    // Correlation Value continues one.
+    if super::helpers::is_streaming(req.init_indicator, &req.correlation_value) {
+        return hash_streaming(deps, &req, algo, correlation_id);
+    }
+
     let bytes = compute_hash(algo, &req.data).map_err(|e| {
         fail_err(deps, correlation_id, "Hash", e)
     })?;
 
     emit_success(deps, correlation_id, "Hash");
-    Ok(HashResponse { data: bytes })
+    Ok(HashResponse { data: bytes, correlation_value: None })
+}
+
+/// Multi-part `Hash` (§6.1.30) — incremental, so a large message never has to
+/// be held whole.
+fn hash_streaming(
+    deps: &Deps,
+    req: &HashRequest,
+    algo: HashingAlgorithm,
+    correlation_id: &str,
+) -> Result<HashResponse> {
+    use crate::ops::deps::{IncrementalDigest, StreamCtx, StreamState};
+    use crate::kmip30::Operation;
+
+    let invalid = |m: &str| {
+        KmipError::failed(ResultReason::InvalidMessage, m.to_string())
+    };
+
+    if req.init_indicator == Some(true) {
+        let mut digest = new_incremental_digest(algo)
+            .ok_or_else(|| fail_err(deps, correlation_id, "Hash",
+                KmipError::failed(ResultReason::OperationNotSupported,
+                    format!("streaming Hash not supported for {algo:?}"))))?;
+        digest.update(&req.data);
+        if req.final_indicator == Some(true) {
+            emit_success(deps, correlation_id, "Hash");
+            return Ok(HashResponse { data: digest.finalize(), correlation_value: None });
+        }
+        let cv = deps.new_correlation_value();
+        deps.streams.lock().unwrap().insert(
+            cv.clone(),
+            StreamCtx {
+                state: StreamState::Digest(digest),
+                operation: Operation::Hash,
+                // §6.1.30 takes no Unique Identifier — Hash is keyless.
+                uid: None,
+                owner: None,
+            },
+        );
+        emit_success(deps, correlation_id, "Hash");
+        return Ok(HashResponse { data: Vec::new(), correlation_value: Some(cv) });
+    }
+
+    let cv = req.correlation_value.clone().ok_or_else(|| {
+        fail_err(deps, correlation_id, "Hash", invalid("streaming part without a Correlation Value"))
+    })?;
+    let mut streams = deps.streams.lock().unwrap();
+    let mut ctx = streams.remove(&cv).ok_or_else(|| {
+        fail_err(deps, correlation_id, "Hash", invalid("unknown-correlation-value"))
+    })?;
+    if ctx.operation != Operation::Hash {
+        streams.insert(cv.clone(), ctx);
+        return Err(fail_err(deps, correlation_id, "Hash",
+            invalid("correlation-value belongs to a different operation")));
+    }
+    let StreamState::Digest(ref mut digest) = ctx.state else {
+        streams.insert(cv.clone(), ctx);
+        return Err(fail_err(deps, correlation_id, "Hash",
+            invalid("correlation-value is not a digest stream")));
+    };
+    digest.update(&req.data);
+
+    if req.final_indicator == Some(true) {
+        let StreamState::Digest(digest) = ctx.state else { unreachable!("checked above") };
+        emit_success(deps, correlation_id, "Hash");
+        Ok(HashResponse { data: digest.finalize(), correlation_value: None })
+    } else {
+        streams.insert(cv.clone(), ctx);
+        emit_success(deps, correlation_id, "Hash");
+        Ok(HashResponse { data: Vec::new(), correlation_value: Some(cv) })
+    }
+}
+
+/// Fresh incremental state for one hashing algorithm. `None` for an algorithm
+/// `compute_hash` does not implement, so the streaming and single-shot paths
+/// support exactly the same set rather than diverging silently.
+fn new_incremental_digest(algo: HashingAlgorithm) -> Option<crate::ops::deps::IncrementalDigest> {
+    use crate::ops::deps::IncrementalDigest as D;
+    use sha2::Digest as _;
+    Some(match algo {
+        HashingAlgorithm::Sha256 => D::Sha256(sha2::Sha256::new()),
+        HashingAlgorithm::Sha384 => D::Sha384(sha2::Sha384::new()),
+        HashingAlgorithm::Sha512 => D::Sha512(sha2::Sha512::new()),
+        HashingAlgorithm::Sha512224 => D::Sha512_224(sha2::Sha512_224::new()),
+        HashingAlgorithm::Sha512256 => D::Sha512_256(sha2::Sha512_256::new()),
+        HashingAlgorithm::Sha3224 => D::Sha3_224(sha3::Sha3_224::new()),
+        HashingAlgorithm::Sha3256 => D::Sha3_256(sha3::Sha3_256::new()),
+        HashingAlgorithm::Sha3384 => D::Sha3_384(sha3::Sha3_384::new()),
+        HashingAlgorithm::Sha3512 => D::Sha3_512(sha3::Sha3_512::new()),
+        _ => return None,
+    })
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -473,7 +630,10 @@ mod tests {
             uid: "v".into(),
             cryptographic_parameters: None,
             data: b"x".to_vec(),
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
         // … and a key with only MAC_GENERATE can't MACVerify.
         d.store.put(ObjectRecord {
@@ -490,8 +650,107 @@ mod tests {
             cryptographic_parameters: None,
             data: b"x".to_vec(),
             mac_data: vec![0u8; 32],
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
+    }
+
+    /// §6.1.38 / §6.1.39 multi-part MAC, tested across the SEAM.
+    ///
+    /// MACing in parts must produce the SAME tag as MACing the whole message
+    /// at once, and that tag must verify. Checking the streaming path against
+    /// itself would pass even if both halves dropped the same part — which is
+    /// precisely how multi-part Decrypt returned Success with wrong plaintext
+    /// for as long as it did.
+    #[test]
+    fn multipart_mac_equals_the_single_shot_tag_and_verifies() {
+        let d = deps_with();
+        put_hmac(&d, "u", vec![7u8; 32]);
+        let auth = crate::server::auth::AuthContext::open();
+        let whole = b"streamed in three uneven pieces, joined by a handle".to_vec();
+
+        let one_shot = mac(&d, MacRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole.clone(),
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+        }, &auth, "c").unwrap();
+
+        let a = mac(&d, MacRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole[..7].to_vec(),
+            init_indicator: Some(true),
+            final_indicator: None,
+            correlation_value: None,
+        }, &auth, "c").unwrap();
+        let cv = a.correlation_value.clone().expect("Init issues a Correlation Value");
+        assert!(a.mac_data.is_empty(), "no tag is available before the final part");
+
+        let b = mac(&d, MacRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole[7..30].to_vec(),
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: Some(cv.clone()),
+        }, &auth, "c").unwrap();
+        assert_eq!(b.correlation_value.as_ref(), Some(&cv));
+
+        let c = mac(&d, MacRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole[30..].to_vec(),
+            init_indicator: None,
+            final_indicator: Some(true),
+            correlation_value: Some(cv),
+        }, &auth, "c").unwrap();
+
+        assert_eq!(
+            hex::encode(&c.mac_data), hex::encode(&one_shot.mac_data),
+            "a three-part MAC must equal the single-shot MAC of the same message"
+        );
+
+        // Cross the seam the other way: the streamed tag verifies single-shot.
+        let v = mac_verify(&d, MacVerifyRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole.clone(),
+            mac_data: c.mac_data.clone(),
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+        }, &auth, "c").unwrap();
+        assert_eq!(v.validity, SignatureValidity::Valid);
+
+        // And a streamed VERIFY accepts the single-shot tag.
+        let va = mac_verify(&d, MacVerifyRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole[..20].to_vec(),
+            mac_data: Vec::new(),
+            init_indicator: Some(true),
+            final_indicator: None,
+            correlation_value: None,
+        }, &auth, "c").unwrap();
+        let vcv = va.correlation_value.clone().expect("Init issues a handle");
+        let vb = mac_verify(&d, MacVerifyRequest {
+            uid: "u".into(),
+            cryptographic_parameters: None,
+            data: whole[20..].to_vec(),
+            mac_data: one_shot.mac_data.clone(),
+            init_indicator: None,
+            final_indicator: Some(true),
+            correlation_value: Some(vcv),
+        }, &auth, "c").unwrap();
+        assert_eq!(
+            vb.validity, SignatureValidity::Valid,
+            "a streamed MAC Verify must accept the tag the single-shot MAC produced"
+        );
     }
 
     #[test]
@@ -502,14 +761,20 @@ mod tests {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(m.mac_data.len(), 32, "HMAC-SHA-256 output is 32 bytes");
         let v = mac_verify(&d, MacVerifyRequest {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
             mac_data: m.mac_data,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(v.validity, SignatureValidity::Valid);
     }
 
@@ -546,7 +811,10 @@ mod tests {
             uid: "u3".into(),
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             hex::encode(&m.mac_data),
             "6deaf15552c952200416ed0781b5d81b53d7f709f8a764ce6a04ff83edf6376b",
@@ -557,7 +825,10 @@ mod tests {
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
             mac_data: m.mac_data,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(v.validity, SignatureValidity::Valid);
     }
 
@@ -581,13 +852,19 @@ mod tests {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"payload".to_vec(),
-        }, &crate::server::auth::AuthContext::open(), "c-soft").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c-soft").unwrap();
         mac_verify(&d, MacVerifyRequest {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"payload".to_vec(),
             mac_data: m.mac_data,
-        }, &crate::server::auth::AuthContext::open(), "c-soft").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c-soft").unwrap();
         let p3 = ring.filter_plane(Plane::Pkcs11);
         assert_eq!(p3.len(), 2, "one soft-path record per MAC + MACVerify");
         for e in &p3 {
@@ -607,7 +884,10 @@ mod tests {
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
             mac_data: vec![0xff; 32],
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(v.validity, SignatureValidity::Invalid);
     }
 
@@ -621,7 +901,10 @@ mod tests {
                 ..CP::default()
             },
             data: b"abc".to_vec(),
-        }, "c").unwrap();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, "c").unwrap();
         // SHA-256("abc") = ba7816bf...
         assert_eq!(hex::encode(&r.data), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
@@ -659,12 +942,112 @@ mod tests {
                     ..CP::default()
                 },
                 data: data.clone(),
-            }, "c").unwrap_or_else(|e| panic!("Hash({algo:?}) failed: {e:?}"));
+                init_indicator: None,
+                final_indicator: None,
+                correlation_value: None,
+}, "c").unwrap_or_else(|e| panic!("Hash({algo:?}) failed: {e:?}"));
             assert_eq!(
                 hex::encode(&r.data), expected_hex,
                 "Hash({algo:?}) must match Python hashlib's independently computed digest",
             );
         }
+    }
+
+    /// §6.1.30 multi-part Hash, tested across the SEAM.
+    ///
+    /// Hashing in parts must equal the single-shot digest of the whole input.
+    /// Testing streaming against itself proves nothing — that is exactly how
+    /// the multi-part Decrypt defect survived, returning Success with wrong
+    /// plaintext because each half agreed with the other half.
+    #[test]
+    fn multipart_hash_equals_the_single_shot_digest_of_the_whole_input() {
+        let d = deps_with();
+        let cp = |algo| CP { hashing_algorithm: Some(algo), cryptographic_algorithm: None, ..CP::default() };
+        let whole = b"the quick brown fox jumps over the lazy dog, repeatedly".to_vec();
+
+        for algo in [HashingAlgorithm::Sha256, HashingAlgorithm::Sha384,
+                     HashingAlgorithm::Sha512, HashingAlgorithm::Sha3256] {
+            let one_shot = hash(&d, HashRequest {
+                cryptographic_parameters: cp(algo),
+                data: whole.clone(),
+                init_indicator: None,
+                final_indicator: None,
+                correlation_value: None,
+            }, "c").unwrap();
+            assert!(one_shot.correlation_value.is_none(), "a single-shot Hash issues no handle");
+
+            let a = hash(&d, HashRequest {
+                cryptographic_parameters: cp(algo),
+                data: whole[..10].to_vec(),
+                init_indicator: Some(true),
+                final_indicator: None,
+                correlation_value: None,
+            }, "c").unwrap();
+            let cv = a.correlation_value.clone().expect("Init must issue a Correlation Value");
+            assert!(a.data.is_empty(), "no digest is available before the final part");
+
+            let b = hash(&d, HashRequest {
+                cryptographic_parameters: cp(algo),
+                data: whole[10..25].to_vec(),
+                init_indicator: None,
+                final_indicator: None,
+                correlation_value: Some(cv.clone()),
+            }, "c").unwrap();
+            assert_eq!(b.correlation_value.as_ref(), Some(&cv), "the handle keeps chaining");
+
+            let c = hash(&d, HashRequest {
+                cryptographic_parameters: cp(algo),
+                data: whole[25..].to_vec(),
+                init_indicator: None,
+                final_indicator: Some(true),
+                correlation_value: Some(cv.clone()),
+            }, "c").unwrap();
+
+            assert_eq!(
+                hex::encode(&c.data), hex::encode(&one_shot.data),
+                "{algo:?}: hashing in three parts must equal hashing the whole input at once"
+            );
+            assert!(c.correlation_value.is_none(), "the final part closes the stream");
+
+            let reuse = hash(&d, HashRequest {
+                cryptographic_parameters: cp(algo),
+                data: b"more".to_vec(),
+                init_indicator: None,
+                final_indicator: Some(true),
+                correlation_value: Some(cv),
+            }, "c");
+            assert!(reuse.is_err(), "a closed correlation value must not be reusable");
+        }
+    }
+
+    /// Correlation values live in ONE namespace across every streaming
+    /// operation, so a Hash stream must not be finalisable by a MAC — that
+    /// would hand one operation another's accumulated state.
+    #[test]
+    fn a_stream_cannot_be_finalised_by_a_different_operation() {
+        let d = deps_with();
+        let opened = hash(&d, HashRequest {
+            cryptographic_parameters: CP {
+                hashing_algorithm: Some(HashingAlgorithm::Sha256),
+                cryptographic_algorithm: None,
+                ..CP::default()
+            },
+            data: b"half".to_vec(),
+            init_indicator: Some(true),
+            final_indicator: None,
+            correlation_value: None,
+        }, "c").unwrap();
+        let cv = opened.correlation_value.expect("Init issues a handle");
+
+        let err = mac(&d, MacRequest {
+            uid: "nonexistent".into(),
+            cryptographic_parameters: None,
+            data: b"rest".to_vec(),
+            init_indicator: None,
+            final_indicator: Some(true),
+            correlation_value: Some(cv),
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidMessage);
     }
 
     #[test]
@@ -673,7 +1056,10 @@ mod tests {
         let err = hash(&d, HashRequest {
             cryptographic_parameters: CP::default(),
             data: b"abc".to_vec(),
-        }, "c").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::MissingData);
     }
 }

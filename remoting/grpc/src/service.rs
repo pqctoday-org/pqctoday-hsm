@@ -35,8 +35,15 @@ impl Pkcs11Remote for Pkcs11RemoteService {
         &self,
         request: Request<OpenSessionRequest>,
     ) -> Result<Response<OpenSessionResponse>, Status> {
+        // Read BEFORE into_inner(): tonic populates the peer address on the
+        // Request wrapper itself, which into_inner() discards (docs/
+        // remediation-plan-auth-visibility-evidence-log-09102026.md, Q2).
+        let peer = request.remote_addr().map(|a| a.to_string());
         let req = request.into_inner();
-        let handle = verbs::open_session(&req.user_pin).map_err(to_status)?;
+        let handle = verbs::open_session(&req.user_pin).map_err(|e| {
+            pqctoday_pkcs11_remote_core::metrics::record_auth_failure(e.class(), peer.as_deref());
+            to_status(e)
+        })?;
         Ok(Response::new(OpenSessionResponse { session_handle: handle }))
     }
 

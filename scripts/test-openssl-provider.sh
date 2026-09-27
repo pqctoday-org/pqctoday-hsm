@@ -171,6 +171,14 @@ EOF
 
 use_arena() { export SOFTHSM2_CONF="$1/softhsm2.conf" OPENSSL_CONF="$1/openssl.cnf"; }
 O() { "$OPENSSL_BIN" "$@"; }   # exit code taken directly — no pipelines
+# filesize: portable byte-count for the size-assertion checks below.
+# `stat -c%s` is GNU coreutils only (this file's own container default);
+# macOS/BSD stat has no -c at all and needs `stat -f%z` instead. Tries the
+# GNU form first (matches the container this harness's defaults target)
+# and falls back to the BSD form so the same call site works unmodified
+# under both `bash scripts/test-openssl-provider.sh` in the Docker/CI
+# container and natively on macOS.
+filesize() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1"; }
 
 # ─── T0 preflight (hard requirements — refuse to produce a vacuous green) ───
 say preflight "environment"
@@ -202,7 +210,7 @@ mldsa_case() { # $1 = param set suffix, $2 = expected FIPS 204 sig size
   w=$(mk_arena "mldsa$set" "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm "ML-DSA-$set" -out "$w/k.pem" || return 1
   O pkeyutl -sign -inkey "pkcs11:token=mldsa$set;type=private" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "$size" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != $size"; return 1; }
+  [[ "$(filesize "$w/sig.bin")" == "$size" ]] || { echo "sig size $(filesize "$w/sig.bin") != $size"; return 1; }
   O pkey -in "pkcs11:token=mldsa$set;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
   # cross-check: OpenSSL's own SOFTWARE implementation verifies the token's signature
   O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin" || return 1
@@ -333,7 +341,7 @@ t4kemexport() {
   O pkey -in "pkcs11:token=mlkemexp;type=private" -pubout -out "$w/pub_from_priv.pem" || return 1
   O pkeyutl -encap -pubin -inkey "$w/pub_from_priv.pem" -secret "$w/secret_server.bin" -out "$w/ct.bin" || return 1
   O pkeyutl -decap -inkey "pkcs11:token=mlkemexp;type=private" -in "$w/ct.bin" -secret "$w/secret_client.bin" || return 1
-  [[ "$(stat -c%s "$w/secret_server.bin")" == "32" && "$(stat -c%s "$w/secret_client.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
+  [[ "$(filesize "$w/secret_server.bin")" == "32" && "$(filesize "$w/secret_client.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
   cmp -s "$w/secret_server.bin" "$w/secret_client.bin"
 }
 run_case T4kemexport PASS "ML-KEM public-share export from the private object (R5 prerequisite): server-encap/client-decap parity" t4kemexport
@@ -418,7 +426,7 @@ t16() {
     O pkey -in "pkcs11:token=x25519a;type=public" -pubin -pubout -out "$wa/kapub.pem" || return 1
   SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
     O pkeyutl -derive -inkey "pkcs11:token=x25519b;type=private" -peerkey "$wa/kapub.pem" -out "$wb/secretB.bin" || return 1
-  [[ "$(stat -c%s "$wa/secretA.bin")" == "32" && "$(stat -c%s "$wb/secretB.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
+  [[ "$(filesize "$wa/secretA.bin")" == "32" && "$(filesize "$wb/secretB.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
   cmp -s "$wa/secretA.bin" "$wb/secretB.bin"
 }
 run_case T16 PASS "X25519 token-to-token derive parity, 32-byte secret (gap ALG-5 / remediation R4); genpkey URI-PEM encoder gated on exit code (remediation R16)" t16
@@ -441,7 +449,7 @@ t16b() {
     O pkey -in "pkcs11:token=x448a;type=public" -pubin -pubout -out "$wa/kapub.pem" || return 1
   SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
     O pkeyutl -derive -inkey "pkcs11:token=x448b;type=private" -peerkey "$wa/kapub.pem" -out "$wb/secretB.bin" || return 1
-  [[ "$(stat -c%s "$wa/secretA.bin")" == "56" && "$(stat -c%s "$wb/secretB.bin")" == "56" ]] || { echo "wrong secret size"; return 1; }
+  [[ "$(filesize "$wa/secretA.bin")" == "56" && "$(filesize "$wb/secretB.bin")" == "56" ]] || { echo "wrong secret size"; return 1; }
   cmp -s "$wa/secretA.bin" "$wb/secretB.bin"
 }
 run_case T16b PASS "X448 token-to-token derive parity, 56-byte secret (gap ALG-5 / remediation R4); genpkey URI-PEM encoder gated on exit code (remediation R16)" t16b
@@ -477,7 +485,7 @@ r17_case() { # $1 = X25519|X448, $2 = expected secret size
   # the reverse pairing: software derives against the token's public key
   OPENSSL_CONF=/dev/null O pkeyutl -derive -inkey "$w/sw.pem" \
     -peerkey "$w/tok_pub.pem" -out "$w/secret_sw.bin" || return 1
-  [[ "$(stat -c%s "$w/secret_tok.bin")" == "$size" && "$(stat -c%s "$w/secret_sw.bin")" == "$size" ]] \
+  [[ "$(filesize "$w/secret_tok.bin")" == "$size" && "$(filesize "$w/secret_sw.bin")" == "$size" ]] \
     || { echo "wrong secret size"; return 1; }
   cmp -s "$w/secret_tok.bin" "$w/secret_sw.bin"
 }
@@ -537,7 +545,7 @@ t11slh() { local w; w=$(mk_arena uripemslh "$CPP_ENGINE_SO") && use_arena "$w" |
   O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
   grep -q "PKCS#11 PROVIDER URI" "$w/k.pem" || { echo "no URI-PEM written"; return 1; }
   O pkeyutl -sign -inkey "$w/k.pem" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "7856" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 7856"; return 1; }
+  [[ "$(filesize "$w/sig.bin")" == "7856" ]] || { echo "sig size $(filesize "$w/sig.bin") != 7856"; return 1; }
 }
 run_case T11slh PASS "URI-PEM round-trip for SLH-DSA-SHA2-128s (gap OP-2 / remediation R2)" t11slh
 
@@ -556,7 +564,7 @@ t11kem() { local w; w=$(mk_arena uripemkem "$CPP_ENGINE_SO") && use_arena "$w" |
   grep -q "PKCS#11 PROVIDER URI" "$w/k.pem" || { echo "no URI-PEM written"; return 1; }
   O pkeyutl -encap -inkey "pkcs11:token=uripemkem;type=public" -secret "$w/secret_ref.bin" -out "$w/ct.bin" || return 1
   O pkeyutl -decap -inkey "$w/k.pem" -in "$w/ct.bin" -secret "$w/secret_dec.bin" || return 1
-  [[ "$(stat -c%s "$w/secret_ref.bin")" == "32" && "$(stat -c%s "$w/secret_dec.bin")" == "32" ]] || { echo "secret size wrong"; return 1; }
+  [[ "$(filesize "$w/secret_ref.bin")" == "32" && "$(filesize "$w/secret_dec.bin")" == "32" ]] || { echo "secret size wrong"; return 1; }
   cmp -s "$w/secret_ref.bin" "$w/secret_dec.bin"
 }
 run_case T11kem PASS "URI-PEM round-trip for ML-KEM-768: decoder-loaded private key decapsulates correctly (gap OP-2 / remediation R2)" t11kem
@@ -608,7 +616,7 @@ run_case T12 PASS "SLH-DSA keygen/store/encode reachable through provider, all 1
 t12sign() { local w; w=$(mk_arena slhsign "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
   O pkeyutl -sign -inkey "pkcs11:token=slhsign;type=private" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "7856" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 7856"; return 1; }
+  [[ "$(filesize "$w/sig.bin")" == "7856" ]] || { echo "sig size $(filesize "$w/sig.bin") != 7856"; return 1; }
   O pkey -in "pkcs11:token=slhsign;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
   O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin" || return 1
   cp "$w/sig.bin" "$w/tampered.bin"
@@ -622,7 +630,7 @@ run_case T12sign PASS "SLH-DSA-SHA2-128s token sign -> software verify (size 785
 t12sign_shake() { local w; w=$(mk_arena slhshake "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHAKE-128f -out "$w/k.pem" || return 1
   O pkeyutl -sign -inkey "pkcs11:token=slhshake;type=private" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "17088" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 17088"; return 1; }
+  [[ "$(filesize "$w/sig.bin")" == "17088" ]] || { echo "sig size $(filesize "$w/sig.bin") != 17088"; return 1; }
   O pkey -in "pkcs11:token=slhshake;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
   O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin"
 }
@@ -1300,17 +1308,35 @@ run_case T26d PASS "EVP_MAC_init_SKEY(HMAC) closes R24's own gap: full opaque ge
 # The standard openssl CLI cannot drive a composite sign/verify (no keymgmt
 # GEN for composite keys — see composite.h's own comment on
 # p11prov_composite_evp_pkey_from_uris) so these cases use composite_sig_probe
-# (scripts/composite-sig-probe.c), a small standalone tool that links
-# pkcs11-provider.so directly and calls that bridge itself. Each case: real
+# (scripts/composite-sig-probe.c), a small standalone tool that dlopen()s
+# pkcs11-provider.so at runtime and calls that bridge itself (portable
+# indirection — see the file's own header comment for why it isn't a
+# build-time link). Each case: real
 # ML-DSA + classical keypairs generated on the token, real sign, real verify
 # against a SEPARATE public-key-URI EVP_PKEY (not the signing one — PKCS#11
 # C_VerifyInit against a private-class object fails), plus two sabotage
 # controls (wrong message, corrupted signature byte) that must both fail.
 #
 # `openssl genpkey`'s own -out writes a base64 "PKCS#11 Provider URI v1.0"
-# PEM wrapper, not a bare pkcs11: string — extract_uri unwraps it.
+# PEM wrapper, not a bare pkcs11: string — extract_uri unwraps it. Uses
+# `grep -a -o` on the decoded bytes rather than piping through `strings`:
+# macOS/BSD `strings` reading from a pipe (as opposed to a real file) can
+# leave a stray non-printable byte glued onto the front of the extracted
+# line (observed: the DER length-prefix byte just before "pkcs11:"),
+# which silently breaks the anchored `grep '^pkcs11:'` match this used to
+# use. `LC_ALL=C` on every stage is required, not cosmetic: in the
+# default UTF-8 locale, macOS's BSD grep (2.6.0-FreeBSD, still the system
+# `/usr/bin/grep` as of this writing) silently fails to match ANYTHING
+# past an invalid UTF-8 byte sequence in binary input (the DER
+# length-prefix bytes right before "pkcs11:" are not valid UTF-8) even
+# with -a — it returns no match and exit 1, with no error message. C
+# locale makes grep byte-literal instead of UTF-8-aware, which is what
+# `-a`/"treat binary as text" is actually supposed to give you here.
+# Confirmed to reproduce with the real /usr/bin/grep (not a PATH-shadowed
+# alias) and to be fixed by LC_ALL=C on this exact input.
 extract_uri() {
-  grep -v 'BEGIN\|END' "$1" | base64 -d | strings | grep '^pkcs11:'
+  LC_ALL=C grep -v 'BEGIN\|END' "$1" | LC_ALL=C base64 -d \
+    | LC_ALL=C grep -ao 'pkcs11:[^[:space:]]*'
 }
 
 compsig_case() { # $1=oid $2=mldsa_alg $3=classical_alg $4...=classical genpkey opts
@@ -1479,8 +1505,8 @@ run_case T22e PASS "token PBKDF2 (HMAC-SHA512 PRF) == software PBKDF2, engine-lo
 # in this harness, silently falls back to the default provider through
 # `openssl kdf` without this flag), engine-log positive assertion +
 # negative-control twin (R13), sabotage (wrong salt -> different output).
-t25_case() { # $1=mode(COUNTER|FEEDBACK) $2=mac(HMAC|CMAC) $3=digest-or-cipher $4=keylen $5=extra kdfopt (seed, optional)
-  local mode="$1" mac="$2" dc="$3" keylen="$4" extra="${5:-}" w
+t25_case() { # $1=mode(COUNTER|FEEDBACK) $2=mac(HMAC|CMAC) $3=digest-or-cipher $4=keylen $5=extra kdfopt (seed, optional) $6=seed hex (FEEDBACK only, for the independent reference below)
+  local mode="$1" mac="$2" dc="$3" keylen="$4" extra="${5:-}" seedhex="${6:-}" w
   w="$ROOT_WORK/r22${mode}${mac}"
   mkdir -p "$w/tokens"
   cat > "$w/softhsm2.conf" <<EOF
@@ -1540,7 +1566,52 @@ EOF
     -kdfopt hexkey:"$key" -kdfopt hexinfo:"$salt" \
     -kdfopt use-l:0 -kdfopt use-separator:0 $extra \
     KBKDF 2>/dev/null) || return 1
-  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  # 2026-09-08: for FEEDBACK mode, $swout above is NOT a valid oracle for
+  # $tokout, even though it still IS a valid oracle for $ctrlout below (see
+  # that comparison). Same root cause as T36/T36b's Double-Pipeline fix:
+  # OpenSSL's own KBKDF provider mixes a 32-bit BE counter into every round
+  # regardless of whether one was requested (confirmed empirically -- see
+  # SoftHSM_keygen.cpp's CKM_SP800_108_FEEDBACK_KDF handler comment), so
+  # $swout is computed WITH a counter. SoftHSM_keygen.cpp's engine handler
+  # was fixed (2026-09, companion to the Double-Pipeline fix) to genuinely
+  # OMIT the counter when the caller does not request one -- which T25f
+  # never does -- so $tokout is correctly counter-free and stopped matching
+  # $swout the moment that engine fix landed, invisibly, because this test
+  # was never updated to match (found running the full gate 2026-09-07,
+  # root-caused by isolating this one case and reading both sides' logs).
+  # Independent Python reference instead, exactly T36's pattern: K(0)=IV
+  # (the seed), K(i)=PRF(K, K(i-1) || FixedInput), no counter.
+  local expected="$swout"
+  if [[ "$mode" == FEEDBACK ]]; then
+    if [[ "$mac" != HMAC ]]; then
+      echo "T25f-style reference not implemented for mac=$mac (only HMAC exercised today)"; return 1
+    fi
+    local pydigest; pydigest="$(echo "$dc" | tr 'A-Z-' 'a-z_')"
+    expected=$(python3 -c "
+import hmac, hashlib
+key = bytes.fromhex('$key')
+fixed = bytes.fromhex('$salt')
+Kprev = bytes.fromhex('$seedhex')
+def prf(k, data):
+    return hmac.new(k, data, hashlib.$pydigest).digest()
+out = b''
+while len(out) < $keylen:
+    Kprev = prf(key, Kprev + fixed)
+    out += Kprev
+print(out[:$keylen].hex())
+")
+    # $tokout is colon-separated uppercase hex (this tool's own `kdf` CLI
+    # output format, e.g. "3D:EA:1B:..."); the Python reference above is
+    # plain lowercase hex with no separators (same normalization T36 already
+    # needed for its own Python reference) -- compare a normalized COPY, not
+    # $tokout itself, since the sabotage check below still needs $tokout in
+    # its original colon-hex form to compare against $sabout (produced by
+    # the same `kdf` CLI, same format).
+    local tokout_norm; tokout_norm="$(echo "${tokout//:/}" | tr 'A-F' 'a-f')"
+    [[ -n "$tokout_norm" && "$tokout_norm" == "$expected" ]] || { echo "token=$tokout_norm expected=$expected"; return 1; }
+  else
+    [[ -n "$tokout" && "$tokout" == "$expected" ]] || { echo "token=$tokout expected=$expected"; return 1; }
+  fi
   # Engine-log evidence (R13): KBKDF is deterministic, so a silent
   # wrong-provider fallback is invisible in the output value alone.
   grep -q "Created new object" "$w/tok.err.log" || return 1
@@ -1577,8 +1648,8 @@ t25b() { t25_case COUNTER HMAC SHA3-256 32; }
 run_case T25b PASS "token SP800-108 Counter-KDF (HMAC-SHA3-256 PRF) == software KBKDF (remediation R22)" t25b
 t25c() { t25_case COUNTER CMAC AES-256-CBC 32; }
 run_case T25c PASS "token SP800-108 Counter-KDF (CMAC-AES-256 PRF) == software KBKDF (remediation R22)" t25c
-t25f() { t25_case FEEDBACK HMAC SHA384 48 "-kdfopt hexseed:$(printf 'aa%.0s' {1..48})"; }
-run_case T25f PASS "token SP800-108 Feedback-KDF (HMAC-SHA384 PRF, with IV/seed) == software KBKDF (remediation R22)" t25f
+t25f() { local seedhex; seedhex="$(printf 'aa%.0s' {1..48})"; t25_case FEEDBACK HMAC SHA384 48 "-kdfopt hexseed:$seedhex" "$seedhex"; }
+run_case T25f PASS "token SP800-108 Feedback-KDF (HMAC-SHA384 PRF, with IV/seed) == independent Python reference, NO explicit CK_SP800_108_COUNTER supplied (K(0)=seed, K(i)=PRF(K,K(i-1)||fixedInput), counter-free -- OpenSSL's own KBKDF provider cannot express this for FEEDBACK mode either, same T36/T36b class of gap) (remediation R22)" t25f
 
 # ─── T25r: KBKDF rejection controls — inputs the C++ engine's own SP800-108
 # handler cannot honor must fail loudly, never silently degrade (R10/F36-6
@@ -1674,7 +1745,12 @@ t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || ret
 
   # -rawin (DIGEST_SIGN/VERIFY dispatch)
   O pkeyutl -sign -rawin -inkey "pkcs11:token=hsssign;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "1296" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 1296"; return 1; }
+  # HBS-1 (2026-09-03, commit 673a5a11): the engine's default LMOTS when
+  # CK_HSS_KEY_PAIR_GEN_PARAMS is omitted moved from W8 (1296-byte sig) to
+  # W4 (2352-byte sig), aligning with Rust's own default -- neither v3.2 nor
+  # RFC 8554 mandates a default, so this is the same size T24c already
+  # exercises explicitly, now also reached implicitly here.
+  [[ "$(filesize "$w/sig.bin")" == "2352" ]] || { echo "sig size $(filesize "$w/sig.bin") != 2352"; return 1; }
   O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hsssign;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
 
   # plain SIGN/VERIFY dispatch (no -rawin)
@@ -1699,7 +1775,7 @@ t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || ret
   then echo "tampered HSS signature VERIFIED by the independent LMS implementation"; return 1; fi
   return 0
 }
-run_case T24 PASS "HSS/LMS token sign (size 1296, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
+run_case T24 PASS "HSS/LMS token sign, default params (size 2352, W4 -- HBS-1, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
 
 # T24c — phase-5 R25 (HSS param-set awareness). T24 above only ever
 # exercises the C++ engine's own documented default (LMOTS W8); this
@@ -1715,7 +1791,7 @@ t24c() { local w; w=$(mk_arena hssw4 "$CPP_ENGINE_SO") && use_arena "$w" || retu
   "$HSS_W4_KEYGEN" "$CPP_ENGINE_SO" hssw4 || { echo "hss_w4_keygen failed"; return 1; }
 
   O pkeyutl -sign -rawin -inkey "pkcs11:token=hssw4;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "2352" ]] || { echo "W4 sig size $(stat -c%s "$w/sig.bin") != 2352"; return 1; }
+  [[ "$(filesize "$w/sig.bin")" == "2352" ]] || { echo "W4 sig size $(filesize "$w/sig.bin") != 2352"; return 1; }
   O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hssw4;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
 
   # sabotage: corrupted signature and wrong message must both be rejected
@@ -2022,7 +2098,7 @@ t30() { local w; w=$(mk_arena hashslhdsa "$CPP_ENGINE_SO") && use_arena "$w" || 
 
   O dgst -sha256 -propquery "?provider=pkcs11" -sign "pkcs11:token=hashslhdsa;type=private" \
     -out "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "dgst -sha256 -sign failed"; return 1; }
-  [[ "$(stat -c%s "$w/sig.bin" 2>/dev/null || stat -f%z "$w/sig.bin")" == "7856" ]] \
+  [[ "$(filesize "$w/sig.bin")" == "7856" ]] \
     || { echo "unexpected signature size"; return 1; }
 
   O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=hashslhdsa;type=public" \
@@ -2100,7 +2176,7 @@ t31() { local w; w=$(mk_arena shakemldsa "$CPP_ENGINE_SO") && use_arena "$w" || 
 
   "$SHAKE_SIGN_PROBE" sign "?provider=pkcs11" "pkcs11:token=shakeslhdsa;type=private" \
     SHAKE128 "$w2/msg.txt" "$w2/sig.bin" 2>/dev/null || { echo "SLH-DSA-SHAKE-128s SHAKE128 sign failed"; return 1; }
-  [[ "$(stat -c%s "$w2/sig.bin" 2>/dev/null || stat -f%z "$w2/sig.bin")" == "7856" ]] \
+  [[ "$(filesize "$w2/sig.bin")" == "7856" ]] \
     || { echo "unexpected SLH-DSA-SHAKE-128s signature size"; return 1; }
 
   "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakeslhdsa;type=public" \
@@ -2673,14 +2749,15 @@ t24d() {
   SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O genpkey -propquery "?provider=pkcs11" -algorithm HSS -out "$w/k.pem" 2>/dev/null || return 1
 
-  # Rust's own CKM_HSS_KEY_PAIR_GEN default is LMOTS_SHA256_N32_W4 (not
-  # the C++ engine's W8) -- 2352 bytes is the size assert that actually
-  # proves the provider read this key's real parameter set (R25)
-  # rather than assuming the C++ default's 1296.
+  # Rust's own CKM_HSS_KEY_PAIR_GEN default is LMOTS_SHA256_N32_W4, and the
+  # C++ engine's default was aligned to match (HBS-1, 2026-09-03, commit
+  # 673a5a11) -- both now produce 2352 bytes here. This assert still proves
+  # the provider reads this key's real parameter set (R25) rather than
+  # assuming a hardcoded size; it's just no longer a cross-engine divergence.
   SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O pkeyutl -sign -propquery "?provider=pkcs11" -rawin \
       -inkey "pkcs11:token=rusths;type=private" -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
-  [[ "$(stat -c%s "$w/sig.bin")" == "2352" ]] || { echo "Rust-arm HSS sig size $(stat -c%s "$w/sig.bin") != 2352"; return 1; }
+  [[ "$(filesize "$w/sig.bin")" == "2352" ]] || { echo "Rust-arm HSS sig size $(filesize "$w/sig.bin") != 2352"; return 1; }
 
   SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
@@ -2783,7 +2860,7 @@ t24f() {
   local wsrc; wsrc=$(mk_arena hssfbsrc "$CPP_ENGINE_SO") && use_arena "$wsrc" || return 1
   "$HSS_W4_KEYGEN" "$CPP_ENGINE_SO" hssfbsrc || { echo "hss_w4_keygen failed"; return 1; }
   O pkeyutl -sign -rawin -inkey "pkcs11:token=hssfbsrc;type=private" -in "$MSG" -out "$wsrc/sig.bin" || return 1
-  [[ "$(stat -c%s "$wsrc/sig.bin")" == "2352" ]] || { echo "source W4 sig size $(stat -c%s "$wsrc/sig.bin") != 2352"; return 1; }
+  [[ "$(filesize "$wsrc/sig.bin")" == "2352" ]] || { echo "source W4 sig size $(filesize "$wsrc/sig.bin") != 2352"; return 1; }
   "$HSS_PUBKEY_DUMP" "$CPP_ENGINE_SO" hssfbsrc "$wsrc/pub.raw" >/dev/null 2>&1 || { echo "hss_pubkey_dump failed"; return 1; }
 
   # fresh, SEPARATE token: the ONLY HSS object on it is the bare fixture
@@ -2987,7 +3064,7 @@ t31b() { # Rust-arm twin of T31 -- same proof, over libsofthsmrustv3.so. No
   SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF="$w2/openssl.cnf" \
     "$SHAKE_SIGN_PROBE" sign "?provider=pkcs11" "pkcs11:token=shakeslhdsarust;type=private" \
       SHAKE128 "$w2/msg.txt" "$w2/sig.bin" 2>/dev/null || { echo "Rust-arm SLH-DSA-SHAKE-128s SHAKE128 sign failed"; return 1; }
-  [[ "$(stat -c%s "$w2/sig.bin" 2>/dev/null || stat -f%z "$w2/sig.bin")" == "7856" ]] \
+  [[ "$(filesize "$w2/sig.bin")" == "7856" ]] \
     || { echo "Rust-arm: unexpected SLH-DSA-SHAKE-128s signature size"; return 1; }
 
   SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF="$w2/openssl.cnf" \

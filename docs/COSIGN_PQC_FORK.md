@@ -18,6 +18,35 @@ the exact seam cosign uses for ECDSA/RSA/Ed25519 — with two backends: pure-Go
 `cloudflare/circl` (file key) and **HSM-resident `softhsmv3` via `miekg/pkcs11`**
 (`C_Sign(CKM_ML_DSA)`, key never leaves the token).
 
+## Quickstart (end users) — real `cosign` binary, no sandbox
+
+Build the patched binary (§4: `git apply cosign-pqc.patch && go build ./cmd/cosign`
+from a clean `v3.0.6` checkout), then, verbatim from the patch header
+(`cosign-pqc.patch`):
+
+```bash
+# 1. Generate an ML-DSA-65 key pair (writes cosign.key / cosign.pub, custom
+#    PEM types — see §3's "Custom PEM types" note)
+COSIGN_KEY_ALGORITHM=ml-dsa-65 COSIGN_PASSWORD= cosign generate-key-pair
+
+# 2. Sign a blob. --use-signing-config=false and --new-bundle-format=false are
+#    REQUIRED — without them sign-blob routes through cosign v3's default
+#    signing-config/bundle path, which the ML-DSA branches don't cover.
+#    --tlog-upload=false is required because Rekor has no ML-DSA entry type
+#    yet (§5).
+cosign sign-blob   --key cosign.key --use-signing-config=false \
+                   --new-bundle-format=false --tlog-upload=false \
+                   --output-signature blob.sig --yes artifact
+
+# 3. Verify (also skip the transparency log)
+cosign verify-blob --key cosign.pub --insecure-ignore-tlog \
+                   --signature blob.sig artifact
+# -> Verified OK (ML-DSA-65 signature, 3309 bytes)
+```
+
+For the HSM-resident key path (softhsmv3, key never leaves the token), pass
+an `mldsa-pkcs11:` key ref to either `--key` in place of `cosign.key`/`cosign.pub` — see §7.
+
 ## 2. Pinned upstream
 
 | Field | Value |
@@ -46,7 +75,7 @@ patch now:
 | `pkg/signature/mldsa/mldsa65_test.go` | **NEW** — sign→verify round-trip, tamper-rejection, PEM-load tests |
 | `pkg/signature/mldsa/pkcs11.go` | **NEW** (`//go:build cgo`) — `PKCS11SignerVerifier`: HSM-resident ML-DSA-65 signing over the `mldsa-pkcs11:` key-ref scheme, `C_Sign(CKM_ML_DSA)` inside the token (§6) |
 | `pkg/signature/mldsa/pkcs11_nocgo.go` | **NEW** (`//go:build !cgo`) — stub `PKCS11SignerVerifier` that errors clearly on a `CGO_ENABLED=0` build |
-| `pkg/signature/keys.go` | ML-DSA branches in `VerifierForKeyRef` (incl. the `mldsa-pkcs11:` scheme), `loadKey`, and `PublicKeyPem` (§7) |
+| `pkg/signature/keys.go` | ML-DSA branches in `VerifierForKeyRef`, `SignerVerifierFromKeyRef` (both incl. the `mldsa-pkcs11:` scheme — this is the seam that dispatches an HSM key ref to `mldsa.NewPKCS11SignerVerifier`), `loadKey`, and `PublicKeyPem` (§7) |
 | `internal/key/svkeypair.go` | ML-DSA branch in `NewSignerVerifierKeypair` (+ `GetHashAlgorithm`/`GetPublicKeyPem`) so the keypair adapter handles a non-x509-marshalable key (§7) |
 | `cmd/cosign/cli/generate/generate_key_pair.go` | `COSIGN_KEY_ALGORITHM=ml-dsa-65` keygen branch (§7) |
 
@@ -176,9 +205,13 @@ Per the rules, the sandbox repo is left untouched. When the fork is ready:
   download with a build of this patched source (or a `pqctoday-org/cosign`
   release artifact `v3.0.6+pqctoday`).
 - **`tests/34_test_supply_chain_signing.sh`**: drop the OpenSSL fallback; use
-  the ML-DSA-65 keypair path. For the slice (tlog-disabled, per §5):
+  the ML-DSA-65 keypair path. For the slice (tlog-disabled, per §5) — the
+  `--use-signing-config=false --new-bundle-format=false` flags are required
+  (see the Quickstart above; cosign v3's default signing-config/new-bundle
+  path is not what the ML-DSA branches wire into):
   ```
-  cosign sign-blob   --key cosign-mldsa.key --tlog-upload=false \
+  cosign sign-blob   --key cosign-mldsa.key --use-signing-config=false \
+                     --new-bundle-format=false --tlog-upload=false \
                      --output-signature blob.sig --yes artifact.tar
   cosign verify-blob --key cosign-mldsa.pub --insecure-ignore-tlog \
                      --signature blob.sig artifact.tar

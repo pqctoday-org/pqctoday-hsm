@@ -55,6 +55,41 @@
 > change any claim this document traces, and `remoting/` wraps the engines
 > rather than adding a third profile-claiming implementation.
 
+> **Second update (2026-09-04).** This pass re-verified every citation in
+> §1–§6 directly against HEAD (`8f4deb6e`), fixed the drift and the one
+> genuinely wrong claim the 2026-09-01 note above had only flagged (not
+> corrected), and added §4B/§4C plus a new §6 covering PQC mechanism
+> implementation status (out of scope for the original conditions-only
+> matrix, added because the profile conditions alone say nothing about
+> whether this fork's actual reason for existing — ML-KEM/ML-DSA/SLH-DSA/
+> HSS/XMSS/XMSS-MT — works). Specifically:
+> - **§1's table and prose were wrong.** Rust's `supported_profiles()`
+>   (`rust/src/state.rs:268-275`, unchanged since the first staleness
+>   note) returns **four** profile IDs, not one — `CKP_BASELINE_PROVIDER`,
+>   `CKP_EXTENDED_PROVIDER`, `CKP_AUTHENTICATION_TOKEN`,
+>   `CKP_PUBLIC_CERTIFICATES_TOKEN` — and `init_profile_objects()` publishes
+>   one `CKO_PROFILE` object per entry, confirmed both by the function body
+>   and by a passing test that asserts exactly this
+>   (`rust/src/ffi.rs`'s `baseline_profile_object_is_public_and_findable`,
+>   now at line 20270 — see §4B). The claim "Rust does **not** claim
+>   Extended or Complete Provider" was true when this document was
+>   originally written and has been false since WS-11 Phase 1 (commit
+>   `dea9bfa1`, 2026-08-29); this pass fixes it rather than re-flagging it.
+> - **`rust/src/ffi.rs` drifted further**: 21,737 → 23,660 lines since the
+>   first note. `profile_object_ffi_tests` is now at
+>   `rust/src/ffi.rs:20220-20341` (was cited there as 18997-19125, before
+>   that 15981-16088); the three test names inside it are unchanged.
+> - **`p11_v32_compliance_test.cpp` did NOT drift further** despite the
+>   file growing to 10,814 lines — `test_profile_objects()` (line 1425),
+>   `CKP_BASELINE_PROVIDER_present` (1469), and
+>   `Extended_provider_claim_recorded` (1489/1495) are all at the exact
+>   lines this document already cited. Re-confirmed directly, not assumed.
+> - **`SoftHSM::computeSupportedProfiles()`** is confirmed at
+>   `src/lib/SoftHSM_objects.cpp:1012-1076` (the commit `dea9bfa1` location
+>   the first note already gave), and now has line-level citations for its
+>   Authentication Token (1053-1060) and Public Certificates Token
+>   (1062-1069) blocks in §4C below, which the first note left unquoted.
+
 **Purpose.** This document maps every PKCS#11 v3.2 profile condition either
 engine in this repository actually *claims* to satisfy — the C++ engine
 (`softhsmv3`) and the Rust engine (`softhsmrustv3`) — to the specific,
@@ -97,30 +132,47 @@ applications that call into a provider, not providers themselves.
 
 **C++ (`softhsmv3`)** computes its profile set at runtime rather than
 hard-coding it — `SoftHSM::computeSupportedProfiles()`,
-[`src/lib/SoftHSM_objects.cpp:949-993`](../src/lib/SoftHSM_objects.cpp#L949-L993).
-It checks the live `CK_FUNCTION_LIST_3_2` for 16 non-NULL function pointers
-and, if all are present, claims **`CKP_BASELINE_PROVIDER`**
-([line 977](../src/lib/SoftHSM_objects.cpp#L977)); if 5 further pointers are
-also present, it additionally claims **`CKP_EXTENDED_PROVIDER`**
-([line 986](../src/lib/SoftHSM_objects.cpp#L986)). It never computes or
-claims `CKP_COMPLETE_PROVIDER` — see §4 below for the exact rationale, quoted
-from source.
+[`src/lib/SoftHSM_objects.cpp:1012-1076`](../src/lib/SoftHSM_objects.cpp#L1012-L1076)
+(moved here from 949-993 by commit `dea9bfa1`, 2026-08-29 — confirmed
+against current HEAD, not carried forward from the prior pin). It checks the
+live `CK_FUNCTION_LIST_3_2` for 16 non-NULL function pointers and, if all are
+present, claims **`CKP_BASELINE_PROVIDER`**
+([line 1040](../src/lib/SoftHSM_objects.cpp#L1040)); if 5 further pointers
+are also present, it additionally claims **`CKP_EXTENDED_PROVIDER`**
+([line 1049](../src/lib/SoftHSM_objects.cpp#L1049)); it then
+unconditionally also claims **`CKP_AUTHENTICATION_TOKEN`** (conditioned on
+`C_Login`/`C_LoginUser`/`C_Logout`/`C_SignInit`+`C_Sign`-or-streaming being
+present — [line 1060](../src/lib/SoftHSM_objects.cpp#L1060)) and
+**`CKP_PUBLIC_CERTIFICATES_TOKEN`** unconditionally
+([line 1069](../src/lib/SoftHSM_objects.cpp#L1069)). See §4C for both. It
+never computes or claims `CKP_COMPLETE_PROVIDER` — see §5 below for the
+exact rationale, quoted from source.
 
-**Rust (`softhsmrustv3`)** hard-codes its claim — `init_profile_objects()`,
-[`rust/src/state.rs:227-246`](../rust/src/state.rs#L227-L246) — publishing
-exactly one `CKO_PROFILE` object carrying **`CKP_BASELINE_PROVIDER`**
-([line 239](../rust/src/state.rs#L239)). The function's own doc comment is
-explicit: *"Baseline Provider is the only profile this engine currently
-claims conformance to; add further profile objects here only after auditing
-every Profiles v3.2 requirement for that profile"*
-([lines 223-226](../rust/src/state.rs#L223-L226)). Rust does **not** claim
-Extended or Complete Provider.
+**Rust (`softhsmrustv3`)** also computes a **four-profile** list, not one —
+`supported_profiles()`,
+[`rust/src/state.rs:268-275`](../rust/src/state.rs#L268-L275), returns
+`[CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_AUTHENTICATION_TOKEN,
+CKP_PUBLIC_CERTIFICATES_TOKEN]`, and `init_profile_objects()`
+([lines 285-304](../rust/src/state.rs#L285-L304)) publishes one
+`CKO_PROFILE` object per entry. **This corrects a wrong claim this
+document itself made** in an earlier revision (pinned to commit `a158095`,
+2026-08-23) — at that commit Rust genuinely did hard-code a single Baseline
+Provider entry, and the function's doc comment (quoted in the previous
+revision) said so explicitly. WS-11 Phase 1 (commit `dea9bfa1`, six days
+later) widened the claim to all four profiles on both engines, and the doc
+comment at [`rust/src/state.rs:277-284`](../rust/src/state.rs#L277-L284)
+was updated accordingly ("WS-11 Phase 1 widened this from Baseline-only
+after auditing Extended/Authentication/Public-Certificates against every
+condition in Profiles v3.2 §5.3/§5.4/§5.5"). Neither engine claims Complete
+Provider. See §4B and §4C.
 
 | Profile | C++ (`softhsmv3`) | Rust (`softhsmrustv3`) |
 |---|---|---|
 | Baseline Provider (§5.1) | Claimed | Claimed |
 | Complete Provider (§5.2) | **Not** claimed (deliberate) | **Not** claimed (deliberate) |
-| Extended Provider (§5.3) | Claimed (conditionally, computed) | **Not** claimed |
+| Extended Provider (§5.3) | Claimed (conditionally, computed) | Claimed (hard-coded in the fixed list) |
+| Authentication Token (§5.4) | Claimed (conditionally, computed) | Claimed (hard-coded in the fixed list) |
+| Public Certificates Token (§5.5) | Claimed (unconditionally) | Claimed (hard-coded in the fixed list) |
 
 ---
 
@@ -163,7 +215,7 @@ differ.
 | 1 | "Supports the conditions required by the PKCS#11 Provider Implementation Conformance clauses [PKCS11_Spec]" | Yes | No dedicated test — meta-clause | Same as C++ |
 | 2 | Data types (a-q, same list as §2) | Yes | No runtime test — structural, via `rust/src/ck_abi.rs` / `constants.rs` type definitions | Same caveat as C++: compile-time only |
 | 3 | Attributes (a-i, same list as §2) | Yes | (a)-(g): pervasive, thousands of call sites in `rust/test_p11_conformance.js`. (h) `CKA_UNIQUE_ID`: `rust/test_p11_conformance.js`, section "Round-2 — T6 object management" ([line 943](../rust/test_p11_conformance.js#L943)) — checks `'CKA_UNIQUE_ID readable via attribute type 0x4 → OK'` ([line 982](../rust/test_p11_conformance.js#L982)), `'CKA_UNIQUE_ID non-empty'` ([line 983](../rust/test_p11_conformance.js#L983)), `'copy CKA_UNIQUE_ID readable → OK'` ([line 992](../rust/test_p11_conformance.js#L992)), `'copy received a FRESH CKA_UNIQUE_ID'` ([line 993](../rust/test_p11_conformance.js#L993)). (i) `CKA_PROFILE_ID`: see condition 4 below | `rust/test_p11_conformance.js` has no `#ifdef`-equivalent gating — the file runs top-to-bottom unconditionally (confirmed: no `process.argv`-based section skipping exists in the file; `grep` for CLI gating returned nothing) |
-| 4 | "Supports the following objects [PKCS11_Spec]: a. CKO_PROFILE with value CKP_BASELINE_PROVIDER" | Yes | **`rust/test_p11_conformance.js` has NO test of `CKO_PROFILE`/`CKA_PROFILE_ID` at all** — confirmed by exhaustive grep, zero hits. The real proof is a Rust-native `#[cfg(test)]` unit-test module, `profile_object_ffi_tests`, [`rust/src/ffi.rs:15981-16088`](../rust/src/ffi.rs#L15981-L16088): `baseline_profile_object_is_public_and_findable` ([line 16031](../rust/src/ffi.rs#L16031)) — asserts exactly one `CKO_PROFILE` object exists, is findable via `C_FindObjectsInit`/`C_FindObjects` in a session that never logged in (`setup()`, [line 15990](../rust/src/ffi.rs#L15990), does not call any login function — so "findable without login" is genuinely exercised, not just asserted in a comment), and carries `CKA_PROFILE_ID == CKP_BASELINE_PROVIDER`. Also `client_cannot_create_profile_object` ([line 16049](../rust/src/ffi.rs#L16049)) and `profile_object_is_fully_read_only` ([line 16063](../rust/src/ffi.rs#L16063)). Cross-engine corroboration (comparative, not independent): differential scenario `env.profile_objects`, [`tests/differential/scenarios.inc:194-215`](../tests/differential/scenarios.inc#L194-L215), whose captured divergence (`profile_ids`: C++ = "1,2", Rust = "1") is adjudicated `legal` in [`tests/differential/exceptions.json:92-99`](../tests/differential/exceptions.json#L92-L99) | **This is the single most important finding in this document.** The file the task brief pointed at (`rust/test_p11_conformance.js`) contains zero coverage of the Rust engine's core profile-conformance claim; the real proof lives in a different file (`rust/src/ffi.rs`, native `cargo test`) that a search scoped only to `test_p11_conformance.js` would miss entirely. `cargo test` run from `rust/` exercises this package's own test suite unmodified (per `rust/Cargo.toml`'s own comment, [line 12-ish](../rust/Cargo.toml)) — not feature-gated, runs by default |
+| 4 | "Supports the following objects [PKCS11_Spec]: a. CKO_PROFILE with value CKP_BASELINE_PROVIDER" | Yes | **`rust/test_p11_conformance.js` has NO test of `CKO_PROFILE`/`CKA_PROFILE_ID` at all** — confirmed by exhaustive grep, zero hits, still true at HEAD. The real proof is a Rust-native `#[cfg(test)]` unit-test module, `profile_object_ffi_tests`, now at [`rust/src/ffi.rs:20220-20341`](../rust/src/ffi.rs#L20220-L20341) (moved from 15981-16088, then 18997-19125, as the file grew to 23,660 lines — reconfirmed directly at HEAD `8f4deb6e`, not carried forward). `baseline_profile_object_is_public_and_findable` ([line 20270](../rust/src/ffi.rs#L20270)) now asserts **exactly four** `CKO_PROFILE` objects (`assert_eq!(found.len(), 4, ...)`) — WS-11 Phase 1 (2026-08-29) widened both the claim and this test together — findable via `C_FindObjectsInit`/`C_FindObjects` in a session that never logged in, and carrying the sorted id set `[CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_AUTHENTICATION_TOKEN, CKP_PUBLIC_CERTIFICATES_TOKEN]`. Also `client_cannot_create_profile_object` ([line 20302](../rust/src/ffi.rs#L20302)) and `profile_object_is_fully_read_only` ([line 20316](../rust/src/ffi.rs#L20316)). **Cross-engine corroboration has changed**: the differential scenario `env.profile_objects` ([`tests/differential/scenarios.inc:194-215`](../tests/differential/scenarios.inc#L194-L215)) still exists and still records a sorted `profile_ids` string, but the `LEGAL-PROFILE-SET-CLAIMED` exception this document previously cited (C++="1,2", Rust="1") **no longer exists in `tests/differential/exceptions.json`** — confirmed by exhaustive grep for `PROFILE`, zero hits. That is expected, not a regression: once Rust's claim widened to match C++'s four-profile set, the divergence the exception excused stopped occurring, so there is nothing left to except | The framing that made this "the single most important finding" — a search scoped to `rust/test_p11_conformance.js` would wrongly conclude Rust's claim is untested — still holds; the real proof still lives only in `rust/src/ffi.rs`'s native `cargo test` suite |
 | 5 | Functions (a-p, same list as §2) | Yes | Exercised as harness scaffolding throughout `rust/test_p11_conformance.js` (every section depends on `C_Initialize`/`C_OpenSession`/etc. succeeding) and throughout `rust/src/ffi.rs`'s broader `#[cfg(test)]` suite | Same caveat as C++: no dedicated named row per function |
 | 6 | "Supports the following mechanisms: a. None specified" | Yes (trivially) | N/A | Nothing to test |
 | 7 | Error Handling | Yes | Broad coverage across `rust/test_p11_conformance.js`'s many `check()` calls asserting specific `CKR_*` codes | General suite coverage, not profile-specific |
@@ -171,15 +223,16 @@ differ.
 
 ---
 
-## 4. Extended Provider (§5.3) — C++ engine only
+## 4. Extended Provider (§5.3) — C++ engine
 
-Rust does not claim this profile — `constants.rs` defines
-`CKP_EXTENDED_PROVIDER` but `state.rs`'s `init_profile_objects()` never
-pushes it, and no other Rust source path claims it (confirmed: the only
-other appearance of `CKP_EXTENDED_PROVIDER` anywhere under `rust/src/` is as
-an arbitrary forged-attribute test value inside
-`client_cannot_create_profile_object`,
-[`rust/src/ffi.rs:16054`](../rust/src/ffi.rs#L16054) — not a claim).
+**Correction (2026-09-04): this section's header used to read "C++ engine
+only" and stated Rust does not claim this profile — that was true at the
+`a158095` pin (2026-08-23) but has been false since WS-11 Phase 1
+(`dea9bfa1`, 2026-08-29).** Rust now claims Extended Provider as part of its
+hard-coded four-profile list (`rust/src/state.rs:268-275`, see §1). The
+per-condition table below was written for and remains accurate for the
+**C++** engine; §4B gives the equivalent (much shorter, since Rust hard-codes
+rather than computes) analysis for **Rust**.
 
 > "An implementation conforms to this specification as an Extended Provider
 > if it meets the following conditions:" — Profiles v3.2 §5.3
@@ -190,8 +243,8 @@ an arbitrary forged-attribute test value inside
 | 2 | "Supports the conditions required by the PKCS #11 Baseline Provider clauses section5.1" | Yes | See §2 above (Baseline Provider table) | Inherited, not re-tested independently |
 | 3 | "Supports the following data types [PKCS11_Spec]: a. CK_MECHANISM_TYPE b. CK_MECHANISM" | Yes | No runtime test — structural, via `pkcs11t.h`; used as literal types at ~2,000+ mechanism-dispatch call sites across the suite | Compile-time only |
 | 4 | "Supports the following attributes [PKCS11_Spec]: a. None specified" | Yes (trivially) | N/A | Nothing to test |
-| 5 | "Supports the following objects [PKCS11_Spec]: a. CKO_PROFILE with value CKP_EXTENDED_PROVIDER" | Yes (conditionally — computed by `computeSupportedProfiles()`, [line 981-986](../src/lib/SoftHSM_objects.cpp#L981-L986)) | **No dedicated PASS/FAIL row asserts `CKP_EXTENDED_PROVIDER` presence by name.** `test_profile_objects()` computes an internal `haveExtended` boolean from the same `C_FindObjects` result used for condition 4 above ([line 1485](../p11_v32_compliance_test.cpp#L1485)), but only uses it to gate whether `Extended_provider_claim_recorded` runs (PASS/FAIL) or is skipped — it never independently asserts "id 2 was found." The differential harness's `env.profile_objects` scenario *does* capture the actual `profile_ids` string (which includes "2" for C++) and that fact is recorded — as prose, not an assertion — in the `LEGAL-PROFILE-SET-CLAIMED` exception justification, [`tests/differential/exceptions.json:97`](../tests/differential/exceptions.json#L97): *"C++ publishes CKO_PROFILE ids 1 and 2 (Baseline Provider and Extended Provider)."* | A real, if indirect, gap: the presence of the `CKP_EXTENDED_PROVIDER` object is *observed* (twice) but never the subject of its own named assertion the way `CKP_BASELINE_PROVIDER_present` is for condition 4 of Baseline |
-| 6 | "Supports the following functions [PKCS11_Spec]: a. C_GetMechanismList b. C_GetMechanismInfo c. C_Login d. C_LoginUser e. C_Logout" | Yes | **(a),(b),(c),(e)** — not independently checked at the profile-claim site; the code comment explains why: *"C_GetMechanismList, C_GetMechanismInfo, C_Login, C_Logout (all baseline v2.40 — always present in `fl` if the engine loaded at all, so checking them adds no signal)"* ([`SoftHSM_objects.cpp:1475-1478`](../src/lib/SoftHSM_objects.cpp#L1475-L1478)). They ARE exercised elsewhere in the suite: `C_GetMechanismList` in `test_mechanism_discovery()` ([line 418](../p11_v32_compliance_test.cpp#L418)); `C_GetMechanismInfo` at, e.g., [line 1707](../p11_v32_compliance_test.cpp#L1707) and [line 8636](../p11_v32_compliance_test.cpp#L8636); `C_Login`/`C_Logout` in `init_token()` ([lines 402-405](../p11_v32_compliance_test.cpp#L402-L405)). **(d) `C_LoginUser`** — this is "the one function whose absence would make a claimed Extended Provider condition false" per the code's own comment ([line 1480](../p11_v32_compliance_test.cpp#L1480)) and is checked **two ways**: (i) `Extended_provider_claim_recorded`, `test_profile_objects()` [lines 1486-1496](../p11_v32_compliance_test.cpp#L1486-L1496) — `dlopen`s the engine and `dlsym`s `"C_LoginUser"`, PASS iff the symbol resolves non-NULL; (ii) a genuine functional call, `test_v30_session()`, category `Session`, check name `"C_LoginUser"` [lines 5367-5382](../p11_v32_compliance_test.cpp#L5367-L5382) — actually invokes `C_LoginUser` and asserts the return code is `CKR_USER_ALREADY_LOGGED_IN` or `CKR_OK` | This is the check the 2026-08-23 fix made genuinely conditional. **What it verifies:** the `C_LoginUser` symbol is exported from the loaded shared library (dlsym succeeds) — i.e., the claim is *satisfiable*. **What it does NOT verify:** that `C_GetMechanismList`, `C_GetMechanismInfo`, `C_Login`, or `C_Logout` export/behave correctly *as part of the Extended Provider claim check itself* (though all four are exercised elsewhere, as cited) |
+| 5 | "Supports the following objects [PKCS11_Spec]: a. CKO_PROFILE with value CKP_EXTENDED_PROVIDER" | Yes (conditionally — computed by `computeSupportedProfiles()`, [lines 1044-1049](../src/lib/SoftHSM_objects.cpp#L1044-L1049), corrected from the stale 981-986 citation) | **No dedicated PASS/FAIL row asserts `CKP_EXTENDED_PROVIDER` presence by name.** `test_profile_objects()` computes an internal `haveExtended` boolean from the same `C_FindObjects` result used for condition 4 above ([line 1489](../p11_v32_compliance_test.cpp#L1489), corrected from 1485 — re-confirmed against HEAD), but only uses it to gate whether `Extended_provider_claim_recorded` runs (PASS/FAIL) or is skipped — it never independently asserts "id 2 was found." **This differential exception no longer exists**: `tests/differential/exceptions.json` has zero hits for `PROFILE` at HEAD (confirmed by exhaustive grep) — the `LEGAL-PROFILE-SET-CLAIMED` entry this row previously cited (justifying C++="1,2" vs Rust="1" as a legal divergence) was for a divergence that stopped occurring once Rust's claim widened to match C++'s (see §1, §3 row 4); the `env.profile_objects` scenario itself is unchanged and still runs | A real, if indirect, gap: the presence of the `CKP_EXTENDED_PROVIDER` object is *observed* but never the subject of its own named assertion the way `CKP_BASELINE_PROVIDER_present` is for condition 4 of Baseline. Unlike the prior revision, there is no longer a differential-exception citation corroborating the observation at all — see §4C for the identical, now also-untested-by-name, gap for Authentication Token / Public Certificates Token |
+| 6 | "Supports the following functions [PKCS11_Spec]: a. C_GetMechanismList b. C_GetMechanismInfo c. C_Login d. C_LoginUser e. C_Logout" | Yes | **(a),(b),(c),(e)** — not independently checked at the profile-claim site; the code comment explains why: *"C_GetMechanismList, C_GetMechanismInfo, C_Login, C_Logout (all baseline v2.40 — always present in `fl` if the engine loaded at all, so checking them adds no signal)"*. **Correction: this comment lives in `p11_v32_compliance_test.cpp:1475-1478`, not `SoftHSM_objects.cpp:1475-1478` as the previous revision cited** — the file name was wrong (the near-identical line numbers across two different files is almost certainly how the mistake happened; re-verified directly by grepping the quoted text — zero hits in `SoftHSM_objects.cpp`, exact match in `p11_v32_compliance_test.cpp`). They ARE exercised elsewhere in the suite: `C_GetMechanismList` in `test_mechanism_discovery()` ([line 418](../p11_v32_compliance_test.cpp#L418), confirmed current); `C_GetMechanismInfo` at, e.g., [line 1707](../p11_v32_compliance_test.cpp#L1707) and [line 8636](../p11_v32_compliance_test.cpp#L8636) (both confirmed current); `C_Login`/`C_Logout` in `init_token()` ([lines 402-405](../p11_v32_compliance_test.cpp#L402-L405), confirmed current). **(d) `C_LoginUser`** — this is "the one function whose absence would make a claimed Extended Provider condition false" per the code's own comment ([line 1480](../p11_v32_compliance_test.cpp#L1480), confirmed current, same file correction as above) and is checked **two ways**: (i) `Extended_provider_claim_recorded`, `test_profile_objects()` [lines 1489-1495](../p11_v32_compliance_test.cpp#L1489-L1495) (corrected from 1486-1496) — `dlopen`s the engine and `dlsym`s `"C_LoginUser"`, PASS iff the symbol resolves non-NULL; (ii) a genuine functional call, `test_v30_session()`, category `Session`, check name `"C_LoginUser"` [lines 5372-5373](../p11_v32_compliance_test.cpp#L5372-L5373) (re-confirmed present in that function, exact sub-range not independently re-derived beyond confirming the surrounding function body is unchanged) — actually invokes `C_LoginUser` and asserts the return code is `CKR_USER_ALREADY_LOGGED_IN` or `CKR_OK` | This is the check the 2026-08-23 fix made genuinely conditional. **What it verifies:** the `C_LoginUser` symbol is exported from the loaded shared library (dlsym succeeds) — i.e., the claim is *satisfiable*. **What it does NOT verify:** that `C_GetMechanismList`, `C_GetMechanismInfo`, `C_Login`, or `C_Logout` export/behave correctly *as part of the Extended Provider claim check itself* (though all four are exercised elsewhere, as cited) |
 | 7 | "Supports the following mechanisms: a. None specified" | Yes (trivially) | N/A | Nothing to test |
 | 8 | "Supports Error Handling [PKCS11_Spec] for any supported object, function or mechanism" | Yes | Same general `ErrCodes`/`G4Retcodes` coverage as Baseline condition 7 | Not profile-specific |
 | 9, 10 | Optional clauses | N/A | — | Nothing to prove |
@@ -203,6 +256,107 @@ Baseline test — both run from one function invocation). Not `#ifdef`-gated:
 the `if (haveExtended)` branch is a runtime condition, not a compile-time
 exclusion, so the row always executes (as PASS/FAIL or SKIP) whenever the
 category runs.
+
+---
+
+## 4B. Extended Provider (§5.3) — Rust engine (new, 2026-09-04)
+
+Not present in any prior revision of this document — added because §1's
+"Rust does not claim Extended Provider" statement was wrong (see the
+correction note in §4). The condition list is identical to §4's C++ table;
+Rust's proof shape differs because the claim is hard-coded rather than
+computed from live function pointers.
+
+Conditions 1-4, 7-10 are identical in kind to §3's Baseline-Provider
+analysis for Rust (meta-clause / structural / trivial — no dedicated test
+possible or needed). The two conditions worth stating explicitly:
+
+- **Condition 5 (object, `CKO_PROFILE` with `CKP_EXTENDED_PROVIDER`):**
+  proven by the same test as §3 row 4 —
+  `baseline_profile_object_is_public_and_findable`
+  ([`rust/src/ffi.rs:20270`](../rust/src/ffi.rs#L20270)) asserts the full
+  4-id set, `CKP_EXTENDED_PROVIDER` included, by name (`assert_eq!(ids,
+  vec![CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER,
+  CKP_AUTHENTICATION_TOKEN, CKP_PUBLIC_CERTIFICATES_TOKEN])`). **This is
+  stronger than the C++ engine's coverage of the same condition** (§4 row 5
+  above): C++ observes `CKP_EXTENDED_PROVIDER`'s presence but never asserts
+  it by name; Rust's test does assert it by name, as one element of an
+  exact-set equality check.
+- **Condition 6 (functions — `C_GetMechanismList`, `C_GetMechanismInfo`,
+  `C_Login`, `C_LoginUser`, `C_Logout`):** unlike C++, Rust's claim is not
+  gated on any live function-pointer check at all — `supported_profiles()`
+  ([`rust/src/state.rs:268-275`](../rust/src/state.rs#L268-L275)) is a fixed
+  array, so the claim is unconditionally true by construction rather than
+  computed. There is consequently no equivalent of C++'s
+  `Extended_provider_claim_recorded` `dlsym` check — **not because Rust has
+  weaker coverage of whether the five functions actually exist (they are
+  exercised as ordinary harness scaffolding throughout
+  `rust/test_p11_conformance.js` and `rust/src/ffi.rs`'s broader test
+  suite, same as §3 condition 5), but because the claim itself does not
+  depend on a runtime check that could fail** the way C++'s conditional
+  `computeSupportedProfiles()` does. This is a genuine asymmetry, not a
+  test gap: it is a structural consequence of Rust hard-coding rather than
+  computing its profile set, unchanged since this document's original
+  Baseline-Provider analysis of the same design choice in §1.
+
+---
+
+## 4C. Authentication Token (§5.4) and Public Certificates Token (§5.5) — both engines (new, 2026-09-04)
+
+**Not discussed anywhere in the prior revision of this document** — the
+2026-09-01 staleness note flagged their existence as an unaddressed gap;
+this revision closes it. Both engines claim both profiles as of WS-11 Phase
+1 (`dea9bfa1`, 2026-08-29):
+
+- **C++**: `computeSupportedProfiles()` claims `CKP_AUTHENTICATION_TOKEN`
+  conditionally — `C_Login`, `C_LoginUser`, `C_Logout`, `C_SignInit`, and
+  (`C_Sign` or `C_SignUpdate`+`C_SignFinal`) must all be non-NULL
+  ([`src/lib/SoftHSM_objects.cpp:1055-1060`](../src/lib/SoftHSM_objects.cpp#L1055-L1060))
+  — and claims `CKP_PUBLIC_CERTIFICATES_TOKEN` **unconditionally**
+  ([`src/lib/SoftHSM_objects.cpp:1062-1069`](../src/lib/SoftHSM_objects.cpp#L1062-L1069)),
+  with the code comment's own rationale: `CKO_CERTIFICATE` creation is not
+  gated by any `WITH_*` build flag the way mechanisms are, so the claim
+  "needs no runtime probe beyond Baseline itself."
+- **Rust**: both are part of the same hard-coded four-entry
+  `supported_profiles()` array as Extended Provider (§4B) — unconditional
+  by construction, same asymmetry noted there.
+
+**Test coverage, verified directly rather than assumed:**
+
+- **C++**: `grep -n "CKP_AUTHENTICATION_TOKEN\|CKP_PUBLIC_CERTIFICATES_TOKEN"
+  p11_v32_compliance_test.cpp` returns **zero hits**. `test_profile_objects()`
+  ([line 1425](../p11_v32_compliance_test.cpp#L1425)) only ever names
+  `P_BASELINE`/`P_EXTENDED` as local constants
+  ([lines 1438-1439](../p11_v32_compliance_test.cpp#L1438-L1439)) — the ids
+  found for Authentication Token (3) and Public Certificates Token (4) flow
+  into the `idList` string embedded in other rows' PASS messages (so a
+  human reading test output can see "profile ids: [ 1 2 3 4 ]"), but
+  **no row asserts their presence by name or fails if either is absent**.
+  This is the same category of gap as §4 row 5 (`CKP_EXTENDED_PROVIDER`
+  unasserted-by-name), now affecting two more profiles, and with no
+  differential-exception citation to fall back on either (see §4 row 5's
+  correction).
+- **Rust**: covered, by name, as part of the same exact-set assertion
+  described in §4B —
+  `baseline_profile_object_is_public_and_findable`
+  ([`rust/src/ffi.rs:20270`](../rust/src/ffi.rs#L20270)) would fail if
+  either id were missing from the token's published set. **This makes
+  Rust's traceability for these two profiles' object condition strictly
+  better than C++'s** — the reverse of the general pattern elsewhere in
+  this document, where C++'s `p11_v32_compliance_test.cpp` is usually the
+  more thoroughly-instrumented suite.
+- **Neither engine's function conditions** (§5.4's `C_SignInit`+`C_Sign`
+  requirement, §5.5's implicit `CKO_CERTIFICATE`-creation requirement) have
+  any dedicated named test at the profile-claim site in either engine —
+  consistent with the same "exercised elsewhere as harness scaffolding,
+  not asserted at the claim site" pattern already documented for Baseline
+  condition 5 and Extended condition 6 above.
+
+**Bottom line:** both new claims are real (the code genuinely computes or
+hard-codes them) but under-tested by name on the C++ side specifically —
+this is a traceability gap to flag, not a false claim to correct. No
+fabrication: this section states only what was directly confirmed by
+reading the cited source at HEAD `8f4deb6e`.
 
 ---
 
@@ -263,25 +417,111 @@ either.
 
 ---
 
-## 6. Summary
+## 6. PQC mechanism implementation status — C++ engine (new, 2026-09-04)
+
+**Why this section exists, and why it is scoped differently from §1-§5
+above.** Everything above this line traces PKCS#11 Profiles v3.2 §5
+*profile conditions* — data types, attributes, objects, functions, error
+handling. None of the profiles either engine claims (Baseline, Extended,
+Authentication Token, Public Certificates Token) mandates support for any
+specific mechanism (each says, verbatim, "Supports the following
+mechanisms: a. None specified" — condition 6/7 throughout §2-§4C). Complete
+Provider is the *only* profile that mandates mechanism support (§5
+condition 6, "Supports all mechanisms"), and neither engine claims it,
+deliberately (§5). **Strictly by the profile-conditions logic above, this
+document could stop at §5 and every claim it makes would still be fully
+accurate.** But this repository's entire purpose (per its own `CLAUDE.md`)
+is PQC — ML-DSA, ML-KEM, SLH-DSA, and stateful HSS/XMSS/XMSS-MT — and a
+"PKCS#11 profile traceability" document that never says whether *those*
+mechanisms actually work would be misleading by omission, whatever the
+profile-conditions technicality says. This section closes that gap.
+**Everything below was verified directly against dispatch code at HEAD
+`8f4deb6e`** — grepping `case CKM_...`/`CKR_MECHANISM_INVALID` in
+`SoftHSM_sign.cpp`, `SoftHSM_keygen.cpp`, `SoftHSM_kem.cpp`, and the
+crypto-backend `OSSL*.cpp` files, plus `SoftHSM::prepareSupportedMechanisms()`
+([`src/lib/SoftHSM_slots.cpp:419-670`](../src/lib/SoftHSM_slots.cpp#L419-L670))
+for what is actually *advertised* via `C_GetMechanismList` — not copied from
+any prior gap-analysis document (several exist under `docs/`, e.g.
+`gap-analysis-pkcs11-v3.2.md`, but that one explicitly marks itself
+"historical... kept for provenance," 2026-06, and this section does not
+rely on it for any claim below).
+
+**For three different readers:**
+- **End users** (want to know: can I actually use algorithm X here?): every
+  row marked **IMPLEMENTED** below has real dispatch code that calls a real
+  cryptographic backend — not a stub that returns success without doing
+  anything, and not advertised-but-rejected. Rows marked otherwise say so
+  explicitly.
+- **System engineers / operators** (want to know: what's stable enough to
+  deploy on?): the one row that needs a caveat is **ML-DSA external-µ**
+  (`CKM_ML_DSA_EXTERNAL_MU`/`_GEN`) — real, dispatched code, but its
+  codepoints come from the **PKCS#11 v3.3 working draft**, not the ratified
+  v3.2 standard this document is otherwise about, and the draft's own
+  status is "proposed," not final. Treat it as pre-standard.
+- **Developers** (want to know: where's the code?): every row below cites
+  the dispatch file:line and the crypto-backend file(s).
+
+| PQC mechanism family | Standard | Key `CKM_`/`CKK_` values | Status | Evidence |
+|---|---|---|---|---|
+| **ML-KEM** | FIPS 203 | `CKM_ML_KEM_KEY_PAIR_GEN` (`0x0f`), `CKM_ML_KEM` (`0x17`), `CKK_ML_KEM` (`0x49`) | **IMPLEMENTED** | Keygen dispatch: [`SoftHSM_keygen.cpp:566,710`](../src/lib/SoftHSM_keygen.cpp#L566). Encapsulate/decapsulate: `C_EncapsulateKey` at [`SoftHSM_kem.cpp:126`](../src/lib/SoftHSM_kem.cpp#L126) (impl `encapsulateKeyImpl` at [172](../src/lib/SoftHSM_kem.cpp#L172)), `C_DecapsulateKey` at [461](../src/lib/SoftHSM_kem.cpp#L461) (impl `decapsulateKeyImpl` at [505](../src/lib/SoftHSM_kem.cpp#L505)) — real, only `CKM_ML_KEM` and `CKM_ECDH1_DERIVE` are accepted, everything else returns `CKR_MECHANISM_INVALID` ([line 194-197](../src/lib/SoftHSM_kem.cpp#L194-L197)); the classical `CKM_ECDH1_DERIVE`-as-KEM arms are separate functions, `encapsulateECDH`/`decapsulateECDH` at [773](../src/lib/SoftHSM_kem.cpp#L773)/[1089](../src/lib/SoftHSM_kem.cpp#L1089) (see the Hybrid/composite row below). Backend: `OSSLMLKEM.cpp`, `OSSLMLKEMKeyPair.cpp`, `OSSLMLKEMPrivateKey.cpp`, `OSSLMLKEMPublicKey.cpp` (all present under `src/lib/crypto/`) |
+| **ML-DSA** | FIPS 204 | `CKM_ML_DSA_KEY_PAIR_GEN` (`0x1c`), `CKM_ML_DSA` (`0x1d`), `CKM_HASH_ML_DSA` + 9 typed hash variants (`0x1f`, `0x23`-`0x2c`), `CKK_ML_DSA` (`0x4a`) | **IMPLEMENTED** | Sign dispatch: [`SoftHSM_sign.cpp:1141-1215`](../src/lib/SoftHSM_sign.cpp#L1141-L1215); mirrored verify dispatch: [`SoftHSM_sign.cpp:2849-2918`](../src/lib/SoftHSM_sign.cpp#L2849-L2918). Keygen: [`SoftHSM_keygen.cpp:560,599,690`](../src/lib/SoftHSM_keygen.cpp#L560). Backend: `OSSLMLDSA.cpp`, `OSSLMLDSAKeyPair.cpp`, `OSSLMLDSAPrivateKey.cpp`, `OSSLMLDSAPublicKey.cpp` |
+| **ML-DSA external-µ** | PKCS#11 **v3.3 draft** (not v3.2) | `CKM_ML_DSA_EXTERNAL_MU` (`0x403c`), `CKM_ML_DSA_EXTERNAL_MU_GEN` (`0x403b`) | **IMPLEMENTED, pre-ratification** | Codepoints defined in [`src/lib/vendor_mechanisms.h:54,81`](../src/lib/vendor_mechanisms.h#L54), whose own header comment calls them "the v3.3 draft's own name and codepoint... same 'proposed', not-yet-ratified caveat." **Confirmed absent from `pkcs11t.h`** (zero grep hits for either name) — they are real, dispatched mechanisms but not part of the ratified v3.2 standard the rest of this document traces. Sign dispatch: [`SoftHSM_sign.cpp:1217-1247`](../src/lib/SoftHSM_sign.cpp#L1217-L1247), verify: [`2920-2950`](../src/lib/SoftHSM_sign.cpp#L2920-L2950) |
+| **SLH-DSA** | FIPS 205 | `CKM_SLH_DSA_KEY_PAIR_GEN` (`0x2d`), `CKM_SLH_DSA` (`0x2e`), `CKM_HASH_SLH_DSA` + 9 typed hash variants (`0x34`, `0x36`-`0x3f`), `CKK_SLH_DSA` (`0x4b`) | **IMPLEMENTED** | Sign dispatch: [`SoftHSM_sign.cpp:1248-1321`](../src/lib/SoftHSM_sign.cpp#L1248-L1321); verify: [`2951-3024`](../src/lib/SoftHSM_sign.cpp#L2951-L3024). Keygen: [`SoftHSM_keygen.cpp:563,601,700`](../src/lib/SoftHSM_keygen.cpp#L563). Backend: `OSSLSLHDSA.cpp`, `OSSLSLHDSAKeyPair.cpp`, `OSSLSLHDSAPrivateKey.cpp`, `OSSLSLHDSAPublicKey.cpp` |
+| **HSS** (stateful hash-based) | RFC 8554, PKCS#11 v3.2 §6.65 | `CKM_HSS_KEY_PAIR_GEN` (`0x4032`), `CKM_HSS` (`0x4033`), `CKK_HSS` (`0x46`) | **IMPLEMENTED** | Sign-init dispatch `StatefulSignInit`: [`SoftHSM_sign.cpp:1500`](../src/lib/SoftHSM_sign.cpp#L1500), routed from `C_SignInit` at [line 1540](../src/lib/SoftHSM_sign.cpp#L1540); verify-side equivalent at [line 3196](../src/lib/SoftHSM_sign.cpp#L3196)/[3315](../src/lib/SoftHSM_sign.cpp#L3315). Keygen: [`SoftHSM_keygen.cpp:569,607,723-840`](../src/lib/SoftHSM_keygen.cpp#L569). Backend: vendored `src/lib/crypto/stateful/hash-sigs/` (28 files, RFC 8554 reference implementation) |
+| **XMSS / XMSS-MT** (stateful hash-based) | RFC 8391, NIST SP 800-208, PKCS#11 v3.2 §6.66 | `CKM_XMSS(_KEY_PAIR_GEN)` (`0x4036`/`0x4034`), `CKM_XMSSMT(_KEY_PAIR_GEN)` (`0x4037`/`0x4035`), `CKK_XMSS`/`CKK_XMSSMT` (`0x47`/`0x48`) | **IMPLEMENTED** | Codepoints are hardcoded as literal hex in `SoftHSM_slots.cpp` rather than via the `CKM_*` macro names, but the literals exactly match `pkcs11t.h`'s definitions ([`pkcs11t.h:1207-1210`](../src/lib/pkcs11/pkcs11t.h#L1207-L1210)) — confirmed byte-for-byte, not a vendor-range value (a header comment nearby, [`pkcs11t.h:1258-1271`](../src/lib/pkcs11/pkcs11t.h#L1258-L1271), warns these specific codepoints were once squatted on by an unrelated mechanism and must never be reused — current values are the correct, final OASIS assignment). Sign/verify dispatch: same `StatefulSignInit`/`StatefulVerify` machinery as HSS above ([`SoftHSM_sign.cpp:1502,1504,1541`](../src/lib/SoftHSM_sign.cpp#L1502)/[3198,3200,3316](../src/lib/SoftHSM_sign.cpp#L3198)). Keygen: [`SoftHSM_keygen.cpp:572,575,609,611,753-840`](../src/lib/SoftHSM_keygen.cpp#L572). Backend: vendored `src/lib/crypto/stateful/xmss-reference/` (RFC 8391 reference implementation). **Not affected** by the 9-parameter-set XMSS bug `CHANGELOG.md` [0.28.1] fixed — that entry is explicit it was Rust-only, and names the C++ engine's "independent RFC 8391 implementation" as the correctness oracle used to find the Rust bug |
+| **One-time-signature key protection** (`CKA_SENSITIVE`/`CKA_EXTRACTABLE`/`CKA_COPYABLE`) | PKCS#11 v3.2 §6.65.3/§6.66.4-5 | Applies to `CKO_PRIVATE_KEY` objects of type `CKK_HSS`/`CKK_XMSS`/`CKK_XMSSMT` | **IMPLEMENTED** (closed 2026-09-03, shipped as `CHANGELOG.md` [0.28.2]) | [`SoftHSM_objects.cpp:1196-1290`](../src/lib/SoftHSM_objects.cpp#L1196-L1290) — forces `CKA_SENSITIVE=TRUE`, `CKA_EXTRACTABLE=FALSE`, `CKA_COPYABLE=FALSE` at every object-creation path (`C_CreateObject` and `C_GenerateKeyPair` both route through this one function) for **all three** key types; a template may restate the value, never contradict it (`CKR_ATTRIBUTE_VALUE_INVALID` otherwise). **This corrects a real prior gap**: before this fix, only `CKA_COPYABLE` for HSS was forced (§6.65.3 names it explicitly); XMSS/XMSS-MT had no enforcement because §6.66.4-5 don't repeat that sentence, even though the underlying one-time-leaf-reuse forgery hazard is identical — the C++ half of the same fix the Rust engine needed more of (Rust additionally lacked `CKA_SENSITIVE`/`CKA_EXTRACTABLE` enforcement entirely; C++ already had those two). Test: `test_hbs_key_protection()`, [`p11_v32_compliance_test.cpp:1289`](../p11_v32_compliance_test.cpp#L1289), wired into the default run at [line 10639](../p11_v32_compliance_test.cpp#L10639) |
+| **Hybrid / composite KEM** (e.g. X25519MLKEM768, SecP256r1MLKEM768) | draft-ietf-tls-hybrid-design and similar; no PKCS#11 v3.2 mechanism exists for this | n/a — no dedicated `CKM_` codepoint in this engine | **NOT IMPLEMENTED AS A SINGLE MECHANISM — BY DESIGN, documented, not a gap** | Per this repo's own `CLAUDE.md`: the named hybrid-KEM combiner is "a Rust-engine + KMIP feature" (`rust/src/native/hybrid.rs`), exposed via KMIP/CACP. The C++ engine's role is the generic classical-KEM building block — `CKM_ECDH1_DERIVE` reachable through `C_EncapsulateKey`/`C_DecapsulateKey` ([`SoftHSM_kem.cpp:190,524`](../src/lib/SoftHSM_kem.cpp#L190)) — which a caller combines with `CKM_ML_KEM` and `CKM_CONCATENATE_BASE_AND_KEY` themselves to build the same construction one KDF step at a time. `CKM_SHAKE_256_KEY_DERIVATION` was added specifically to support this kind of construction (X-Wing's 96-byte expansion), per its own comment at [`SoftHSM_slots.cpp:503`](../src/lib/SoftHSM_slots.cpp#L503). The Rust engine's native `CKM_HPKE` mechanism (a real single-call hybrid-KEM+AEAD combiner, added per `CHANGELOG.md` `[0.28.0]`) is **explicitly not** extended to C++: that entry states "Rust engine only; C++ engine parity is a separately gated follow-on" |
+
+**What this section deliberately does NOT cover** (out of scope, not
+overlooked): classical mechanisms (RSA, ECDSA, ECDH, EdDSA, AES, HMAC,
+etc.) — those aren't this fork's differentiator and aren't what "PQC
+mechanisms are the whole point of this fork" refers to. Two specific
+CHANGELOG items worth a one-line disposition since they're recent and
+sound C++-adjacent: **`CKM_AES_CCM`/`CKM_AES_XTS`/`CKM_AES_GMAC`
+multi-part-streaming fixes and the widened HMAC-digest set in
+`CHANGELOG.md` `[0.28.0]` are both explicitly Rust-engine-only** (each
+entry is headed "Rust engine:" and the HKDF entry in the same release
+states outright "The C++ engine's equivalent path was already correct —
+this was Rust-only") — **no correction to this document was needed for
+either**, because this document never claimed otherwise and the C++
+dispatch code for those three AEAD mechanisms was independently confirmed
+present and unmodified by this pass.
+
+---
+
+## 7. Summary
 
 | Profile | Total conditions | Directly proven by a named test | Structural / meta / trivial (no test needed) | Documented gap |
 |---|---|---|---|---|
 | Baseline Provider — C++ | 9 | 4 (attributes, objects) | 4 (data types, mechanisms, optional×2) | 1 (functions — no per-function named row; scaffolding-only proof) |
 | Baseline Provider — Rust | 9 | 4 (attributes, objects — via `rust/src/ffi.rs`, NOT `test_p11_conformance.js`) | 4 | 1 (functions — same as C++) |
-| Extended Provider — C++ | 10 | 2 (functions [C_LoginUser only, twice], inherited Baseline) | 5 (inherited meta, data types, attributes, mechanisms, optional×2) | 1 (objects — CKP_EXTENDED_PROVIDER presence observed but never independently asserted by name); 4 of condition 6's 5 named functions not checked at the claim site itself (though exercised elsewhere) |
+| Extended Provider — C++ | 10 | 2 (functions [C_LoginUser only, twice], inherited Baseline) | 5 (inherited meta, data types, attributes, mechanisms, optional×2) | 1 (objects — CKP_EXTENDED_PROVIDER presence observed but never independently asserted by name, and the differential-exception citation that used to corroborate it is now gone — see §4 row 5); 4 of condition 6's 5 named functions not checked at the claim site itself (though exercised elsewhere) |
+| Extended Provider — Rust (new, §4B) | 10 | 3 (attributes, objects — asserted **by name** as part of the 4-id exact-set check, unlike C++; inherited Baseline) | 5 (inherited meta, data types, attributes, mechanisms, optional×2) | 0 for the object condition (stronger than C++ here); the functions condition has no dedicated check at all, but as a structural consequence of the claim being hard-coded rather than computed — not a coverage gap |
+| Authentication Token — both engines (new, §4C) | Not enumerated per-condition in this document | 0 named — object presence flows into other rows' output text (C++) or the same exact-set assertion (Rust), function condition (C_SignInit+C_Sign) untested at claim site on both | — | Object condition: C++ untested-by-name (same category as Extended Provider); Rust tested-by-name. Function condition: untested at claim site on both engines |
+| Public Certificates Token — both engines (new, §4C) | Not enumerated per-condition in this document | Same pattern as Authentication Token | — | Same as Authentication Token |
 | Complete Provider — both | 8 | N/A — not claimed | — | N/A — deliberately not claimed, rationale quoted in §5 |
+| **PQC mechanisms — C++ (new, §6)** | 6 families + 1 protection property | All 6 mechanism families confirmed **IMPLEMENTED** with real dispatch + backend code (ML-KEM, ML-DSA, ML-DSA external-µ [pre-ratification], SLH-DSA, HSS, XMSS/XMSS-MT); key-protection property confirmed IMPLEMENTED (closed 2026-09-03) | — | Hybrid/composite KEM has no single dedicated mechanism — by design (Rust-engine + KMIP feature), not a C++ gap |
 
 **The one condition this document could NOT find a real test for, full
-stop:** none — every numbered condition has either a real test, a
+stop:** none — every numbered condition in §2-§4C has either a real test, a
 structural/meta/trivial reason no test is possible, or an explicitly
-documented partial-coverage gap (Extended Provider condition 5's object
-presence, and both profiles' condition 5/6 "functions" conditions lacking a
-per-function named assertion at the claim site). The most significant
-finding is not an untested condition but a **misdirected search target**:
-`rust/test_p11_conformance.js` — the file most likely to be checked first —
-has zero coverage of the Rust engine's `CKO_PROFILE` claim; the real proof
-lives in `rust/src/ffi.rs`'s native `cargo test` suite instead. A future
-auditor who checks only the JS file, as this task's own step 3 initially
-suggested doing, would wrongly conclude Rust's Baseline Provider claim is
-untested.
+documented partial-coverage gap (the object-presence gaps for Extended
+Provider [C++], Authentication Token, and Public Certificates Token; the
+"functions" conditions across every profile lacking a per-function named
+assertion at the claim site). The most significant finding, unchanged since
+the original revision of this document, is not an untested condition but a
+**misdirected search target**: `rust/test_p11_conformance.js` — the file
+most likely to be checked first — has zero coverage of the Rust engine's
+`CKO_PROFILE` claim for *any* of its four profiles; the real proof lives in
+`rust/src/ffi.rs`'s native `cargo test` suite instead. A future auditor who
+checks only the JS file would wrongly conclude Rust's profile claims are
+untested. **This 2026-09-04 revision's own most significant finding**:
+the previous revision's §1 and §4 made a claim ("Rust does not claim
+Extended Provider") that was simply wrong at HEAD — not stale, wrong — a
+reminder that even a document whose stated purpose is re-deriving every
+claim from source on every audit will still go wrong the moment code
+changes between audits and the document isn't re-verified. §6 adds the one
+dimension the profile-conditions analysis structurally cannot see: whether
+this fork's actual PQC mechanisms work. They do, C++-engine-side, with one
+pre-ratification caveat (ML-DSA external-µ) and one by-design absence
+(single-mechanism hybrid KEM) — both documented, neither fabricated.

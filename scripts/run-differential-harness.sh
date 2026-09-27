@@ -58,7 +58,28 @@ done
 
 if [[ $DO_BUILD -eq 1 ]]; then
   echo "==> building the C++ engine ($BUILD_DIR)"
-  if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+  # Reconfigure unless the previous configure actually SUCCEEDED. Testing
+  # CMakeCache.txt alone (what this did) tests only that configure once
+  # *started*: cmake writes the cache early and then, on a failure, leaves it
+  # behind with no generated build system. The next run therefore skipped
+  # configure and went straight to `cmake --build`, which died with
+  #
+  #     gmake: Makefile: No such file or directory
+  #
+  # and kept dying on every subsequent run until a human deleted the directory
+  # by hand. Any interrupted configure — Ctrl-C, a missing submodule, a full
+  # disk — wedged the build dir permanently.
+  #
+  # Found 2026-09-24: a first gate run failed to configure because this
+  # worktree's submodules were not initialised (src/lib/crypto/oqs/liboqs was
+  # an empty directory), and every later run then failed for this *different*
+  # reason, masking the real cause and costing a full gate cycle to diagnose.
+  #
+  # The generated build system is the honest success marker, so check for it
+  # too. Both generator outputs are accepted: Unix Makefiles (the default here)
+  # and Ninja, so this keeps working if -G Ninja is ever used.
+  if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]] \
+     || { [[ ! -f "$BUILD_DIR/Makefile" ]] && [[ ! -f "$BUILD_DIR/build.ninja" ]]; }; then
     cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
           -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3 2>/dev/null || echo /usr)"
   fi
@@ -68,22 +89,30 @@ if [[ $DO_BUILD -eq 1 ]]; then
   ( cd rust && cargo build --lib )
 fi
 
-# Detected AFTER the build, not before: on a fresh $BUILD_DIR (no prior
-# successful run) the .dylib does not exist yet at the top of this script,
-# so checking here-then-never-again would silently lock onto the .so
-# fallback forever — even after the build above produces a real .dylib —
-# and every subsequent run would FATAL "engine not built" against a path
-# macOS never produces. Only ever caught because every prior invocation of
-# this script happened to run against an ALREADY-built $BUILD_DIR (its own
-# header even hints at that habit: "--no-build only when you have just
-# built both yourself"); promoting this script into the default local
-# gate (2026-08-23) was the first genuinely from-clean-state run and hit
-# it immediately. If DO_BUILD=0, this still correctly detects whatever
-# was already on disk, unchanged from before.
-CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.dylib"
-[[ -f "$CPP_ENGINE" ]] || CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.so"
-RUST_ENGINE="rust/target/debug/libsofthsmrustv3.dylib"
-[[ -f "$RUST_ENGINE" ]] || RUST_ENGINE="rust/target/debug/libsofthsmrustv3.so"
+# Resolve outputs AFTER building, honor Cargo's configured target directory,
+# and select the shared-library format for the current operating system. This
+# prevents a mounted Linux container from loading a stale host-format library
+# merely because that filename also exists in the worktree.
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  if [[ "$CARGO_TARGET_DIR" = /* ]]; then
+    RUST_TARGET_DIR="$CARGO_TARGET_DIR"
+  else
+    RUST_TARGET_DIR="$REPO/rust/$CARGO_TARGET_DIR"
+  fi
+else
+  RUST_TARGET_DIR="$REPO/rust/target"
+fi
+
+case "$(uname -s)" in
+  Darwin)
+    CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.dylib"
+    RUST_ENGINE="$RUST_TARGET_DIR/debug/libsofthsmrustv3.dylib"
+    ;;
+  *)
+    CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.so"
+    RUST_ENGINE="$RUST_TARGET_DIR/debug/libsofthsmrustv3.so"
+    ;;
+esac
 
 for f in "$CPP_ENGINE" "$RUST_ENGINE"; do
   [[ -f "$f" ]] || { echo "FATAL: engine not built: $f" >&2; exit 2; }

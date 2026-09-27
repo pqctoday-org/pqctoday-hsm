@@ -41,7 +41,13 @@ src/bin/
   softhsm2-keyconv/ # Key conversion utility
 ```
 
-**Retained algorithms**: RSA, ECDSA, ECDH, EdDSA, AES, SHA-1/224/256/384/512, HMAC, CMAC.
+**Retained algorithms**: RSA, ECDSA, ECDH, EdDSA, AES, SHA-1/224/256/384/512,
+SHA-3, MD5, RIPEMD-160, HMAC, CMAC. MD5 and SHA-1 are retained deliberately
+(decision D2, 2026-09-07) and are present in BOTH engines: they are broken for
+any security purpose and must never be selected for new signatures, but callers
+still have to verify existing artefacts, and two engines advertising different
+mechanism sets is its own hazard. As of 2026-09-07 the Rust engine advertises a
+superset of the C++ engine's mechanisms.
 
 **PQC additions**: ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA (SHA2/SHAKE × 12
 param sets), and stateful HSS/LMS and XMSS/XMSS-MT. The named hybrid KEM
@@ -120,7 +126,37 @@ New functions in pkcs11f.h:
 
 ## Source of Truth — PKCS#11 Constants
 
-**The PKCS#11 v3.2 spec and its normative header `pkcs11t.h` are the ONLY reference for all `CK*` constant values.**
+**The PKCS#11 v3.2 spec and its normative header `pkcs11t.h` are the reference for all `CK*` constant values**, subject to the v3.3 precedence rule below.
+
+### v3.2 baseline, v3.3 fills the gaps (standing rule, 2026-09-07)
+
+- **v3.2 is the baseline.** It is the published OASIS Standard
+  (`docs/refs/pkcs11-spec-v3.2-os.pdf`). The engines report Cryptoki **3.2.0**,
+  and every citation in `tests/differential/exceptions.json` references v3.2
+  section and table numbers.
+- **v3.3 governs where v3.2 has a gap or a plain error.** The OASIS PKCS 11
+  TC's working tree is vendored at
+  `docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/`. Where v3.2 is silent,
+  ambiguous, or demonstrably wrong, v3.3 is the authority.
+- **v3.3 does NOT otherwise supersede v3.2.** It is an *unpublished* working
+  draft — no v3.3 CSD/CS/OS exists on `docs.oasis-open.org`, its own header
+  still declares `CRYPTOKI_VERSION_MINOR 2`, and it moves with every TC commit
+  (see that directory's `PROVENANCE.md`). Do not bump the reported Cryptoki
+  version to 3.3, and do not re-anchor citations to it: its markdown carries no
+  section numbers at all.
+- **Every v3.3-derived constant correction is registered**, with a reason and a
+  `file:line` + commit citation, in `V33_CORRECTIONS` in
+  `scripts/check_pkcs11_constants.py`. That table is the only sanctioned way
+  the local header may differ from the pinned canonical v3.2 include; anything
+  else still fails the gate. Currently one correction, covering
+  `CKA_ENCAPSULATE_TEMPLATE` and `CKA_DECAPSULATE_TEMPLATE`, which v3.2 omitted
+  `CKF_ARRAY_ATTRIBUTE` from though they are array attributes exactly like the
+  three older `*_TEMPLATE` attributes.
+- **The v3.3 markdown is prose only.** Use it to read what a rule *says*; never
+  to check a section or table number. Its content has drifted from v3.2 (for
+  example `CKA_UNIQUE_ID` moved sections, and it renames
+  `CKA_HSS_KEYS_REMAINING` to `CKA_KEYS_REMAINING` — a rename NOT present in
+  either header).
 
 - Canonical `pkcs11t.h`: https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/pkcs11t.h
 - Local copy: `src/lib/pkcs11/pkcs11t.h` (kept in sync with the spec)

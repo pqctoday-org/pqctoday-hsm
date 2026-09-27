@@ -356,6 +356,13 @@ CK_RV SoftHSM::C_SessionCancel(CK_SESSION_HANDLE hSession, CK_FLAGS flags)
 	if (!match)
 		return CKR_OK;
 
+	// A cancelled message-based operation must not leave re-arm state behind:
+	// resetOp() deliberately preserves it (so a message op survives its own
+	// per-message resets), so cancelling has to drop it explicitly, exactly as
+	// C_MessageSignFinal / C_MessageVerifyFinal do. Unconditional because this
+	// only runs when `match` says a requested family was live, and the values
+	// are inert for every non-message family.
+	session->clearMessageOp();
 	session->resetOp();
 
 	return CKR_OK;

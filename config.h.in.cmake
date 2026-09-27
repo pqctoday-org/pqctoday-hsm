@@ -157,6 +157,9 @@
 /* Compile with OpenSSL support */
 #cmakedefine WITH_OPENSSL @WITH_OPENSSL@
 
+/* Compile with liboqs support (Classic McEliece — D-2; OFF for WASM, D-4) */
+#cmakedefine WITH_LIBOQS @WITH_LIBOQS@
+
 /* Compile with raw RSA PKCS PSS */
 #cmakedefine WITH_RAW_PSS @WITH_RAW_PSS@
 

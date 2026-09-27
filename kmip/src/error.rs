@@ -14,6 +14,73 @@ use thiserror::Error;
 #[repr(u32)]
 pub enum ResultReason {
     ItemNotFound          = 0x0000_0001,
+    // ── G10 (2026-09-06): the §11.48 reasons this server could not name ──
+    //
+    // Coverage was 41 of 71. The absences that mattered most: the server
+    // implements Set Constraints and Process but could not report
+    // `Constraint Violation` or `Duplicate Process Request`; and every
+    // codec fault collapsed to `Invalid Message`, so a client could not
+    // tell an unknown tag from a malformed frame.
+    /// `Application Namespace Not Supported` (§11.48, 0x0f).
+    ApplicationNamespaceNotSupported = 0x0000_000f,
+    /// `Key Compression Type Not Supported` (§11.48, 0x11).
+    KeyCompressionTypeNotSupported = 0x0000_0011,
+    /// `Encoding Option Error` (§11.48, 0x12).
+    EncodingOptionError = 0x0000_0012,
+    /// `Attestation Required` (§11.48, 0x14).
+    AttestationRequired = 0x0000_0014,
+    /// `Attestation Failed` (§11.48, 0x15).
+    AttestationFailed = 0x0000_0015,
+    /// `Numeric Range` (§11.48, 0x1b).
+    NumericRange = 0x0000_001b,
+    /// `Read Only Attribute` (§11.48, 0x1d).
+    ReadOnlyAttribute = 0x0000_001d,
+    /// `Multi Valued Attribute` (§11.48, 0x1e).
+    MultiValuedAttribute = 0x0000_001e,
+    /// `Unsupported Attribute` (§11.48, 0x1f).
+    UnsupportedAttribute = 0x0000_001f,
+    /// `Attribute Instance Not Found` (§11.48, 0x20).
+    AttributeInstanceNotFound = 0x0000_0020,
+    /// `Bad Password` (§11.48, 0x25).
+    BadPassword = 0x0000_0025,
+    /// `Codec Error` (§11.48, 0x26).
+    CodecError = 0x0000_0026,
+    /// `Illegal Object Type` (§11.48, 0x28).
+    IllegalObjectType = 0x0000_0028,
+    /// `Internal Server Error` (§11.48, 0x2a).
+    InternalServerError = 0x0000_002a,
+    /// `Invalid Correlation Value` (§11.48, 0x2e).
+    InvalidCorrelationValue = 0x0000_002e,
+    /// `Key Wrap Type Not Supported` (§11.48, 0x32).
+    KeyWrapTypeNotSupported = 0x0000_0032,
+    /// `Missing Initialization Vector` (§11.48, 0x34).
+    MissingInitializationVector = 0x0000_0034,
+    /// `Not Authorised` (§11.48, 0x39).
+    NotAuthorised = 0x0000_0039,
+    /// `Server Limit Exceeded` (§11.48, 0x3a).
+    ServerLimitExceeded = 0x0000_003a,
+    /// `Unknown Enumeration` (§11.48, 0x3b).
+    UnknownEnumeration = 0x0000_003b,
+    /// `Unknown Message Extension` (§11.48, 0x3c).
+    UnknownMessageExtension = 0x0000_003c,
+    /// `Unknown Tag` (§11.48, 0x3d).
+    UnknownTag = 0x0000_003d,
+    /// `Protection Storage Unavailable` (§11.48, 0x44).
+    ProtectionStorageUnavailable = 0x0000_0044,
+    /// `PKCS#11 Codec Error` (§11.48, 0x45).
+    Pkcs11CodecError = 0x0000_0045,
+    /// `PKCS#11 Invalid Function` (§11.48, 0x46).
+    Pkcs11InvalidFunction = 0x0000_0046,
+    /// `PKCS#11 Invalid Interface` (§11.48, 0x47).
+    Pkcs11InvalidInterface = 0x0000_0047,
+    /// `Private Protection Storage Unavailable` (§11.48, 0x48).
+    PrivateProtectionStorageUnavailable = 0x0000_0048,
+    /// `Public Protection Storage Unavailable` (§11.48, 0x49).
+    PublicProtectionStorageUnavailable = 0x0000_0049,
+    /// `Constraint Violation` (§11.48, 0x4b).
+    ConstraintViolation = 0x0000_004b,
+    /// `Duplicate Process Request` (§11.48, 0x4c).
+    DuplicateProcessRequest = 0x0000_004c,
     ResponseTooLarge      = 0x0000_0002,
     AuthenticationNotSuccessful = 0x0000_0003,
     InvalidMessage        = 0x0000_0004,
@@ -344,6 +411,36 @@ impl KmipError {
     }
     pub fn attribute_not_found(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::AttributeNotFound, msg)
+    }
+    pub fn unsupported_attribute(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::UnsupportedAttribute, msg)
+    }
+    pub fn read_only_attribute(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::ReadOnlyAttribute, msg)
+    }
+    pub fn attribute_instance_not_found(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::AttributeInstanceNotFound, msg)
+    }
+    pub fn constraint_violation(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::ConstraintViolation, msg)
+    }
+    pub fn duplicate_process_request(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::DuplicateProcessRequest, msg)
+    }
+    pub fn unknown_tag(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::UnknownTag, msg)
+    }
+    pub fn unknown_enumeration(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::UnknownEnumeration, msg)
+    }
+    pub fn codec_error(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::CodecError, msg)
+    }
+    pub fn internal_server_error(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::InternalServerError, msg)
+    }
+    pub fn not_authorised(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::NotAuthorised, msg)
     }
     pub fn key_value_not_present(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::KeyValueNotPresent, msg)

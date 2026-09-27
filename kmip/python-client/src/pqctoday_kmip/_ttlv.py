@@ -61,7 +61,7 @@ NAMED_INTEGER_MASKS: dict[str, dict[str, int]] = {
     "ProtectionStorageMask":  PROTECTION_STORAGE_MASK,
 }
 
-# TTLV type codepoints — KMIP 3.0 §9.1.1.
+# TTLV type codepoints — KMIP 3.0 CSD02 §11.25.
 TTLV_TYPE: dict[str, int] = {
     "Structure":        0x01,
     "Integer":          0x02,
@@ -74,6 +74,10 @@ TTLV_TYPE: dict[str, int] = {
     "DateTime":         0x09,
     "Interval":         0x0A,
     "DateTimeExtended": 0x0B,
+    # KMIP 3.0 (§11.25) — real wire types, not aliases.
+    "Identifier":       0x0C,
+    "Reference":        0x0D,
+    "NameReference":    0x0E,
 }
 
 XML_TYPE_ALIASES: dict[str, str] = {
@@ -364,7 +368,8 @@ def _encode_value(node: TtlvNode) -> bytes:
         return _struct.pack(">I", code)
     if t == "Boolean":
         return _struct.pack(">Q", 1 if str(v).lower() in ("true", "1") else 0)
-    if t == "TextString":
+    if t in ("TextString", "Identifier", "Reference", "NameReference"):
+        # §10.1.2 — all four are UTF-8; only the type byte differs.
         return str(v).encode("utf-8")
     if t == "ByteString":
         return bytes.fromhex(str(v))
@@ -457,7 +462,7 @@ def decode_one(buf: bytes, offset: int = 0) -> tuple[TtlvNode, int]:
         value = _struct.unpack(">I", body)[0]
     elif type_name == "Boolean":
         value = bool(_struct.unpack(">Q", body)[0])
-    elif type_name == "TextString":
+    elif type_name in ("TextString", "Identifier", "Reference", "NameReference"):
         value = body.decode("utf-8")
     elif type_name == "ByteString":
         value = body.hex()

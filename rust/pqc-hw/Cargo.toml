@@ -1,0 +1,22 @@
+[package]
+name = "pqc-hw"
+version = "0.1.0"
+edition = "2024"
+description = "Userspace transport and simulator for PQC Today FPGA accelerators"
+license = "Apache-2.0"
+
+[features]
+default = []
+hw-accel = []
+diagnostic-timing = []
+
+[[bin]]
+name = "pqc-fpga-check"
+path = "src/bin/pqc_fpga_check.rs"
+
+[dependencies]
+libc = "0.2"
+sha3 = "0.10.8"
+# Scrubs secret inputs (SK.seed / SEED) staged for the hashsig engine.
+# Already in Cargo.lock through the engine crate; no new crate enters the graph.
+zeroize = "1"

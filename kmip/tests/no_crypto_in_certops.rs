@@ -207,14 +207,59 @@ fn wasm_dependency_graph_has_no_c_backed_crypto() {
     );
 
     let tree = String::from_utf8_lossy(&output.stdout);
+    let packages = cargo_tree_package_names(&tree);
     for banned_crate in ["ring", "aws-lc-rs", "aws_lc_rs"] {
         assert!(
-            !tree.contains(banned_crate),
+            !packages.iter().any(|name| *name == banned_crate),
             "invariant 0b violated (\"pure Rust... ring, aws-lc-rs... \
              gone from production code\"): `{banned_crate}` appears in the \
              wasm32 (--no-default-features) dependency graph:\n{tree}"
         );
     }
+}
+
+/// Package names from `cargo tree` output, one per line.
+///
+/// Each line is `<tree-drawing prefix><name> v<version>[ (<path or note>)]`,
+/// and the ROOT line carries the manifest's filesystem path. Substring
+/// matching on the whole output is therefore wrong in both directions: it
+/// fires on a checkout whose directory happens to be named after a banned
+/// crate (a worktree called `aws-lc-rs-backend` failed this test while
+/// `cargo tree -i aws-lc-rs --target wasm32-unknown-unknown` correctly
+/// reported nothing), and `ring` matches any crate with those four letters
+/// in its name. Comparing the name token is exact in both directions.
+fn cargo_tree_package_names(tree: &str) -> Vec<&str> {
+    tree.lines()
+        .filter_map(|line| {
+            let name = line
+                .trim_start_matches(|c: char| {
+                    c.is_whitespace()
+                        || matches!(c, '\u{2502}' | '\u{251c}' | '\u{2514}' | '\u{2500}' | '|' | '+' | '\\' | '-')
+                })
+                .split_whitespace()
+                .next()?;
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// The guard above must see dependencies, not the path it is run from.
+#[test]
+fn cargo_tree_names_ignore_the_checkout_path_and_match_whole_names() {
+    let tree = "pqctoday-kmip v0.17.0 (/ag/pqctoday-hsm/.worktrees/aws-lc-rs-backend/kmip)\n\
+                \u{251c}\u{2500}\u{2500} anyhow v1.0.103\n\
+                \u{2502}   \u{2514}\u{2500}\u{2500} stringprep v0.1.5\n\
+                \u{2514}\u{2500}\u{2500} zeroize v1.9.0\n";
+    let names = cargo_tree_package_names(tree);
+    assert!(names.contains(&"pqctoday-kmip"), "root package is listed: {names:?}");
+    assert!(names.contains(&"anyhow") && names.contains(&"zeroize"), "deps listed: {names:?}");
+    // The worktree directory is named after the crate; it is not a dependency.
+    assert!(!names.iter().any(|n| *n == "aws-lc-rs"), "checkout path must not count as a dependency");
+    // `stringprep` contains "ring"; only whole-name matches may fire.
+    assert!(!names.iter().any(|n| *n == "ring"), "substring of another crate must not count");
+    // A real dependency still gets caught.
+    let bad = cargo_tree_package_names("root v0.1.0 (/tmp/x)\n\u{251c}\u{2500}\u{2500} aws-lc-rs v1.18.0\n");
+    assert!(bad.iter().any(|n| *n == "aws-lc-rs"), "a genuine dependency is still detected");
 }
 
 /// A gate that always passes proves nothing — these check the stripping

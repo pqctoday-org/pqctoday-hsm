@@ -12,6 +12,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use pqc_rest_pkcs11::routes;
 use pqctoday_tls::TlsProfile;
+use rustls::pki_types::pem::PemObject;
 
 #[derive(Parser, Debug)]
 #[command(name = "pqc-rest-pkcs11")]
@@ -37,6 +38,16 @@ struct Cli {
     /// the same name. OFF by default (plan RW0 posture).
     #[arg(long = "enable-destructive", env = "PKCS11_REMOTE_ENABLE_DESTRUCTIVE", default_value_t = false)]
     enable_destructive: bool,
+
+    /// Prometheus `/metrics` scrape endpoint, plain HTTP (same posture as
+    /// pqctoday-kmip's own `--metrics-listen`: same-pod/network-namespace
+    /// scraper, or a network policy). docs/remediation-plan-auth-visibility-
+    /// evidence-log-09102026.md, Gap 1/Q3 — currently just
+    /// cacp_auth_failures_total; appliance-side port choice (9098 here is a
+    /// placeholder distinct from KMIP's 9095) still needs coordinating with
+    /// pqctoday-cacp's systemd units and Fluent Bit scrape config.
+    #[arg(long, env = "PKCS11_REMOTE_METRICS_LISTEN", default_value = "127.0.0.1:9098")]
+    metrics_listen: SocketAddr,
 }
 
 #[tokio::main]
@@ -59,6 +70,12 @@ async fn main() -> anyhow::Result<()> {
 
     pqctoday_pkcs11_remote_core::verbs::bootstrap()?;
 
+    // Gap 1/Q3 — metrics registry init + scrape endpoint, same "before any
+    // task that could call record_*" ordering as pqctoday-kmip's own main.
+    pqctoday_pkcs11_remote_core::metrics::init();
+    tokio::spawn(pqctoday_pkcs11_remote_core::metrics::serve_metrics_forever(cli.metrics_listen));
+    tracing::info!(addr = %cli.metrics_listen, "metrics scrape endpoint on http://{}/metrics (plain HTTP)", cli.metrics_listen);
+
     let server_config = build_server_config(&cli)?;
     let rustls_config = RustlsConfig::from_config(Arc::new(server_config));
 
@@ -67,8 +84,10 @@ async fn main() -> anyhow::Result<()> {
     let app = routes::router_with(cli.enable_destructive)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
     tracing::info!(addr = %cli.listen, "pqc-rest-pkcs11 listening (HTTP/1.1 only)");
+    // Q2 — ConnectInfo<SocketAddr> in the request extensions, needed for
+    // open_session's peer-address capture on a PIN failure.
     axum_server::bind_rustls(cli.listen, rustls_config)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
 }
@@ -80,7 +99,7 @@ fn build_server_config(cli: &Cli) -> anyhow::Result<rustls::ServerConfig> {
     let mut config = if let Some(ca_path) = &cli.tls_client_ca {
         let ca_pem = std::fs::read(ca_path)?;
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut &ca_pem[..]) {
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&ca_pem) {
             roots.add(cert?)?;
         }
         let provider = Arc::new(pqctoday_tls::client_provider_for(cli.tls_profile));
@@ -111,9 +130,10 @@ fn load_or_generate_identity(
         (Some(cert_path), Some(key_path)) => {
             let cert_pem = std::fs::read(cert_path)?;
             let key_pem = std::fs::read(key_path)?;
-            let certs = rustls_pemfile::certs(&mut &cert_pem[..]).collect::<Result<Vec<_>, _>>()?;
-            let key = rustls_pemfile::private_key(&mut &key_pem[..])?
-                .ok_or_else(|| anyhow::anyhow!("no private key in {key_path:?}"))?;
+            let certs = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+                .collect::<Result<Vec<_>, _>>()?;
+            let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+                .map_err(|e| anyhow::anyhow!("no usable private key in {key_path:?}: {e}"))?;
             Ok((certs, key))
         }
         (None, None) => {

@@ -45,15 +45,19 @@ pub fn destroy_object(session: u32, handle: u32) -> Result<(), CkRv> {
     if let Some(val) = attrs.get_mut(&CKA_VALUE) {
         val.zeroize();
     }
+    // The AWS-LC fast path may hold this key parsed; drop it with the object
+    // so no private material outlives the destroy (crypto::awslc_keycache,
+    // crypto::mldsa_keycache).
+    crate::ffi::drop_key_caches();
 
     // PKCS#11 v3.2 — clean up any active operation state referencing the
     // destroyed key. Without this, a session that called native::sign +
     // then native::destroy_object would hold a stale key handle in the
     // sign-state map.
-    SIGN_STATE.with(|s| s.borrow_mut().retain(|_, v| v.1 != handle));
-    VERIFY_STATE.with(|s| s.borrow_mut().retain(|_, v| v.1 != handle));
-    ENCRYPT_STATE.with(|s| s.borrow_mut().retain(|_, ctx| ctx.key_handle != handle));
-    DECRYPT_STATE.with(|s| s.borrow_mut().retain(|_, ctx| ctx.key_handle != handle));
+    SIGN_STATE.for_each_shard(|m| m.retain(|_, v| v.1 != handle));
+    VERIFY_STATE.for_each_shard(|m| m.retain(|_, v| v.1 != handle));
+    ENCRYPT_STATE.for_each_shard(|m| m.retain(|_, ctx| ctx.key_handle != handle));
+    DECRYPT_STATE.for_each_shard(|m| m.retain(|_, ctx| ctx.key_handle != handle));
     Ok(())
 }
 
@@ -170,6 +174,10 @@ pub fn set_attribute(
     // avoid touching a function ffi.rs also depends on).
     let access = resolve_session_access(session)?;
     with_object_checked(&access, handle, |_| ())?;
+    // A CKA_VALUE change makes any parsed copy of the old key stale material
+    // to be holding; drop the key caches (crypto::awslc_keycache,
+    // crypto::mldsa_keycache).
+    crate::ffi::drop_key_caches();
     crate::state::set_object_attr_checked(handle, attr_type, value)
 }
 

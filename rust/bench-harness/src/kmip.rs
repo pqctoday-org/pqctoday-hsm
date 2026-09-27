@@ -34,6 +34,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use pqctoday_kmip::codec;
 use pqctoday_kmip::dispatcher::one_off_request;
@@ -117,8 +119,7 @@ impl KmipEndpoint {
 
     fn tls_config(&self) -> Result<Arc<rustls::ClientConfig>> {
         let mut roots = rustls::RootCertStore::empty();
-        let mut reader = &self.ca_pem[..];
-        let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        let certs: Vec<_> = CertificateDer::pem_slice_iter(&self.ca_pem)
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("parsing CA PEM")?;
         if certs.is_empty() {
@@ -131,12 +132,11 @@ impl KmipEndpoint {
         // Parse the client identity once, so both profile branches share it.
         let client_auth = match (&self.client_cert_pem, &self.client_key_pem) {
             (Some(cert_pem), Some(key_pem)) => {
-                let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+                let certs: Vec<_> = CertificateDer::pem_slice_iter(cert_pem)
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .context("parsing client cert PEM")?;
-                let key = rustls_pemfile::private_key(&mut &key_pem[..])
-                    .context("parsing client key PEM")?
-                    .ok_or_else(|| anyhow!("no private key found in the client key PEM"))?;
+                let key = PrivateKeyDer::from_pem_slice(key_pem)
+                    .context("parsing client key PEM")?;
                 Some((certs, key))
             }
             (None, None) => None,
@@ -401,13 +401,22 @@ impl KmipTransport for KmipEndpoint {
     }
 }
 
-/// Pull the first TextString under a Response Payload with `tag`.
+/// Pull the first string-shaped field under a Response Payload with `tag`.
+///
+/// Accepts `TextString` and, since 2026-09-06, the three KMIP 3.0 string
+/// types (§11.25): responses now carry a Unique Identifier as `Identifier`
+/// (0x0C) and links as `Reference`/`Name Reference`, so a TextString-only
+/// match would silently find nothing and every UID read here would be `None`.
 fn text_field(response: &[u8], tag: u32) -> Option<String> {
     fn walk(v: &codec::Value, tag: u32, out: &mut Option<String>) {
         if let codec::Value::Structure(children) = v {
             for c in children {
                 if c.tag.0 == tag {
-                    if let codec::Value::TextString(s) = &c.value {
+                    if let codec::Value::TextString(s)
+                        | codec::Value::Identifier(s)
+                        | codec::Value::Reference(s)
+                        | codec::Value::NameReference(s) = &c.value
+                    {
                         if out.is_none() {
                             *out = Some(s.clone());
                         }
@@ -502,6 +511,10 @@ pub fn sign(
             uid: uid.to_string(),
             data: data.to_vec(),
             cryptographic_parameters: None,
+            // Single-shot request: no §6.1.62 multi-part stream.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
     )?;
     bytes_field(&resp, TAG_SIGNATURE_DATA)
@@ -525,6 +538,10 @@ pub fn signature_verify(
             data: data.to_vec(),
             signature: signature.to_vec(),
             cryptographic_parameters: None,
+            // Single-shot request: no §6.1.63 multi-part stream.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
     )?;
     let (frame, _) = codec::decode(&resp)?;
@@ -1062,6 +1079,9 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                                             uid: kp_priv.clone(),
                                             data: b"bench".to_vec(),
                                             cryptographic_parameters: None,
+                                            init_indicator: None,
+                                            final_indicator: None,
+                                            correlation_value: None,
                                         }),
                                         KmipClass::Kem => RequestPayload::Encapsulate(EncapsulateRequest {
                                             uid: kp_pub.clone(),
@@ -1081,7 +1101,7 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                     })
                     .collect();
                 let (total_ops, latencies, elapsed) =
-                    crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+                    crate::measure::run_point(args.duration_secs, args.warmup_secs, 0, args.duration_secs, workers)?;
                 let (p50, p99) = crate::measure::percentiles_ms(latencies);
                 samples[i].push((total_ops as f64 / elapsed, p50, p99, total_ops, elapsed));
             }

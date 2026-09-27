@@ -343,6 +343,12 @@ extern const OSSL_DISPATCH
 #define P11PROV_PARAM_EPHEMERAL "pkcs11_ephemeral"
 #define P11PROV_PARAM_KEY_USAGE "pkcs11_key_usage"
 #define P11PROV_PARAM_SLOT_ID "pkcs11_slot_id"
+/* EC keygen only: when set to a non-zero integer, generate the private
+ * scalar with CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS (FIPS 186-5 A.2.2,
+ * "extra random bits") instead of CKM_EC_KEY_PAIR_GEN. OpenSSL defines
+ * no standard parameter for the EC key-generation METHOD, so this is a
+ * provider-specific one, following the pkcs11_* convention above. */
+#define P11PROV_PARAM_EC_EXTRA_BITS "pkcs11_ec_extra_bits"
 
 #if SKEY_SUPPORT == 1
 

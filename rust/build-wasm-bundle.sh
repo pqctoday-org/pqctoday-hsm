@@ -42,9 +42,24 @@ if [[ "${1:-}" == "--dev" ]]; then
 fi
 
 # Resolve the rustup toolchain bin dir (NOT Homebrew's cargo/rustc).
+#
+# Honour RUSTUP_HOME instead of assuming $HOME/.rustup. Those are the same path
+# on a developer Mac and are NOT the same inside the pqc-rust container, whose
+# rust:1 image sets RUSTUP_HOME=/usr/local/rustup while HOME=/root. The old
+# hardcoded path therefore failed there with "rustup toolchain not found at
+# /root/.rustup/toolchains/..." — which is the entire reason several sessions
+# recorded "the container has no rustup" and hand-invoked wasm-pack instead.
+# It does have rustup (1.29.0), cargo 1.96.0 and both wasm32 targets, so with
+# this one line the container runs this script unmodified, which is where every
+# hsm build is supposed to happen (never host cargo, never Xcode).
+RUSTUP_ROOT="${RUSTUP_HOME:-$HOME/.rustup}"
 TOOLCHAIN="$(rustup show active-toolchain | awk '{print $1}')"
-TC="$HOME/.rustup/toolchains/$TOOLCHAIN/bin"
-[[ -x "$TC/cargo" ]] || { echo "rustup toolchain not found at $TC" >&2; exit 1; }
+TC="$RUSTUP_ROOT/toolchains/$TOOLCHAIN/bin"
+[[ -x "$TC/cargo" ]] || {
+  echo "rustup toolchain not found at $TC" >&2
+  echo "  (RUSTUP_HOME=${RUSTUP_HOME:-<unset, defaulted to \$HOME/.rustup>})" >&2
+  exit 1
+}
 
 echo "▶ wasm-pack build ($PROFILE, target=bundler, toolchain=$TOOLCHAIN) → $OUT/"
 # --features acvp is required: without it C_Initialize rejects a non-null pReserved

@@ -1,3 +1,15 @@
 /target
 /.idea/
-Cargo.lock
+
+# Cargo.lock IS committed here, unlike upstream.
+#
+# This file came from the upstream project, where ignoring the lock is the
+# normal choice for a library crate. In this repository it had a concrete cost:
+# openpgp/ was the ONLY workspace whose lock was untracked, so `cargo audit`
+# had no pinned versions to read and could not see that openpgp/lib pulled in
+# rsa 0.7.2. Dependabot saw it — from the manifest, server side — and the
+# difference went unexplained until 2026-09-25. Committing the lock is what
+# makes a local audit and a Dependabot alert look at the same versions.
+#
+# Keep it in step with the other seven workspace locks in this repo, all of
+# which are tracked.

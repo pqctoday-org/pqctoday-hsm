@@ -8,6 +8,7 @@
 //! | `cacp_kmip_requests_total` | counter | operation, status | KMIP batch items |
 //! | `cacp_tls_handshakes_total` | counter | listener | TLS handshakes (kmip, admin) |
 //! | `cacp_admin_requests_total` | counter | method, route, status | Admin API requests |
+//! | `cacp_auth_failures_total` | counter | surface, reason | Failed authentication attempts (docs/remediation-plan-auth-visibility-evidence-log-09102026.md) |
 //!
 //! ## Usage
 //!
@@ -32,6 +33,7 @@ struct Metrics {
     kmip_requests: CounterVec,
     tls_handshakes: CounterVec,
     admin_requests: CounterVec,
+    auth_failures: CounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -76,7 +78,18 @@ pub fn init() {
         .expect("admin_requests counter");
         registry.register(Box::new(admin_requests.clone())).expect("register admin_requests");
 
-        Metrics { registry, build_info, kmip_requests, tls_handshakes, admin_requests }
+        // `surface` is fixed to a small enum-shaped set — see
+        // record_auth_failure's own doc for the exact values. `reason` is
+        // likewise a short fixed token per surface, never free text (same
+        // cardinality discipline as record_admin_request's `route` above).
+        let auth_failures = CounterVec::new(
+            Opts::new("cacp_auth_failures_total", "Failed authentication attempts"),
+            &["surface", "reason"],
+        )
+        .expect("auth_failures counter");
+        registry.register(Box::new(auth_failures.clone())).expect("register auth_failures");
+
+        Metrics { registry, build_info, kmip_requests, tls_handshakes, admin_requests, auth_failures }
     });
 }
 
@@ -94,26 +107,67 @@ pub fn record_kmip_request(operation: &'static str, success: bool) {
 
 /// Increment `cacp_tls_handshakes_total{listener}`.
 /// `listener` should be `"kmip"` or `"admin"`.
+///
+/// Also one `SRC_TLS` record in the behaviour ring (its own gate — see
+/// `softhsmrustv3::behaviour`): a handshake is a transaction the monitor
+/// wants to see next to the requests it precedes.
 pub fn record_tls_handshake(listener: &'static str) {
     if let Some(m) = METRICS.get() {
         m.tls_handshakes.with_label_values(&[listener]).inc();
+    }
+    if softhsmrustv3::behaviour::enabled() {
+        use softhsmrustv3::behaviour::{RESULT_OK, Record, SRC_TLS, op_tls};
+        softhsmrustv3::behaviour::emit(Record::new(SRC_TLS, op_tls(listener), 0, RESULT_OK));
     }
 }
 
 /// Increment `cacp_admin_requests_total{method, route, status}`.
 /// `route` must be a stable pattern (e.g. `"/api/v1/policies/{name}"`),
 /// never a raw path — unbounded cardinality breaks Prometheus.
+///
+/// Also one `SRC_KMIP_ADMIN` record in the behaviour ring, op = the route
+/// pattern's id, result from the HTTP status.
 pub fn record_admin_request(method: &str, route: &'static str, status: u16) {
     if let Some(m) = METRICS.get() {
         m.admin_requests
             .with_label_values(&[method, route, &status.to_string()])
             .inc();
     }
+    if softhsmrustv3::behaviour::enabled() {
+        use softhsmrustv3::behaviour::{Record, SRC_KMIP_ADMIN, op_kmip_admin, result_from_http_status};
+        softhsmrustv3::behaviour::emit(Record::new(
+            SRC_KMIP_ADMIN,
+            op_kmip_admin(route),
+            0,
+            result_from_http_status(status),
+        ));
+    }
+}
+
+/// Increment `cacp_auth_failures_total{surface, reason}` AND emit a
+/// `PQCAUTH` record via [`softhsmrustv3::authlog`] (docs/remediation-plan-
+/// auth-visibility-evidence-log-09102026.md, Q1/Q3). One call covers both
+/// the metric (reaches OpenMetrics/SNMP) and the log line (reaches syslog
+/// via the appliance's existing `imfile` tail of the shared auth-log path)
+/// so a call site never forgets one or the other.
+///
+/// `surface` ∈ `{"kmip-credential", "kmip-tls-handshake"}` for this crate
+/// (`"remoting-pin"` is PKCS#11 remoting's own, added at its call sites).
+/// `reason` is a short fixed token — see each call site.
+/// `peer`, when known, is `ip:port` (Q2: capture it where available).
+pub fn record_auth_failure(surface: &'static str, reason: &'static str, peer: Option<&str>) {
+    if let Some(m) = METRICS.get() {
+        m.auth_failures.with_label_values(&[surface, reason]).inc();
+    }
+    softhsmrustv3::authlog::emit(surface, reason, peer);
 }
 
 // ── Scrape endpoint ───────────────────────────────────────────────────────────
 
-fn render() -> String {
+/// The scrape body (Prometheus text format 0.0.4); empty before `init()`.
+/// Public so an in-process check can compare counters against another
+/// signal without opening a socket (the behaviour-ring end-to-end test does).
+pub fn render() -> String {
     let Some(m) = METRICS.get() else { return String::new() };
     let mut buf = Vec::new();
     TextEncoder::new().encode(&m.registry.gather(), &mut buf).ok();

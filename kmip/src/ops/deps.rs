@@ -19,15 +19,93 @@ use crate::auditlog::AuditSink;
 use crate::policy::Engine;
 use crate::store::KeyStore;
 
-/// One in-flight multi-part cryptographic operation (KMIP 3.0 §6.1.21 /
-/// §6.1.16 streaming: `Init Indicator` → [parts…] → `Final Indicator`,
-/// chained by the server-issued `Correlation Value`).
+/// Incremental digest state for a multi-part `Hash` (§6.1.30).
+///
+/// `Hash` is the one streaming operation this crate can carry entirely on its
+/// own: `compute_hash` is in-process `sha2`/`sha3`, never an engine call, so a
+/// real incremental hasher is available and the parts never need buffering.
+/// The enum exists because `Digest::finalize` consumes `self` and so is not
+/// object-safe — a `Box<dyn Digest>` will not compile.
+pub enum IncrementalDigest {
+    Sha256(sha2::Sha256),
+    Sha384(sha2::Sha384),
+    Sha512(sha2::Sha512),
+    Sha512_224(sha2::Sha512_224),
+    Sha512_256(sha2::Sha512_256),
+    Sha3_224(sha3::Sha3_224),
+    Sha3_256(sha3::Sha3_256),
+    Sha3_384(sha3::Sha3_384),
+    Sha3_512(sha3::Sha3_512),
+}
+
+impl IncrementalDigest {
+    pub fn update(&mut self, part: &[u8]) {
+        use sha2::Digest as _;
+        match self {
+            Self::Sha256(h) => h.update(part),
+            Self::Sha384(h) => h.update(part),
+            Self::Sha512(h) => h.update(part),
+            Self::Sha512_224(h) => h.update(part),
+            Self::Sha512_256(h) => h.update(part),
+            Self::Sha3_224(h) => h.update(part),
+            Self::Sha3_256(h) => h.update(part),
+            Self::Sha3_384(h) => h.update(part),
+            Self::Sha3_512(h) => h.update(part),
+        }
+    }
+
+    pub fn finalize(self) -> Vec<u8> {
+        use sha2::Digest as _;
+        match self {
+            Self::Sha256(h) => h.finalize().to_vec(),
+            Self::Sha384(h) => h.finalize().to_vec(),
+            Self::Sha512(h) => h.finalize().to_vec(),
+            Self::Sha512_224(h) => h.finalize().to_vec(),
+            Self::Sha512_256(h) => h.finalize().to_vec(),
+            Self::Sha3_224(h) => h.finalize().to_vec(),
+            Self::Sha3_256(h) => h.finalize().to_vec(),
+            Self::Sha3_384(h) => h.finalize().to_vec(),
+            Self::Sha3_512(h) => h.finalize().to_vec(),
+        }
+    }
+}
+
+/// What one in-flight stream is accumulating.
+pub enum StreamState {
+    /// Encrypt / Decrypt — the engine's own streaming cipher state.
+    Cipher(softhsmrustv3::crypto::multipart::MultipartCipher),
+    /// Hash — real incremental digest state, so parts are never buffered.
+    Digest(IncrementalDigest),
+    /// Sign / Signature Verify / MAC / MAC Verify — the parts, concatenated,
+    /// handed to the existing one-shot at `Final Indicator`.
+    ///
+    /// This mirrors the ENGINE's own multi-part convention rather than
+    /// inventing a second one: `C_SignUpdate` accumulates into
+    /// `SIGN_MULTIPART_ACC` and `C_SignFinal` runs the one-shot handler
+    /// (`rust/src/state.rs`). It is also the only correct shape for pure
+    /// ML-DSA and SLH-DSA, which must see the whole message. Bounding this
+    /// with an incremental digest for the hash-then-sign mechanisms is a
+    /// known follow-up, listed as such in `state.rs` itself.
+    Buffered(Vec<u8>),
+}
+
+/// One in-flight multi-part cryptographic operation (KMIP 3.0 §6.1.23 /
+/// §6.1.16 / §6.1.30 / §6.1.38 / §6.1.39 / §6.1.62 / §6.1.63 streaming:
+/// `Init Indicator` → [parts…] → `Final Indicator`, chained by the
+/// server-issued `Correlation Value`).
 pub struct StreamCtx {
-    /// The engine streaming state (owns key schedule + GHASH/CBC chain).
-    pub cipher: softhsmrustv3::crypto::multipart::MultipartCipher,
-    /// UID the stream was initialised against — §6.1.21 requires every
-    /// part to target the same key.
-    pub uid: String,
+    /// What this stream is accumulating, and how.
+    pub state: StreamState,
+    /// Which operation opened the stream. A `Final Indicator` arriving on a
+    /// DIFFERENT operation must be refused rather than silently consuming
+    /// another operation's accumulated state — correlation values live in one
+    /// namespace, so nothing else stops an Encrypt stream being finalised by a
+    /// Sign.
+    pub operation: crate::kmip30::Operation,
+    /// UID the stream was initialised against — every part must target the
+    /// same key. `None` for `Hash`, which is keyless (§6.1.30 takes no Unique
+    /// Identifier at all).
+    pub uid: Option<String>,
     /// Part F §F7.5 — the tenant that opened this stream. A continuation
     /// part from a different identity is rejected as an unknown
     /// correlation value (anti-oracle), even though the entry-level
@@ -187,6 +265,12 @@ pub struct DepsConfig {
     /// enforces §8.1.2 authentication per batch item
     /// (`Authentication Not Successful (0x03)` on failure).
     pub auth_users: Vec<crate::server::auth::AuthUser>,
+    /// KMIP 3.0 §6.1.32 — Interop "SHALL NOT be available in a production
+    /// server". Defaults to **false**, so the operation is refused unless a
+    /// deployment opts in; the conformance harness turns it on explicitly.
+    /// Before R6 the operation was always available, which is exactly what
+    /// the spec forbids.
+    pub interop_enabled: bool,
 
     /// P2.3 — the server-configured Certificate Authority used by the
     /// §6.1.6 Certify / §6.1.52 Re-certify operations. `None` (the
@@ -353,6 +437,9 @@ impl Default for DepsConfig {
             tenancy_mode: TenancyMode::Single, // today's behavior, unchanged
             strict_tenants: Vec::new(),
             auto_composite: true,
+            // §6.1.32 — off unless a deployment opts in. The conformance
+            // harness passes --enable-interop; a production server does not.
+            interop_enabled: false,
         }
     }
 }
@@ -468,6 +555,36 @@ pub struct Deps {
     /// no test needs. Not `Clone`/`Copy`, so it lives behind a
     /// `OnceLock`.
     pub self_handle: std::sync::OnceLock<Weak<Deps>>,
+    /// P0 (`imx95-npu-implementation-plan-09132026.md`) — wall-clock start
+    /// of the currently in-flight per-batch-item request, keyed by its
+    /// `correlation_id`. Started by `dispatcher::RequestTimer` at the top
+    /// of `dispatch_one` and consumed by [`Self::take_request_latency_ms`]
+    /// wherever a `KmipResponseSent` audit event is emitted — the fix for
+    /// the long-standing `latency_ms: 0` placeholder every such event
+    /// carried (that field was never actually measured before this).
+    /// `RequestTimer`'s `Drop` clears the entry unconditionally on every
+    /// exit path (Poll's early return, an ineligible-for-async failure,
+    /// ID-placeholder substitution failure, …), so an item that never
+    /// reaches `take_request_latency_ms` still can't leak an entry here.
+    pub request_started: Mutex<HashMap<String, std::time::Instant>>,
+}
+
+/// `Instant::now()`, or `None` where there is no clock to read: on
+/// `wasm32-unknown-unknown` `Instant::now()` aborts the whole module with
+/// "time not implemented on this platform" — the browser playground
+/// (`wasm/`, built by `scripts/build-kmip-wasm.sh`) hit exactly that on its
+/// first Query once the dispatcher started timing requests, caught by the
+/// bundle's smoke test. There is no latency consumer in the playground, so
+/// it keeps reporting `latency_ms: 0` rather than carrying a JS clock shim.
+fn monotonic_now() -> Option<std::time::Instant> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        None
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Some(std::time::Instant::now())
+    }
 }
 
 impl Deps {
@@ -495,6 +612,69 @@ impl Deps {
             pkcs11_virtual_initialized: std::sync::atomic::AtomicBool::new(false),
             async_jobs: Mutex::new(HashMap::new()),
             self_handle: std::sync::OnceLock::new(),
+            request_started: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// P0 — record the wall-clock start of a per-batch-item request.
+    /// Called once, by `dispatcher::RequestTimer::new`, at the top of
+    /// `dispatch_one` — never call this directly from an op handler.
+    pub fn record_request_start(&self, correlation_id: String) {
+        let Some(now) = monotonic_now() else { return };
+        let mut m = match self.request_started.lock() {
+            Ok(m) => m,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        m.insert(correlation_id, now);
+    }
+
+    /// P0 — read and remove the start time recorded for `correlation_id`,
+    /// returning the elapsed milliseconds. Every `KmipResponseSent`
+    /// emission site calls this exactly once, so the entry `record_request_start`
+    /// inserted is consumed here in the normal case. Returns `0` (the old,
+    /// always-wrong placeholder) only if no start time was recorded — which
+    /// should happen solely in tests that build a `RequestPayload` and call
+    /// an op handler directly, bypassing `dispatch_one`/`RequestTimer`
+    /// entirely; every request that goes through `dispatch()` always has one.
+    pub fn take_request_latency_ms(&self, correlation_id: &str) -> u32 {
+        let mut m = match self.request_started.lock() {
+            Ok(m) => m,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match m.remove(correlation_id) {
+            Some(start) => u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
+            None => 0,
+        }
+    }
+
+    /// P0 — discard a recorded start time without computing a latency.
+    /// Used only by `dispatcher::RequestTimer`'s `Drop`, as the safety net
+    /// for the exit paths that never call `take_request_latency_ms` at all
+    /// (Poll's early return, an ineligible-for-async failure, ID-placeholder
+    /// substitution failure) — without this, those paths would leak one
+    /// entry per request into `request_started` forever. Idempotent: a
+    /// `correlation_id` already consumed by `take_request_latency_ms` is
+    /// simply absent, and removing an absent key is a no-op.
+    pub fn clear_request_start(&self, correlation_id: &str) {
+        match self.request_started.lock() {
+            Ok(mut m) => {
+                m.remove(correlation_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(correlation_id);
+            }
+        }
+    }
+
+    /// Test-only: current size of `request_started`, so a dispatcher test
+    /// can assert an item that never reaches `take_request_latency_ms`
+    /// (e.g. a Poll response, or an ID-placeholder failure) still leaves
+    /// no entry behind.
+    #[cfg(test)]
+    pub fn request_started_len(&self) -> usize {
+        match self.request_started.lock() {
+            Ok(m) => m.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
         }
     }
 

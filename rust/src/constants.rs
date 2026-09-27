@@ -39,6 +39,11 @@ pub const CKR_DOMAIN_PARAMS_INVALID: u32 = 0x0000_0130;
 /// PKCS#11 v3.2 §6.3 — the CKA_EC_PARAMS decoded cleanly and names a curve
 /// this token does not implement (W1/W2/C2, 2026-08-13).
 pub const CKR_CURVE_NOT_SUPPORTED: u32 = 0x0000_0140;
+/// PKCS#11 v3.2 §5.1.6 — "The public key fails a public key validation. For
+/// example, an EC public key fails the public key validation specified in
+/// Section 5.2.2 of [ANSI X9.62]. This error code may be returned by
+/// C_CreateObject, when the public key is created ...".
+pub const CKR_PUBLIC_KEY_INVALID: u32 = 0x0000_01b9;
 /// PKCS#11 v3.2 §5.2 — returned by the NULL-mechanism cancel form of a
 /// `C_*Init` function when the active operation cannot be cancelled (C2).
 pub const CKR_OPERATION_CANCEL_FAILED: u32 = 0x0000_0202;
@@ -70,6 +75,10 @@ pub const CKR_UNWRAPPING_KEY_HANDLE_INVALID: u32 = 0x0000_00F0;
 pub const CKR_WRAPPED_KEY_INVALID: u32 = 0x0000_0110;
 pub const CKR_WRAPPED_KEY_LEN_RANGE: u32 = 0x0000_0112;
 pub const CKR_WRAPPING_KEY_HANDLE_INVALID: u32 = 0x0000_0113;
+pub const CKR_UNWRAPPING_KEY_SIZE_RANGE: u32 = 0x0000_00F1;
+pub const CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT: u32 = 0x0000_00F2;
+pub const CKR_WRAPPING_KEY_SIZE_RANGE: u32 = 0x0000_0114;
+pub const CKR_WRAPPING_KEY_TYPE_INCONSISTENT: u32 = 0x0000_0115;
 
 // ── PKCS#11 Attribute Types ──────────────────────────────────────────────────
 
@@ -83,12 +92,9 @@ pub const CKA_EC_PARAMS: u32 = 0x0000_0180;
 pub const CKA_EC_POINT: u32 = 0x0000_0181;
 // PQCToday vendor attrs (CKA_VENDOR_DEFINED | 0x1021/0x1022). Formerly bare
 // 0x1021/0x1022, which squat OASIS-reserved space — see pkcs11t.h vendor
-// extensions section. Legacy bare values still accepted (CKA_BIP32_*_LEGACY).
+// extensions section. The bare values are no longer read or written (4.D).
 pub const CKA_BIP32_CHAIN_CODE: u32 = 0x8000_1021;
 pub const CKA_BIP32_CHILD_INDEX: u32 = 0x8000_1022;
-// Deprecated aliases — accepted on read paths for in-the-wild JS callers.
-pub const CKA_BIP32_CHAIN_CODE_LEGACY: u32 = 0x0000_1021;
-pub const CKA_BIP32_CHILD_INDEX_LEGACY: u32 = 0x0000_1022;
 pub const CKA_PUBLIC_KEY_INFO: u32 = 0x0000_0129; // PKCS#11 v3.2 — DER SubjectPublicKeyInfo
 pub const CKA_PARAMETER_SET: u32 = 0x0000_061d;
 // PKCS#11 v3.2 — deterministic keygen seed (ξ for ML-DSA, d‖z for ML-KEM).
@@ -109,6 +115,20 @@ pub const CKO_CERTIFICATE: u32 = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
 pub const CKO_SECRET_KEY: u32 = 0x0000_0004;
+/// Non-storage ("Other Objects") classes. These describe the TOKEN rather
+/// than holding application data, are built in rather than created, and are
+/// refused by `validate_create_template` — see the "Creating objects" rule
+/// that only Storage Objects may be created. `CKO_HW_FEATURE` and
+/// `CKO_MECHANISM` are defined here so that refusal can name them; this
+/// engine materialises neither (it is software, and advertises its
+/// mechanisms through `C_GetMechanismList`, not as objects).
+pub const CKO_HW_FEATURE: u32 = 0x0000_0005;
+pub const CKO_MECHANISM: u32 = 0x0000_0007;
+/// Validation objects describe third-party validations the module conforms
+/// to and are "read only, token objects". This engine never materialises
+/// one: it holds no real FIPS 140-3 / Common Criteria validation, and
+/// self-reporting one it does not have would be a false claim.
+pub const CKO_VALIDATION: u32 = 0x0000_000a;
 /// PKCS#11 v3.2 §4.7 — trust objects bind trusted usages (`CKA_TRUST_*`
 /// below) to individual certificates, keyed by `CKA_ISSUER` +
 /// `CKA_SERIAL_NUMBER`. Read/write, general-purpose object storage — no
@@ -177,6 +197,24 @@ pub const CKK_HSS: u32 = 0x0000_0046; // HSS/LMS multi-level (standard)
 pub const CKK_XMSS: u32 = 0x0000_0047; // XMSS single-tree (standard)
 pub const CKK_XMSSMT: u32 = 0x0000_0048; // XMSS^MT multi-tree (standard)
 // Vendor: single-level LMS (not in PKCS#11 v3.2 standard; same numeric space as CKK is separate from CKM)
+// HMAC key types (§6.44 and the per-digest HMAC sections) and CKK_HKDF
+// (§6.62.1) — values from pkcs11t.h. The engine creates HMAC keys as
+// CKK_GENERIC_SECRET; these are accepted as the digest-specific alternative
+// the HMAC mechanisms also allow (ffi::mech_key_types).
+pub const CKK_MD5_HMAC: u32 = 0x0000_0027;
+pub const CKK_SHA_1_HMAC: u32 = 0x0000_0028;
+pub const CKK_RIPEMD160_HMAC: u32 = 0x0000_002A;
+pub const CKK_SHA256_HMAC: u32 = 0x0000_002B;
+pub const CKK_SHA384_HMAC: u32 = 0x0000_002C;
+pub const CKK_SHA512_HMAC: u32 = 0x0000_002D;
+pub const CKK_SHA224_HMAC: u32 = 0x0000_002E;
+pub const CKK_SHA3_224_HMAC: u32 = 0x0000_0036;
+pub const CKK_SHA3_256_HMAC: u32 = 0x0000_0037;
+pub const CKK_SHA3_384_HMAC: u32 = 0x0000_0038;
+pub const CKK_SHA3_512_HMAC: u32 = 0x0000_0039;
+pub const CKK_HKDF: u32 = 0x0000_0042;
+pub const CKK_SHA512_224_HMAC: u32 = 0x0000_0043;
+pub const CKK_SHA512_256_HMAC: u32 = 0x0000_0044;
 
 // Vendor key types — FrodoKEM / Classic McEliece (BSI TR-02102-1 recommended KEMs,
 // not NIST-standardized, no PKCS#11 v3.2 standard codepoint exists for either).
@@ -338,6 +376,28 @@ pub const CKA_UNWRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0212;
 /// §5.18.3 — the derive counterpart. Defined for completeness of the array
 /// attribute family; not enforced by any derive path yet.
 pub const CKA_DERIVE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0213;
+/// KEM counterpart of [`CKA_WRAP_TEMPLATE`], on the ENCAPSULATING key:
+/// "an attribute set that will be compared against the attributes of the key
+/// to be encapsulated. If all attributes match according to the C_FindObject
+/// rules of attribute matching then the wrap will proceed … If any attribute
+/// conflict occurs … the function SHALL return CKR_KEY_HANDLE_INVALID."
+///
+/// v3.2 defines the constant and then never mentions it again — no table row,
+/// no prose. The semantics above are v3.3's
+/// (key_management_functions.md:762-771), adopted under the standing rule
+/// that v3.3 governs where v3.2 has a gap.
+///
+/// CKF_ARRAY_ATTRIBUTE is set per the same rule: v3.2 omits it though the
+/// three older *_TEMPLATE attributes above all carry it. See V33_CORRECTIONS
+/// in scripts/check_pkcs11_constants.py.
+pub const CKA_ENCAPSULATE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_062a;
+/// KEM counterpart of [`CKA_UNWRAP_TEMPLATE`], on the DECAPSULATING key:
+/// "an attribute set that will be added to attributes of the key to be
+/// decapsulated. If the attributes do not conflict with the user supplied
+/// attribute template … the decapsulation will proceed … If any attribute
+/// conflict occurs … the function SHALL return CKR_TEMPLATE_INCONSISTENT."
+/// (v3.3 key_management_functions.md:868-878.)
+pub const CKA_DECAPSULATE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_062b;
 
 // Private attribute: stores the parameter set on generated keys
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;
@@ -409,6 +469,17 @@ pub const CKA_EXPONENT_2: u32 = 0x0000_0127;
 pub const CKA_COEFFICIENT: u32 = 0x0000_0128;
 // SHA3-384 RSA composite sign mechanisms (§6.4).
 pub const CKM_SHA3_384_RSA_PKCS: u32 = 0x0000_0061;
+// §3 Wave 1b (2026-09-07) — the remaining RSA hash combos the C++ engine
+// advertises. Values from src/lib/pkcs11/pkcs11t.h (the normative header).
+pub const CKM_SHA224_RSA_PKCS: u32 = 0x0000_0046;
+pub const CKM_SHA224_RSA_PKCS_PSS: u32 = 0x0000_0047;
+pub const CKM_SHA3_224_RSA_PKCS: u32 = 0x0000_0066;
+pub const CKM_SHA3_224_RSA_PKCS_PSS: u32 = 0x0000_0067;
+pub const CKM_SHA3_256_RSA_PKCS: u32 = 0x0000_0060;
+pub const CKM_SHA3_256_RSA_PKCS_PSS: u32 = 0x0000_0063;
+pub const CKM_SHA3_512_RSA_PKCS: u32 = 0x0000_0062;
+pub const CKM_SHA3_512_RSA_PKCS_PSS: u32 = 0x0000_0065;
+pub const CKM_ECDSA_SHA224: u32 = 0x0000_1043;
 pub const CKM_SHA3_384_RSA_PKCS_PSS: u32 = 0x0000_0064;
 
 // PQC - KEM
@@ -438,6 +509,21 @@ pub const CKH_DETERMINISTIC_REQUIRED: u32 = 0x0000_0002;
 
 // SHA Digest
 pub const CKM_SHA_1: u32 = 0x0000_0220;
+// §3 Wave 2 (2026-09-07, decision D2) — the SHA-1 family, for parity with the
+// C++ engine. `sha1` was already a dependency. SHA-1 is collision-broken and
+// must not be chosen for new signatures; it is advertised because callers
+// still have to VERIFY existing artefacts, and because the two engines
+// disagreeing on their mechanism sets is its own hazard.
+pub const CKM_SHA_1_HMAC_GENERAL: u32 = 0x0000_0222;
+// §3 Wave 3 (2026-09-07, decision D2) — the MD5 family. Historical; present
+// for C++ parity and legacy verification only.
+pub const CKM_MD5: u32 = 0x0000_0210;
+pub const CKM_MD5_HMAC: u32 = 0x0000_0211;
+pub const CKM_MD5_HMAC_GENERAL: u32 = 0x0000_0212;
+pub const CKM_MD5_RSA_PKCS: u32 = 0x0000_0005;
+pub const CKM_SHA1_RSA_PKCS: u32 = 0x0000_0006;
+pub const CKM_SHA1_RSA_PKCS_PSS: u32 = 0x0000_000E;
+pub const CKM_ECDSA_SHA1: u32 = 0x0000_1042;
 pub const CKM_SHA_1_HMAC: u32 = 0x0000_0221;
 pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA224: u32 = 0x0000_0255;
@@ -470,6 +556,15 @@ pub const CKM_SHA384_HMAC_GENERAL: u32 = 0x0000_0262;
 pub const CKM_SHA512_HMAC_GENERAL: u32 = 0x0000_0272;
 pub const CKM_SHA3_256_HMAC_GENERAL: u32 = 0x0000_02B2;
 pub const CKM_SHA3_512_HMAC_GENERAL: u32 = 0x0000_02D2;
+// §3 Wave 1 (2026-09-07) — the remaining HMAC_GENERAL codepoints the C++
+// engine advertises. Values taken from src/lib/pkcs11/pkcs11t.h, which
+// CLAUDE.md makes the sole source of truth for CK* values.
+pub const CKM_SHA224_HMAC_GENERAL: u32 = 0x0000_0257;
+pub const CKM_SHA512_224_HMAC_GENERAL: u32 = 0x0000_004A;
+pub const CKM_SHA512_256_HMAC_GENERAL: u32 = 0x0000_004E;
+pub const CKM_SHA3_224_HMAC_GENERAL: u32 = 0x0000_02B7;
+pub const CKM_SHA3_384_HMAC_GENERAL: u32 = 0x0000_02C2;
+pub const CKM_RIPEMD160_HMAC_GENERAL: u32 = 0x0000_0242;
 
 // MGF identifiers (CK_RSA_PKCS_MGF_TYPE)
 pub const CKG_MGF1_SHA1: u32 = 0x0000_0001;
@@ -477,6 +572,10 @@ pub const CKG_MGF1_SHA256: u32 = 0x0000_0002;
 pub const CKG_MGF1_SHA384: u32 = 0x0000_0003;
 pub const CKG_MGF1_SHA512: u32 = 0x0000_0004;
 pub const CKG_MGF1_SHA3_384: u32 = 0x0000_0008;
+pub const CKG_MGF1_SHA224: u32 = 0x0000_0005;
+pub const CKG_MGF1_SHA3_224: u32 = 0x0000_0006;
+pub const CKG_MGF1_SHA3_256: u32 = 0x0000_0007;
+pub const CKG_MGF1_SHA3_512: u32 = 0x0000_0009;
 // OAEP source type
 pub const CKZ_DATA_SPECIFIED: u32 = 0x0000_0001;
 // SP 800-108 data-param types (beyond BYTE_ARRAY below)
@@ -526,12 +625,27 @@ pub const CKM_CONCATENATE_BASE_AND_KEY: u32 = 0x0000_0360;
 //             For appending ciphertext/pubkey/label in transcript-binding
 //             combiners (X-Wing, Chempat).
 pub const CKM_CONCATENATE_BASE_AND_DATA: u32 = 0x0000_0362;
+/// §3 Wave 4 (2026-09-07) — the mirror of the above: data first, then the
+/// base key's value. Value from src/lib/pkcs11/pkcs11t.h.
+pub const CKM_CONCATENATE_DATA_AND_BASE: u32 = 0x0000_0363;
+/// §3 Wave 4 — derive a key by ENCRYPTING caller-supplied data with the base
+/// key (v3.2 §6.27). Values from src/lib/pkcs11/pkcs11t.h.
+/// §3 Wave 4 — composite key transport (v3.2 §6.4.7): an ephemeral AES key
+/// wraps the target with AES-KWP, and RSA-OAEP wraps that AES key. The output
+/// is the RSA blob followed by the AES-KWP blob.
+pub const CKM_RSA_AES_KEY_WRAP: u32 = 0x0000_1054;
+pub const CKM_AES_ECB_ENCRYPT_DATA: u32 = 0x0000_1104;
+pub const CKM_AES_CBC_ENCRYPT_DATA: u32 = 0x0000_1105;
 
 // Digest key-derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3): derived
 // value = SHAx(base.CKA_VALUE), left-truncated to CKA_VALUE_LEN when the
 // template supplies one. The hash-second-step for concat-then-hash combiners
 // (SSH, X-Wing). Values verified against pkcs11t.h.
 pub const CKM_SHA256_KEY_DERIVATION: u32 = 0x0000_0393;
+// §3 Wave 1b (2026-09-07) — values from src/lib/pkcs11/pkcs11t.h.
+pub const CKM_SHA512_224_KEY_DERIVATION: u32 = 0x0000_004B;
+pub const CKM_SHA512_256_KEY_DERIVATION: u32 = 0x0000_004F;
+pub const CKM_SHAKE_256_KEY_DERIVATION: u32 = 0x0000_039C;
 pub const CKM_SHA384_KEY_DERIVATION: u32 = 0x0000_0394;
 pub const CKM_SHA512_KEY_DERIVATION: u32 = 0x0000_0395;
 pub const CKM_SHA3_256_KEY_DERIVATION: u32 = 0x0000_0397;
@@ -576,9 +690,20 @@ pub const CKD_SHA3_256_KDF: u32 = 0x0000_000B; // PKCS#11 v3.2 §5.2.12 — SHA3
 pub const CKD_SHA3_512_KDF: u32 = 0x0000_000D; // PKCS#11 v3.2 §5.2.12 — SHA3-512 X9.63 KDF
 
 // PBKDF2 PRF types
+// SHA1 and SHA224 PRFs added 2026-09-25 (E15) for parity with the C++
+// engine, under their pkcs11t.h names (the three CKP_PBKDF2_* below predate
+// that and are pinned as naming drift in scripts/check_pkcs11_constants.py).
+pub const CKP_PKCS5_PBKD2_HMAC_SHA1: u32 = 0x0000_0001;
+pub const CKP_PKCS5_PBKD2_HMAC_SHA224: u32 = 0x0000_0003;
 pub const CKP_PBKDF2_HMAC_SHA256: u32 = 0x04;
 pub const CKP_PBKDF2_HMAC_SHA384: u32 = 0x05;
 pub const CKP_PBKDF2_HMAC_SHA512: u32 = 0x06;
+
+/// Engine policy, not a PKCS#11 rule (decision D7, 2026-09-25): CKM_PKCS5_PBKD2
+/// refuses fewer iterations than this with CKR_MECHANISM_PARAM_INVALID. SP 800-132
+/// §5.2: "A minimum iteration count of 1,000 is recommended." Recorded on the
+/// CKM_PKCS5_PBKD2 row of docs/pkcs11-mechanism-ledger.json.
+pub const PBKDF2_MIN_ITERATIONS: u32 = 1000;
 
 // HKDF salt types
 pub const CKF_HKDF_SALT_DATA: u32 = 0x0000_0002;
@@ -590,14 +715,10 @@ pub const CK_SP800_108_BYTE_ARRAY: u32 = 0x0000_0004;
 // ----- HD Derivation (BIP32 / SLIP10) -----
 // PQCToday vendor mechanisms (CKM_VENDOR_DEFINED | 0x105B/0x105C). Formerly
 // bare 0x105B/0x105C, which squat OASIS-reserved space — see pkcs11t.h
-// vendor extensions section. Only the vendor codepoints are advertised;
-// the legacy bare values are still ACCEPTED at C_DeriveKey dispatch as
-// deprecated aliases for in-the-wild JS callers.
+// vendor extensions section. The bare values were accepted as dispatch
+// aliases until 2026-09-27 (4.D); they are now refused, as in the C++ engine.
 pub const CKM_BIP32_MASTER_DERIVE: u32 = 0x8000_105B;
 pub const CKM_BIP32_CHILD_DERIVE: u32 = 0x8000_105C;
-// Deprecated aliases — do NOT advertise; dispatch-accept only.
-pub const CKM_BIP32_MASTER_DERIVE_LEGACY: u32 = 0x0000_105B;
-pub const CKM_BIP32_CHILD_DERIVE_LEGACY: u32 = 0x0000_105C;
 pub const CKF_BIP32_HARDENED: u32 = 0x8000_0000;
 
 pub const CKM_EC_KEY_PAIR_GEN: u32 = 0x0000_1040;
@@ -641,6 +762,15 @@ pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
 // ck_param::hpke_params.
 pub const CKM_HPKE_KEM_KEY_PAIR_GEN: u32 = 0x8000_0013;
 pub const CKM_HPKE: u32 = 0x8000_0014;
+// ECDSA with a CALLER-SUPPLIED nonce k — a deliberate key-recovery primitive
+// for teaching (SECURITY.md, "Deliberate key-recovery primitive"). Same input
+// as CKM_ECDSA (the caller's digest); pParameter is k itself, big-endian,
+// exactly the curve's order length, 1 <= k < n. Anyone who knows k and one
+// signature recovers the private key: d = r^-1 (s*k - z) mod n. Sign only,
+// single-part, P-256/P-384/P-521. Allocated in the priv vendor ledger
+// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in
+// src/lib/vendor_mechanisms.h.
+pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
 // ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
 // draft's own name and codepoint — no longer a vendor-range stopgap. See
@@ -728,14 +858,24 @@ pub const CKP_FRODOKEM_976_SHAKE: u32 = 0x4;
 pub const CKP_FRODOKEM_1344_AES: u32 = 0x5;
 pub const CKP_FRODOKEM_1344_SHAKE: u32 = 0x6;
 
-// Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128 (BSI's
-// Category-5 pick) for this slice; the crate can only have one parameter-set
-// feature compiled in at a time (see implementation plan Phase 0.5), so this
-// is the only valid value today. Kept as an explicit CKP_* (not a bare
-// literal) so CKA_PARAMETER_SET validation follows the same
-// no-silent-default pattern as ML-KEM, and so adding 460896/8192128 later is
-// additive, not a rename.
+// Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 liboqs/classic-mceliece-rust
+// parameter sets (5 sizes x {plain, f}), per the McEliece all-parameter-sets
+// implementation plan §3.1 (docs/implementation-plan-classic-mceliece-all-
+// parameter-sets-2026-09-08.md). `6688128 = 0x1` is unchanged from the original
+// single-variant allocation (BSI's Category-5 pick, already on the wire since
+// softhsmrustv3 v0.7.0); 0x2-0xA are additive. Reserved in the priv authority
+// file's §1.4.1 (pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-
+// allocation.md).
 pub const CKP_CLASSIC_MCELIECE_6688128: u32 = 0x1;
+pub const CKP_CLASSIC_MCELIECE_348864: u32 = 0x2;
+pub const CKP_CLASSIC_MCELIECE_348864F: u32 = 0x3;
+pub const CKP_CLASSIC_MCELIECE_460896: u32 = 0x4;
+pub const CKP_CLASSIC_MCELIECE_460896F: u32 = 0x5;
+pub const CKP_CLASSIC_MCELIECE_6688128F: u32 = 0x6;
+pub const CKP_CLASSIC_MCELIECE_6960119: u32 = 0x7;
+pub const CKP_CLASSIC_MCELIECE_6960119F: u32 = 0x8;
+pub const CKP_CLASSIC_MCELIECE_8192128: u32 = 0x9;
+pub const CKP_CLASSIC_MCELIECE_8192128F: u32 = 0xA;
 
 pub const CKP_ML_DSA_44: u32 = 0x1;
 pub const CKP_ML_DSA_65: u32 = 0x2;
@@ -833,6 +973,15 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_RSA_X_509,
     CKM_RSA_PKCS_PSS,
     CKM_SHA3_384_RSA_PKCS,
+    CKM_SHA224_RSA_PKCS,
+    CKM_SHA224_RSA_PKCS_PSS,
+    CKM_SHA3_224_RSA_PKCS,
+    CKM_SHA3_224_RSA_PKCS_PSS,
+    CKM_SHA3_256_RSA_PKCS,
+    CKM_SHA3_256_RSA_PKCS_PSS,
+    CKM_SHA3_512_RSA_PKCS,
+    CKM_SHA3_512_RSA_PKCS_PSS,
+    CKM_ECDSA_SHA224,
     CKM_SHA3_384_RSA_PKCS_PSS,
     // ML-KEM (FIPS 203)
     CKM_ML_KEM_KEY_PAIR_GEN,
@@ -888,18 +1037,56 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA3_256,
     CKM_SHA3_512,
     CKM_RIPEMD160,
+    // §3 Wave 1 (2026-09-07) — digests the C++ engine has always advertised.
+    CKM_SHA224,
+    CKM_SHA512_224,
+    CKM_SHA512_256,
+    CKM_SHA3_224,
+    CKM_SHA3_384,
     // HMAC
     CKM_SHA256_HMAC,
     CKM_SHA384_HMAC,
     CKM_SHA512_HMAC,
     CKM_SHA3_256_HMAC,
     CKM_SHA3_512_HMAC,
+    // R2'a (2026-09-06) — these four were ALREADY implemented in
+    // crypto::handlers::sign_hmac and in the SP 800-108 PRF paths, but were
+    // missing from this list, from C_GetMechanismInfo and from the
+    // C_Sign/C_Verify dispatch arms, so no caller could reach them through the
+    // PKCS#11 surface: implemented-but-unadvertised, the exact drift a
+    // header-vs-engine mechanism ledger is meant to catch.
+    CKM_SHA512_224_HMAC,
+    CKM_SHA512_256_HMAC,
+    CKM_SHA3_224_HMAC,
+    CKM_SHA3_384_HMAC,
     CKM_RIPEMD160_HMAC,
     CKM_SHA256_HMAC_GENERAL,
     CKM_SHA384_HMAC_GENERAL,
     CKM_SHA512_HMAC_GENERAL,
     CKM_SHA3_256_HMAC_GENERAL,
     CKM_SHA3_512_HMAC_GENERAL,
+    CKM_AES_CMAC,
+    CKM_CONCATENATE_DATA_AND_BASE,
+    CKM_RSA_AES_KEY_WRAP,
+    CKM_AES_ECB_ENCRYPT_DATA,
+    CKM_AES_CBC_ENCRYPT_DATA,
+    CKM_MD5,
+    CKM_MD5_HMAC,
+    CKM_MD5_HMAC_GENERAL,
+    CKM_MD5_RSA_PKCS,
+    CKM_SHA_1,
+    CKM_SHA_1_HMAC,
+    CKM_SHA_1_HMAC_GENERAL,
+    CKM_SHA1_RSA_PKCS,
+    CKM_SHA1_RSA_PKCS_PSS,
+    CKM_ECDSA_SHA1,
+    CKM_SHA224_HMAC,
+    CKM_SHA224_HMAC_GENERAL,
+    CKM_SHA512_224_HMAC_GENERAL,
+    CKM_SHA512_256_HMAC_GENERAL,
+    CKM_SHA3_224_HMAC_GENERAL,
+    CKM_SHA3_384_HMAC_GENERAL,
+    CKM_RIPEMD160_HMAC_GENERAL,
     // KMAC
     CKM_KMAC_128,
     CKM_KMAC_256,
@@ -961,6 +1148,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_CONCATENATE_BASE_AND_KEY,
     CKM_CONCATENATE_BASE_AND_DATA,
     CKM_SHA256_KEY_DERIVATION,
+    CKM_SHA512_224_KEY_DERIVATION,
+    CKM_SHA512_256_KEY_DERIVATION,
+    CKM_SHAKE_256_KEY_DERIVATION,
     CKM_SHA384_KEY_DERIVATION,
     CKM_SHA512_KEY_DERIVATION,
     CKM_SHA3_256_KEY_DERIVATION,
@@ -978,6 +1168,18 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_XMSSMT,
     // Keccak-256 digest (G11 — Rust engine only)
     CKM_KECCAK_256,
+    // CKM_HPKE family (vendor range, pending OASIS TC allocation — see
+    // docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md). Implemented and
+    // dispatched by C_GenerateKeyPair / C_EncapsulateKey / C_DecapsulateKey
+    // since the [Unreleased] CKM_HPKE work, with FFI tests
+    // (ffi::hpke_ffi_tests) and native tests (native::hpke), but never
+    // listed here — dispatched-but-not-advertised, so no caller could
+    // discover them (gap-closure finding E19, 2026-09-25).
+    CKM_HPKE_KEM_KEY_PAIR_GEN,
+    CKM_HPKE,
+    // Explicit-nonce ECDSA — deliberate key-recovery teaching primitive
+    // (see the constant's comment). Both engines.
+    CKM_PQCTODAY_ECDSA_EXPLICIT_K,
 ];
 
 /// PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization
@@ -1126,12 +1328,19 @@ pub const CKP_LMOTS_SHAKE_N24_W8: u32 = 0x10;
 pub const CKP_XMSS_SHA2_10_256: u32 = 0x01;
 pub const CKP_XMSS_SHA2_16_256: u32 = 0x02;
 pub const CKP_XMSS_SHA2_20_256: u32 = 0x03;
+// SP 800-208 §5.2 Table 12 — SHA-256/192 (n=24, WOTSP-SHA2_192, len=51).
+pub const CKP_XMSS_SHA2_10_192: u32 = 0x0d; // XMSS-SHA2_10_192
+pub const CKP_XMSS_SHA2_16_192: u32 = 0x0e; // XMSS-SHA2_16_192
+pub const CKP_XMSS_SHA2_20_192: u32 = 0x0f; // XMSS-SHA2_20_192
 pub const CKP_XMSS_SHAKE_10_256: u32 = 0x07; // XMSS-SHAKE_10_256 (SHAKE128)
 pub const CKP_XMSS_SHAKE_16_256: u32 = 0x08; // XMSS-SHAKE_16_256 (SHAKE128)
 pub const CKP_XMSS_SHAKE_20_256: u32 = 0x09; // XMSS-SHAKE_20_256 (SHAKE128)
+pub const CKP_XMSS_SHAKE256_10_256: u32 = 0x10; // XMSS-SHAKE256_10_256
 pub const CKP_XMSS_SHAKE256_16_256: u32 = 0x11; // XMSS-SHAKE256_16_256
 pub const CKP_XMSS_SHAKE256_20_256: u32 = 0x12; // XMSS-SHAKE256_20_256
 pub const CKP_XMSS_SHAKE256_10_192: u32 = 0x13; // XMSS-SHAKE256_10_192
+pub const CKP_XMSS_SHAKE256_16_192: u32 = 0x14; // XMSS-SHAKE256_16_192
+pub const CKP_XMSS_SHAKE256_20_192: u32 = 0x15; // XMSS-SHAKE256_20_192
 
 // ── XMSS-MT Parameter Set Constants (RFC 8391 OIDs, matching C++ xmssmt_parse_oid) ──────────────
 // SHA2 / 256-bit (most common; selected subset for PKCS#11 v3.2 §6.66.6)

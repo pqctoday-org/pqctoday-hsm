@@ -50,9 +50,16 @@
 #include "cryptoki.h"
 #include "P11Attributes.h"
 #include "P11Objects.h"
+#include "vendor_mechanisms.h"
 #include "SlotManager.h"
 #include "SymmetricKey.h"
 #include "AESKey.h"
+#include "MLKEMPublicKey.h"
+#include "MLKEMPrivateKey.h"
+#include "OSSLECPublicKey.h"
+#include "OSSLEDPublicKey.h"
+#include "OSSLMLKEMPublicKey.h"
+#include "OSSLMLKEMPrivateKey.h"
 
 // C3 (2026-08-13): the OpenPGP certificate type was carried at 0x00000003, an
 // UNASSIGNED OASIS codepoint below CKC_VENDOR_DEFINED — squatting a value the
@@ -92,6 +99,8 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 				*p11object = new P11MLDSAPublicKeyObj();
 			else if (keyType == CKK_ML_KEM)
 				*p11object = new P11MLKEMPublicKeyObj();
+			else if (keyType == CKK_PQCTODAY_CLASSIC_MCELIECE)
+				*p11object = new P11ClassicMcEliecePublicKeyObj();
 			else if (keyType == CKK_SLH_DSA)
 				*p11object = new P11SLHDSAPublicKeyObj();
 			else if (keyType == CKK_HSS)
@@ -115,6 +124,8 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 				*p11object = new P11MLDSAPrivateKeyObj();
 			else if (keyType == CKK_ML_KEM)
 				*p11object = new P11MLKEMPrivateKeyObj();
+			else if (keyType == CKK_PQCTODAY_CLASSIC_MCELIECE)
+				*p11object = new P11ClassicMcEliecePrivateKeyObj();
 			else if (keyType == CKK_SLH_DSA)
 				*p11object = new P11SLHDSAPrivateKeyObj();
 			else if (keyType == CKK_HSS)
@@ -163,6 +174,12 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 			// (SoftHSM::publishProfileObjects); an application asking to create
 			// one is refused in SoftHSM::CreateObject before it reaches here.
 			*p11object = new P11ProfileObj();
+			break;
+		case CKO_TRUST:
+			// C2 (2026-09-07) — §4.7. Unlike CKO_PROFILE this IS a storage
+			// object an application may create; it just has mandatory
+			// attributes, enforced in SoftHSM::CreateObject.
+			*p11object = new P11TrustObj();
 			break;
 		case CKO_DOMAIN_PARAMETERS:
 			return CKR_ATTRIBUTE_VALUE_INVALID;
@@ -321,6 +338,216 @@ CK_RV checkValueVerify(bool supplied, const ByteString& suppliedValue,
 	if (computed.size() == 0) return CKR_ATTRIBUTE_VALUE_INVALID;
 	if (suppliedValue == computed) return CKR_OK;
 	return CKR_ATTRIBUTE_VALUE_INVALID;
+}
+
+// E3 (ACVP gap-closure 2026-09-25) — ML-KEM key material at C_CreateObject.
+//
+// PKCS#11 v3.2 §6.68.2/§6.68.3 define an ML-KEM key's CKA_VALUE as the
+// encapsulation key ek / decapsulation key dk "as defined in [FIPS 203]", and
+// §4.1.1 rule 2 says a template that "specifies an invalid value for a valid
+// attribute" MUST fail with CKR_ATTRIBUTE_VALUE_INVALID. FIPS 203 §7.2/§7.3
+// give the input checks that decide validity: the type (length) check for
+// both keys, the modulus check for ek (every ByteDecode12 coefficient < q) and
+// the hash check for dk (H(ek) embedded in dk matches). Nothing ran any of
+// them here: a 1-byte-short dk, a short ek, or a dk with a modified H was
+// stored, and only failed (or, for a well-formed-length key, was caught)
+// later at C_EncapsulateKey/C_DecapsulateKey. OpenSSL's ML-KEM import
+// (EVP_PKEY_fromdata) performs exactly the modulus and hash checks, so the
+// value is run through the same OSSLMLKEM*Key path the KEM operations use.
+// An unknown CKA_PARAMETER_SET is refused for the same reason. Mirrors the
+// Rust engine's fix on fix/mlkem-input-checks-0925 (C_CreateObject ->
+// CKR_ATTRIBUTE_VALUE_INVALID).
+// Public key validation for imported EC / Edwards / Montgomery public keys
+// (2026-09-25). Same shape and placement as checkMLKEMKeyValue below: run from
+// the TEMPLATE before any object exists, so a refused key leaves nothing behind.
+//
+// Measured before writing it: all 10 invalid points in the NIST ACVP ECDSA and
+// EdDSA KeyVer vectors were accepted here — 6 ECDSA (3 "x or y out of range",
+// 3 "point not on curve") and 4 EdDSA ("point not on curve"). C_CreateObject
+// only stored the attributes and the crypto key is built lazily at first use,
+// so nothing ever checked the point.
+//
+// On the standard, stated precisely because it is easy to overstate: PKCS#11
+// v3.2 does NOT require public key validation. CKR_PUBLIC_KEY_INVALID occurs
+// exactly once in the whole document, permissively — "This error code may be
+// returned by C_CreateObject, when the public key is created, or by
+// C_VerifyInit..." (lowercase "may", so not even a BCP 14 MAY) — and chapter 6
+// has no validation mandate; all 22 of its X9.62 references are about point and
+// parameter ENCODING. The requirement being met is NIST SP 800-56A public key
+// validation, which the ACVP KeyVer groups exercise. So this is a security and
+// ACVP fix, not a conformance one.
+//
+// CKR_PUBLIC_KEY_INVALID is returned rather than checkMLKEMKeyValue's
+// CKR_ATTRIBUTE_VALUE_INVALID because the spec names this exact scenario for
+// it: "The public key fails a public key validation. For example, an EC public
+// key fails the public key validation specified in Section 5.2.2 of
+// [ANSI X9.62]." The ML-KEM path is a different case (length/hash input checks),
+// so the two codes are not inconsistent.
+//
+// The check is the crypto layer's own EVP_PKEY_public_check, reached by building
+// the key. For EC that covers on-curve, coordinate range AND prime-order
+// subgroup — which matters, because NO available KeyVer vector is small-order,
+// so a check written only to satisfy the vectors would drive the failures to
+// zero while still admitting a small-order point.
+static CK_RV checkECPublicKeyPoint(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType,
+                                   CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount)
+{
+	if (objClass != CKO_PUBLIC_KEY) return CKR_OK;
+
+	CK_ATTRIBUTE_PTR ecParams = NULL_PTR, ecPoint = NULL_PTR;
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		if (pTemplate[i].type == CKA_EC_PARAMS) ecParams = &pTemplate[i];
+		else if (pTemplate[i].type == CKA_EC_POINT) ecPoint = &pTemplate[i];
+	}
+	// Absent point is not this check's business — the per-attribute ck1 rules
+	// already require CKA_EC_POINT on create.
+	if (ecPoint == NULL || ecPoint->pValue == NULL_PTR) return CKR_OK;
+
+	ByteString params, point;
+	if (ecParams != NULL && ecParams->pValue != NULL_PTR)
+		params = ByteString((const unsigned char*)ecParams->pValue, ecParams->ulValueLen);
+	point = ByteString((const unsigned char*)ecPoint->pValue, ecPoint->ulValueLen);
+
+	bool ok = false;
+	if (keyType == CKK_EC)
+	{
+		if (params.size() == 0) return CKR_OK;   // ck1 rules cover absence
+		AsymmetricAlgorithm* ecdsa = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::ECDSA);
+		if (ecdsa == NULL) return CKR_GENERAL_ERROR;
+		OSSLECPublicKey* key = (OSSLECPublicKey*)ecdsa->newPublicKey();
+		if (key != NULL)
+		{
+			key->setEC(params);
+			key->setQ(point);
+			ok = (key->getOSSLKey() != NULL);  // SP 800-56A public key validation
+			ecdsa->recyclePublicKey(key);
+		}
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(ecdsa);
+	}
+	else if (keyType == CKK_EC_EDWARDS || keyType == CKK_EC_MONTGOMERY)
+	{
+		if (params.size() == 0) return CKR_OK;
+		AsymmetricAlgorithm* eddsa = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::EDDSA);
+		if (eddsa == NULL) return CKR_GENERAL_ERROR;
+		OSSLEDPublicKey* key = (OSSLEDPublicKey*)eddsa->newPublicKey();
+		if (key != NULL)
+		{
+			key->setEC(params);
+			key->setA(point);
+			ok = (key->getOSSLKey() != NULL);
+			// OpenSSL builds an Edwards key from any 32/57 bytes: it checks
+			// neither that they decode to a curve point nor the subgroup
+			// (EVP_PKEY_public_check returns 1 for any correct-length EdDSA
+			// key). isInPrimeOrderSubgroup does RFC 8032 strict decoding and
+			// L*Q = identity. Montgomery (X25519/X448) keys have no such
+			// requirement: RFC 7748 accepts every u-coordinate.
+			if (ok && keyType == CKK_EC_EDWARDS)
+				ok = key->isInPrimeOrderSubgroup();
+			eddsa->recyclePublicKey(key);
+		}
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(eddsa);
+	}
+	else return CKR_OK;
+
+	if (!ok)
+	{
+		ERROR_MSG("EC public key fails public key validation (SP 800-56A): point is "
+		          "off the curve, has a coordinate outside [0,p), or is outside the "
+		          "prime-order subgroup");
+		return CKR_PUBLIC_KEY_INVALID;
+	}
+	return CKR_OK;
+}
+
+static CK_RV checkMLKEMKeyValue(CK_OBJECT_CLASS objClass,
+                                CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount)
+{
+	const CK_ATTRIBUTE* value = NULL;
+	const CK_ATTRIBUTE* paramSet = NULL;
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		if (pTemplate[i].type == CKA_VALUE) value = &pTemplate[i];
+		else if (pTemplate[i].type == CKA_PARAMETER_SET) paramSet = &pTemplate[i];
+	}
+	// A missing attribute is CKR_TEMPLATE_INCOMPLETE, reported by
+	// saveTemplate() from the attributes' ck1 flags — not this check's job.
+	if (value == NULL || paramSet == NULL) return CKR_OK;
+	if (paramSet->pValue == NULL_PTR || paramSet->ulValueLen != sizeof(CK_ULONG))
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	const CK_ULONG ps = *(const CK_ULONG*)paramSet->pValue;
+	size_t ekLen = 0, dkLen = 0;  // FIPS 203 Table 3: 384k+32 / 768k+96
+	switch (ps)
+	{
+		case CKP_ML_KEM_512:  ekLen =  800; dkLen = 1632; break;
+		case CKP_ML_KEM_768:  ekLen = 1184; dkLen = 2400; break;
+		case CKP_ML_KEM_1024: ekLen = 1568; dkLen = 3168; break;
+		default:
+			ERROR_MSG("Unknown ML-KEM parameter set %lu", (unsigned long)ps);
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	const bool isPrivate = (objClass == CKO_PRIVATE_KEY);
+	if (value->pValue == NULL_PTR || value->ulValueLen != (isPrivate ? dkLen : ekLen))
+	{
+		ERROR_MSG("ML-KEM %s key: CKA_VALUE is %lu bytes, FIPS 203 requires %zu",
+		          isPrivate ? "decapsulation" : "encapsulation",
+		          (unsigned long)value->ulValueLen, isPrivate ? dkLen : ekLen);
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	AsymmetricAlgorithm* mlkem = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::MLKEM);
+	if (mlkem == NULL) return CKR_GENERAL_ERROR;
+	ByteString raw((const unsigned char*)value->pValue, value->ulValueLen);
+	bool ok = false;
+	if (isPrivate)
+	{
+		OSSLMLKEMPrivateKey* key = (OSSLMLKEMPrivateKey*)mlkem->newPrivateKey();
+		if (key != NULL)
+		{
+			key->setParameterSet(ps);
+			key->setValue(raw);
+			ok = (key->getOSSLKey() != NULL);  // FIPS 203 §7.3 hash check
+			mlkem->recyclePrivateKey(key);
+		}
+	}
+	else
+	{
+		OSSLMLKEMPublicKey* key = (OSSLMLKEMPublicKey*)mlkem->newPublicKey();
+		if (key != NULL)
+		{
+			key->setParameterSet(ps);
+			key->setValue(raw);
+			ok = (key->getOSSLKey() != NULL);  // FIPS 203 §7.2 modulus check
+			mlkem->recyclePublicKey(key);
+		}
+	}
+	raw.wipe();
+	CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
+	if (!ok)
+	{
+		ERROR_MSG("ML-KEM %s key fails the FIPS 203 %s input check",
+		          isPrivate ? "decapsulation" : "encapsulation",
+		          isPrivate ? "§7.3 hash" : "§7.2 modulus");
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+	return CKR_OK;
+}
+
+bool isSingleDerValue(const unsigned char* p, size_t n)
+{
+	if (p == NULL || n < 2) return false;
+	size_t hdr = 2, len = p[1];
+	if (p[1] & 0x80)
+	{
+		size_t nb = p[1] & 0x7f;
+		if (nb == 0 || nb > 3 || n < 2 + nb) return false; // no indefinite / oversized lengths
+		len = 0;
+		for (size_t i = 0; i < nb; i++) len = (len << 8) | p[2 + i];
+		hdr = 2 + nb;
+	}
+	return n == hdr + len;
 }
 
 CK_RV checkKeyLength(CK_KEY_TYPE keyType, size_t byteLen)
@@ -1184,26 +1411,105 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		return rv;
 	}
 
-	// C1 (2026-08-13). Profile objects describe what the LIBRARY conforms to, so
-	// they are read-only token objects the engine publishes for itself
-	// (publishProfileObjects below). An application creating one could otherwise
-	// claim conformance the implementation does not have. Rust's
-	// CKR_ATTRIBUTE_READ_ONLY is the better code than the CKR_ATTRIBUTE_VALUE_INVALID
-	// this used to fall through to.
-	if (op == OBJECT_OP_CREATE && objClass == CKO_PROFILE)
+	// C1 (2026-08-13, extended R3 2026-09-06). Profile objects describe what the
+	// LIBRARY conforms to, so they are read-only token objects the engine
+	// publishes for itself (publishProfileObjects below). An application creating
+	// one could otherwise claim conformance the implementation does not have.
+	// Rust's CKR_ATTRIBUTE_READ_ONLY is the better code than the
+	// CKR_ATTRIBUTE_VALUE_INVALID this used to fall through to.
+	//
+	// R3: the same reasoning covers the whole "Other Objects" (non-storage)
+	// table, not just profiles — "only objects that are considered Storage
+	// Objects can be created on a token, other kinds of object are generally
+	// built-in and attempting to create new objects of those kinds will result
+	// in an error". CKO_VALIDATION is the sharpest case: validation objects are
+	// read-only token objects describing third-party validations the module
+	// holds, and this software token holds none, so letting an application
+	// create one would let it fabricate a validation claim. CKO_HW_FEATURE and
+	// CKO_MECHANISM already fell through to CKR_ATTRIBUTE_VALUE_INVALID in
+	// newP11Object's default arm; naming them here returns the more accurate
+	// code and keeps both engines identical.
+	if (op == OBJECT_OP_CREATE &&
+	    (objClass == CKO_PROFILE ||
+	     objClass == CKO_VALIDATION ||
+	     objClass == CKO_HW_FEATURE ||
+	     objClass == CKO_MECHANISM))
 		return CKR_ATTRIBUTE_READ_ONLY;
 
-	// ── S5 (2026-08-13) — hash-based-signature private keys ──────────────────
+	// ── C2 (2026-09-07) — CKO_TRUST mandatory attributes (§4.7 Table 25) ──
+	// A trust object binds trusted usages to ONE certificate and is looked up
+	// by CKA_ISSUER + CKA_SERIAL_NUMBER, so footnote 1 makes both mandatory:
+	// without them the object asserts trust about nothing in particular and
+	// can never be found. Footnote 2 additionally requires
+	// CKA_HASH_OF_CERTIFICATE "unless all trust attributes are
+	// CKT_TRUST_UNKNOWN, or CKT_NOT_TRUSTED" — i.e. exactly when the object
+	// vouches for something, which is when binding it to the RIGHT
+	// certificate matters. Checked here rather than in P11TrustObj::init
+	// because only this function sees the caller's whole template.
+	if (op == OBJECT_OP_CREATE && objClass == CKO_TRUST)
+	{
+		bool haveIssuer = false, haveSerial = false, haveHash = false;
+		bool vouchesForSomething = false;
+
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			switch (pTemplate[i].type)
+			{
+				case CKA_ISSUER:
+					haveIssuer = true;
+					break;
+				case CKA_SERIAL_NUMBER:
+					haveSerial = true;
+					break;
+				case CKA_HASH_OF_CERTIFICATE:
+					haveHash = true;
+					break;
+				case CKA_TRUST_SERVER_AUTH:
+				case CKA_TRUST_CLIENT_AUTH:
+				case CKA_TRUST_CODE_SIGNING:
+				case CKA_TRUST_EMAIL_PROTECTION:
+				case CKA_TRUST_IPSEC_IKE:
+				case CKA_TRUST_TIME_STAMPING:
+				case CKA_TRUST_OCSP_SIGNING:
+				{
+					if (pTemplate[i].ulValueLen != sizeof(CK_ULONG) ||
+					    pTemplate[i].pValue == NULL_PTR)
+						return CKR_ATTRIBUTE_VALUE_INVALID;
+					const CK_ULONG v = *(CK_ULONG*)pTemplate[i].pValue;
+					if (v != CKT_TRUST_UNKNOWN && v != CKT_NOT_TRUSTED)
+						vouchesForSomething = true;
+					break;
+				}
+				default:
+					break;
+			}
+		}
+
+		if (!haveIssuer || !haveSerial)
+			return CKR_TEMPLATE_INCOMPLETE;
+		if (vouchesForSomething && !haveHash)
+			return CKR_TEMPLATE_INCOMPLETE;
+	}
+
+	// ── S5 (2026-08-13, extended HBS-1 2026-09-03) — hash-based-signature
+	// private keys ────────────────────────────────────────────────────────
 	// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE
 	// MUST be false, and CKA_COPYABLE MUST be false for this key."
 	// §6.66.4 (XMSS) / §6.66.5 (XMSS-MT): "CKA_SENSITIVE MUST be true and
-	// CKA_EXTRACTABLE MUST be false for this key."
+	// CKA_EXTRACTABLE MUST be false for this key" — the spec text does not
+	// repeat the COPYABLE sentence for these two, but the hazard it guards
+	// against is identical: a copied XMSS/XMSS-MT private key can advance or
+	// replay the same one-time leaf independently of the original, exactly
+	// the HSS forgery hazard the spec does spell out. HBS-1 (2026-09-03)
+	// closes that gap by enforcing CKA_COPYABLE FALSE for all three types,
+	// not HSS alone — this engine reads the two sections' silence on
+	// COPYABLE as an omission, not a deliberate looser bound.
 	//
 	// These keys hold the one-time-signature STATE in CKA_VALUE — the same
 	// tables warn that "exporting this value is dangerous as it would allow key
-	// reuse", and reuse of an LMS/XMSS one-time key permits forgery. Until this
-	// pass neither generation nor C_CreateObject set any of the three, so the
-	// class defaults applied (sensitive false) and the state was one
+	// reuse", and reuse of an LMS/XMSS one-time key permits forgery. Until the
+	// 08-13 pass neither generation nor C_CreateObject set any of the three, so
+	// the class defaults applied (sensitive false) and the state was one
 	// C_GetAttributeValue from extraction.
 	//
 	// Enforced here rather than in the keygen mechanism block because both
@@ -1217,8 +1523,7 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		for (CK_ULONG i = 0; i < ulCount; i++)
 		{
 			const CK_ATTRIBUTE_TYPE t = pTemplate[i].type;
-			if (t != CKA_SENSITIVE && t != CKA_EXTRACTABLE &&
-			    !(keyType == CKK_HSS && t == CKA_COPYABLE))
+			if (t != CKA_SENSITIVE && t != CKA_EXTRACTABLE && t != CKA_COPYABLE)
 				continue;
 			if (pTemplate[i].pValue == NULL_PTR ||
 			    pTemplate[i].ulValueLen != sizeof(CK_BBOOL))
@@ -1230,6 +1535,35 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 			if ((v != CK_FALSE) != (required != CK_FALSE))
 				return CKR_ATTRIBUTE_VALUE_INVALID;
 		}
+	}
+
+	// E3 (2026-09-25): FIPS 203 §7.2/§7.3 input checks on imported ML-KEM
+	// keys — before any object exists, so a refused key leaves nothing behind.
+	if (op == OBJECT_OP_CREATE && keyType == CKK_ML_KEM &&
+	    (objClass == CKO_PUBLIC_KEY || objClass == CKO_PRIVATE_KEY))
+	{
+		rv = checkMLKEMKeyValue(objClass, pTemplate, ulCount);
+		if (rv != CKR_OK) return rv;
+	}
+
+	// SP 800-56A public key validation on imported EC / Edwards / Montgomery
+	// public keys — same "before any object exists" placement as the ML-KEM
+	// check above. See checkECPublicKeyPoint for why this is a security/ACVP
+	// fix rather than a conformance one.
+	if (op == OBJECT_OP_CREATE &&
+	    (keyType == CKK_EC || keyType == CKK_EC_EDWARDS || keyType == CKK_EC_MONTGOMERY))
+	{
+		// Plan 3.B′: CKA_EC_PARAMS must be exactly one DER value (§6.3,
+		// CKR_DOMAIN_PARAMS_INVALID) — same rule as both key generators and
+		// the Rust engine's decode_ec_params.
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			if (pTemplate[i].type == CKA_EC_PARAMS && pTemplate[i].pValue != NULL_PTR &&
+			    !isSingleDerValue((const unsigned char*)pTemplate[i].pValue, pTemplate[i].ulValueLen))
+				return CKR_DOMAIN_PARAMS_INVALID;
+		}
+		rv = checkECPublicKeyPoint(objClass, keyType, pTemplate, ulCount);
+		if (rv != CKR_OK) return rv;
 	}
 
 	// Change order of attributes
@@ -1248,7 +1582,7 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		if (hbsPrivateKey &&
 		    (pTemplate[i].type == CKA_SENSITIVE ||
 		     pTemplate[i].type == CKA_EXTRACTABLE ||
-		     (keyType == CKK_HSS && pTemplate[i].type == CKA_COPYABLE)))
+		     pTemplate[i].type == CKA_COPYABLE))
 		{
 			// Validated above; the engine writes the mandated value itself.
 			continue;
@@ -1275,13 +1609,12 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		attribs[attribsCount].pValue = &hbsExtractable;
 		attribs[attribsCount].ulValueLen = sizeof(hbsExtractable);
 		attribsCount++;
-		if (keyType == CKK_HSS)
-		{
-			attribs[attribsCount].type = CKA_COPYABLE;
-			attribs[attribsCount].pValue = &hbsCopyable;
-			attribs[attribsCount].ulValueLen = sizeof(hbsCopyable);
-			attribsCount++;
-		}
+		// HBS-1 (2026-09-03): forced for HSS, XMSS and XMSS-MT alike — see
+		// the enforcement comment above this block.
+		attribs[attribsCount].type = CKA_COPYABLE;
+		attribs[attribsCount].pValue = &hbsCopyable;
+		attribs[attribsCount].ulValueLen = sizeof(hbsCopyable);
+		attribsCount++;
 	}
 	for (CK_ULONG i=0; i < saveAttribsCount; i++)
 	{
@@ -1328,6 +1661,7 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 	delete p11object;
 	if (rv != CKR_OK)
 		return rv;
+
 
 	if (op == OBJECT_OP_CREATE)
 	{

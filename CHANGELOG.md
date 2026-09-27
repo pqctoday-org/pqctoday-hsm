@@ -6,6 +6,966 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **The local gate can run on another machine.** `bash scripts/local-gate.sh
+  --host=user@host --cpp` runs the same gate on a second host (today the
+  M4 Pro) and writes the pre-push marker here only if it passed there on
+  exactly this commit: the commit travels as a git bundle (no credentials on
+  the remote), and the remote's checkout must match this commit's tree hash
+  before and after the run. The marker records `host=<name>` in its flags.
+  The remote container is built from the new pinned
+  `scripts/gate-container/Dockerfile`, a reproducible recipe for the
+  previously hand-built `pqc-rust` container. Without `--host`, nothing
+  changes.
+
+- **Rust engine: operations on different sessions no longer queue behind each
+  other.** Every per-session table (operation state for sign, verify,
+  encrypt, decrypt, digest, find and the message APIs, plus the session
+  table itself) was one `Mutex<HashMap>`, so each call of every session on
+  every thread took the same few locks. Small operations lost throughput as
+  threads were added (M4 Pro: SHA-256 64 B fell from 5.2M ops/s with one
+  worker per tenant to 1.2M with two). The tables are now split into 64
+  independently locked shards keyed by session handle; whole-table work
+  (C_CloseAllSessions, C_Finalize, destroying a key in use) visits every
+  shard. The object table moved behind a read/write lock, so key lookups run
+  concurrently. One-shot AES C_Encrypt / C_Decrypt reuse the key schedule
+  expanded at Init instead of re-reading and re-expanding the key per call;
+  a global object-write epoch, bumped by every write to the object table,
+  invalidates that cache, so a key destroyed or changed after Init is
+  re-read exactly as before. Behaviour is unchanged: 11 new tests pin the
+  operation-state error codes, the §5.2 size query, cleanup on close,
+  close-all and finalize, isolation between sessions on different threads,
+  a stress run (8 threads × 4 sessions, interleaved one-shot, multipart,
+  digest and close/reopen, 50 rounds), and cache invalidation on key destroy
+  and key change.
+
+- **RSA C_Decrypt no longer decrypts twice for the two-call idiom.** A NULL
+  `pData` length query on `CKM_RSA_PKCS_OAEP` / `CKM_RSA_PKCS` ran the full
+  private-key operation just to learn the plaintext length, and the real call
+  then ran it again: two private-key operations per decrypt for every caller
+  that follows the §5.2 convention. The query now answers with the modulus length k (§5.2
+  allows an upper bound; the C++ engine already reports k) without touching
+  the private key. Only a well-formed request takes this path (ciphertext of
+  exactly k bytes, key carrying `CKA_MODULUS`); anything else keeps the full
+  path and its error codes. The answer depends on the key alone, so it
+  carries no padding-oracle signal.
+
+- **AES-GCM processes whole blocks instead of single bytes.** `GcmState`
+  (one-shot, multipart and message-based GCM in the Rust engine) produced
+  the CTR keystream one AES block per call and fed GHASH one byte at a time,
+  so once hardware AES made the cipher cheap, that loop set GCM's speed: GCM
+  gained 3–6× from hardware AES on every CPU measured, against 7–13× for CBC.
+  Aligned data now goes through a whole-block path: up to 32 counter blocks
+  per AES call (the backend pipelines them) and one GHASH update per 512-byte
+  batch. Only the bytes before the stream is block-aligned and the final
+  partial block take the byte path. Output is byte-identical: checked against
+  the NIST GCM vectors (all IV lengths), the existing KATs, and a new test
+  comparing every length 0–100 plus multi-batch sizes, in seven chunkings,
+  both directions and both APIs, with the independent `aes-gcm` crate.
+
+- **Both engines (behaviour change): BIP32 output keys.**
+  - A child derive now stays on its parent's curve. A template naming another
+    curve (say P-256 on a secp256k1 parent) used to derive on the template's
+    curve and return `CKR_OK`; it is now `CKR_TEMPLATE_INCONSISTENT`.
+  - SLIP-10 Ed25519 nodes are now `CKK_EC_EDWARDS` keys that sign with
+    `CKM_EDDSA`. They used to be `CKK_EC`, which `CKM_EDDSA` refuses. The
+    hub's BIP32 wrapper already asked for `CKK_EC_EDWARDS`; the engines
+    overrode it.
+
+- **Rust engine (behaviour change): the bare BIP32 codes `0x105B`/`0x105C` are
+  no longer accepted.** They were silent aliases of the vendor
+  `CKM_BIP32_MASTER_DERIVE`/`CKM_BIP32_CHILD_DERIVE` (`0x8000105B`/`0x8000105C`),
+  never advertised, and sit in space OASIS reserves for future mechanisms.
+  `C_DeriveKey` now answers `CKR_MECHANISM_INVALID` for them, as the C++
+  engine always has. Derived keys no longer carry a second copy of the chain
+  code under the bare attribute ID `0x1021`. No known caller used either form.
+
+- **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
+  the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
+  flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
+  `--cfg aes_armv8` (and `polyval` 0.6, GCM's GHASH, only under
+  `--cfg polyval_armv8`), so every aarch64 build that forgot the flags ran the
+  constant-time *software* AES while the core's AESE/AESMC/PMULL sat idle.
+  `aes` 0.9 and `polyval` 0.7 select the hardware backends by default (runtime
+  HWCAP detection, software fallback), so the failure mode is gone. Verified on
+  the artefact of a build with **no RUSTFLAGS at all**: 46 `aes` 0.9
+  hardware-backend symbols and 5 `polyval` 0.7 intrinsics symbols linked, zero
+  `polyval` software symbols. Measured effect of hardware AES (same engine,
+  A-B-A-B, SHA-256 control flat): AES-CBC 16 KiB 7.4–12.9×, AES-GCM 3.0–5.8×
+  on KV260, i.MX 95 and M4 Pro.
+
+  Crates: `aes` 0.9, `aes-gcm` 0.11, `aes-kw` 0.3, `cbc` 0.2, `ctr` 0.10,
+  `xts-mode` 0.6, `ghash` 0.6, `chacha20` 0.10 (`legacy` feature for the 64-bit
+  nonce variant), `chacha20poly1305` 0.11. The three lockfiles (`rust/`,
+  `kmip/`, `remoting/`) change only in that family.
+
+  **One exception, deliberately: AES-CMAC stays on `cmac` 0.7 with its own
+  aliased `aes` 0.8** (`aes08`). `cmac` 0.8 implements `digest` 0.11's `Mac`,
+  while the SP 800-108 KDF helpers are generic over one `Mac` trait shared with
+  HMAC on `digest` 0.10 — moving CMAC means moving the whole digest-0.10 stack
+  (`sha2`, `sha3`, `hmac`, `hkdf`, and the patched SLH-DSA/LMS/XMSS crates),
+  which is a separate, larger migration. Until then CMAC is the one AES user
+  that still needs `--cfg aes_armv8` for its hardware path.
+
+  The eight AES key-wrap sites (four in `ffi`, four in `native`) now go through
+  one helper, `crypto::aeskw`, because `aes-kw` 0.3 replaced the `*_vec` methods
+  with caller-sized buffers and split KW/KWP into separate types. The helper
+  reports only *why* a wrap failed (KEK length vs operation); every site keeps
+  its own precondition checks and its own `CKR_*` mapping unchanged, because
+  `ffi` and `native` deliberately return different codes for the same failure.
+  Buffer sizes follow what `aes-kw` 0.3's code actually checks (one of its doc
+  comments is looser than the code). Every former `GenericArray::from_slice`
+  site is either a length-matched key (now `new_from_slice(..).expect(..)`) or a
+  length-checked block/nonce (now `try_from(..)`), preserving the old
+  panic-on-mismatch semantics without the now-deprecated constructors; the
+  encrypted object store's nonce conversions map to its existing `CryptoError`
+  rather than panic.
+
+  **Consumers must update in lockstep:** the ARMv8 artefact gates in
+  pqctoday-cacp (`meta-pqc-hsm/conf/pqc-rust-armv8-crypto.inc`) and the bench
+  sidecar (`pqctoday-sandbox` `Dockerfile.bench-arm64`) match `polyval` 0.6
+  symbols, which no longer exist. They must accept `polyval` 0.7's
+  `backend::intrinsics` (and `aes` 0.9's hardware symbols) before any build
+  pins an engine that includes this change.
+
+### Fixed
+
+- **Two KMIP conformance replays could not run in one container.** The
+  replay started each test's server on the same fixed sequence of ports in
+  every run, so a second gate (or a server left over from a stopped one)
+  made it fail with "Address already in use" — and its readiness check could
+  even connect to the other run's server. Each server now gets a free port
+  from the operating system, is retried once if that port is taken, and
+  only counts as started if it is still running once the port answers.
+  `kmip/conformance/harness/check_concurrent_replay.py` runs two replays at
+  once and requires both to pass.
+
+- **C++ engine: Edwards and Montgomery mechanisms advertised no EC
+  capability flags.** `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EDDSA`,
+  `CKM_EDDSA_PH`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN`, `CKM_X25519` and
+  `CKM_X448` now report `CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME |
+  CKF_EC_UNCOMPRESS`, matching what the engine accepts (PKCS#11 v3.2 §6.3).
+  The cross-engine differential harness now compares the `CKF_EC_*` flags,
+  which it never recorded before; the one legal difference it finds (only the
+  Rust engine accepts a curve name for P-256 and the other Weierstrass curves)
+  is recorded with its citation.
+
+- **The KMIP mechanism manifest listed 4 of the 16 vendor mechanisms.**
+  `kmip/pkcs11-mech-manifest.json` still showed the July FrodoKEM / Classic
+  McEliece entries and an authority checksum four revisions old, and claimed
+  a CI check that could not exist (the authority file is private). It now
+  lists every vendor mechanism and key type the engines define, pins the
+  current authority revision, and says plainly that the checksum is a
+  hand-kept record. `check_pkcs11_constants.py` now fails if the manifest's
+  vendor lists and the engines ever disagree.
+
+- **ChaCha20 kept its start block across a size query.** After a NULL-buffer
+  length query or `CKR_BUFFER_TOO_SMALL`, one-shot `C_Encrypt` / `C_Decrypt`
+  re-armed the operation with block counter 0, so the real call used the wrong
+  keystream block for a `CK_CHACHA20_PARAMS` start counter other than 0.
+
+- **Both engines: imported EC public keys are now validated
+  (`CKR_PUBLIC_KEY_INVALID`).**
+  - **Rust:** no imported EC public key was checked before. Off-curve and
+    out-of-range points were accepted for P-224, P-256, P-384, P-521,
+    secp256k1, Ed25519 and Ed448.
+  - **C++:** it has checked the NIST curves since #274, but Edwards keys went
+    unchecked, because OpenSSL builds an Edwards key from any
+    correct-length bytes.
+  - **What is now checked:**
+    - NIST-curve keys must lie on the curve with in-range coordinates.
+    - Edwards keys must have a canonical encoding, lie on the curve, not be
+      the identity, and lie in the prime-order subgroup (L·Q = identity).
+    - That last check is not the same as rejecting small-order points: a
+      mixed-order point is not small-order, but still carries a torsion
+      component.
+  - **Evidence:**
+    - NIST ACVP KeyVer vectors (`tests/acvp/ec_keyver_test.json`), 20 cases,
+      now pass verdict-exact in both engines.
+    - NIST publishes no small-order or mixed-order case, so the identity,
+      order-8, mixed-order and non-canonical Edwards cases are
+      byte-identical constants in both engines' tests, computed
+      independently in Python.
+    - With the checks disabled, C++ accepted all of them, and so did the
+      Rust validator.
+- **C++ engine: about 1 in 256 BIP32 derivations failed with
+  `CKR_FUNCTION_FAILED`.** `setECPrivateKey` decided whether a 32- or 48-byte
+  key was a raw EC scalar or a PKCS#8 blob partly by checking whether its first
+  byte was `0x30`, the DER SEQUENCE tag. A random scalar starts with `0x30`
+  about once in 256, and such a key failed to decode. That broke the
+  `CKM_BIP32_MASTER_DERIVE` and `CKM_BIP32_CHILD_DERIVE` paths, and the
+  raw-scalar unwrap path used by GSMA SUCI flows. The size alone now decides: a
+  PKCS#8 EC key is never 32 or 48 bytes. It surfaced as an intermittent
+  failure of `testBip32ChildDeriveAdvertisesItsParentKeySize`; a new test pins
+  it with a seed whose master key starts with `0x30`.
+- **Rust engine: RSA-OAEP with SHA-1, SHA-224 and SHA-3 was refused.** The
+  engine only accepted SHA-256, SHA-384 and SHA-512, so every other hash got
+  `CKR_MECHANISM_PARAM_INVALID` at `C_EncryptInit` / `C_DecryptInit` /
+  `C_WrapKey` / `C_UnwrapKey`. That included NIST's own SHA-1 OAEP vectors,
+  although PKCS#11 v3.2 leaves the hash open and SP 800-56B rev 2 allows
+  SHA-1. The C++ engine already accepted all nine hashes, each with its
+  matching MGF1, and the Rust engine now does too. The NIST OAEP test now
+  decrypts through `C_DecryptInit` / `C_Decrypt`. Before, it called the RSA
+  library directly, which proved the imported key material but not the
+  engine; that gap is how the refusal went unnoticed (reported by a parallel
+  review session).
+
+- **`bench-harness`: RSA-PSS now passes `CK_RSA_PKCS_PSS_PARAMS`, so the
+  benchmark runs again against the current engine.** The hash-specific PSS
+  mechanisms require that structure (PKCS#11 v3.2 §6.1.11), and since
+  conformance decision E9/D6 (2026-09-25) the engine enforces it — an absent
+  struct is `CKR_MECHANISM_PARAM_INVALID`. The harness had relied on the old
+  fallback to defaults, so every run that included RSA-PSS now died during
+  provisioning (`C_SignInit(RSA-PSS-2048)`, rv=0x71) — found by the first
+  benchmark run against engine `d1f74a52`. It now sends hashAlg/mgf matching
+  the mechanism's digest and sLen = digest length (what the old default used,
+  so the measured operation is unchanged). Verified by running the full
+  matrix against that engine: 262/262 rows, no zero-op points.
+
+- **Local gate: the Rust PKCS#11 conformance step built wasm with a 2 MiB
+  stack, while the shipped bundle uses 8 MiB.** So the gate checked a
+  configuration nobody ships. With 2 MiB, the ACVP wasm harness crashes at
+  SLH-DSA-192f with `memory access out of bounds` (a wasm stack overflow);
+  with 8 MiB it runs through. The gate step and the documented manual build
+  commands now use 8 MiB, the value `rust/build-wasm-bundle.sh` ships. The
+  `.wasm` file size is unchanged; initial memory grows from 2.6 to 8.6 MiB.
+
+- **Rust engine: `CKM_BIP32_MASTER_DERIVE` advertised a 32-byte seed but
+  accepted any length.** The advertised range was a constraint the engine did
+  not enforce, the same defect the C++ engine fixed in `b9cc607c`. The Rust
+  engine now matches it: it advertises 16 to 64 bytes (BIP-32 allows 128 to
+  512 bits, and 64 bytes is what BIP-39 produces), refuses any other length
+  with `CKR_KEY_SIZE_RANGE`, and wipes the seed on that path. Both ends of the
+  range are pinned with BIP-32's own test vectors 1 (16-byte seed) and 2
+  (64-byte seed). `CKM_BIP32_CHILD_DERIVE` stays at 32/32, the parent's
+  private scalar.
+
+- **C++ engine: a malformed curve name in `CKA_EC_PARAMS` crashed the engine,
+  and unusable EC parameters returned `CKR_GENERAL_ERROR`.**
+  - A `PrintableString` whose length runs past the bytes supplied (for example
+    `13 05 41`) was passed to `strcmp` as a NULL pointer, a crash reachable
+    from `C_GenerateKeyPair` and from importing an Edwards or Montgomery key.
+    It is now refused.
+  - Both key-pair generators now answer with the two codes PKCS#11 v3.2 §6.3
+    names, the same line the Rust engine draws:
+    - `CKR_CURVE_NOT_SUPPORTED` for a well-formed curve identifier this engine
+      does not implement;
+    - `CKR_DOMAIN_PARAMS_INVALID` for a value that is not a valid
+      representation (truncated, implicitCA `NULL`, other tags, or a curve name
+      given to the Weierstrass generator, which does not take that form).
+  - Proof: with the old engine code the new test crashes the C++ test binary
+    (segmentation fault); with the fix it passes.
+
+- **Rust engine: Ed25519ph and Ed448ph still dropped the context through
+  `C_Sign` and `C_Verify`.** #276 fixed the signing and verifying functions,
+  but the PKCS#11 entry points never passed them the context. The parameter
+  parser read `CK_EDDSA_PARAMS`' context only for `CKM_EDDSA`, and a
+  `phFlag = TRUE` call has already become `CKM_EDDSA_PH` by then. So every
+  pre-hash call signed with an empty context and returned `CKR_OK`. The hub's
+  ACVP harness measured 8 NIST pre-hash cases producing the wrong signature on
+  the wasm engine. Every NIST pre-hash vector in the repository now
+  byte-matches through `C_Sign` and verifies through `C_Verify`, for both
+  `phFlag = TRUE` and `CKM_EDDSA_PH`.
+- **Rust engine: X25519 accepted low-order peer points.** Such a point makes
+  the shared secret all zeros whatever the private key is. RFC 7748 §6.1 says
+  to check for that, and RFC 9180 (HPKE) requires it. X448 already refused
+  these points; X25519 did not, in `C_DeriveKey`, `C_EncapsulateKey`,
+  `C_DecapsulateKey`, HPKE, the X25519MLKEM768 hybrid, or the KMIP key
+  agreement. All ten call sites now refuse a non-contributory result with the
+  code their X448 counterpart already returns.
+
+- **Rust engine: Ed448 verification accepted signatures whose R sets unused
+  bits.** In Ed448's 57-byte point encoding, bits 448 to 454 must be zero
+  (RFC 8032 §5.2.2). The curve library ignores them, so a signature crafted
+  over a modified R verified. Wycheproof `ed448_test.json` tcIds 63, 64 and 65
+  (`InvalidEncoding`) returned `CKR_OK`; the C++ engine already refused them.
+  All three Ed448 verifiers (plain, context, pre-hash) now reject such an R
+  with `CKR_SIGNATURE_INVALID`. Wycheproof tcId 5, a valid signature under the
+  same key, still verifies.
+
+- **Rust engine: the generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA`
+  ignored their hedge variant and context.** Their `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  was read only for its `hash` field. So `CKH_DETERMINISTIC_REQUIRED` still
+  signed hedged: the hub measured two different SLH-DSA signatures for the
+  same digest on all 12 parameter sets, and the same happened for ML-DSA. A
+  caller's context was also dropped, so the signature was made with an empty
+  one. Both are now honoured, through `C_Sign` and `C_SignMessage`. The
+  hash-specific `CKM_HASH_*_<hash>` mechanisms were not affected.
+
+- **Rust engine: KMIP key agreement ran every 32-byte EC key as P-256.** The
+  curve was guessed from the private key's length, so a secp256k1 key failed
+  with `CKR_ARGUMENTS_BAD` over KMIP, although `C_DeriveKey` handled it. The
+  key's stored curve is now used.
+
+- **C++ engine: no BIP32-derived key could sign.** Derived nodes stored
+  `CKA_EC_PARAMS` unencrypted while the signing path decrypts it for private
+  keys, so `C_SignInit` answered `CKR_GENERAL_ERROR` for every BIP32 key. A
+  secp256k1 child now signs with `CKM_ECDSA`, and the SLIP-10 Ed25519 child
+  m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
+  published in SLIP-10 test vector 1.
+
+- **Rust engine: LMS signatures with a 24-byte hash and Winternitz w=1 were
+  wrong (correctness fix to the vendored `hbs-lms`, `rust/hbs-lms-patched`).**
+  The LMOTS checksum left shift is `ls = 16 − v·w` (RFC 8554 §4.1), which
+  depends on both w and the hash size n, but the crate used the 32-byte values
+  for every hash; it now computes `ls` from the formula. For `LMOTS_SHA256_N24_W1` and `LMOTS_SHAKE_N24_W1` it rejected
+  valid NIST signatures, and signed with the same wrong checksum, so its
+  signatures would not verify anywhere else. All other LMS parameter sets were
+  unaffected. The hub offers only the W4 and W8 variants of the 24-byte sets.
+  All 320 NIST LMS signature-verification cases now pass.
+
+- **Rust engine: SP 800-108 key derivation accepted a repeated DKM length
+  field.** PKCS#11 v3.2 (Tables 199–201) allows at most one
+  `CK_SP800_108_DKM_LENGTH` entry in the data parameters. A request with two
+  was accepted in counter, feedback and double-pipeline mode, and the derived
+  key silently depended on both. `C_DeriveKey` now refuses it with
+  `CKR_MECHANISM_PARAM_INVALID` in all three modes.
+
+- **Rust engine: SP 800-108 feedback and double-pipeline derivation accepted
+  a repeated counter field.** PKCS#11 v3.2 (Tables 200–201) allows at most one
+  `CK_SP800_108_COUNTER` entry. Two were accepted and both were mixed into the
+  derivation. `C_DeriveKey` now refuses the request with
+  `CKR_MECHANISM_PARAM_INVALID`. A single counter field still works as before.
+
+- **Rust engine: unwrapping could create a key of the wrong length for its
+  type.** For example, unwrapping 16 bytes into a `CKK_CHACHA20` key returned
+  `CKR_OK` and made a 128-bit ChaCha20 key, though ChaCha20 keys are always
+  256 bits. PKCS#11 v3.2 §5.18.4 requires `CKR_WRAPPED_KEY_LEN_RANGE` for such
+  a length conflict. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply
+  the same length rules `C_DeriveKey` already uses (AES 16, 24 or 32 bytes;
+  AES-XTS 32 or 64; ChaCha20 exactly 32; a non-empty value for generic-secret,
+  HKDF and HMAC keys) and refuse anything else with that code. No key object is
+  created on refusal.
+
+- **Rust engine: an RSA key with a public exponent of 2^33 or more was
+  accepted by `C_UnwrapKey`.** `C_CreateObject` refuses such keys (a
+  deliberate limit: both Rust backends reject them). The unwrap path stored the
+  key without the same check, so it was accepted there and then failed on first
+  use. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply the import check
+  and return `CKR_WRAPPED_KEY_INVALID`.
+
+- **Both engines: `CKA_EC_PARAMS` with bytes after the DER value was
+  accepted.** An OID or curve name followed by trailing bytes was decoded as if
+  the extra bytes were not there. The Rust decoder and the C++ `C_CreateObject`
+  and `C_GenerateKeyPair` paths (EC, Edwards and Montgomery keys) now require
+  the attribute to be exactly one DER value and return
+  `CKR_DOMAIN_PARAMS_INVALID` otherwise (PKCS#11 v3.2 §6.3).
+
+- **Known deviation now measured: structure packing (PKCS#11 v3.2 §2.1).** The
+  spec says Cryptoki structures SHALL be packed with 1-byte alignment. Both
+  engines keep natural alignment on purpose, as OpenSC, p11-kit and
+  pkcs11-provider expect on non-Windows platforms; packing would break them.
+  The C++ compliance harness now records a cited XFAIL for each info structure
+  whose size differs from its packed size, and a Rust test pins the current
+  layout so any change is noticed.
+
+### Added
+
+- **bench-harness can measure SHAKE128/256, labelled as outside the HSM.**
+  PKCS#11 v3.2 defines no SHAKE digest mechanism, so the benchmark had no
+  SHAKE row. The new `bench-harness xof` subcommand times the same `sha3`
+  crate the engine links, directly, at 64 B / 1 KiB / 16 KiB. Every row
+  carries `access_path = "rust-sha3-direct"` and an empty `engine_version`,
+  so it cannot be read as an HSM figure. The PKCS#11 matrix
+  (`--list-algorithms`, 113 cells) is unchanged; a FIPS 202 known-answer test
+  pins the output. M4 Pro, 4 threads: SHAKE128 16 KiB 238k ops/s, SHAKE256
+  196k.
+
+- **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
+  caller-supplied nonce — a deliberate key-recovery primitive for teaching.**
+
+  Signs a digest, exactly like `CKM_ECDSA`, but uses the k given as the
+  mechanism parameter instead of generating one. With k and one signature,
+  anyone recovers the private key (d = r⁻¹(s·k − z) mod n), which is the
+  lesson the mechanism exists to show; `SECURITY.md` describes the risk and how
+  to turn it off per key (`CKA_ALLOWED_MECHANISMS`) or per C++ token
+  (`slots.mechanisms`). Sign only, single-part, P-256 / P-384 / P-521.
+  k must be exactly the order's byte length with 1 ≤ k < n, else
+  `CKR_MECHANISM_PARAM_INVALID` at `C_SignInit`. A P-224 key gets
+  `CKR_KEY_SIZE_RANGE` and any other curve `CKR_KEY_TYPE_INCONSISTENT`.
+
+  It also makes NIST's ECDSA SigGen vectors checkable at all. They are
+  random-k, so (r, s) can only be reproduced when k is an input. 40 ACVP-Server
+  cases (P-256, P-384 and P-521, including SHA-512 on P-256 for digest
+  truncation) now byte-match in both engines. Rust uses RustCrypto's
+  `ecdsa::hazmat::sign_prehashed`. The C++ engine uses OpenSSL's BN and
+  EC_POINT API directly, since OpenSSL 3.x has no public way to sign with a
+  given k.
+
+- **`bench-harness`: AES and SHA-2/SHA-3 measurement cells.**
+
+  The benchmark measured only asymmetric work — signatures, key agreement,
+  KEMs, RSA key transport — so the symmetric and hashing cost that carries bulk
+  traffic had no row. It now measures `AES-{128,256}-{CBC,GCM}` encryption and
+  `SHA-256/384/512` + `SHA3-256/512` digests, each at **64 B, 1 KiB and
+  16 KiB** (31 new cells; 131 per leg with `--include-slow`). The data size is
+  part of the algorithm name (`AES-256-GCM-16KB`) because symmetric throughput
+  depends on message size in a way an asymmetric operation's does not, and
+  every consumer of the JSONL keys a series by `algorithm` alone. 16 KiB is TLS
+  1.3's maximum record size (RFC 8446 §5.1).
+
+  New `pkcs11.rs` wrappers, each checked against `ffi.rs`'s dispatch before
+  use: `C_GenerateKey` (`CKA_VALUE_LEN` is required for `CKM_AES_KEY_GEN` and
+  read at native `CK_ULONG` width), a mode-aware symmetric
+  `C_EncryptInit`/`C_DecryptInit` (CBC takes a bare 16-byte IV; GCM takes six
+  native-width `CK_GCM_PARAMS` fields), and `C_DigestInit`/`C_Digest`. The
+  existing `encrypt_init` builds `CK_RSA_PKCS_OAEP_PARAMS` unconditionally, so
+  the symmetric path is separate. Symmetric and digest workers allocate their
+  buffers once (`encrypt_into`/`digest_into`, one FFI call per op) — at 64 B a
+  per-operation allocation would be a visible share of what the row reports.
+  GCM nonces are unique per (worker, operation), since workers share a
+  tenant's key.
+
+  **SHAKE is not measurable here, by construction**: PKCS#11 v3.2 defines no
+  SHAKE digest mechanism and `C_DigestInit` answers `CKR_MECHANISM_INVALID`
+  for it. SHA-3 is that family's row; the `SLH-DSA-SHAKE-*` signature rows
+  remain the real SHAKE workload.
+
+  First results (2026-09-26): at 64 B every algorithm on a board costs about
+  the same — the call path dominates — while at 16 KiB SHA-256 is 4–8× SHA-3 on
+  Cortex-A53/A55 (SHA-256 instructions present, none for SHA-3). They also
+  exposed that the engine's **AES ran its software backend on every aarch64
+  target**: `aes 0.8` and `polyval 0.6` include their ARMv8 backends only under
+  `--cfg aes_armv8` / `--cfg polyval_armv8`, which no build set. With both
+  flags, A-B-A-B on the same boards: AES-CBC 16 KiB **7.4–12.9×**, AES-GCM
+  **3.0–5.8×**, with ACVP-AES-GCM-1.0 (60 cases) and the SP 800-38A KATs
+  passing. The flags live in the appliance recipes (pqctoday-cacp#36) and the
+  bench sidecar (pqctoday-sandbox#83), not here: Yocto always exports
+  `RUSTFLAGS`, which would silently override a `.cargo/config.toml` entry.
+  GCM's smaller gain is consistent with `GcmState` feeding GHASH one byte at a
+  time once AES itself is fast — not yet measured.
+
+## [0.31.0] — 2026-09-25
+
+### Added
+
+- **`bench-harness`: secp256k1 and a minimum-op-count measurement mode.**
+
+  `ECDSA-K256` (secp256k1, OID 1.3.132.0.10) joins the benchmark's signature
+  matrix — deliberately *not* a NIST curve, because it is what Bitcoin,
+  Ethereum and most of the wider blockchain estate sign with, so the cost of
+  migrating that estate becomes measurable. It is paired with the same
+  `CKM_ECDSA_SHA256` mechanism and the same L1 security class as ECDSA-P256, so
+  the two together read as the cost of the *curve* rather than of the hash. Its
+  `CKA_EC_PARAMS` bytes are byte-identical to what `ffi.rs` already emits for
+  `CURVE_K256` and what `crypto/handlers.rs::decode_ec_params` already accepts,
+  so nothing in the engine changed. Measured 2.2–3.6× faster than P-256 across
+  four aarch64 targets, including both appliance boards running their own
+  shipped engines.
+
+  `--min-ops N` / `--max-secs S` extend a measured point from "T seconds" to "at
+  least T seconds AND at least N operations, never longer than S". This is what
+  makes the slow SLH-DSA parameter sets measurable at all: at a 5-second window,
+  `SLH-DSA-SHA2-128s` signing completed 12 operations and
+  `SLH-DSA-SHAKE-256s` completed **zero**, so an ops/sec or a p99 derived from
+  them was noise. With `--min-ops 20`, SHAKE-256s returns 28 operations in
+  15.4 s (1.82 ops/s, p50 3,061 ms). `--min-ops 0` is the default and reproduces
+  the previous pure fixed-duration behaviour exactly; the KMIP and
+  gRPC/REST transport arms pass 0 and are unchanged, being network-bound and
+  never sample-starved. The op counter the controller polls is a single
+  `fetch_add` on the workers' hot path, and the hard ceiling means a
+  pathologically slow or wedged point returns a short sample instead of hanging
+  the run.
+
+- **Behaviour event ring** (`behaviour/`, `PQC_BEHAVIOUR_RING`): every
+  producer on the appliance — both PKCS#11 engines at their evidence-log call
+  sites, the KMIP server (one record per response, plus policy deny / warn /
+  rekey / activation, TLS handshakes and admin routes) and the auth-failure
+  sink — writes one bucketed 8-byte record per operation into a shared
+  multi-producer ring file for an out-of-process behaviour monitor. Off unless
+  the variable is set; the id tables both engines use are generated from one
+  `behaviour/ids.json` and both test suites assert the same golden vectors.
+- **`dur=<µs>` on every `PQCEV` operation record**, both engines: the wall
+  time of the dispatch, measured in the function that emits it.
+
+- **AWS-LC constant-time RSA and NIST-curve ECDH fast path** (Rust engine,
+  native targets only). RSA PKCS#1 v1.5 sign/verify, RSA-OAEP encrypt and
+  PKCS#1 v1.5 encrypt/decrypt, RSA key generation, and P-256/384/521 ECDH now
+  run through AWS-LC (`aws-lc-rs`) instead of the pure-Rust `rsa`/`p256`
+  crates. (OAEP **decrypt** is listed separately under Fixed below — it was
+  claimed here before it was actually wired.) The
+  wasm32 build is byte-for-byte unchanged — it keeps the pure-Rust path, which
+  also remains the conformance reference for every mechanism AWS-LC does not
+  expose (raw `CKM_RSA_X_509`, all RSA-PSS, deterministic ECDSA, the legacy
+  hash variants, sub-2048-bit keys). The KMIP server and both remoting
+  services link this engine, so they inherit the fast path with no source
+  change of their own. See `rust/src/crypto/awslc.rs`.
+- **Much faster ML-DSA on ARM boards: 3,150+ signatures/s on the KV260's
+  CPU alone** (Rust engine, native targets only, feature `awslc-pq`, on by
+  default). ML-DSA key generation, hedged pure and external-µ signing, pure
+  and external-µ verification, and ML-KEM decapsulation now run on AWS-LC's
+  mldsa-native / mlkem-native, whose hand-written AArch64 NEON code the
+  pure-Rust crates lack.
+  - Measured on the KV260 (4× Cortex-A53): ML-DSA-65 sign went from 404/s to
+    3,150-3,190/s (0.96 ms), and verify reached 8,400/s.
+  - Deterministic output and keys are byte-identical to the old path; hedged
+    signatures cross-verify both ways.
+  - Deterministic and explicit-rnd ML-DSA, HashML-DSA and the internal
+    interface stay on fips204 (AWS-LC's public API cannot do them).
+  - ML-KEM key generation and encapsulation stay on ml-kem by default. The
+    opt-in feature `awslc-pq-mlkem-seeded` routes them to AWS-LC too, but it
+    needs aws-lc-sys's per-target bindings, which Yocto's
+    `aarch64-amd-linux-gnu` does not have.
+  - A loaded ML-DSA-65 FPGA signer keeps precedence for ML-DSA-65 signing,
+    and the wasm32 builds are unchanged.
+  - `PQC_AWSLC_PQ_DISABLE=1` puts everything back on fips204 / ml-kem. The
+    coverage matrix is in `rust/src/crypto/awslc_pq.rs`.
+- **Hash-based signatures are many times faster on the CPU** (Rust engine,
+  all builds).
+  - Measured on the KV260 CPU: SLH-DSA-SHA2-128s sign went from 9.4 s to
+    191 ms (about 49x), and SLH-DSA-SHAKE-128s from 12.3 s to 2.1 s (about
+    5.8x).
+  - What changed:
+    - hash-signature crates compiled for speed (opt-level 3, also in WASM);
+    - the Armv8 SHA-256 instructions;
+    - the PK.seed block hashed once per operation;
+    - SLH-DSA subtrees built on all cores under one shared core budget
+      (`FIPS205_THREADS` caps it);
+    - no more full keygen on every SLH-DSA `C_Sign` (the key is checked once
+      when it enters the token, and each signature against PK.root).
+  - LMS/HSS and XMSS signing no longer rebuild the whole tree per signature.
+    Per-key in-memory node caches make XMSS_16 go from 19.6 s to 2.5 ms and
+    LMS H15 from 1.2 s to 0.6 ms (container measurements). The key format and
+    the "persist state before releasing the signature" order are unchanged.
+    `xmss` is now vendored as `rust/xmss-patched`.
+- **KV260 hash-signature FPGA engine support** (`--features hw-accel`).
+  - SLH-DSA-SHAKE-128s/192s/256s signing and key generation run on the
+    `hashsig` FPGA profile: 69 ms per SHAKE-128s signature on the KV260,
+    against 2.1 s on its CPU and 1.06 s on the i.MX 95.
+  - Every FPGA signature is checked on ARM against PK.root before release.
+  - Routing is set by `PQC_HASHSIG_ROUTE` (default `shake=fpga,sha2=cpu`).
+    Anything the engine does not claim runs on ARM.
+  - LMS/XMSS tree hooks (`MERKLE_SUBTREE`) are in place for a future
+    bitstream.
+- **ML-DSA FPGA signing nearly doubled.**
+  - With the `mldsa` profile the KV260 now signs ML-DSA-65 at 975/s with 8
+    bench threads (was 521/s) and about 1,260/s with 12.
+  - How: each key is decoded and its matrix expanded once instead of on
+    every signature; inputs are written straight into the DMA buffer; cache
+    syncs take one ioctl; and signer lanes sleep on the UIO interrupt instead
+    of spinning a core.
+- **Parsed-RSA-key cache on the AWS-LC fast path** (`rust/src/crypto/awslc_keycache.rs`).
+  Every RSA private-key operation used to call `from_pkcs8` on the caller's
+  DER, which inside AWS-LC re-runs `RSA_check_key`, rebuilds three Montgomery
+  contexts and creates a fresh blinding factor — once per operation. The
+  parsed key is now cached (keyed by SHA-256 of the PKCS#8 DER, so the same
+  key reached over PKCS#11, `native::sign`, or KMIP shares one parse), and
+  dropped wholesale on every lifecycle event that ends a key's accessibility
+  (`C_Finalize`, `C_Logout`, `C_CloseSession`, `C_CloseAllSessions`,
+  `C_InitToken`, `C_DestroyObject`, `C_SetAttributeValue`). Measured on the
+  FRDM-IMX95 (6× Cortex-A55 @ 1.8 GHz), RSA-2048 sign through the PKCS#11 C
+  ABI rose from 80.8 to 105.4 /s single-threaded and from 356 to 481 /s across
+  six cores.
+
+### Changed
+
+- The optional KV260 whole-signature ML-DSA-65 path now schedules concurrent
+  requests across two independently mapped FPGA signing engines. Each lane has
+  its own UIO controls, DMA buffer, process lock, cached matrix context, and
+  failure recovery. Contending workers try the other lane and fall back to ARM
+  only when neither FPGA lane is available.
+- The KV260 resident ML-DSA-65 diagnostic now retains its UIO and DMA mappings
+  across a benchmark session, serializes ownership with a process lock, and
+  synchronizes and scrubs only the 41,984-byte live command region. Per-stage
+  timings separate encoding, DMA ownership transfers, FPGA execution,
+  decoding and zeroization. The one-shot API remains as a compatibility
+  wrapper around the session. A diagnostic cached-matrix mode retains the
+  30,720-byte public matrix and transfers and scrubs only the per-operation
+  vector/output region.
+- The optional KV260 Rust ML-DSA-65 path now routes key-generation and signing
+  matrix/vector products through the resident cached session. Hardware failure
+  discards the session and recomputes the complete operation in software. The
+  slower standalone FPGA `ExpandA` hook is no longer installed while the two
+  accelerators share one DMA allocation.
+
+### Security
+
+- **RSA PKCS#1 v1.5 decryption is now constant-time on native targets**
+  (RUSTSEC-2023-0071, the Marvin attack). The pure-Rust `rsa` crate's v1.5
+  decrypt leaks key material through a timing side channel and is unpatched
+  upstream; the KMIP server that exposes RSA on `:5696` statically links this
+  engine. That operation, and the OAEP and sign paths alongside it, now run on
+  AWS-LC's constant-time implementation. The `rsa` crate stays only on the
+  wasm32 build (no network timing oracle inside a browser tab) and as the
+  fallback for the mechanisms AWS-LC does not implement.
+- **rustls 0.23.45** (RUSTSEC-2026-0285: TLS 1.3 handshake messages accepted
+  across encryption-level boundaries) in every lock file that links a TLS
+  listener or client — the engine workspace, the KMIP server, the shared
+  `tls` crate and both remoting services. The weekly Rust dependency audit
+  had been red since 2026-08-31 behind five unrelated denied warnings, so
+  this advisory sat unseen for a week; all five were fixed rather than
+  ignored, and the audit now also scans `kmip/Cargo.lock` (the lock the
+  shipped server binary is built from), which had drifted to 0.23.40.
+  Alongside: the unmaintained `rustls-pemfile` is replaced by
+  `rustls-pki-types`' PEM API (RUSTSEC-2025-0134), `scraper` 0.20 → 0.27
+  drops the unmaintained `fxhash` (RUSTSEC-2025-0057), and `chacha20`,
+  `der`, `spin` move off yanked releases.
+
+### Fixed
+
+- **RSA-OAEP decrypt now actually runs on AWS-LC** (Rust engine, native
+  targets). `awslc::rsa_oaep_decrypt` shipped fully written, cached and
+  error-mapped — but with **no production callers**, so every OAEP decrypt
+  still ran the pure-Rust `rsa` unpad, which is the Marvin timing side channel
+  (RUSTSEC-2023-0071, unpatched upstream). That path is reachable from
+  `pqctoday-kmip`'s Decrypt on :5696, i.e. over the network, where the timing
+  is observable — while `CHANGELOG.md` and `SECURITY.md` both stated the
+  opposite. All four decrypt sites now probe AWS-LC first: `C_Decrypt`,
+  `C_UnwrapKey`, `CKM_RSA_AES_KEY_WRAP`, and `native::encrypt` (the KMIP and
+  native path). An absent `mgf` field is normalized to MGF1-over-`hashAlg`
+  first, so the common default-parameter case reaches AWS-LC rather than
+  declining on a technicality. Error-code precedence is unchanged — the probe
+  sits *after* each site's existing key-parse and parameter validation, so
+  `CKR_KEY_TYPE_INCONSISTENT`, `CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT`,
+  `CKR_MECHANISM_PARAM_INVALID` and `CKR_WRAPPED_KEY_INVALID` all still win
+  exactly where they did. OAEP with a hash ≠ MGF1 hash, a PKCS#1
+  `RSAPrivateKey` DER key, and wasm32 keep the pure-Rust fallback by design.
+  A unit test pins the probe *engaging*, because a silent fallback returns
+  identical plaintext and no functional test can distinguish the two — which
+  is exactly how this went unnoticed.
+- **C++ engine: five NIST ACVP findings fixed** (ACVP gap-closure plan
+  2026-09-25), each with a NIST ACVP-Server@975de31e known-answer suite in
+  `p11test` (`src/lib/test/`, vectors with provenance in `tests/acvp/`):
+  - **HashSLH-DSA signatures now interoperate.** `CKM_HASH_SLH_DSA_*`
+    signed and verified a doubly wrapped message, so no valid NIST (or
+    other implementation's) pre-hash signature verified. Pure SLH-DSA was
+    not affected.
+  - **ML-KEM keys are checked on import.** `C_CreateObject` refuses a key
+    of the wrong length, an unknown parameter set, or one failing the FIPS
+    203 modulus / hash check with `CKR_ATTRIBUTE_VALUE_INVALID`; a
+    ciphertext of another parameter set's length now returns
+    `CKR_WRAPPED_KEY_LEN_RANGE`.
+  - **KMAC honours its parameter.** `CKM_KMAC_128/256` now read
+    `CK_PQCTODAY_KMAC_PARAMS` (customization string and output length), as
+    the Rust engine does; before, any non-default MAC failed to verify.
+  - **HMAC key sizes are advertised truthfully.** `C_GetMechanismInfo` no
+    longer claims a digest-length minimum key the engine never enforced.
+  - **PBKDF2 refuses fewer than 1000 iterations** with
+    `CKR_MECHANISM_PARAM_INVALID`, the same policy the Rust engine applies.
+
+- **HashML-DSA and HashSLH-DSA signatures from KMIP / remoting now verify**
+  (Rust engine). `native::sign_pqc`, the signing path behind KMIP and the
+  gRPC/REST remoting services, signed every pre-hash mechanism
+  (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) as *pure* ML-DSA / SLH-DSA,
+  while `verify_pqc` checked them as pre-hash signatures, so they never
+  verified. It now hash-signs them, in the hedged, deterministic and
+  explicit-`<Random>` modes. The deterministic form is byte-identical to the
+  `C_Sign` path. `C_Sign` itself was not affected.
+
+- **C++ engine error codes now match PKCS #11 v3.2 on five error paths**
+  found by the Hub's error-path probes, so callers that branch on the return
+  value get the one the specification names:
+  - a key of the wrong type (an AES key for ECDSA, EdDSA, RSA, HSS or XMSS; an
+    EC key as an HKDF base key) is refused with `CKR_KEY_TYPE_INCONSISTENT`
+    instead of being accepted, and that code now wins over
+    `CKR_KEY_FUNCTION_NOT_PERMITTED` as §5.1.6 requires (sign/verify-recover
+    and `C_EncapsulateKey` answered the latter);
+  - `C_UnwrapKey` with a wrong AES-CBC unwrapping key returns
+    `CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT`, not the `C_WrapKey`-only code;
+  - `C_SignMessage` into a too-small buffer no longer ends the message-signing
+    session, so the retry with the right size succeeds (§5.14.2);
+  - a malformed or unsupported mechanism parameter returns
+    `CKR_MECHANISM_PARAM_INVALID` instead of `CKR_ARGUMENTS_BAD` (102 checks,
+    every init, wrap/unwrap and derive path);
+  - `CKM_RIPEMD160` is dispatched only in builds that advertise it.
+
+  Known and not yet fixed: a second `C_SignMessage` under one
+  `C_MessageSignInit` still returns `CKR_OPERATION_NOT_INITIALIZED`.
+
+- The OpenMLS interop workflow checks out submodules again, so its pqctoday
+  image builds since Classic McEliece made `liboqs` a hard CMake dependency
+  (red on every nightly run 2026-09-12 → 09-21). It now runs on push / PR to
+  the provider, the C++ engine or `CMakeLists.txt`, weekly, and on demand —
+  not nightly — with the OpenSSL 3.6.3 and softhsmv3 image stages kept in
+  the GitHub Actions layer cache between runs. Both it and the dependency
+  audit open (and later close) a single "<workflow> is red" issue, so a red
+  scheduled run is no longer silent.
+- The cross-engine PKCS#11 gate now builds and runs inside the Linux
+  validation container, honors `CARGO_TARGET_DIR`, and selects the native
+  shared-library format. This prevents a mounted worktree from loading a stale
+  host-format Rust library during release validation.
+- **Auth-failure clients were counted by address *and port*.** The behaviour
+  ring bucketed a failing peer by `ip:port`, so seventeen refused handshakes
+  from one machine looked like seventeen different clients — the opposite of
+  what a brute-force signal should show. Found on the emulator under a forced
+  load; the bucket is now the address alone.
+- **KMIP `latency_ms` was always 0.** Every `KmipResponseSent` audit event
+  hard-coded `latency_ms: 0` at all nine emit sites; the dispatcher now times
+  each request from the moment it mints the correlation id and every emit site
+  reads that figure.
+- **The wasm no-C-crypto guard matched on filesystem paths, not crate names.**
+  `wasm_dependency_graph_has_no_c_backed_crypto` asserted on
+  `tree.contains("aws-lc-rs")` over raw `cargo tree` output, whose root line
+  carries the checkout path — so it failed in a worktree named after a banned
+  crate and matched `ring` inside unrelated crate names like `stringprep`. It
+  now compares the package-name token from each line, with a test pinning both
+  directions.
+
+## [0.30.0] — 2026-09-09
+
+### Added
+
+- **PKCS#11 v3.2 KEM template attributes.** `CKA_ENCAPSULATE_TEMPLATE` and
+  `CKA_DECAPSULATE_TEMPLATE` are now implemented and enforced on both engines.
+- **`CKO_TRUST` objects** implemented on both engines.
+- C++ gains `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS` (engine, provider, and JavaJCE
+  proof).
+- A per-`CKM_*` mechanism ledger (`docs/pkcs11-mechanism-ledger.json`) pins
+  every shared mechanism's key-size range against its own spec citation, with
+  a gate step that ratchets against drift.
+
+### Changed
+
+- **Rust engine reaches full PKCS#11 mechanism parity with C++** (41
+  mechanisms, delivered in three waves).
+- Spec precedence rule adopted: PKCS#11 v3.2 is the baseline; the unpublished
+  v3.3 draft fills gaps or corrects plain errors, with every v3.3-derived
+  constant correction registered and cited (see `CLAUDE.md`).
+
+### Fixed
+
+- **Rust private keys now export a real PKCS#8 `PrivateKeyInfo`** instead of a
+  malformed wire encoding (D-2).
+- `CKA_VALUE` is no longer exposed on RSA keys; SPKI is now mirrored to the
+  matching private key. `CKA_VALUE` on stateful-hash private keys corrected.
+- `CKM_ECDSA_SHA1` on P-256 could never verify — fixed.
+- Stateful-hash verify (HSS/XMSS/XMSS-MT) now routes `C_VerifySignatureInit`
+  through `StatefulVerifyInit` on C++, matching the Rust engine.
+- `CK_ULONG` cap and a payload-vs-key size ambiguity on AES key wrap resolved.
+- `local-gate.sh`: four steps that ran their full suite twice, an
+  `--javajce-remote` crash on an unbound variable, two stale
+  openssl-provider assertions, and a missing `SeedableRng` import in the
+  wasm+acvp build.
+- **Rust engine: Classic McEliece, all 10 parameter sets** (`348864`,
+  `348864f`, `460896`, `460896f`, `6688128`, `6688128f`, `6960119`,
+  `6960119f`, `8192128`, `8192128f` — BSI TR-02102-1 §2.4.2), up from the
+  single `mceliece6688128` variant this engine shipped before. Backed by a
+  new vendored fork, `rust/classic-mceliece-multi/`, which compiles every
+  parameter set into one build instead of the upstream `classic-mceliece-
+  rust` crate's one-per-Cargo-feature limit — see that crate's own
+  `README.md` and
+  `docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md`
+  for the design. `CKA_PARAMETER_SET` values `0x2`–`0xA` (`0x1`, unchanged,
+  stays `mceliece6688128`) join the PKCS#11 vendor mechanisms already
+  shipped (`CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN`/`_ENCAPSULATE`,
+  unchanged codepoints); `C_GetMechanismInfo`'s key-size range widens from a
+  single point (1,044,992 B) to the full span across all ten sets
+  (261,120–1,357,824 B). Verified against the official Round-4 KAT vectors
+  (all 10, byte-for-byte), against liboqs (bidirectional cross-validation,
+  the previously-shipped variant), and through the full PKCS#11 FFI path.
+  C++ engine parity (liboqs-backed, since `oqs-provider` dropped Classic
+  McEliece in 0.8.0+) is tracked separately as Phase 2 of the same plan.
+
+### Changed
+
+- `C_GetMechanismInfo` for `CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN`/
+  `_ENCAPSULATE` now reports `ulMinKeySize`/`ulMaxKeySize` as `261,120`/
+  `1,357,824` (public-key bytes across all 10 sets) instead of the single
+  hardcoded `1,044,992` the one-variant build reported.
+
+## [0.29.0] — 2026-09-08
+
+### Changed — BREAKING
+
+- **The KMIP server's default TLS posture is now `basic`, not `permissive`.
+  Existing TLS 1.2 clients will fail to connect after this upgrade.**
+
+  KMIP 3.0 Profiles §3.1.2 lists the cipher suites a conformant server may
+  offer and closes with "SHALL NOT support any cipher suite not listed
+  above". The previous `permissive` default offered TLS 1.2 and
+  `TLS13_AES_128_GCM_SHA256`, which that clause forbids — so the posture the
+  server SHIPPED with was not the posture its Baseline Server conformance
+  claim was measured under. It now is.
+
+  **To restore the previous behaviour**, start the server with
+  `--tls-profile permissive` (or set `KMIP_TLS_PROFILE=permissive`, which is
+  how the distroless container images flip posture without a rebuild). That
+  configuration is NOT §3.1.2-conformant, and is now a deliberate choice
+  rather than a silent default.
+
+  `basic` is TLS 1.3 only. §3.1.2's TLS 1.2 list is static-RSA CBC, which
+  rustls does not implement, and §3.1.1 makes TLS 1.2 a SHOULD rather than a
+  SHALL — so 1.3-only is the conformant posture actually available.
+
+### Added
+
+- **The KMIP server now conforms to the Baseline Server profile and
+  advertises it** via `Query Profiles` (`Profile Name` = 0x12b), and only
+  that profile. **Two caveats that belong with the claim:** KMIP 3.0 is not
+  a ratified standard — this is measured against CSD02, whose public review
+  closed 13 August 2026 — and no KMIP 3.0 implementation exists to interop
+  against, so the evidence is the official OASIS transcripts rather than
+  another vendor agreeing with us. Conformant to those transcripts; not
+  "interoperable". Conformance replay is 99 PASS / 0 FAIL / 3 SKIP; the three
+  skips are 3DES, which belongs to the Symmetric Key Foundry for FIPS
+  profile this server does not claim.
+
+- Classical **DSA is accepted for STORAGE ONLY** (§11.12 codepoint 0x05), so
+  the Baseline mandatory Register tests (`BL-M-12-30`, `BL-M-13-30`) pass. It
+  maps to no PKCS#11 mechanism: the server holds and returns a DSA key but
+  can neither generate one nor sign or verify with it.
+
+- `EC` (0x1a), `X25519` (0x5a), `X448` (0x5b) and `XMSS` (0x32) are accepted
+  on their standard codepoints. All four were compatibility gaps where the
+  server could already perform the operation but refused the spec's
+  algorithm-value form — `XMSS` most notably, where the engine had supported
+  the algorithm all along with no way to name it over KMIP.
+
+- **Four HMAC mechanisms that were implemented but unreachable.**
+  `CKM_SHA512_224_HMAC`, `CKM_SHA512_256_HMAC`, `CKM_SHA3_224_HMAC` and
+  `CKM_SHA3_384_HMAC` had working implementations in the Rust engine's
+  `sign_hmac` and in its SP 800-108 PRF paths, but were missing from the
+  advertised mechanism list, from `C_GetMechanismInfo` and from the
+  `C_Sign`/`C_Verify` dispatch arms — so `C_SignInit` rejected all four and no
+  caller could reach the working code. Each is now advertised and routed, and
+  cross-checked against the RustCrypto reference implementation rather than
+  only against itself.
+
+### Fixed
+
+- **`Object Group` (0x420056) is no longer emitted: that codepoint is
+  (Reserved) in KMIP 3.0.** Group membership now uses §7.24's repeated
+  `Group Link` (0x4201b3), which also makes membership genuinely
+  multi-valued as the clause requires. Records written before this still
+  load, and searches still find objects that stored their group the old way.
+
+- The §4.27 `Fresh` attribute was inverted — it defaulted to False for every
+  object and silently discarded a client-supplied value at Register.
+
+
+- **A key recovered with `C_UnwrapKey` — or produced by `C_EncapsulateKey` /
+  `C_DecapsulateKey` — came back non-extractable in the C++ engine unless the
+  caller explicitly asked otherwise.** PKCS#11 v3.2 says the opposite for all
+  four of these functions: `C_UnwrapKey`/`C_UnwrapKeyAuthenticated` state "the
+  `CKA_EXTRACTABLE` attribute is by default set to CK_TRUE", and the two KEM
+  functions set it "to the value of the input template with a default of
+  CK_TRUE if not provided". The engine applied one class-wide default of
+  `CK_FALSE` to every object-creation path instead, so a conforming
+  application that omitted the attribute silently received a key it could
+  never wrap or export again — and the key material had come from outside the
+  token in all four cases, so the conservative default protected nothing. The
+  Rust engine already behaved correctly. The cross-engine differential
+  harness had recorded this divergence as *legal*, citing "§5.18.4
+  `C_UnwrapKey` imposes no value"; the specification text vendored in this
+  repository says the opposite, so that exception has been deleted rather
+  than re-worded.
+
+- **A key derived with `CKM_CONCATENATE_BASE_AND_KEY` reported the wrong
+  provenance in the C++ engine.** The derivation computed
+  `CKA_NEVER_EXTRACTABLE` correctly and then stored the result into
+  `CKA_ALWAYS_SENSITIVE`, overwriting the value computed for it one line
+  earlier and leaving `CKA_NEVER_EXTRACTABLE` at its class default of
+  `CK_TRUE`. A derived key could therefore claim it had never been
+  extractable while being extractable — a false security attribute, not just
+  a cosmetic one. Nothing exercised it: the harness has no
+  `CKM_CONCATENATE_BASE_AND_KEY` scenario and the C++ compliance suite makes
+  no `CKA_NEVER_EXTRACTABLE` assertion at all.
+
+- **The Rust engine advertised a real generating mechanism on keys it had not
+  generated.** `CKA_KEY_GEN_MECHANISM` "contains a valid value only if the
+  `CKA_LOCAL` attribute has the value CK_TRUE. If `CKA_LOCAL` has the value
+  CK_FALSE, the value of the attribute is `CK_UNAVAILABLE_INFORMATION`", and
+  §5.18.8/§5.18.9 mandate `CKA_LOCAL=FALSE` for encapsulated and decapsulated
+  keys. All six KEM arms (ML-KEM, ECDH-as-KEM and the vendor FrodoKEM /
+  Classic McEliece paths) stored the producing mechanism anyway. The engine's
+  own `C_UnwrapKey` path already had this right, so this was an internal
+  inconsistency. The harness exception that called the divergence legal has
+  been deleted; its citation was also wrong.
+
+- **Objects that describe the token could be created by an application.**
+  Only Storage Objects may be created — "other kinds of object are generally
+  built-in and attempting to create new objects of those kinds will result in
+  an error" — and the specification's "Other Objects" table names four
+  non-storage classes: `CKO_HW_FEATURE`, `CKO_MECHANISM`, `CKO_PROFILE` and
+  `CKO_VALIDATION`. Only `CKO_PROFILE` was refused. `CKO_VALIDATION` is the
+  sharpest case: validation objects are read-only token objects describing
+  third-party validations the module holds, and this software token holds
+  none, so an application could create one and fabricate a FIPS 140-3 /
+  Common Criteria validation claim against the module. Both engines now
+  refuse all four with `CKR_ATTRIBUTE_READ_ONLY` (the class value is valid,
+  it simply is not the caller's to write).
+
+## [0.28.2] — 2026-09-04
+
+### Security
+
+- **HSS/XMSS/XMSS-MT private keys could be copied, and in the Rust engine
+  could be made extractable, defeating the one-time-signature protections
+  PKCS#11 v3.2 requires for these key types.** These keys hold hash-based
+  one-time-signature state; a duplicate object (via `C_CopyObject`) or an
+  exported value can independently advance or replay the same leaf,
+  producing two valid signatures over the same one-time key — the exact
+  forgery hazard the standard's `CKA_SENSITIVE`/`CKA_EXTRACTABLE`/
+  `CKA_COPYABLE` rules exist to prevent.
+  - **Rust engine** (the production KMIP/CACP backend): `CKA_COPYABLE` was
+    never forced `FALSE` for any of the three key types, and worse, a
+    caller's own `C_GenerateKeyPair`/`C_CreateObject` private-key template
+    could silently override the engine's `CKA_SENSITIVE`/`CKA_EXTRACTABLE`
+    defaults with no rejection. Fixed: both attributes plus `CKA_COPYABLE`
+    are now enforced at every creation path — a template may restate the
+    mandated values, never override them (`CKR_ATTRIBUTE_VALUE_INVALID`
+    otherwise) — with a defense-in-depth force in the engine's universal
+    object-defaults choke point as a second, independent guarantee.
+  - **C++ engine**: `CKA_COPYABLE=FALSE` was already forced for HSS
+    (PKCS#11 v3.2 §6.65.3 names it explicitly) but not for XMSS/XMSS-MT
+    (§6.66.4-5 do not repeat the sentence for these two, even though the
+    underlying hazard is identical). Extended the existing enforcement to
+    all three key types.
+  - **Also fixed**: the two engines defaulted to different LMOTS
+    one-time-signature parameters (C++: W8, Rust: W4) when a caller
+    generated an HSS key pair without an explicit
+    `CK_HSS_KEY_PAIR_GEN_PARAMS` — neither PKCS#11 v3.2 nor RFC 8554
+    mandates a default, so this was silent non-interoperability rather
+    than a security defect; C++ is now aligned to Rust's W4 default.
+  - **Cross-engine differential harness**: added scenarios exercising
+    `CKM_HSS_KEY_PAIR_GEN` and `CKM_XMSSMT_KEY_PAIR_GEN` — neither had any
+    coverage before this fix, which is why the original divergence went
+    undetected (the existing XMSS scenario's `CKA_COPYABLE` check couldn't
+    catch it either, since both engines agreed on the wrong default).
+
+## [0.28.1] — 2026-09-04
+
+### Fixed
+
+- **Rust engine: 9 of the 18 XMSS parameter sets from NIST SP 800-208 were
+  either missing or silently broken.** Three sub-families were affected:
+  SHAKE256/256 (Table 14) was missing its 10-tree id; SHAKE256/192 (Table
+  16) had its 16- and 20-tree ids missing and its 10-tree id **dispatched
+  but non-functional since introduction**; SHA-256/192 (Table 12) was
+  entirely absent from both engines. Root cause of the `_192` breakage:
+  the keygen seed buffer was hardcoded to 96 bytes for every parameter
+  set, but n=24 (`_192`) sets need 72 bytes per `SEED_LEN = 3×n` —
+  confirmed against both the `xmss` crate's own trait constant and the
+  C++ engine's independent RFC 8391 implementation. Fixed generically via
+  `SEED_LEN` instead of a hardcoded constant, and wired all 9 param sets
+  into keygen/sign/verify/max-signatures dispatch and the CKM_XMSS
+  signature-length estimator.
+
+- **Rust engine: `C_DeriveKey(CKM_ECDH1_DERIVE)` rejected roughly 1 in 256
+  valid raw SEC1 peer public keys with `CKR_ARGUMENTS_BAD`.** The ECDH
+  arm decided whether `pPublicData` was DER-wrapped by checking whether it
+  started with `0x04` — but a raw uncompressed SEC1 point *also* starts
+  with `0x04` (that's its own "uncompressed" marker), so the code then read
+  the next byte — the first byte of the X coordinate — as a DER length.
+  Whenever X started with `0x3F` (P-256), `0x5F` (P-384) or `0x83` (P-521),
+  two real bytes were stripped off a perfectly valid point and the
+  truncated remainder failed to parse. PKCS#11 v3.2's
+  `CK_ECDH1_DERIVE_PARAMS.pPublicData` row makes the raw form the **MUST**
+  case and DER the optional **MAY** — the mandatory path was the broken
+  one. Same mistake, same fix, as the `CKA_EC_POINT`-import bug fixed in
+  0.28.0 (#212) — that fix covered the attribute-read path only; this
+  arm, and the analogous `C_EncapsulateKey`/`C_DecapsulateKey`
+  ECDH-as-KEM paths, carried independent copies of the same tag-first
+  logic. All three now go through one curve-anchored
+  `unwrap_peer_ec_point()`, which decides by length against the base
+  key's known curve rather than by sniffing the leading byte. Found via
+  an intermittent (~25% of runs) failure in a downstream HPKE test suite
+  exercising real random keys; reproduced deterministically here by
+  retrying keygen until the exact byte pattern occurs.
+
 ## [0.28.0] — 2026-09-02
 
 **Consolidated release: a cross-provider PKCS#11 validation pass and the

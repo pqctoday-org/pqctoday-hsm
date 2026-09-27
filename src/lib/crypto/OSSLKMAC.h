@@ -28,10 +28,17 @@ public:
 
 	virtual size_t getMacSize() const;
 
+	virtual bool setKmacParams(size_t outputLen, const ByteString& customization);
+
 protected:
+	// EVP_MAC_init with OSSL_MAC_PARAM_SIZE (= L) and, when set,
+	// OSSL_MAC_PARAM_CUSTOM (= S) — shared by signInit and verifyInit.
+	bool initCtx(const SymmetricKey* key);
+
 	EVP_MAC_CTX* curCTX;
 	const char* macName;
 	size_t macSize;
+	ByteString customization;
 };
 
 class OSSLKMAC128 : public OSSLKMACAlgorithm

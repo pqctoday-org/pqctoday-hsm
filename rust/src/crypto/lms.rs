@@ -16,7 +16,6 @@ use hbs_lms::{
     Shake256_192, Shake256_256,
 };
 
-use crate::constants::*;
 
 // ── Hash type dispatch ──────────────────────────────────────────────────────
 //
@@ -251,5 +250,54 @@ pub fn hss_verify(pub_key_bytes: &[u8], message: &[u8], signature: &[u8], lms_pa
         0x0F..=0x13 => lms::verify::<Shake256_256>(message, signature, pub_key_bytes).is_ok(),
         0x14..=0x18 => lms::verify::<Shake256_192>(message, signature, pub_key_bytes).is_ok(),
         _ => lms::verify::<Sha256_256>(message, signature, pub_key_bytes).is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod nist_lms_sigver_tests {
+    //! NIST ACVP LMS SigVer (tests/acvp/lms_sigver_test.json + _expected.json),
+    //! all 80 groups — SHA-256 and SHAKE-256, M24 and M32, H5..H25, LMOTS
+    //! W1/W2/W4/W8 — through this engine's hss_verify. Until 2026-09-27 the
+    //! patched hbs-lms used the n = 32 checksum left shift for every hash
+    //! size, so every LMOTS *_N24_W1 group rejected its valid signature
+    //! (register row rust-lms-m24-verify-fails; RFC 8554 §4.1: ls = 16 - v*w).
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn every_nist_lms_sigver_case_matches_its_verdict() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/acvp/lms_sigver_test.json")).unwrap();
+        let e: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/acvp/lms_sigver_expected.json")).unwrap();
+        let mut verdict = std::collections::HashMap::new();
+        for g in e["testGroups"].as_array().unwrap() {
+            for t in g["tests"].as_array().unwrap() {
+                verdict.insert(t["tcId"].as_u64().unwrap(), t["testPassed"].as_bool().unwrap());
+            }
+        }
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for g in v["testGroups"].as_array().unwrap() {
+            // HSS form: u32be(L = 1) || LMS public key.
+            let mut pk = vec![0, 0, 0, 1];
+            pk.extend(unhex(g["publicKey"].as_str().unwrap()));
+            let lms_param = lms_param_from_pubkey(&pk).expect("LMS type in the public key");
+            for t in g["tests"].as_array().unwrap() {
+                let tc = t["tcId"].as_u64().unwrap();
+                // HSS form: u32be(Nspk = 0) || LMS signature.
+                let mut sig = vec![0, 0, 0, 0];
+                sig.extend(unhex(t["signature"].as_str().unwrap()));
+                let got = hss_verify(&pk, &unhex(t["message"].as_str().unwrap()), &sig, lms_param);
+                if got != verdict[&tc] {
+                    wrong.push(format!("tcId {tc} ({} / {}): got {got}", g["lmsMode"], g["lmOtsMode"]));
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 320, "all 80 groups x 4 cases");
+        assert!(wrong.is_empty(), "{} NIST LMS verdicts wrong: {:?}", wrong.len(), wrong);
     }
 }

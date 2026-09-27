@@ -94,13 +94,15 @@ fn tag_codepoints_match_spec() {
     // generator dropped them). The codec value is the standard KMIP registry
     // value, independently asserted in unit tests — so this is an extract gap,
     // not a codec error. Keyed by (codec const name → codepoint).
-    let extract_gaps: HashMap<&str, u32> = [
-        // Extract has "Object Groups"=0x420166 but is missing the canonical
-        // "Object Group"=0x420056 (stable since KMIP 1.0; verified in wire.rs tests).
-        ("ObjectGroup", 0x42_0056u32),
-    ]
-    .into_iter()
-    .collect();
+    // Was one entry claiming `Object Group` = 0x420056 was a canonical tag the
+    // extract generator had dropped. That belief was WRONG, and this test was
+    // asserting it: CSD02's §11.58 Tag Enumeration table lists 0x420056 as
+    // **(Reserved)** — between `Name` (0x420053) and `Object Type` (0x420057)
+    // sit three Reserved slots. The extract was right and the codec was
+    // emitting a reserved codepoint. `Object Group` was removed on 2026-09-07
+    // in favour of §7.24's repeated `Group Link` (0x4201b3), so there is no
+    // gap left to record.
+    let extract_gaps: HashMap<&str, u32> = HashMap::new();
 
     let mut matched = 0usize; // name + codepoint both match spec
     let mut name_variant = 0usize; // codepoint is a valid spec codepoint, name differs

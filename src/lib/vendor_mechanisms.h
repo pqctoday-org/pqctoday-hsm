@@ -28,6 +28,71 @@
 
 #define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
 
+// ── Vendor: ECDSA with a caller-supplied nonce k — BOTH engines ─────────────
+// A deliberate key-recovery primitive for teaching (SECURITY.md, "Deliberate
+// key-recovery primitive"): anyone who knows k and one signature recovers the
+// private key, d = r^-1 (s*k - z) mod n. Same input as CKM_ECDSA (the caller's
+// digest); pParameter is k, big-endian, exactly the order's byte length,
+// 1 <= k < n, else CKR_MECHANISM_PARAM_INVALID at C_SignInit. Sign only,
+// single-part, P-256 / P-384 / P-521. Allocated in the priv vendor ledger
+// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in rust/src/constants.rs.
+
+#define CKM_PQCTODAY_ECDSA_EXPLICIT_K 0x80000015UL  /* vendor */
+
+// ── Classic McEliece (BSI TR-02102-1 §2.4.2) — implementation plan D-2/D-3 ───
+// First mechanism/key-type pair genuinely SHARED between both engines: the
+// Rust engine has advertised these since softhsmrustv3 v0.7.0 (one parameter
+// set only, then); this C++ engine's Phase 2 makes them the first C++-side
+// use of the 0x80000000|n vendor range. Values are pinned in the priv
+// authority file (pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-
+// allocation.md §1.4/§1.4.1) and mirrored in rust/src/constants.rs — this
+// header must match both exactly.
+
+#define CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN 0x80000003UL  /* vendor */
+#define CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE  0x80000004UL  /* vendor */
+#define CKK_PQCTODAY_CLASSIC_MCELIECE               0x80000002UL  /* vendor */
+
+// CKA_PARAMETER_SET values — own small-integer numbering (same convention as
+// CKP_ML_DSA_*/CKP_ML_KEM_*), NOT vendor-range: 0x1 is unchanged from the
+// value already on the wire (softhsmrustv3 v0.7.0, mceliece6688128 only).
+#define CKP_CLASSIC_MCELIECE_6688128  0x1UL
+#define CKP_CLASSIC_MCELIECE_348864   0x2UL
+#define CKP_CLASSIC_MCELIECE_348864F  0x3UL
+#define CKP_CLASSIC_MCELIECE_460896   0x4UL
+#define CKP_CLASSIC_MCELIECE_460896F  0x5UL
+
+// ── Allocated elsewhere, implemented in the Rust engine only ────────────────
+// These are NOT implemented by this C++ engine. They are defined here because
+// this header is the complete map of the pqctoday vendor range, and an
+// incomplete map is how a collision happens: read only the block above and the
+// next free key type looks like 0x80000003, which is already CKK_HPKE_KEM.
+//
+// Presence here is an allocation record, NOT a capability claim. The Rust
+// engine (softhsmrustv3) implements FrodoKEM and HPKE; this engine advertises
+// neither, which tests/differential/exceptions.json adjudicates as legal under
+// LEGAL-MECHANISM-SET — both engines claim the Baseline profile, which mandates
+// no mechanisms, and neither claims Complete Provider.
+//
+// Note the vendor range reuses values across namespaces, which is legal
+// (PKCS#11 v3.2 §3.5) and is exactly why the whole range must be visible:
+//   0x80000001  CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN  and  CKK_PQCTODAY_FRODOKEM
+//   0x80000002  CKM_PQCTODAY_FRODOKEM_ENCAPSULATE   and  CKK_PQCTODAY_CLASSIC_MCELIECE
+//   0x80000003  CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN  and  CKK_HPKE_KEM
+
+#define CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN 0x80000001UL  /* vendor; Rust engine */
+#define CKM_PQCTODAY_FRODOKEM_ENCAPSULATE  0x80000002UL  /* vendor; Rust engine */
+#define CKK_PQCTODAY_FRODOKEM              0x80000001UL  /* vendor; Rust engine */
+
+#define CKM_HPKE_KEM_KEY_PAIR_GEN          0x80000013UL  /* vendor; Rust engine */
+#define CKM_HPKE                           0x80000014UL  /* vendor; Rust engine */
+#define CKK_HPKE_KEM                       0x80000003UL  /* vendor; Rust engine */
+
+#define CKP_CLASSIC_MCELIECE_6688128F 0x6UL
+#define CKP_CLASSIC_MCELIECE_6960119  0x7UL
+#define CKP_CLASSIC_MCELIECE_6960119F 0x8UL
+#define CKP_CLASSIC_MCELIECE_8192128  0x9UL
+#define CKP_CLASSIC_MCELIECE_8192128F 0xAUL
+
 // ── ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // from the real PKCS#11 v3.3 working draft on 2026-08-30) ───────────────────
 // This is the v3.3 draft's own name and codepoint, used directly — no
@@ -95,6 +160,23 @@ typedef struct CK_MU_GEN_PARAMS {
 
 typedef CK_MU_GEN_PARAMS CK_PTR CK_MU_GEN_PARAMS_PTR;
 
+// ── Vendor: KMAC mechanism parameter (CKM_KMAC_128 / CKM_KMAC_256) ──────────
+// CKM_KMAC_128/256 are vendor codepoints (pkcs11/pkcs11t.h's PQCToday block);
+// v3.2 has no KMAC at all, and the v3.3 draft's CK_KMAC_PARAMS (kmac.md) uses
+// different mechanism values and a different field order. This is the layout
+// the Rust engine has always read (rust/src/ck_param.rs `kmac`,
+// "CK_PQCTODAY_KMAC_PARAMS") and the Hub passes to BOTH engines — a
+// pointer-first, native-width struct. Absent parameter => the mechanism
+// defaults (empty customization S; output L = 32 bytes for KMAC-128, 64 for
+// KMAC-256). ulOutputLen is L in BYTES (NIST SP 800-185 §4.3); 0 = default.
+typedef struct CK_PQCTODAY_KMAC_PARAMS {
+    CK_BYTE_PTR pCustomization;
+    CK_ULONG    ulCustomizationLen;
+    CK_ULONG    ulOutputLen;
+} CK_PQCTODAY_KMAC_PARAMS;
+
+typedef CK_PQCTODAY_KMAC_PARAMS CK_PTR CK_PQCTODAY_KMAC_PARAMS_PTR;
+
 // ── Vendor: stateful key attributes ──────────────────────────────────────────
 // Range: 0x80000101–0x80000105 (offset from CKM vendor range to avoid confusion)
 
@@ -103,6 +185,9 @@ typedef CK_MU_GEN_PARAMS CK_PTR CK_MU_GEN_PARAMS_PTR;
 #define CKA_LMOTS_PARAM_SET    0x80000103UL  /* CKP_LMOTS_SHA256_N32_W* value */
 #define CKA_XMSS_PARAM_SET     0x80000104UL  /* CKP_XMSS_* value */
 #define CKA_LEAF_INDEX         0x80000105UL  /* current leaf index (CK_ULONG) */
+// 0x80000106 is UNUSED. Per the priv authority's mutation policy a retired
+// codepoint stays reserved forever, so confirm there before reusing it.
+#define CKA_XMSSMT_PARAM_SET   0x80000107UL  /* CKP_XMSSMT_* value */
 
 // ── LMS parameter set values (IANA registry, RFC 8554 + SP 800-208) ─────────
 // Used in CKA_LMS_PARAM_SET and CK_HSS_KEY_PAIR_GEN_PARAMS.ulLmsParamSet[].

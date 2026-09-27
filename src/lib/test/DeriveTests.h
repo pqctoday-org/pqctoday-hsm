@@ -45,6 +45,7 @@ class DeriveTests : public TestsBase
 #endif
 #ifdef WITH_EDDSA
 	CPPUNIT_TEST_PARAMETERIZED(testEddsaDerive, {"X25519", "X448"});
+	CPPUNIT_TEST(testMontgomeryDeriveFixedKeys);
 #endif
 	CPPUNIT_TEST(testSymDerive);
 	CPPUNIT_TEST(testMiscDerivations);
@@ -58,6 +59,7 @@ public:
 #endif
 #ifdef WITH_EDDSA
 	void testEddsaDerive(const char* alg);
+	void testMontgomeryDeriveFixedKeys();
 #endif
 	void testSymDerive();
     void testMiscDerivations();

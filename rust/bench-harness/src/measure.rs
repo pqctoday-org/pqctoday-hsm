@@ -4,7 +4,7 @@
 //! measured loop calls nothing but that one real engine operation,
 //! repeatedly, through the same dlopen'd C ABI the mechanism proofs used.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -75,17 +75,46 @@ pub struct ResultRow {
 /// A worker closure returning `Err` aborts that thread's loop early and
 /// the error is propagated after `join` — a real engine failure mid-run
 /// must surface as a hard error, not a silently-short count.
-pub fn run_point<F>(duration_secs: f64, warmup_secs: f64, worker_fns: Vec<F>) -> Result<(u64, Vec<f64>, f64)>
+/// `min_ops` / `max_secs` extend the fixed window into "at least T seconds AND
+/// at least N operations, but never longer than `max_secs`".
+///
+/// Why this exists: a fixed-duration window is fine for an algorithm doing
+/// thousands of ops a second, and useless for one that does less than one. At
+/// `--duration-secs 5`, SLH-DSA-SHA2-128s signing (p50 ~2,158 ms) completed 12
+/// operations and SLH-DSA-SHAKE-256s completed **zero** — an "ops/sec" and a
+/// p99 derived from 0-12 samples are noise with a decimal point, and the SLH-DSA
+/// "s" parameter sets were effectively unmeasurable. `min_ops` lets a slow point
+/// keep running until it has a real sample while a fast point still returns in
+/// `duration_secs`, so one run can cover both ends of a 5-orders-of-magnitude
+/// spread.
+///
+/// `min_ops = 0` reproduces the original fixed-duration behaviour exactly.
+/// `max_secs` is a hard ceiling so a pathologically slow (or wedged) point
+/// cannot hang the run forever — it is reported as a short sample rather than
+/// waited on indefinitely.
+pub fn run_point<F>(
+    duration_secs: f64,
+    warmup_secs: f64,
+    min_ops: u64,
+    max_secs: f64,
+    worker_fns: Vec<F>,
+) -> Result<(u64, Vec<f64>, f64)>
 where
     F: FnMut() -> Result<()> + Send + 'static,
 {
     let warmup_deadline = Instant::now() + Duration::from_secs_f64(warmup_secs);
     let stop = Arc::new(AtomicBool::new(false));
+    // Live op counter so the controller can decide when `min_ops` is met.
+    // Per-thread counts are still authoritative for the returned total (they
+    // are what the latency vectors correspond to); this is only the signal the
+    // controller polls, which is why Relaxed ordering is sufficient.
+    let ops_so_far = Arc::new(AtomicU64::new(0));
 
     let handles: Vec<std::thread::JoinHandle<Result<(u64, Vec<f64>)>>> = worker_fns
         .into_iter()
         .map(|mut op| {
             let stop = Arc::clone(&stop);
+            let ops_so_far = Arc::clone(&ops_so_far);
             std::thread::spawn(move || {
                 // Warm-up: run the real op, discard timings.
                 while Instant::now() < warmup_deadline {
@@ -98,6 +127,7 @@ where
                     op()?;
                     latencies_ms.push(start.elapsed().as_secs_f64() * 1000.0);
                     count += 1;
+                    ops_so_far.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok((count, latencies_ms))
             })
@@ -110,6 +140,17 @@ where
     std::thread::sleep(warmup_deadline.saturating_duration_since(Instant::now()));
     let measured_start = Instant::now();
     std::thread::sleep(Duration::from_secs_f64(duration_secs));
+    // Keep going while the sample is too small to mean anything, bounded by
+    // max_secs. Polled rather than signalled: a 100 ms granularity is far below
+    // the per-op cost of any point that gets this far (the fast points have
+    // already satisfied min_ops during `duration_secs` and never enter the
+    // loop), and it keeps the workers' hot path to a single fetch_add.
+    if min_ops > 0 {
+        let hard_deadline = measured_start + Duration::from_secs_f64(max_secs.max(duration_secs));
+        while ops_so_far.load(Ordering::Relaxed) < min_ops && Instant::now() < hard_deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     stop.store(true, Ordering::Relaxed);
     let actual_duration_s = measured_start.elapsed().as_secs_f64();
 

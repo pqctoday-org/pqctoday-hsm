@@ -1,9 +1,14 @@
 # How to Test SoftHSMv3
 
-This guide covers the full testing workflow for SoftHSMv3: building the
-library, running the CppUnit p11test suite, and running the standalone
-`pqc_validate` program that exercises every PKCS#11 v3.2 mechanism
-supported by OpenSSL 3.6.0.
+This guide covers the C++ engine's native testing workflow in depth:
+building the library, running the CppUnit p11test suite, and running the
+standalone `pqc_validate` program that exercises every PKCS#11 v3.2
+mechanism supported by OpenSSL. That is only part of this repository's test
+surface, though — it also ships a second engine (Rust, with its own test
+suite and checked-in PKCS#11 v3.2 conformance evidence), a cross-engine
+differential harness, WASM/Node.js suites, and a live-OpenSSL-provider
+coverage harness. [§10, "Other Test Suites in This Repository"](#10-other-test-suites-in-this-repository)
+covers all of those and how they fit together with what CI actually runs.
 
 ---
 
@@ -18,6 +23,7 @@ supported by OpenSSL 3.6.0.
 7. [Phase-by-Phase Expectations](#7-phase-by-phase-expectations)
 8. [Debugging Tips](#8-debugging-tips)
 9. [CI Integration](#9-ci-integration)
+10. [Other Test Suites in This Repository](#10-other-test-suites-in-this-repository)
 
 ---
 
@@ -159,6 +165,22 @@ CI runs (`.github/workflows/ci.yml`):
 cd build
 ctest --output-on-failure
 ```
+
+With `-DBUILD_TESTS=ON`, `ctest` registers exactly **two** tests (verified
+against the root and `src/lib/test/` `CMakeLists.txt`): the CppUnit `p11test`
+suite below, and `p11_v32_compliance` (the standalone
+`p11_v32_compliance_test` binary, driven against the freshly built engine —
+891/0/48 as of the checked-in `cpp_compliance_report.md`; see
+[§10](#10-other-test-suites-in-this-repository) for how it and the differential
+harness relate). The same build also produces roughly a dozen small **probe
+binaries** (`composite_sig_probe`, `aead_probe`, `aead_edge_probe`,
+`aes_wrap_probe`, `aes_xts_probe`, `skey_flow_probe`, `shake_sign_probe`,
+`generic_hash_mldsa_probe`, `hash_pqc_crosscheck`, `hash_pqc_provider_probe`,
+`mu_gen_probe`, `dump_int_param`, `lms_xdr_verify`, `hss_pubkey_dump`, …) —
+these are **not** registered under `ctest`; they exist to be invoked
+individually by `scripts/test-openssl-provider.sh` (§10) against the OpenSSL
+provider. `ctest --output-on-failure` will not run them, and their absence
+from a `ctest` run is expected, not a build gap.
 
 Or run the test binary directly:
 
@@ -561,7 +583,125 @@ cmake -B build -DDEFAULT_LOG_LEVEL=DEBUG ...
 
 ---
 
-## 10. Key Template Requirements
+## 10. Other Test Suites in This Repository
+
+The p11test/pqc_validate workflow above is the C++ engine's own native test
+surface. The rest of this repository's test coverage lives in several other
+places; each has its own README with full detail, but a tester should at
+least know they exist and roughly when to reach for each one.
+
+### The Rust engine's own test suite
+
+The Rust engine (`rust/`, `softhsmrustv3`) is not exercised by anything
+above — it has an independent unit-test suite and its own checked-in PKCS#11
+v3.2 conformance evidence:
+
+```bash
+cd rust
+cargo test                      # native unit + FFI-dispatch tests
+node test_p11_conformance.js    # regenerates rust/RUST_P11_V32_CONFORMANCE_REPORT.md
+                                 # from a real run — 999/0 as of the last checked-in report
+```
+
+`test_p11_conformance.js` drives the engine through its real wasm-bindgen
+`_C_*` ABI (a `--features acvp` build), not a Rust-internal shortcut, and
+writes the Markdown report itself — the report is machine-generated, not
+hand-edited. See `rust/README.md` and `rust/RUST_P11_V32_CONFORMANCE_REPORT.md`.
+
+### Cross-engine differential harness (`tests/differential/`)
+
+Two independent engines that are supposed to agree wherever the spec says
+what the behavior is invites exactly the kind of prose-drift bug this repo
+has hit twice before (a 2026-08-13 audit found 24 documentation statements
+about C++/Rust parity that were simply wrong). `tests/differential/` replaces
+prose with a harness: it `dlopen`s both engines into one process, drives them
+through 49 identical scenarios, and diffs every observable output field by
+field. Legal differences (the spec is silent, or a product decision) live in
+`tests/differential/exceptions.json` with a citation; anything not listed
+there fails the run.
+
+```bash
+./scripts/run-differential-harness.sh                 # build both engines, run everything
+./scripts/run-differential-harness.sh --list          # list the scenarios
+./scripts/run-differential-harness.sh --only bytes.   # one scenario group
+./scripts/run-differential-harness.sh --verbose       # print the covered divergences too
+```
+
+Reports land in `build_union/p11_diff_report.{md,json}`. See
+`tests/differential/README.md` for the full design rationale (why one
+process rather than two, what it deliberately does not cover — the Rust
+*native* API the KMIP server calls directly, on-disk persistence, threading —
+and how to add a scenario).
+
+### WASM / Node.js suites (`tests/`)
+
+`pqc_validate` (§5 above) is native-only. The WASM builds of both engines are
+exercised by Node.js harnesses driven from the repo-root `package.json`:
+
+| Command | Runs | What it does |
+|---|---|---|
+| `npm test` | `tests/smoke-wasm.mjs` | Full PKCS#11 v3.2 lifecycle smoke test against the C++ WASM module (`C_Initialize` → token init → ML-KEM-768 keygen/encap/decap → ML-DSA-65 keygen/sign/verify → `C_Finalize`). Requires `wasm/softhsm.{js,wasm}` (`npm run build` first). |
+| `npm run test:acvp` | `tests/acvp-wasm.mjs` | 20 ACVP test suites against the C++ and/or Rust WASM engines via raw PKCS#11 calls, using the vectors in `tests/acvp/`. `--engine=cpp\|rust\|both`, `--verbose`, `--json`. |
+
+Also present and runnable directly with `node` (not wired into
+`package.json`): `tests/parity-wasm.mjs` (cross-engine C++ vs Rust behavioral
+spot-check), `tests/c-get-function-list.mjs` (Rust-only WASM
+indirect-function-table coverage), `tests/test-ecdsa-sha512.mjs` (focused
+`CKM_ECDSA_SHA512`/P-256 unit test), and `tests/test_acvp_lms_sigver.py`
+(NIST ACVP LMS sigVer vectors against `hss_validate_signature()` directly,
+bypassing PKCS#11). See `tests/README.md` for the complete file-by-file map.
+
+### OpenSSL provider coverage harness (`scripts/test-openssl-provider.sh`)
+
+This is the harness referenced in §4 above for the probe binaries `ctest`
+does not run. It exercises the vendored `pkcs11-provider`
+(`src/vendor/pkcs11-provider/`) against **both** PKCS#11 engines under a real
+OpenSSL 3.6.3 build — every result is cross-checked against the *other*
+implementation (provider-sign → software-verify, software-encap →
+provider-decap), never self-verified. Design record and the full T-case list:
+`docs/openssl-provider-coverage-audit-2026-08-25.md`.
+
+```bash
+bash scripts/test-openssl-provider.sh
+```
+
+Key environment overrides (defaults target the project's own dev container —
+override for a local run): `OPENSSL_BIN` (must be OpenSSL ≥ 3.6, default
+`/usr/local/ssl/bin/openssl`), `HSM_ROOT` (defaults to this script's own repo
+root — always overridable, and self-locating so a `git worktree` checkout
+tests itself rather than silently loading the main tree's binaries),
+`PROVIDER_SO`, `CPP_ENGINE_SO`, `RUST_ENGINE_SO`, `SOFTHSM_UTIL`. It prints a
+single greppable summary line: `OPENSSL-PROVIDER-HARNESS: PASS=<n> FAIL=0
+XFAIL=<m> XPASS=0` — an `XPASS` (a documented-gap case unexpectedly passing)
+fails the run just as loudly as a real `FAIL`, so a remediation that closes a
+gap must also flip its expectation in the harness, not just land the fix.
+Runs on both Linux and macOS (the composite-signature probe and several
+`stat`/`grep` portability issues were fixed for macOS in 2026-09).
+
+### The real pre-push gate: `scripts/local-gate.sh`
+
+None of the suites above run in GitHub CI by project directive (2026-07-01)
+— "new test suites run locally, never in GitHub CI." `scripts/local-gate.sh`
+is the single script that runs them all before a push: KMIP/CACP Rust tests,
+the Rust engine's own test suite, the OASIS KMIP 3.0 replay harness, the
+Rust PKCS#11 v3.2 conformance regeneration, and the cross-engine
+differential harness, by default; `--cpp` adds the C++ `ctest` run from this
+guide, `--openssl-provider` adds the harness above, and several other flags
+gate slower or environment-specific suites (`--acvp-wasm`, `--release-xmss`,
+`--tls-interop`, `--javajce`, `--javajce-remote`). `--all` runs everything —
+see `RELEASING.md` for when a full `--all` run is required. Read the script's
+own header comment for the authoritative, current step list; it changes more
+often than this doc does.
+
+```bash
+bash scripts/local-gate.sh              # core gate
+bash scripts/local-gate.sh --cpp --openssl-provider   # + this guide's ctest run + the provider harness
+bash scripts/local-gate.sh --all        # everything (pre-release)
+```
+
+---
+
+## 11. Key Template Requirements
 
 > **Spec reference**: PKCS#11 v3.2, ratified OASIS Standard (03 June 2026) — `docs/refs/pkcs11-spec-v3.2-os.pdf`
 > (page/section/table numbers below are unchanged from the earlier CSD01 draft, verified against the ratified text)
@@ -786,3 +926,8 @@ Omitting `CKA_VALUE_LEN` → `CKR_TEMPLATE_INCOMPLETE (0x000000d0)`.
 | `src/lib/pkcs11/pkcs11t.h` | All `CKM_*`, `CKK_*`, `CKA_*`, `CKP_*` constants |
 | `src/lib/pkcs11/pkcs11f.h` | `C_EncapsulateKey` / `C_DecapsulateKey` signatures |
 | `docs/gap-analysis-pkcs11-v3.2.md` | PKCS#11 v3.2 gap analysis |
+| `rust/` , `rust/RUST_P11_V32_CONFORMANCE_REPORT.md` | Rust engine + its own checked-in PKCS#11 v3.2 conformance evidence — see [§10](#10-other-test-suites-in-this-repository) |
+| `tests/differential/` | Cross-engine differential harness (C++ vs Rust) — see [§10](#10-other-test-suites-in-this-repository) |
+| `scripts/test-openssl-provider.sh` | Vendored OpenSSL provider vs both engines, live — see [§10](#10-other-test-suites-in-this-repository) |
+| `scripts/local-gate.sh` | The pre-push gate that runs all of the above — see [§10](#10-other-test-suites-in-this-repository) |
+| `cpp_compliance_report.md` / `.json` | Checked-in `p11_v32_compliance_test` output (891/0/48 as of this writing) |

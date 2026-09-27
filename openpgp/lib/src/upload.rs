@@ -6,6 +6,10 @@ use cryptoki::object::{
 use crate::x509::types::{AlgorithmId, PublicKeyInfo};
 use openssl::pkey::{KeyType as OsslKeyType, PKey};
 use p256::elliptic_curve::zeroize::Zeroizing;
+// `dp()`/`dq()`/`qinv()` were inherent methods on `RsaPrivateKey` in rsa 0.7;
+// in 0.9 they come from this trait. `from_components` still precomputes them
+// (and now validates first), so they remain `Some`.
+use rsa::traits::PrivateKeyParts;
 use sequoia_openpgp::crypto::mpi;
 use sequoia_openpgp::packet::key::{Key6, PublicParts, SecretKeyMaterial, SecretParts, UnspecifiedRole};
 use sequoia_openpgp::packet::Key;

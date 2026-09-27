@@ -36,6 +36,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -244,6 +245,8 @@ CK_RV SoftHSM::C_Initialize(CK_VOID_PTR pInitArgs)
 	// gated on purpose (see OpLog.h): the shipped binary and the binary evidence
 	// is collected from must be the same binary.
 	OpLog::init();
+	// Same for the behaviour ring (PQC_BEHAVIOUR_RING) -- see BehaviourRing.h.
+	BehaviourRing::init();
 
 	// Configure object store storage backend used by all tokens.
 	if (!ObjectStoreToken::selectBackend(Configuration::i()->getString("objectstore.backend", DEFAULT_OBJECTSTORE_BACKEND)))
@@ -298,6 +301,7 @@ CK_RV SoftHSM::C_Finalize(CK_VOID_PTR pReserved)
 	// Close the evidence sink before the teardown branch below, so a run that
 	// ends via process exit still leaves a properly closed, complete log.
 	OpLog::shutdown();
+	BehaviourRing::shutdown();
 
 	// During process teardown (OpenSSL's atexit cleanup unloading the provider),
 	// OpenSSL's globals are already being freed. The cleanup below reaches back
@@ -598,7 +602,10 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 
 	// ECDSA + ECDH (DSA and DH PKCS removed)
 	t["CKM_EC_KEY_PAIR_GEN"]	= CKM_EC_KEY_PAIR_GEN;
+	t["CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS"]	= CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS;
 	t["CKM_ECDSA"]			= CKM_ECDSA;
+	// Vendor, deliberate key-recovery primitive (SECURITY.md).
+	t["CKM_PQCTODAY_ECDSA_EXPLICIT_K"]	= CKM_PQCTODAY_ECDSA_EXPLICIT_K;
 	t["CKM_ECDSA_SHA1"]		= CKM_ECDSA_SHA1;
 	t["CKM_ECDSA_SHA224"]		= CKM_ECDSA_SHA224;
 	t["CKM_ECDSA_SHA256"]		= CKM_ECDSA_SHA256;
@@ -666,6 +673,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	// ML-KEM (FIPS 203, PKCS#11 v3.2)
 	t["CKM_ML_KEM_KEY_PAIR_GEN"]	= CKM_ML_KEM_KEY_PAIR_GEN;
 	t["CKM_ML_KEM"]			= CKM_ML_KEM;
+
+	// Classic McEliece (BSI TR-02102-1 §2.4.2) — vendor mechanisms, all 10
+	// parameter sets, liboqs-backed (implementation plan D-2). First time
+	// this engine advertises these two codepoints — the Rust engine has
+	// since softhsmrustv3 v0.7.0.
+	t["CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN"] = CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN;
+	t["CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE"]  = CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE;
 
 	// LMS / HSS stateful hash-based signatures (G10)
 	// CKM_HSS / CKM_HSS_KEY_PAIR_GEN are standard PKCS#11 v3.2 §6.65
@@ -770,6 +784,29 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 
 	return CKR_OK;
 }
+
+// The elliptic-curve capability flags every EC-family mechanism in this engine
+// shares: prime-field curves (CKF_EC_F_P), CKA_EC_PARAMS given as a curve OID
+// (CKF_EC_OID — pkcs11t.h:1354 keeps CKF_EC_NAMEDCURVE as a deprecated alias
+// for the same bit, retired in PKCS#11 3.00; prefer the current name), and uncompressed
+// point encodings (CKF_EC_UNCOMPRESS). PKCS#11 v3.2 §5.4.4 / Table 40 defines
+// these as the EC-family members of CK_MECHANISM_INFO.flags.
+//
+// Hoisted out of the switch below (2026-09-25). It used to be #defined inside
+// the CKM_EC_KEY_PAIR_GEN case, under `#ifdef WITH_ECC`, while the first
+// consumer added outside that block — the CKM_ECDH1_* arms, which live under
+// `#if defined(WITH_ECC) || defined(WITH_EDDSA)` — would not have compiled in
+// an EdDSA-only configuration. A shared flag set does not belong inside one
+// case label either way.
+#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_OID | CKF_EC_UNCOMPRESS)
+// Edwards / Montgomery curves (plan 1.4, 2026-09-27). These six mechanisms
+// advertised no CKF_EC_* flag at all, though v3.2's CK_MECHANISM_INFO flag
+// table says an EC-capable library "must set" the field, parameter-encoding
+// and point-form flags "for each EC mechanism". Unlike the Weierstrass arms,
+// CURVENAME is true here: OSSLUtil.cpp decodes CKA_EC_PARAMS for these curves
+// in both the oID and the curveName (PrintableString) forms, and the engine
+// itself emits the curveName form (exceptions.json LEGAL-EC-PARAMS-CURVE-NAME-VS-OID).
+#define CKF_EC_EDWARDS_MONTGOMERY	(CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME | CKF_EC_UNCOMPRESS)
 
 // Return more information about a mechanism for a given slot
 CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR pInfo)
@@ -876,87 +913,101 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		// identical key-size and function constraints — it differs only in
 		// taking a CK_MAC_GENERAL_PARAMS output length — so each pairs with
 		// its plain mechanism here (PKCS#11 v3.2 §6.20.3 and siblings).
+		//
+		// E17 (ACVP gap-closure 2026-09-25): ulMinKeySize is the smallest key
+		// the token ACCEPTS, not a recommendation. It used to be the digest
+		// length (20..64), while resolveMacMech() (SoftHSM_sign.cpp,
+		// kMacMechTable minKeyBytes = 0) deliberately enforces no floor:
+		// RFC 2104 §3 / FIPS 198-1 §4 allow any key length, RFC 4231 TC1 uses
+		// a 20-byte key with SHA-256..512, and NIST's HMAC 2.0 ACVP samples
+		// use 8-bit keys. PKCS#11 v3.2 §6.22.3 (and siblings) only says a
+		// FIPS-198 token "MAY" require >= half the hash length; this token
+		// doesn't. So the advertisement is corrected to what is enforced —
+		// no minimum, 0 bytes (an empty key is accepted and HMAC'd as RFC
+		// 2104 defines: zero-padded to the block size) — rather than
+		// breaking those vectors, or RFC 5869-style empty-salt callers, with
+		// a new floor. The maximum is unchanged.
 #ifndef WITH_FIPS
 		case CKM_MD5_HMAC:
 		case CKM_MD5_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 16;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 #endif
 #ifdef WITH_RIPEMD160
 		case CKM_RIPEMD160_HMAC:
 		case CKM_RIPEMD160_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 20;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 #endif
 		case CKM_SHA_1_HMAC:
 		case CKM_SHA_1_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 20;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA224_HMAC:
 		case CKM_SHA224_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 28;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA256_HMAC:
 		case CKM_SHA256_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 32;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA384_HMAC:
 		case CKM_SHA384_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 48;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA512_HMAC:
 		case CKM_SHA512_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 64;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA512_224_HMAC:
 		case CKM_SHA512_224_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 28;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA512_256_HMAC:
 		case CKM_SHA512_256_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 32;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA3_224_HMAC:
 		case CKM_SHA3_224_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 28;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA3_256_HMAC:
 		case CKM_SHA3_256_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 32;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA3_384_HMAC:
 		case CKM_SHA3_384_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 48;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_SHA3_512_HMAC:
 		case CKM_SHA3_512_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 64;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = HMAC_MECH_FLAGS;
 			break;
 		case CKM_RSA_PKCS_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = rsaMinSize;
@@ -1010,13 +1061,20 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = rsaMinSize;
 			pInfo->ulMaxKeySize = rsaMaxSize;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 		case CKM_RSA_PKCS_OAEP:
 			pInfo->ulMinKeySize = rsaMinSize;
 			pInfo->ulMaxKeySize = rsaMaxSize;
 			pInfo->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP;
 			break;
+		// Phase-5 §3.2 (2026-09-07): v3.2 §6.8 fixes ulMinKeySize/ulMaxKeySize
+		// for THIS mechanism as bits, not bytes — the one case in this
+		// switch where that distinction is spec-mandated rather than a
+		// convention. 1..UNLIMITED_KEY_SIZE is honest: nothing in the
+		// spec bounds a generic secret's length, so the ceiling is
+		// "whatever the CK_ULONG cap permits", not a Rust-style flat 512.
 		case CKM_GENERIC_SECRET_KEY_GEN:
 			pInfo->ulMinKeySize = 1;
 			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
@@ -1086,18 +1144,28 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_ENCRYPT | CKF_DECRYPT;
 			break;
+		// Phase-5 §3.1 (2026-09-07): ulMaxKeySize for a key-WRAP mechanism is
+		// ambiguous between "size of the payload that may be wrapped"
+		// (this engine's old reading) and "size of the wrapping AES key
+		// itself" (Rust's reading, and the one adopted here — a caller
+		// selects a KEK by its own CKA_VALUE_LEN, so the payload reading
+		// told a caller nothing a wrapping mechanism's key-size range is
+		// for). 16-32 matches CKM_AES_KEY_GEN and every other AES
+		// mechanism's key-size range in this switch.
 		case CKM_AES_KEY_WRAP:
 			pInfo->ulMinKeySize = 16;
-			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
+			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
 			break;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 		// Same RFC 5649 construction; KWP is the v3.0+ name for it and
 		// CKM_AES_KEY_WRAP_PAD is the deprecated spelling (v3.2 §6.16.3).
+		// Minimum raised from 1 to 16 alongside the §3.1 max change above —
+		// a one-byte AES wrapping key was never real under either reading.
 		case CKM_AES_KEY_WRAP_PAD:
 		case CKM_AES_KEY_WRAP_KWP:
-			pInfo->ulMinKeySize = 1;
-			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
 			break;
 #endif
@@ -1120,6 +1188,14 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
+		// Phase-5 §3.2 (2026-09-07): KMAC is absent from v3.2 entirely (these
+		// are CKM_VENDOR_DEFINED mechanisms), so v3.3 governs by the
+		// standing rule. kmac.md:115-120 recommends a key of at least 128
+		// bits for KMAC128 and at least 256 for KMAC256 -- exactly these
+		// minimums, in bytes per kmac.md:132-134 -- and states the key "can
+		// be of arbitrary length" otherwise, so the maximum is a statement
+		// about this token, not the spec: the CK_ULONG cap, not Rust's
+		// unsourced flat 64 (which sits BELOW the recommended KMAC-256 key).
 		case CKM_KMAC_128:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
@@ -1132,9 +1208,9 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			break;
 #ifdef WITH_ECC
 		case CKM_EC_KEY_PAIR_GEN:
+		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
-#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)
 			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_COMMOM;
 			break;
 		case CKM_ECDSA:
@@ -1152,7 +1228,15 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_COMMOM |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
+			break;
+		case CKM_PQCTODAY_ECDSA_EXPLICIT_K:
+			// Sign only (its signatures verify under CKM_ECDSA), no message
+			// flags (single-part), and only P-256 / P-384 / P-521.
+			pInfo->ulMinKeySize = 256;
+			pInfo->ulMaxKeySize = 521;
+			pInfo->flags = CKF_SIGN | CKF_EC_COMMOM;
 			break;
 #endif
 #if defined(WITH_ECC) || defined(WITH_EDDSA)
@@ -1161,47 +1245,105 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			// C_EncapsulateKey/C_DecapsulateKey (SoftHSM_kem.cpp, PKCS#11
 			// v3.2 §6.3.17 Table 78) — advertise it, mirroring the
 			// CKM_ML_KEM entry below. The cofactor variant stays derive-only.
+			//
+			// CKF_EC_COMMOM (2026-09-25, finding E20): both ECDH1 mechanisms
+			// are EC-family mechanisms (v3.2 §6.3), dispatched by C_DeriveKey
+			// through deriveECDH/deriveEDDSA over exactly the same key objects
+			// the CKM_ECDSA and CKM_EC_KEY_PAIR_GEN arms above already claim
+			// these flags for: prime-field curves, CKA_EC_PARAMS as a curve
+			// OID, uncompressed CKA_EC_POINT. Omitting them here said this
+			// engine could not do an ECDH over a named prime curve with an
+			// uncompressed peer point — which is the only form it does.
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
-			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE;
+			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE |
+			               CKF_EC_COMMOM;
 			break;
 		case CKM_ECDH1_COFACTOR_DERIVE:
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
-			pInfo->flags = CKF_DERIVE;
+			pInfo->flags = CKF_DERIVE | CKF_EC_COMMOM;
 			break;
 #endif
 		// Montgomery X25519/X448 + BIP32 derive (audit mech G6). These are
 		// dispatched by C_DeriveKey but were unreachable because the advertised
 		// table omitted them (isMechanismPermitted rejected them).
+		//
+		// E20 (2026-09-25) — these four were one case label reporting 0/0 for
+		// all of them. They are split now because their key sizes are neither
+		// unknown nor shared. X25519 and X448 are RFC 7748 Diffie-Hellman over
+		// ONE fixed curve each, so min == max, in bits, exactly as the
+		// CKM_EC_MONTGOMERY_KEY_PAIR_GEN / CKM_EC_MONTGOMERY_KEY_DERIVE arms
+		// below already report (eddsaMinSize = 255, eddsaMaxSize = 448, from
+		// OSSLEDDSA::getMin/MaxKeySize). Both curves are genuinely supported —
+		// C_DeriveKey routes a CKK_EC_MONTGOMERY base key to deriveEDDSA
+		// (SoftHSM_keygen.cpp) and OSSLUtil.cpp maps both "curve25519" and
+		// "curve448" to their EVP_PKEY types. 0/0 said the engine knew nothing
+		// about the key size of a mechanism whose key size is fixed by name.
 		case CKM_X25519:
+			pInfo->ulMinKeySize = 255;
+			pInfo->ulMaxKeySize = 255;
+			pInfo->flags = CKF_DERIVE | CKF_EC_EDWARDS_MONTGOMERY;
+			break;
 		case CKM_X448:
-		case CKM_BIP32_MASTER_DERIVE:
+			pInfo->ulMinKeySize = 448;
+			pInfo->ulMaxKeySize = 448;
+			pInfo->flags = CKF_DERIVE | CKF_EC_EDWARDS_MONTGOMERY;
+			break;
+		// BIP32 child derivation takes the parent's private scalar as its base
+		// key, which HDWalletDerivation::deriveChildNode consumes as a 32-byte
+		// value for every curve it supports (secp256k1, P-256, ed25519) — the
+		// same 32/32 the Rust engine advertises.
 		case CKM_BIP32_CHILD_DERIVE:
-			pInfo->ulMinKeySize = 0;
-			pInfo->ulMaxKeySize = 0;
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 32;
+			pInfo->flags = CKF_DERIVE;
+			break;
+		// CKM_BIP32_MASTER_DERIVE advertises 16/64 (maintainer ruling 2026-09-26).
+		// BIP-32 permits 128 to 512 bits of seed entropy, so this range describes
+		// what is actually accepted and usable while excluding nothing real —
+		// notably it ACCEPTS the 64-byte seed BIP-39 produces.
+		//
+		// This replaces an earlier 0/0 here, which was accurate about the old
+		// behaviour (deriveMasterNode HMAC-SHA512s a seed of any length) but
+		// claimed no contract at all. An intermediate 32/32 was considered and
+		// rejected precisely because it would have excluded BIP-39's seed length.
+		// The Rust engine moves 32/32 -> 16/64 to match, owned separately.
+		//
+		// The range is only honest because SoftHSM_keygen.cpp ENFORCES it
+		// (CKR_KEY_SIZE_RANGE below 16 or above 64). Advertising a range without
+		// that check would claim a constraint the engine does not have, which is
+		// finding E20's own defect class. Keep the two in step: if the enforcement
+		// is ever relaxed, this range has to go back to 0/0.
+		//
+		// Vendor mechanism (CKM_VENDOR_DEFINED | 0x105B), so this is a project
+		// ruling, NOT a v3.2 conformance requirement — canonical v3.2 does not
+		// define it.
+		case CKM_BIP32_MASTER_DERIVE:
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 64;
 			pInfo->flags = CKF_DERIVE;
 			break;
 #ifdef WITH_EDDSA
 		case CKM_EC_EDWARDS_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = eddsaMinSize;
 			pInfo->ulMaxKeySize = eddsaMaxSize;
-			pInfo->flags = CKF_GENERATE_KEY_PAIR;
+			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_EC_MONTGOMERY_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = eddsaMinSize;
 			pInfo->ulMaxKeySize = eddsaMaxSize;
-			pInfo->flags = CKF_GENERATE_KEY_PAIR;
+			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_EDDSA:
 			pInfo->ulMinKeySize = eddsaMinSize;
 			pInfo->ulMaxKeySize = eddsaMaxSize;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_EDDSA_PH:
 			pInfo->ulMinKeySize = 255;
 			pInfo->ulMaxKeySize = 255;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 #endif
 		// ML-DSA (FIPS 204) — ulMin/MaxKeySize are public-key BYTES per
@@ -1228,7 +1370,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = 1312;
 			pInfo->ulMaxKeySize = 2592;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — CKF_SIGN |
 		// CKF_VERIFY only, no C_MessageSign/Verify* support for this
@@ -1269,7 +1412,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = 32;
 			pInfo->ulMaxKeySize = 64;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 		// ML-KEM (FIPS 203) — sizes are encapsulation key bytes (not security bits)
 		// ML-KEM-512=800B, ML-KEM-768=1184B, ML-KEM-1024=1568B
@@ -1281,6 +1425,22 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_ML_KEM:
 			pInfo->ulMinKeySize = 800;
 			pInfo->ulMaxKeySize = 1568;
+			pInfo->flags = CKF_ENCAPSULATE | CKF_DECAPSULATE;
+			break;
+		// Classic McEliece (BSI TR-02102-1 §2.4.2) — sizes are public-key
+		// bytes across all 10 parameter sets: 261,120 (mceliece348864) to
+		// 1,357,824 (mceliece8192128/8192128f) — same "min = smallest
+		// variant, max = largest variant" convention this table already
+		// uses for ML-KEM/FrodoKEM. Matches the Rust engine's own range
+		// exactly (rust/src/ffi.rs).
+		case CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN:
+			pInfo->ulMinKeySize = 261120;
+			pInfo->ulMaxKeySize = 1357824;
+			pInfo->flags = CKF_GENERATE_KEY_PAIR;
+			break;
+		case CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE:
+			pInfo->ulMinKeySize = 261120;
+			pInfo->ulMaxKeySize = 1357824;
 			pInfo->flags = CKF_ENCAPSULATE | CKF_DECAPSULATE;
 			break;
 		// LMS / HSS stateful hash-based signatures (G10)

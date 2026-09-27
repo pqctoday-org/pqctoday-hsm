@@ -201,6 +201,7 @@ const char* OpLog::mechName(CK_MECHANISM_TYPE mech)
 		case CKM_ECDSA_SHA3_384:          return "CKM_ECDSA_SHA3_384";
 		case CKM_ECDSA_SHA3_512:          return "CKM_ECDSA_SHA3_512";
 		case CKM_EC_KEY_PAIR_GEN:         return "CKM_EC_KEY_PAIR_GEN";
+		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: return "CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS";
 		case CKM_ECDH1_DERIVE:            return "CKM_ECDH1_DERIVE";
 		case CKM_EDDSA:                   return "CKM_EDDSA";
 		case CKM_EC_EDWARDS_KEY_PAIR_GEN: return "CKM_EC_EDWARDS_KEY_PAIR_GEN";

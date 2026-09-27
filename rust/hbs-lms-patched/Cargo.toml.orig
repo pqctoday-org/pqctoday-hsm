@@ -36,5 +36,7 @@ rand = "0.8.3"
 [features]
 default = []
 std = []
+# pqctoday-hsm: in-memory per-tree node cache (src/tree_cache.rs); needs std.
+tree-cache = ["std"]
 fast_verify = ["std", "rand", "crossbeam"]
 verbose = []

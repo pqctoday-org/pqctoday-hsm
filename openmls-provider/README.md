@@ -20,9 +20,11 @@ Sibling integration to:
 | `aead_encrypt` / `aead_decrypt` (suite 3, X-Wing) | `CKM_CHACHA20_POLY1305` via the `softhsmrustv3` Rust engine (`backend.rs`'s `PkcsOps::chacha20_poly1305`) | yes |
 | `signature_key_gen` | `C_GenerateKeyPair(CKM_EC_EDWARDS_KEY_PAIR_GEN` / `CKM_EC_KEY_PAIR_GEN)` as **token object** | yes |
 | `sign` / `verify_signature` | `CKM_EDDSA` / `CKM_ECDSA_SHA*` | yes |
-| HPKE / `DhKem25519`+`HkdfSha256`+`AesGcm128` | `CKM_ECDH1_DERIVE` + `CKM_SHA256_HMAC` + `CKM_AES_GCM` (RFC 9180 in `hpke.rs`) | yes |
+| HPKE / `DhKem25519`+`HkdfSha256`+`AesGcm128` (suite 1) | `CKM_ECDH1_DERIVE` + `CKM_SHA256_HMAC` + `CKM_AES_GCM` (RFC 9180 in `hpke.rs`) | yes |
+| HPKE / `DhKemP256`+`HkdfSha256`+`AesGcm128` (suite 2) | `CKM_ECDH1_DERIVE` via a dedicated `ecdh_p256` `PkcsOps` method (RFC 9180 §7.1.3 DeriveKeyPair + §7.1.1 point validation) + `CKM_SHA256_HMAC` + `CKM_AES_GCM` | yes |
+| HPKE / `DhKem25519`+`HkdfSha256`+`ChaCha20Poly1305` (suite 3) | `CKM_ECDH1_DERIVE` + `CKM_SHA256_HMAC` + `CKM_CHACHA20_POLY1305` | yes |
 | HPKE / X-Wing (ML-KEM-768 + X25519) + ChaCha20-Poly1305 | ML-KEM-768 keygen/encapsulate/decapsulate + X25519 `CKM_ECDH1_DERIVE`, SHAKE-256 seed expansion and the SHA3-256 combiner via the Rust engine's `native::derive::{shake256_xof, run_combiner}`, `CKM_CHACHA20_POLY1305` for the AEAD (draft-connolly-cfrg-xwing-kem in `hpke.rs`) | yes |
-| HPKE / other suites (`DhKemP256`/`P384`/`P521`/`448`) | `hpke-rs-rust-crypto` fallback in-process | **no — Phase 2.1** |
+| HPKE / other suites (`DhKemP384`/`P521`/`448`) | `hpke-rs-rust-crypto` fallback in-process | **no — Phase 2.1** |
 
 ## Signature key custody
 
@@ -110,22 +112,32 @@ native module.
 
 ## Roadmap
 
-### Phase 2 — HSM-resident HPKE (✅ done in v0.2 for `DhKem25519`)
+### Phase 2 — HSM-resident HPKE (✅ done for all 4 declared ciphersuites)
 
 The 5 HPKE entry points now run end-to-end through PKCS#11 primitives for
-the suite used by `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`:
-DH via `CKM_ECDH1_DERIVE`, HKDF stitched over `CKM_SHA256_HMAC`, AEAD via
-`CKM_AES_GCM`. RFC 9180 implementation lives in
-[`lib/src/hpke.rs`](lib/src/hpke.rs). Interop with `hpke-rs` is verified
-in both directions by the `hpke_pkcs11_path_interops_with_hpke_rs` and
+every ciphersuite this crate declares support for — `DhKem25519`+`AesGcm128`
+(suite 1), `DhKemP256`+`AesGcm128` (suite 2), `DhKem25519`+`ChaCha20Poly1305`
+(suite 3), and X-Wing+`ChaCha20Poly1305` (the PQ suite, see Phase 4). Suites
+2 and 3 were the last gap: until 2026-09-01 both silently fell through to the
+in-process `hpke-rs` fallback despite being declared as fully HSM-backed —
+closed by adding a dedicated `ecdh_p256` `PkcsOps` method (RFC 9180 §7.1.3
+rejection-sampling DeriveKeyPair + §7.1.1 point validation) for suite 2, and
+a new `Suite` constant + dispatch arm reusing the existing X25519 KEM and
+ChaCha20-Poly1305 AEAD for suite 3. DH via `CKM_ECDH1_DERIVE`, HKDF stitched
+over `CKM_SHA256_HMAC`, AEAD via `CKM_AES_GCM` or `CKM_CHACHA20_POLY1305`.
+RFC 9180 implementation lives in [`lib/src/hpke.rs`](lib/src/hpke.rs),
+verified against the RFC's own published KATs (Appendix A.1.1 for X25519,
+A.2 for X25519+ChaCha20Poly1305, A.3 for P-256+AES-128-GCM). Interop with
+`hpke-rs` is verified in both directions by the
+`hpke_pkcs11_path_interops_with_hpke_rs` and
 `hpke_pkcs11_exporter_secret_matches_hpke_rs` integration tests.
 
 ### Phase 2.1 — Remaining HPKE suites
 
-Generalise `hpke.rs` to cover `DhKemP256`, `DhKemP384`, `DhKemP521`, and
-`DhKem448` plus the SHA-384 / SHA-512 KDFs and ChaCha20-Poly1305 AEAD —
-all of which softhsmv3 supports. Trait-level dispatch already routes
-unmatched suites to `hpke-rs` as a safety net, so this is incremental.
+Generalise `hpke.rs` to cover `DhKemP384`, `DhKemP521`, and `DhKem448` plus
+the SHA-384 / SHA-512 KDFs — none of which any currently-declared
+ciphersuite needs, so this is speculative rather than gating. Trait-level
+dispatch already routes unmatched suites to `hpke-rs` as a safety net.
 
 ### Phase 3 — Storage in the HSM (✅ v0.1 done)
 
@@ -252,10 +264,12 @@ end-to-end against the canonical `openmls` library:
 - **[`interop/`](interop/)** — `tonic`-based gRPC server speaking the
   IETF `mls_client.MLSClient` contract from
   [`mlswg/mls-implementations`](https://github.com/mlswg/mls-implementations).
-  21 of 34 RPCs are implemented (full parity with `openmls/interop_client`);
-  the remaining 13 return `UNIMPLEMENTED`. Smoke test in
+  22 of 34 RPCs are implemented; the remaining 12 (the ReInit, Branch,
+  NewMemberAdd, and ExternalSigner RPC families) return `UNIMPLEMENTED`,
+  matching `openmls/interop_client`'s own `todo!()`s. Smoke test in
   `interop/tests/grpc_smoke.rs` proves the wire-level protobuf contract is
-  correct end-to-end.
+  correct end-to-end. See [`interop/README.md`](interop/README.md) for the
+  full RPC table and the nightly cross-implementation gating results.
 
 Run everything:
 
@@ -273,7 +287,7 @@ cargo run --release --bin pqctoday-mls-grpc -- --port 50053
 | Implementation | RustCrypto crates (`sha2`, `aes-gcm`, `hpke-rs`, `ed25519-dalek`, `p256`) | Cryspen libcrux (formally-verified primitives) | PKCS#11 v3.2 via `cryptoki` |
 | Backing | pure-Rust software | pure-Rust software | softhsmv3 native module (any conformant module works) |
 | Signature key custody | in-process `Vec<u8>` | in-process `Vec<u8>` | **HSM token object, `CKA_EXTRACTABLE=FALSE`** |
-| HPKE execution | in-process (`hpke-rs-rust-crypto`) | in-process (`hpke-rs-libcrux`) | **HSM-resident for X25519+SHA256+AES128GCM (Phase 2) and X-Wing+SHA256+ChaCha20Poly1305 (Phase 4)** |
+| HPKE execution | in-process (`hpke-rs-rust-crypto`) | in-process (`hpke-rs-libcrux`) | **HSM-resident for all 4 declared ciphersuites** — X25519/P-256 + AES-128-GCM and X25519 + ChaCha20-Poly1305 (Phase 2), X-Wing + ChaCha20-Poly1305 (Phase 4) |
 | Hash / HMAC / HKDF | in-process | in-process (verified) | **HSM-resident via `CKM_*`** |
 | AEAD | in-process | in-process (verified) | **HSM-resident via `CKM_AES_GCM`** (suites 1, 2) **/ `CKM_CHACHA20_POLY1305`** (suite 3, X-Wing) |
 | Randomness | OS `getrandom` | OS `getrandom` | **HSM DRBG via `C_GenerateRandom`** |
@@ -350,8 +364,13 @@ cargo test --release --test openmls_contract -- --test-threads=1
 The [`interop/`](interop/) crate is a `tonic`-based gRPC server speaking the
 IETF `mls_client.MLSClient` contract from
 [`mlswg/mls-implementations`](https://github.com/mlswg/mls-implementations).
-21 RPCs are implemented (full parity with `openmls/interop_client`); 13 RPCs
-are stubbed matching openmls's own `todo!()`/`Status::unimplemented`.
+22 RPCs are implemented; 12 RPCs (the ReInit, Branch, NewMemberAdd, and
+ExternalSigner families) are stubbed matching openmls's own
+`todo!()`/`Status::unimplemented`. A nightly gating job
+(`.github/workflows/openmls-interop.yml`) runs pqctoday against both the
+`openmls` and `mls-rs` reference implementations across
+`welcome_join`/`commit`/`external_join` — see
+[`interop/README.md`](interop/README.md) for the current pass rate.
 
 ```bash
 # Run the full gRPC smoke suite (spins up in-process server + tonic client):

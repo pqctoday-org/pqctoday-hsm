@@ -52,6 +52,14 @@ struct Cli {
     /// OFF until explicitly decided otherwise (plan RW0 posture).
     #[arg(long = "enable-destructive", env = "PKCS11_REMOTE_ENABLE_DESTRUCTIVE", default_value_t = false)]
     enable_destructive: bool,
+
+    /// Prometheus `/metrics` scrape endpoint, plain HTTP — see the REST
+    /// binary's flag of the same name for the full rationale (docs/
+    /// remediation-plan-auth-visibility-evidence-log-09102026.md, Gap
+    /// 1/Q3). Distinct default port from REST's (9097 vs 9098) — both are
+    /// placeholders pending appliance-side port coordination.
+    #[arg(long, env = "PKCS11_REMOTE_METRICS_LISTEN", default_value = "127.0.0.1:9097")]
+    metrics_listen: std::net::SocketAddr,
 }
 
 #[tokio::main]
@@ -73,6 +81,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     pqctoday_pkcs11_remote_core::verbs::bootstrap()?;
+
+    // Gap 1/Q3 — metrics registry init + scrape endpoint, before any task
+    // that could call record_auth_failure (same ordering pqctoday-kmip's
+    // own main.rs uses).
+    pqctoday_pkcs11_remote_core::metrics::init();
+    tokio::spawn(pqctoday_pkcs11_remote_core::metrics::serve_metrics_forever(cli.metrics_listen));
+    tracing::info!(addr = %cli.metrics_listen, "metrics scrape endpoint (plain HTTP)");
 
     // Install this process's ONE posture as the rustls default (see module
     // doc — required because tonic's ServerTlsConfig gives no other hook).

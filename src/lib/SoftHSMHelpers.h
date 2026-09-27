@@ -43,14 +43,60 @@
 // Defined as static constexpr so each TU gets its own copy without ODR issues.
 // ---------------------------------------------------------------------------
 
-/// Maximum ulMaxKeySize for mechanisms with no practical key-size limit (2^31).
-static constexpr CK_ULONG UNLIMITED_KEY_SIZE       = 0x80000000UL;
+/// Maximum ulMaxKeySize for mechanisms with no practical key-size limit.
+/// Phase-5 §3 (2026-09-07): was 2^31 (0x80000000), one over the CK_ULONG
+/// cap v3.3 introduction.md:303 states ("every CK_ULONG capped at
+/// 0x7FFFFFFF") and v3.2 leaves unstated -- a v3.3 gap-fill under the
+/// standing rule, not a correction to a v3.2 value. Clamped to the cap
+/// itself: still effectively unlimited for every mechanism that uses it
+/// (CKM_GENERIC_SECRET_KEY_GEN, CKM_KMAC_128/256), one bit narrower.
+static constexpr CK_ULONG UNLIMITED_KEY_SIZE       = 0x7FFFFFFFUL;
 
 /// Hard cap on generic secret key byte length in C_GenerateKey (128 MiB).
 static constexpr CK_ULONG MAX_GENERIC_KEY_LEN_BYTES = 0x8000000UL;
 
 /// Maximum HMAC key length in bytes (512 bytes / 4096 bits, matches upstream).
 static constexpr CK_ULONG MAX_HMAC_KEY_BYTES        = 512UL;
+
+/// Minimum HMAC key length in bytes advertised by C_GetMechanismInfo — the
+/// smallest key MacSignInit/MacVerifyInit accept, which is none at all:
+/// kMacMechTable enforces no HMAC floor (E17, see SoftHSM_slots.cpp).
+static constexpr CK_ULONG HMAC_MIN_KEY_BYTES        = 0UL;
+
+/// CK_MECHANISM_INFO flags advertised for every CKM_*_HMAC mechanism.
+///
+/// CKF_MESSAGE_SIGN / CKF_MESSAGE_VERIFY were added 2026-09-25, when
+/// C_MessageSignInit and C_MessageVerifyInit started dispatching MAC
+/// mechanisms to MacSignInit / MacVerifyInit instead of routing everything
+/// through the asymmetric inits. Before that C++ refused message-based signing
+/// with a MAC key (CKR_MECHANISM_INVALID) while the Rust engine accepted it —
+/// measured, not inferred: tests/differential scenario
+/// sign.message_based_hmac. Advertising a capability the engine does not
+/// implement, or implementing one it does not advertise, are both defects, so
+/// these move together.
+///
+/// CKF_MULTI_MESSAGE is set as of 2026-09-25, and its meaning was corrected
+/// twice on the way here. It does NOT mean "several messages may be sent under
+/// one operation" — that is simply what a message-based operation IS (§5.14.2)
+/// and needs no flag. v3.2's CK_MECHANISM_INFO flag table: "True if the
+/// mechanism can be used with C_*MessageBegin. One of CKF_MESSAGE_* flag must
+/// also be set." It advertises the STREAMING Begin/Next form, and that
+/// co-requirement holds here because this same constant carries
+/// CKF_MESSAGE_SIGN/VERIFY.
+///
+/// It is claimed only now because until the same change, C_SignMessageNext
+/// refused the non-final shape §5.14.3 mandates (a NULL pulSignatureLen) in
+/// BOTH engines — so both agreed, and the cross-engine differential harness
+/// could not see it. Only reading the spec found it.
+static constexpr CK_FLAGS HMAC_MECH_FLAGS =
+	CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+	CKF_MULTI_MESSAGE;
+
+/// CKM_PKCS5_PBKD2 policy floor on CK_PKCS5_PBKD2_PARAMS2.iterations (E15 /
+/// decision D7): NIST SP 800-132 §5.2's recommended minimum, the same floor
+/// the Rust engine enforces. Below it C_DeriveKey returns
+/// CKR_MECHANISM_PARAM_INVALID (decision D6).
+static constexpr CK_ULONG PBKDF2_MIN_ITERATIONS     = 1000UL;
 
 /// Valid AES key lengths in bytes.
 static constexpr CK_ULONG AES_KEY_BYTES_128         = 16UL;  ///< AES-128
@@ -64,6 +110,13 @@ static constexpr CK_ULONG AES_KEY_BYTES_256         = 32UL;  ///< AES-256
 /// Reset MutexFactory callbacks to the OS-native implementations.
 /// Defined in SoftHSM.cpp; called by constructor, destructor, and C_Initialize.
 void resetMutexFactoryCallbacks();
+
+/// True when `p[0..n)` is exactly ONE complete DER value (tag, short- or
+/// long-form length, contents) with nothing after it. CKA_EC_PARAMS must be
+/// one DER-encoded Parameters CHOICE; a valid OID followed by stray bytes used
+/// to be accepted because OpenSSL decodes the prefix (plan 3.B′, 2026-09-27).
+/// Defined in SoftHSM_objects.cpp; used by objects and keygen files.
+bool isSingleDerValue(const unsigned char* p, size_t n);
 
 /// Check that a secret-key byte length is valid for the given CKK_* type.
 /// Defined in SoftHSM_objects.cpp; used by objects and keygen files.

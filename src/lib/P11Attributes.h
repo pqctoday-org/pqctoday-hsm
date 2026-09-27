@@ -678,6 +678,49 @@ protected:
 };
 
 /*****************************************
+ * CKA_HASH_OF_CERTIFICATE
+ *****************************************/
+
+// C2 (2026-09-07) — PKCS#11 v3.2 §4.7 Table 25. The cryptographic hash of the
+// certificate a trust object speaks about, computed with the mechanism named
+// by CKA_NAME_HASH_ALGORITHM. Default empty, per the table.
+class P11AttrHashOfCertificate : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrHashOfCertificate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_HASH_OF_CERTIFICATE; checks = ck8; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+};
+
+/*****************************************
+ * CKA_TRUST_* (the seven CK_TRUST usages)
+ *****************************************/
+
+// C2 (2026-09-07) — §4.7 Table 25 defines seven CKA_TRUST_XXX attributes that
+// differ only in which usage they describe, so they share one class rather
+// than being copy-pasted seven times. CK_TRUST is a closed set of five values
+// and updateAttr rejects anything outside it.
+//
+// Footnote 3: "Missing CKA_TRUST_XXX attributes are treated as
+// CKT_TRUST_UNKNOWN", which is also the default value here.
+class P11AttrTrustValue : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrTrustValue(OSObject* inobject, CK_ATTRIBUTE_TYPE attrType) : P11Attribute(inobject) { type = attrType; size = sizeof(CK_ULONG); checks = ck8; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+
+	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
  * CKA_DERIVE
  *****************************************/
 
@@ -1267,6 +1310,56 @@ class P11AttrWrapTemplate : public P11Attribute
 public:
 	// Constructor
 	P11AttrWrapTemplate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_WRAP_TEMPLATE; checks = 0; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+
+	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
+ * CKA_ENCAPSULATE_TEMPLATE
+ *
+ * The KEM counterpart of CKA_WRAP_TEMPLATE, on the ENCAPSULATING key.
+ * PKCS#11 v3.2 defines the constant (pkcs11t.h) and then never mentions it
+ * again — no table row, and zero occurrences in the specification text. The
+ * v3.3 working draft supplies both: Table 27 Common Public Key Attributes,
+ * and SHALL-level enforcement in C_EncapsulateKey. Adopted under the standing
+ * v3.2-baseline / v3.3-fills-gaps rule (see CLAUDE.md).
+ *
+ * Placed on the COMMON public key object, not only on KEM key types, because
+ * that is where the table puts it.
+ *****************************************/
+
+class P11AttrEncapsulateTemplate : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrEncapsulateTemplate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_ENCAPSULATE_TEMPLATE; checks = 0; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+
+	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
+ * CKA_DECAPSULATE_TEMPLATE
+ *
+ * The KEM counterpart of CKA_UNWRAP_TEMPLATE, on the DECAPSULATING key.
+ * v3.3 Table 29 Common Private Key Attributes; same provenance as
+ * CKA_ENCAPSULATE_TEMPLATE above.
+ *****************************************/
+
+class P11AttrDecapsulateTemplate : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrDecapsulateTemplate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_DECAPSULATE_TEMPLATE; checks = 0; }
 
 protected:
 	// Set the default value of the attribute

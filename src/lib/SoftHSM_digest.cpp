@@ -72,19 +72,23 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			algo = HashAlgo::MD5;
 			break;
 #endif
-		case CKM_RIPEMD160:
 #ifdef WITH_RIPEMD160
+		case CKM_RIPEMD160:
 			// Native builds load the OpenSSL legacy provider in
 			// OSSLCryptoFactory, so RIPEMD-160 is a genuine digest here (G-DA-X).
 			algo = HashAlgo::RIPEMD160;
 			break;
-#else
-			// WASM / no-legacy build: the legacy provider is absent, so there is
-			// no RIPEMD-160 backend. The previous code fell through into
-			// CKM_SHA_1, silently computing a 20-byte SHA-1 digest labelled
-			// RIPEMD-160 (G1). Reject rather than substitute another hash.
-			return CKR_MECHANISM_INVALID;
 #endif
+		// WASM / no-legacy build: the legacy provider is absent, so there is no
+		// RIPEMD-160 backend and CKM_RIPEMD160 is neither advertised
+		// (prepareSupportedMechanisms) nor dispatched — it falls to `default`
+		// (CKR_MECHANISM_INVALID) like any unsupported mechanism. The case label
+		// used to sit outside the #ifdef with its own CKR_MECHANISM_INVALID body,
+		// which static dispatch analysis (Hub G-7, finding E19) read as
+		// "dispatched but not advertised"; advertisement and dispatch are now
+		// guarded by the same WITH_RIPEMD160, exactly as the HMAC variants are
+		// in SoftHSM_sign.cpp. (The case must never fall through into CKM_SHA_1:
+		// that computed a SHA-1 digest labelled RIPEMD-160, G1.)
 		case CKM_SHA_1:
 			algo = HashAlgo::SHA1;
 			break;
@@ -147,7 +151,7 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			if (haveTr == haveKey)
 			{
 				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN requires exactly one of hKey or pTR");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			ByteString tr;
@@ -156,7 +160,7 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				if (muParams->ulTRLen != 64)
 				{
 					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: pTR must be exactly 64 bytes");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 				}
 				tr = ByteString(muParams->pTR, 64);
 			}
@@ -197,12 +201,12 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			if (muParams->ulctxLen > 255)
 			{
 				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: context string too long (max 255)");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (muParams->ulctxLen > 0 && muParams->pctx == NULL_PTR)
 			{
 				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: context pointer is NULL with non-zero length");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			OSSLMuGenDigest* muHash = new OSSLMuGenDigest();

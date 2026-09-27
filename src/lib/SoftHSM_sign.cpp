@@ -40,6 +40,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -314,6 +315,53 @@ static CK_RV applyGmacParams(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
 	return CKR_OK;
 }
 
+/**
+ * @brief Apply CKM_KMAC_128/256's CK_PQCTODAY_KMAC_PARAMS (E16, 2026-09-25).
+ *
+ * Absent parameter (NULL/0) keeps the mechanism defaults — empty
+ * customization, L = 32 bytes (KMAC-128) / 64 bytes (KMAC-256) — exactly
+ * what this engine always did. A present parameter must be the whole
+ * struct; ulOutputLen is L in bytes (0 = default). Before this, the
+ * parameter was ignored outright, so C_Verify of a MAC of any other length
+ * returned CKR_SIGNATURE_LEN_RANGE (the length check compares against
+ * getOutputMacSize()) and any customization string was silently dropped.
+ *
+ * Bounds: L <= 1024 bytes is the Rust engine's own cap (rust/src/ffi.rs
+ * parse_sign_mech_params, CKR_MECHANISM_PARAM_INVALID). S is capped at 512
+ * bytes, OpenSSL's KMAC_MAX_CUSTOM (providers/implementations/macs/
+ * kmac_prov.c) — the most this backend can compute; Rust allows 1024.
+ */
+static CK_RV applyKmacParams(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
+{
+	if (pMechanism->pParameter == NULL_PTR && pMechanism->ulParameterLen == 0)
+		return CKR_OK;
+
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_KMAC_PARAMS))
+	{
+		ERROR_MSG("CKM_KMAC_*: parameter must be a CK_PQCTODAY_KMAC_PARAMS (%lu bytes, got %lu)",
+			  (unsigned long)sizeof(CK_PQCTODAY_KMAC_PARAMS),
+			  (unsigned long)pMechanism->ulParameterLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	CK_PQCTODAY_KMAC_PARAMS_PTR kp = (CK_PQCTODAY_KMAC_PARAMS_PTR)pMechanism->pParameter;
+
+	if (kp->ulOutputLen > 1024 || kp->ulCustomizationLen > 512 ||
+	    (kp->ulCustomizationLen > 0 && kp->pCustomization == NULL_PTR))
+	{
+		ERROR_MSG("CKM_KMAC_*: invalid output length or customization string");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	ByteString custom;
+	if (kp->ulCustomizationLen > 0)
+		custom = ByteString(kp->pCustomization, kp->ulCustomizationLen);
+	if (!mac->setKmacParams((size_t)kp->ulOutputLen, custom))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	return CKR_OK;
+}
+
 } // anonymous namespace
 
 // MacAlgorithm version of C_SignInit
@@ -360,6 +408,15 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 	if (pMechanism->mechanism == CKM_AES_GMAC)
 	{
 		mechRv = applyGmacParams(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
+	if (pMechanism->mechanism == CKM_KMAC_128 || pMechanism->mechanism == CKM_KMAC_256)
+	{
+		mechRv = applyKmacParams(pMechanism, mac);
 		if (mechRv != CKR_OK)
 		{
 			CryptoFactory::i()->recycleMacAlgorithm(mac);
@@ -496,7 +553,7 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 		{
 			ERROR_MSG("Invalid ML-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen, (unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -517,13 +574,13 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 				break;
 			default:
 				ERROR_MSG("Invalid hedge variant %lu", ctx->hedgeVariant);
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 		}
 
 		if (ctx->ulContextLen > 255)
 		{
 			ERROR_MSG("ML-DSA context string too long (%lu, max 255)", ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
@@ -531,7 +588,7 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 			if (ctx->pContext == NULL_PTR)
 			{
 				ERROR_MSG("ML-DSA context pointer is NULL with non-zero length");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
@@ -545,7 +602,7 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 			ERROR_MSG("Invalid HashML-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen,
 				(unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_HASH_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -566,18 +623,18 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 				break;
 			default:
 				ERROR_MSG("Invalid hedge variant %lu", ctx->hedgeVariant);
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 		}
 
 		if (ctx->ulContextLen > 255)
 		{
 			ERROR_MSG("ML-DSA context string too long (%lu)", ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
 		{
-			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
+			if (ctx->pContext == NULL_PTR) return CKR_MECHANISM_PARAM_INVALID;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
 		// Remediation R37 (phase 8): this branch (CK_HASH_SIGN_ADDITIONAL_
@@ -627,7 +684,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			ERROR_MSG("Invalid SLH-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen,
 				(unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -639,7 +696,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 		{
 			ERROR_MSG("SLH-DSA context string too long (%lu, max 255)",
 				ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
@@ -647,7 +704,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			if (ctx->pContext == NULL_PTR)
 			{
 				ERROR_MSG("SLH-DSA context pointer is NULL with non-zero length");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
@@ -661,7 +718,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			ERROR_MSG("Invalid HashSLH-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen,
 				(unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_HASH_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -672,12 +729,12 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 		if (ctx->ulContextLen > 255)
 		{
 			ERROR_MSG("SLH-DSA context string too long (%lu)", ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
 		{
-			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
+			if (ctx->pContext == NULL_PTR) return CKR_MECHANISM_PARAM_INVALID;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
 		// Remediation R37 (phase 8): see parseMLDSASignContext's identical
@@ -798,7 +855,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_PSS_PARAMS))
 			{
 				ERROR_MSG("Invalid RSA-PSS parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_PKCS_PSS;
 			unsigned long allowedMgf;
@@ -831,12 +888,12 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 					break;
 				default:
 					ERROR_MSG("Invalid RSA-PSS hash");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			if (CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != allowedMgf) {
 				ERROR_MSG("Hash and MGF don't match");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			pssParam.sLen = CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->sLen;
@@ -858,7 +915,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA1)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA1_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA1;
@@ -881,7 +938,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA224;
@@ -904,7 +961,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA256;
@@ -927,7 +984,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA384;
@@ -950,7 +1007,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA512;
@@ -973,7 +1030,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_224;
@@ -996,7 +1053,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_256;
@@ -1019,7 +1076,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_384;
@@ -1042,7 +1099,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_512;
@@ -1109,6 +1166,23 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			bAllowMultiPartOp = true;
 			isECDSA = true;
 			break;
+		case CKM_PQCTODAY_ECDSA_EXPLICIT_K:
+			// Vendor, deliberate key-recovery primitive (SECURITY.md).
+			// pParameter IS k; it is required, and its length and range
+			// (1 <= k < n) depend on the key, so they are checked by
+			// checkSignParameters once the key is loaded, below. Single-part
+			// only, like CKM_ECDSA's digest input.
+			if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen == 0)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ECDSA_EXPLICIT_K requires k as its parameter");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			mechanism = AsymMech::ECDSA_EXPLICIT_K;
+			bAllowMultiPartOp = false;
+			isECDSA = true;
+			param = pMechanism->pParameter;
+			paramLen = pMechanism->ulParameterLen;
+			break;
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
@@ -1155,7 +1229,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_ML_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
 			// Remediation R37 (phase 8): genuinely single-part -- the
@@ -1183,7 +1257,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				case CKM_SHA3_512: mldsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_ML_DSA", hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &mldsaSignParam;
 			paramLen = sizeof(mldsaSignParam);
@@ -1265,7 +1339,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_SLH_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
 			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
@@ -1289,7 +1363,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_SLH_DSA",
 					          hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &slhdsaSignParam;
 			paramLen = sizeof(slhdsaSignParam);
@@ -1447,6 +1521,18 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		return CKR_MECHANISM_INVALID;
 	}
 
+	// Key-dependent parameter checks (CKM_PQCTODAY_ECDSA_EXPLICIT_K's k).
+	const SignParamCheck::Type chk =
+		asymCrypto->checkSignParameters(privateKey, mechanism, param, paramLen);
+	if (chk != SignParamCheck::OK)
+	{
+		asymCrypto->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(asymCrypto);
+		if (chk == SignParamCheck::KEY_SIZE_RANGE) return CKR_KEY_SIZE_RANGE;
+		if (chk == SignParamCheck::KEY_TYPE_INCONSISTENT) return CKR_KEY_TYPE_INCONSISTENT;
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
 	// Initialize signing
 	if (bAllowMultiPartOp && !asymCrypto->signInit(privateKey,mechanism,param,paramLen))
 	{
@@ -1530,9 +1616,14 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 	// Resolved before dispatch: a failed init can leave the session op state
 	// torn down, and the key identity is most wanted on exactly those records.
 	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
 	const std::string keyFields = logging
 		? opLogKeyFields(hSession, hKey, pMechanism->mechanism)
 		: std::string();
+	const uint8_t alg = ring ? behaviourAlg(hSession, hKey, pMechanism->mechanism) : 0;
+	// Timed only when a sink will see the figure: a logging-off, ring-off run
+	// pays no clock read.
+	const uint64_t t0 = (logging || ring) ? BehaviourRing::nowMicros() : 0;
 
 	CK_RV rv;
 	if (isMacMechanism(pMechanism))
@@ -1543,16 +1634,21 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 	else
 		rv = AsymSignInit(hSession, pMechanism, hKey);
 
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
 	// `sess` is the join key: C_Sign / C_SignFinal cannot cheaply recover the
 	// CK_MECHANISM_TYPE (the session stores the internal AsymMech::Type), so a
 	// consumer pairs the init record with the operation records by session.
 	if (logging)
-		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s rv=%s rv_id=0x%08lx",
+		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism->mechanism),
 		            (unsigned long)pMechanism->mechanism,
 		            keyFields.c_str(),
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGNINIT, alg, rv, 0, dur));
 
 	return rv;
 }
@@ -1934,6 +2030,10 @@ CK_RV SoftHSM::C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ul
 
 	AsymMech::Type mechanism = session->getMechanism();
 
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv;
 	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
 		rv = StatefulSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
@@ -1945,18 +2045,27 @@ CK_RV SoftHSM::C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ul
 		rv = AsymSign(session, pData, ulDataLen,
 			      pSignature, pulSignatureLen);
 
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
 	// probe=1 marks the mandatory PKCS#11 length-query call (pSignature NULL).
 	// Callers make it before every real signature, so a consumer counting
 	// signatures must ignore probe records rather than halve its count.
 	// The guard clauses above are deliberately not recorded: they reject the
 	// call before it reaches the token, so nothing cryptographic happened.
-	if (OpLog::enabled())
-		OpLog::emit("C_Sign", "sess=%lu in=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx",
+	if (logging)
+		OpLog::emit("C_Sign", "sess=%lu in=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            (unsigned long)ulDataLen,
 		            (unsigned long)*pulSignatureLen,
 		            (pSignature == NULL_PTR) ? 1 : 0,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
+	// alg stays 0 here (the session holds the mechanism); a consumer joins on
+	// the C_SignInit record. Probe calls are recorded too -- a probe storm is
+	// one of the shapes the monitor exists to see.
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGN, BehaviourIds::ALG_NONE,
+		                                       rv, (uint64_t)ulDataLen, dur));
 
 	return rv;
 }
@@ -2162,21 +2271,30 @@ CK_RV SoftHSM::C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, C
 	if ((session->getOpType() != SESSION_OP_SIGN && !dualSignSurvivor) || !session->getAllowMultiPartOp())
 		return CKR_OPERATION_NOT_INITIALIZED;
 
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv;
 	if (session->getMacOp() != NULL)
 		rv = MacSignFinal(session, pSignature, pulSignatureLen);
 	else
 		rv = AsymSignFinal(session, pSignature, pulSignatureLen);
 
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
 	// The multi-part counterpart of the C_Sign record. C_SignUpdate is
 	// deliberately not recorded -- it produces no signature, and instrumenting
 	// it would emit one line per chunk of a large input for no added evidence.
-	if (OpLog::enabled())
-		OpLog::emit("C_SignFinal", "sess=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx",
+	if (logging)
+		OpLog::emit("C_SignFinal", "sess=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            (unsigned long)*pulSignatureLen,
 		            (pSignature == NULL_PTR) ? 1 : 0,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGNFINAL, BehaviourIds::ALG_NONE, rv, 0, dur));
 
 	return rv;
 }
@@ -2362,6 +2480,15 @@ CK_RV SoftHSM::MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 			return mechRv;
 		}
 	}
+	if (pMechanism->mechanism == CKM_KMAC_128 || pMechanism->mechanism == CKM_KMAC_256)
+	{
+		mechRv = applyKmacParams(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
 
 	SymmetricKey* pubkey = new SymmetricKey();
 
@@ -2508,7 +2635,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_PSS_PARAMS))
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_PKCS_PSS;
 
@@ -2540,11 +2667,11 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 					expectedMgf = CKG_MGF1_SHA512;
 					break;
 				default:
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			if (CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != expectedMgf) {
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			pssParam.sLen = CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->sLen;
@@ -2566,7 +2693,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA1)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA1_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA1;
@@ -2589,7 +2716,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA224;
@@ -2612,7 +2739,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA256;
@@ -2635,7 +2762,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA384;
@@ -2658,7 +2785,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA512;
@@ -2681,7 +2808,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_224;
@@ -2704,7 +2831,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_256;
@@ -2727,7 +2854,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_384;
@@ -2750,7 +2877,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_512;
@@ -2863,7 +2990,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_ML_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
 			// Remediation R37 (phase 8): genuinely single-part -- see the
@@ -2886,7 +3013,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				case CKM_SHA3_512: mldsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_ML_DSA", hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &mldsaSignParam;
 			paramLen = sizeof(mldsaSignParam);
@@ -2968,7 +3095,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_SLH_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
 			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
@@ -2992,7 +3119,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_SLH_DSA",
 					          hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &slhdsaSignParam;
 			paramLen = sizeof(slhdsaSignParam);
@@ -3213,30 +3340,20 @@ CK_RV SoftHSM::StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR p
 
 // Stateful hash-based signature verification (HSS/LMS/XMSS/XMSSMT)
 // PKCS#11 v3.2 §6.14: verification is stateless — only needs public key + message + signature
-CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
+CK_RV SoftHSM::StatefulVerifyCore(CK_OBJECT_HANDLE hKey, CK_SLOT_ID slotId, AsymMech::Type mechanism,
+                                   CK_BYTE_PTR pData, CK_ULONG ulDataLen,
+                                   CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
 {
-	if (!session->getAllowSinglePartOp()) {
-		session->resetOp();
-		return CKR_OPERATION_NOT_INITIALIZED;
-	}
+	OSObject* osObj = (OSObject*)handleManager->getObject(hKey, slotId);
+	if (!osObj) return CKR_KEY_HANDLE_INVALID;
 
-	CK_OBJECT_HANDLE hKey = session->getVerifyKeyHandle();
-	OSObject* osObj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
-	if (!osObj) {
-		session->resetOp();
-		return CKR_KEY_HANDLE_INVALID;
-	}
-
-	AsymMech::Type mechanism = session->getMechanism();
 	ByteString pubKeyBytes = osObj->getByteStringValue(CKA_VALUE);
 
 	// GAP 4.6: pre-check the signature length so a malformed length reports
 	// CKR_SIGNATURE_LEN_RANGE (matching MacVerify / AsymVerify), not the
 	// catch-all CKR_SIGNATURE_INVALID. An empty signature is always malformed.
-	if (pSignature == NULL_PTR || ulSignatureLen == 0) {
-		session->resetOp();
+	if (pSignature == NULL_PTR || ulSignatureLen == 0)
 		return CKR_SIGNATURE_LEN_RANGE;
-	}
 	if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
 		// XMSS/XMSSMT signatures are fixed-length for the param set encoded in
 		// the public key OID; any other length is out of range.
@@ -3249,10 +3366,8 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 			int prv = (mechanism == (AsymMech::Type)1001)
 			          ? xmss_parse_oid(&params, oid)
 			          : xmssmt_parse_oid(&params, oid);
-			if (prv == 0 && ulSignatureLen != (CK_ULONG)params.sig_bytes) {
-				session->resetOp();
+			if (prv == 0 && ulSignatureLen != (CK_ULONG)params.sig_bytes)
 				return CKR_SIGNATURE_LEN_RANGE;
-			}
 		}
 	}
 
@@ -3290,12 +3405,23 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 		                           pubKeyBytes.const_byte_str());
 		verified = (ret == 0);
 	} else {
-		session->resetOp();
 		return CKR_MECHANISM_INVALID;
 	}
 
-	session->resetOp();
 	return verified ? CKR_OK : CKR_SIGNATURE_INVALID;
+}
+
+CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
+{
+	if (!session->getAllowSinglePartOp()) {
+		session->resetOp();
+		return CKR_OPERATION_NOT_INITIALIZED;
+	}
+
+	CK_RV rv = StatefulVerifyCore(session->getVerifyKeyHandle(), session->getSlot()->getSlotID(),
+	                               session->getMechanism(), pData, ulDataLen, pSignature, ulSignatureLen);
+	session->resetOp();
+	return rv;
 }
 
 // Initialise a verification operation using the specified key and mechanism
@@ -3711,7 +3837,32 @@ static CK_RV applyPerMessageParam(Session* session,
 	return CKR_OK;
 }
 
-// C_MessageSignInit — initialise a multi-message sign context (PKCS#11 v3.0 §5.8.1)
+// Rebuild the per-message crypto context. See the declaration in SoftHSM.h
+// for the ordering contract.
+//
+// The MAC branch mirrors C_SignInit's own dispatch (isMacMechanism → MacSignInit,
+// otherwise AsymSignInit): a message-based operation over CKM_*_HMAC has to be
+// re-armed through the MAC init, not the asymmetric one, or the re-init answers
+// CKR_MECHANISM_INVALID. Stateful HSS/XMSS is deliberately NOT routed here —
+// C_SignInit sends it to StatefulSignInit, but those are one-signature-per-key
+// schemes, so sending several messages under one operation is not a thing to
+// enable by accident.
+CK_RV SoftHSM::rearmMessageOp(CK_SESSION_HANDLE hSession, Session* session, bool sign)
+{
+	size_t initParamLen = 0;
+	void* initParam = session->getMessageOpParam(initParamLen);
+	CK_MECHANISM remech;
+	remech.mechanism = session->getMessageOpMechType();
+	remech.pParameter = initParam;
+	remech.ulParameterLen = (CK_ULONG)initParamLen;
+	CK_OBJECT_HANDLE hKey = session->getMessageOpKeyHandle();
+	if (isMacMechanism(&remech))
+		return sign ? MacSignInit(hSession, &remech, hKey)
+		            : MacVerifyInit(hSession, &remech, hKey);
+	return sign ? AsymSignInit(hSession, &remech, hKey)
+	            : AsymVerifyInit(hSession, &remech, hKey);
+}
+
 CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
@@ -3724,8 +3875,19 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_SIGN);
 
-	// Reuse existing asymmetric-sign init; it validates the key, mechanism, and session
-	CK_RV rv = AsymSignInit(hSession, pMechanism, hKey);
+	// CKM_PQCTODAY_ECDSA_EXPLICIT_K carries no CKF_MESSAGE_SIGN: a message
+	// operation would sign every message under the one k fixed at init.
+	if (pMechanism->mechanism == CKM_PQCTODAY_ECDSA_EXPLICIT_K) return CKR_MECHANISM_INVALID;
+
+	// Reuse the existing sign inits; they validate the key, mechanism, and
+	// session. The dispatch mirrors C_SignInit's: a MAC mechanism must go to
+	// MacSignInit. Until 2026-09-25 this called AsymSignInit unconditionally,
+	// so CKM_*_HMAC answered CKR_MECHANISM_INVALID here while the Rust engine
+	// accepted it — measured, not inferred (tests/differential
+	// sign.message_based_hmac).
+	CK_RV rv = isMacMechanism(pMechanism)
+		? MacSignInit(hSession, pMechanism, hKey)
+		: AsymSignInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
 	// Upgrade op type so C_Sign cannot be called against this context
@@ -3733,6 +3895,18 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	session->setOpType(SESSION_OP_MESSAGE_SIGN);
+	// Remember what to re-arm with: AsymSign recycles the signing context after
+	// every message, so each per-message entry point rebuilds it from these.
+	// §5.14.1 keeps the operation alive until C_MessageSignFinal, not until the
+	// first message. Cleared there (and by the cancel path).
+	// Copy the CALLER's mechanism parameter, not the session's internal `param`
+	// — see Session::setMessageOp for why those are not interchangeable.
+	if (!session->setMessageOp(pMechanism->mechanism, hKey,
+	                           pMechanism->pParameter, (size_t)pMechanism->ulParameterLen))
+	{
+		session->resetOp();
+		return CKR_HOST_MEMORY;
+	}
 	return CKR_OK;
 }
 
@@ -3774,12 +3948,63 @@ CK_RV SoftHSM::C_SignMessage(CK_SESSION_HANDLE hSession,
 	// AsymSign calls resetOp() before returning (both size-query and real sign),
 	// so we must unconditionally restore MESSAGE_SIGN on success to keep the
 	// multi-message contract (caller may send further messages under this session).
+	// MacSign behaves identically in both respects, which is why one re-arm
+	// mechanism covers both (see rearmMessageOp).
 	session->setOpType(SESSION_OP_SIGN);
-	CK_RV rv = AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
-	if (rv == CKR_OK)
+	CK_RV rv = (session->getMacOp() != NULL)
+		? MacSign(session, pData, ulDataLen, pSignature, pulSignatureLen)
+		: AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
+	// PKCS#11 v3.2 §5.14.2: a C_SignMessage call "begins and terminates a
+	// message signing operation unless it returns CKR_BUFFER_TOO_SMALL", and
+	// "C_SignMessage does not finish the message-based signing process" — only
+	// C_MessageSignFinal (§5.14.5) does. AsymSign leaves its context intact on
+	// CKR_BUFFER_TOO_SMALL, so restoring the message-sign state there is all a
+	// caller's retry needs. Before this, the state was left at SESSION_OP_SIGN
+	// and the retry got CKR_OPERATION_NOT_INITIALIZED (G-8 finding E8,
+	// 2026-09-25) — the same handling C_SignMessageNext already had.
+	if (rv == CKR_OK || rv == CKR_BUFFER_TOO_SMALL)
 	{
+		// Re-arm for the NEXT message, BEFORE relabelling the op type.
+		// Ordering is load-bearing: AsymSignInit -> acquireSession refuses with
+		// CKR_OPERATION_ACTIVE unless getOpType() is SESSION_OP_NONE
+		// (SoftHSM.cpp:155-158), and AsymSign's resetOp() has just left it
+		// there. Setting SESSION_OP_MESSAGE_SIGN first makes the re-arm fail.
+		//
+		// Only after a real signature: AsymSign returns CKR_OK from the size
+		// query (pSignature == NULL_PTR) and CKR_BUFFER_TOO_SMALL *before* it
+		// calls resetOp(), so in both of those cases the context is still live
+		// and re-initialising would double-init the algorithm and leak the live
+		// context. Relabelling alone is right for those two.
+		//
+		// Why re-init rather than simply not resetting: AsymSign's multi-part
+		// branch drives signUpdate()/signFinal(), which finishes the
+		// AsymmetricAlgorithm's operation, and AsymmetricAlgorithm::signInit
+		// refuses re-entry while one is live. A fresh signInit is genuinely
+		// required for those mechanisms, not merely a surviving pointer.
+		// AsymSignInit re-acquires the session by handle, which is safe while
+		// holding sessionGuard: HandleManager::getSessionShared releases
+		// handlesMutex before returning, so the guard is a refcount, not a lock.
+		bool rearmed = false;
+		if (rv == CKR_OK && pSignature != NULL_PTR)
+		{
+			CK_RV rearm = rearmMessageOp(hSession, session, true);
+			if (rearm != CKR_OK)
+			{
+				// The signature just produced IS valid and is already in the
+				// caller's buffer, so this call still succeeds — but the
+				// operation cannot accept another message. Tear it down rather
+				// than leave a context that looks live and is not.
+				session->clearMessageOp();
+				session->resetOp();
+				if (snap) free(snap);
+				return rv;
+			}
+			rearmed = true;
+		}
 		session->setOpType(SESSION_OP_MESSAGE_SIGN);
-		if (snap) session->setParameters(snap, snapLen);
+		// A successful re-arm already installed the params, from the stored
+		// init parameter via the mechanism above.
+		if (!rearmed && snap) session->setParameters(snap, snapLen);
 	}
 	if (snap) free(snap);
 	return rv;
@@ -3794,6 +4019,9 @@ CK_RV SoftHSM::C_MessageSignFinal(CK_SESSION_HANDLE hSession)
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	if (session->getOpType() != SESSION_OP_MESSAGE_SIGN)
 		return CKR_OPERATION_NOT_INITIALIZED;
+	// §5.14.5: THIS is what ends the message-based operation, so the re-arm
+	// state dies here — not after the first message.
+	session->clearMessageOp();
 	session->resetOp();
 	return CKR_OK;
 }
@@ -3811,13 +4039,24 @@ CK_RV SoftHSM::C_MessageVerifyInit(CK_SESSION_HANDLE hSession,
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_VERIFY);
 
-	CK_RV rv = AsymVerifyInit(hSession, pMechanism, hKey);
+	// MAC dispatch — see C_MessageSignInit for why this is not AsymVerifyInit
+	// unconditionally.
+	CK_RV rv = isMacMechanism(pMechanism)
+		? MacVerifyInit(hSession, pMechanism, hKey)
+		: AsymVerifyInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	session->setOpType(SESSION_OP_MESSAGE_VERIFY);
+	// Same re-arm bookkeeping as the sign half — see C_MessageSignInit.
+	if (!session->setMessageOp(pMechanism->mechanism, hKey,
+	                           pMechanism->pParameter, (size_t)pMechanism->ulParameterLen))
+	{
+		session->resetOp();
+		return CKR_HOST_MEMORY;
+	}
 	return CKR_OK;
 }
 
@@ -3855,13 +4094,31 @@ CK_RV SoftHSM::C_VerifyMessage(CK_SESSION_HANDLE hSession,
 
 	// AsymVerify expects SESSION_OP_VERIFY; temporarily satisfy that check.
 	// AsymVerify calls resetOp() before returning, so restore MESSAGE_VERIFY on
-	// success to maintain the multi-message contract.
+	// success to maintain the multi-message contract. MacVerify matches.
 	session->setOpType(SESSION_OP_VERIFY);
-	CK_RV rv = AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
+	CK_RV rv = (session->getMacOp() != NULL)
+		? MacVerify(session, pData, ulDataLen, pSignature, ulSignatureLen)
+		: AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
 	{
+		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
+		// SESSION_OP_NONE, the only state an init accepts (acquireSession
+		// answers CKR_OPERATION_ACTIVE otherwise). Verify has no size-query or
+		// CKR_BUFFER_TOO_SMALL path, so plain CKR_OK is the only case where the
+		// context was destroyed.
+		CK_RV rearm = rearmMessageOp(hSession, session, false);
+		if (rearm != CKR_OK)
+		{
+			// The verification result stands; the operation simply cannot take
+			// another message.
+			session->clearMessageOp();
+			session->resetOp();
+			if (snap) free(snap);
+			return rv;
+		}
 		session->setOpType(SESSION_OP_MESSAGE_VERIFY);
-		if (snap) session->setParameters(snap, snapLen);
+		// A successful re-arm reinstalled the params from the stored init
+		// parameter already.
 	}
 	if (snap) free(snap);
 	return rv;
@@ -3876,6 +4133,8 @@ CK_RV SoftHSM::C_MessageVerifyFinal(CK_SESSION_HANDLE hSession)
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	if (session->getOpType() != SESSION_OP_MESSAGE_VERIFY)
 		return CKR_OPERATION_NOT_INITIALIZED;
+	// §5.15.5 — this is what ends the operation, so the re-arm state dies here.
+	session->clearMessageOp();
 	session->resetOp();
 	return CKR_OK;
 }
@@ -3923,7 +4182,7 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
-	if (pData == NULL_PTR || pulSignatureLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	if (pData == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -3935,6 +4194,43 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	CK_RV rv = applyPerMessageParam(session, pParameter, ulParameterLen);
 	if (rv != CKR_OK) return rv;
 
+	// pulSignatureLen == NULL_PTR marks a NON-FINAL part: accumulate it and
+	// return, staying in MESSAGE_SIGN_BEGIN so further parts may follow.
+	//
+	// §5.14.3: "After calling C_SignMessageBegin, the application should call
+	// C_SignMessageNext one or more times to sign the message in multiple
+	// parts. The message signature operation is active until the application
+	// uses a call to C_SignMessageNext with a non-NULL pulSignatureLen to
+	// actually obtain the signature." Until 2026-09-25 this function answered
+	// CKR_ARGUMENTS_BAD for a NULL pulSignatureLen, so streaming sign did not
+	// exist here; the Rust engine refused it too, from a shared C-ABI shim, so
+	// the two engines AGREED and the differential harness could not see it.
+	// Only the spec could.
+	//
+	// Note the asymmetry with a size query, which also passes no signature
+	// buffer: a size query has pSignature == NULL but pulSignatureLen != NULL.
+	// The two are distinguished by which pointer is null, so the size-query
+	// path below is unaffected.
+	//
+	// msgBuffer is the same accumulator C_VerifyMessageNext and
+	// C_VerifySignatureUpdate use — safe to share because opType is a single
+	// value, so no two of those operations are ever live in one session, and
+	// resetOp() clears it unconditionally.
+	if (pulSignatureLen == NULL_PTR)
+	{
+		session->appendToMsgBuffer(pData, ulDataLen);
+		return CKR_OK;
+	}
+
+	// Final part: sign over everything accumulated followed by this part. With
+	// no preceding parts this is byte-for-byte the previous behaviour.
+	ByteString wholeMsg(session->getMsgBuffer());
+	const bool streamed = wholeMsg.size() > 0;
+	if (streamed) wholeMsg += ByteString(pData, ulDataLen);
+	CK_BYTE_PTR sData    = streamed
+		? const_cast<CK_BYTE_PTR>(wholeMsg.const_byte_str()) : pData;
+	CK_ULONG    sDataLen = streamed ? (CK_ULONG)wholeMsg.size() : ulDataLen;
+
 	// AsymSign requires SESSION_OP_SIGN; satisfy temporarily then restore.
 	// Size-query path (pSignature==NULL): AsymSign does not call resetOp, so session
 	// crypto objects survive — stay in BEGIN to allow a subsequent real-sign call.
@@ -3945,11 +4241,26 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	// correctly-sized buffer.  All other errors: AsymSign called resetOp, leaving
 	// SESSION_OP_NONE — the multi-message context is terminated per spec.
 	session->setOpType(SESSION_OP_SIGN);
-	rv = AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
+	rv = (session->getMacOp() != NULL)
+		? MacSign(session, sData, sDataLen, pSignature, pulSignatureLen)
+		: AsymSign(session, sData, sDataLen, pSignature, pulSignatureLen);
 	if (rv == CKR_OK)
 	{
 		if (pSignature != NULL_PTR)
+		{
+			// Real sign: AsymSign reset the context, so rebuild it before
+			// relabelling (an init requires SESSION_OP_NONE). Without this the
+			// next C_SignMessageBegin/Next pair would find a NULL context —
+			// Begin only checks the op type, it does not re-init.
+			CK_RV rearm = rearmMessageOp(hSession, session, true);
+			if (rearm != CKR_OK)
+			{
+				session->clearMessageOp();
+				session->resetOp();
+				return rv;
+			}
 			session->setOpType(SESSION_OP_MESSAGE_SIGN);        // message complete
+		}
 		else
 			session->setOpType(SESSION_OP_MESSAGE_SIGN_BEGIN);  // size query, stay
 	}
@@ -3988,7 +4299,7 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
-	if (pData == NULL_PTR || pSignature == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	if (pData == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -3999,11 +4310,66 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	CK_RV rv = applyPerMessageParam(session, pParameter, ulParameterLen);
 	if (rv != CKR_OK) return rv;
 
+	// pSignature == NULL_PTR marks a NON-FINAL part: accumulate it and return,
+	// leaving the operation in MESSAGE_VERIFY_BEGIN so further parts may follow.
+	//
+	// Until 2026-09-25 this whole function answered CKR_ARGUMENTS_BAD for a NULL
+	// pSignature, which made streaming verification impossible AND produced a
+	// wrong answer rather than a refusal: with the non-final part rejected, the
+	// final call verified only the LAST part, so a signature over the whole
+	// message came back CKR_SIGNATURE_INVALID. A false negative on a valid
+	// signature is worse than an unimplemented feature, which is why this was
+	// fixed ahead of the (still missing) streaming SIGN path.
+	//
+	// §5.14.3 states the rule for the sign side — "The message signature
+	// operation is active until the application uses a call to
+	// C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the
+	// signature" — and §5.16.3/§5.16.4 are the verify analogue. Here the
+	// discriminator is pSignature itself, because C_VerifyMessageNext takes
+	// ulSignatureLen BY VALUE and so has no length pointer to nullify.
+	//
+	// msgBuffer is the same accumulator C_VerifySignatureUpdate uses. Safe to
+	// share: that path runs under SESSION_OP_VERIFY_SIGNATURE and this one under
+	// SESSION_OP_MESSAGE_VERIFY_BEGIN, so the two are never live at once, and
+	// resetOp() clears it unconditionally either way.
+	if (pSignature == NULL_PTR)
+	{
+		session->appendToMsgBuffer(pData, ulDataLen);
+		return CKR_OK;
+	}
+
+	// Final part. Verify over everything accumulated so far followed by this
+	// part; with no preceding parts this is byte-for-byte the old behaviour.
+	ByteString whole(session->getMsgBuffer());
+	const bool streamed = whole.size() > 0;
+	if (streamed) whole += ByteString(pData, ulDataLen);
+	CK_BYTE_PTR vData   = streamed
+		? const_cast<CK_BYTE_PTR>(whole.const_byte_str()) : pData;
+	CK_ULONG    vDataLen = streamed ? (CK_ULONG)whole.size() : ulDataLen;
+
 	// AsymVerify requires SESSION_OP_VERIFY; satisfy temporarily then restore.
 	session->setOpType(SESSION_OP_VERIFY);
-	rv = AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
+	rv = (session->getMacOp() != NULL)
+		? MacVerify(session, vData, vDataLen, pSignature, ulSignatureLen)
+		: AsymVerify(session, vData, vDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
+	{
+		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
+		// SESSION_OP_NONE, the only state an init accepts (acquireSession
+		// answers CKR_OPERATION_ACTIVE otherwise). Verify has no size-query or
+		// CKR_BUFFER_TOO_SMALL path, so plain CKR_OK is the only case where the
+		// context was destroyed.
+		CK_RV rearm = rearmMessageOp(hSession, session, false);
+		if (rearm != CKR_OK)
+		{
+			// The verification result stands; the operation simply cannot take
+			// another message.
+			session->clearMessageOp();
+			session->resetOp();
+			return rv;
+		}
 		session->setOpType(SESSION_OP_MESSAGE_VERIFY);
+	}
 	return rv;
 }
 
@@ -4047,7 +4413,23 @@ CK_RV SoftHSM::C_VerifySignatureInit(CK_SESSION_HANDLE hSession,
 	// start any multi-part verifier (for mechanisms where bAllowMultiPartOp is
 	// true).  It also stores algo-specific params (ML-DSA / SLH-DSA context)
 	// in session->param.
-	CK_RV rv = AsymVerifyInit(hSession, pMechanism, hKey);
+	//
+	// Phase-5 §1 — HSS/XMSS/XMSSMT route through StatefulVerifyInit instead:
+	// AsymVerifyInit's mechanism switch has no case for them and falls to
+	// CKR_MECHANISM_INVALID. v3.2's own footnote for these mechanisms permits
+	// multi-part verification precisely when C_VerifySignatureInit is used
+	// (v3.3 keeps the same clause), so refusing them here was the gap, not a
+	// deliberate restriction — StatefulVerifyInit's OWN allowMultiPartOp=false
+	// is for plain C_VerifyInit and is overwritten below regardless of which
+	// init function ran. It sets the mechanism flag and verify key handle
+	// that C_VerifySignature/C_VerifySignatureFinal need (see their own
+	// stateful branch), and stores no algo params, so the blob built below is
+	// exactly [header || signature] for these three mechanisms.
+	CK_RV rv = (pMechanism->mechanism == CKM_HSS ||
+	            pMechanism->mechanism == CKM_XMSS ||
+	            pMechanism->mechanism == CKM_XMSSMT)
+	           ? StatefulVerifyInit(hSession, pMechanism, hKey)
+	           : AsymVerifyInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
 	// Re-acquire the session to read the algo params left by AsymVerifyInit and
@@ -4133,8 +4515,23 @@ CK_RV SoftHSM::C_VerifySignature(CK_SESSION_HANDLE hSession,
 		reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(blobPtr) + sizeof(PreBoundVerifySig) + hdr->sigLen) :
 		NULL;
 
+	AsymMech::Type mechanism = session->getMechanism();
+
+	// Phase-5 §1 — HSS/XMSS/XMSSMT never use the AsymmetricAlgorithm base
+	// (StatefulVerifyInit sets neither AsymmetricCryptoOp nor PublicKey), so
+	// the generic path below would misreport CKR_OPERATION_NOT_INITIALIZED
+	// for an operation that is genuinely initialised. Route to the same core
+	// StatefulVerify (plain C_Verify) uses, over the pre-bound sig + pData.
+	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 ||
+	    mechanism == (AsymMech::Type)1002)
+	{
+		CK_RV srv = StatefulVerifyCore(session->getVerifyKeyHandle(), session->getSlot()->getSlotID(),
+		                                mechanism, pData, ulDataLen, sigBytes, hdr->sigLen);
+		session->resetOp();
+		return srv;
+	}
+
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
-	AsymMech::Type mechanism        = session->getMechanism();
 	PublicKey* publicKey            = session->getPublicKey();
 	if (asymCrypto == NULL || publicKey == NULL)
 	{
@@ -4208,8 +4605,23 @@ CK_RV SoftHSM::C_VerifySignatureFinal(CK_SESSION_HANDLE hSession)
 		reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(blobPtr) + sizeof(PreBoundVerifySig) + hdr->sigLen) :
 		NULL;
 
+	AsymMech::Type mechanism = session->getMechanism();
+
+	// Phase-5 §1 — same reasoning as C_VerifySignature: HSS/XMSS/XMSSMT never
+	// populate AsymmetricCryptoOp/PublicKey, so route to the stateful core
+	// over the message C_VerifySignatureUpdate accumulated.
+	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 ||
+	    mechanism == (AsymMech::Type)1002)
+	{
+		ByteString msg(session->getMsgBuffer());
+		CK_RV srv = StatefulVerifyCore(session->getVerifyKeyHandle(), session->getSlot()->getSlotID(),
+		                                mechanism, const_cast<CK_BYTE_PTR>(msg.const_byte_str()),
+		                                (CK_ULONG)msg.size(), sigBytes, hdr->sigLen);
+		session->resetOp();
+		return srv;
+	}
+
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
-	AsymMech::Type mechanism        = session->getMechanism();
 	PublicKey* publicKey            = session->getPublicKey();
 	if (asymCrypto == NULL || publicKey == NULL)
 	{

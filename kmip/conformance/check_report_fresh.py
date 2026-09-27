@@ -106,7 +106,25 @@ def main() -> int:
             print(f"  - {p}", file=sys.stderr)
         return 1
     print("REPORT STALENESS GUARD OK: committed REPLAY_REPORT.{md,json} match a fresh run")
+    restore_unchanged([(MD, md_rel), (JSON, json_rel)])
     return 0
+
+
+def restore_unchanged(pairs: list[tuple[Path, Path]]) -> None:
+    """Put the committed bytes back when a fresh run matched them.
+
+    Only called after the guard PASSED, i.e. the fresh report differs from
+    HEAD's in the timestamp alone. Leaving the fresh copy in place dirtied
+    the tree on every gate run with a one-line timestamp diff -- noise that
+    hides a real diff and invites `git add -A`. A report whose content
+    changed never gets here (the guard fails first) and stays in the tree
+    to be committed. (2026-09-24)
+    """
+    for path, rel in pairs:
+        committed = head_blob(rel)
+        if committed is not None and path.read_text() != committed:
+            path.write_text(committed)
+            print(f"  restored {rel} (fresh run identical apart from its timestamp)")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@
  *****************************************************************************/
 
 #include "config.h"
+#include <cstdint>
 #include "LeakingPtr.h"
 #include "log.h"
 #include "cryptoki.h"
@@ -60,6 +61,8 @@ class SLHDSAPublicKey;
 class SLHDSAPrivateKey;
 class MLKEMPublicKey;
 class MLKEMPrivateKey;
+class ClassicMcEliecePublicKey;
+class ClassicMcEliecePrivateKey;
 
 class SoftHSM
 {
@@ -282,7 +285,28 @@ private:
 	CK_RV MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 	CK_RV StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 	CK_RV StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
+	// Shared verification core for HSS/XMSS/XMSSMT (AsymMech::Type 1000/1001/1002).
+	// Session-free by design: StatefulVerify (plain C_Verify) and the pre-bound
+	// C_VerifySignature/C_VerifySignatureFinal path (phase-5 §1) source hKey and
+	// the message differently and manage session state on their own timelines,
+	// but both end up needing exactly this. Neither resets any session state.
+	CK_RV StatefulVerifyCore(CK_OBJECT_HANDLE hKey, CK_SLOT_ID slotId, AsymMech::Type mechanism,
+	                          CK_BYTE_PTR pData, CK_ULONG ulDataLen,
+	                          CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
 	CK_RV AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
+
+	// Rebuild the crypto context of a live message-based operation so it can
+	// take another message (PKCS#11 v3.2 §5.14.1 / §5.16.1). AsymSign and
+	// AsymVerify call Session::resetOp() after each successful message, which
+	// recycles the algorithm and the key; only C_Message*Final ends the
+	// operation itself. Replays the mechanism and key recorded by
+	// Session::setMessageOp at init. `sign` picks the sign or verify half.
+	//
+	// MUST be called while getOpType() is SESSION_OP_NONE — i.e. straight after
+	// AsymSign/AsymVerify reset it, BEFORE relabelling the session as a message
+	// op — because acquireSession() refuses any init with CKR_OPERATION_ACTIVE
+	// while an operation is set.
+	CK_RV rearmMessageOp(CK_SESSION_HANDLE hSession, Session* session, bool sign);
 
 	// Key generation
 	CK_RV generateAES
@@ -329,7 +353,10 @@ private:
 		CK_BBOOL isPublicKeyOnToken,
 		CK_BBOOL isPublicKeyPrivate,
 		CK_BBOOL isPrivateKeyOnToken,
-		CK_BBOOL isPrivateKeyPrivate
+		CK_BBOOL isPrivateKeyPrivate,
+		// CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS selects FIPS 186-5 A.2.2 for the
+		// private scalar; it is otherwise identical to CKM_EC_KEY_PAIR_GEN
+		bool useExtraBits = false
 	);
 	CK_RV generateED
 	(
@@ -464,6 +491,23 @@ private:
 	);
 	CK_RV getMLKEMPrivateKey(MLKEMPrivateKey* privateKey, Token* token, OSObject* key);
 	CK_RV getMLKEMPublicKey(MLKEMPublicKey* publicKey, Token* token, OSObject* key);
+	CK_RV getClassicMcEliecePrivateKey(ClassicMcEliecePrivateKey* privateKey, Token* token, OSObject* key);
+	CK_RV getClassicMcEliecePublicKey(ClassicMcEliecePublicKey* publicKey, Token* token, OSObject* key);
+	// Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 parameter sets, liboqs-backed (D-2).
+	CK_RV generateClassicMcEliece
+	(
+		CK_SESSION_HANDLE hSession,
+		CK_ATTRIBUTE_PTR pPublicKeyTemplate,
+		CK_ULONG ulPublicKeyAttributeCount,
+		CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
+		CK_ULONG ulPrivateKeyAttributeCount,
+		CK_OBJECT_HANDLE_PTR phPublicKey,
+		CK_OBJECT_HANDLE_PTR phPrivateKey,
+		CK_BBOOL isPublicKeyOnToken,
+		CK_BBOOL isPublicKeyPrivate,
+		CK_BBOOL isPrivateKeyOnToken,
+		CK_BBOOL isPrivateKeyPrivate
+	);
 	// ECDH-as-KEM (2026-07-25) — CKM_ECDH1_DERIVE under C_EncapsulateKey/
 	// C_DecapsulateKey (PKCS#11 v3.2 Table 78), CKK_EC or CKK_EC_MONTGOMERY.
 	// The real body of C_GenerateKeyPair; the public entry point wraps it to
@@ -495,6 +539,20 @@ private:
 	CK_RV decapsulateECDH(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPrivateKey,
 		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
 		CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey);
+
+	// CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE under C_EncapsulateKey/
+	// C_DecapsulateKey, dispatched from encapsulateKeyImpl/decapsulateKeyImpl
+	// exactly like the CKM_ECDH1_DERIVE branch above (own mechanism, own key
+	// type, so kept as separate self-contained bodies rather than threading a
+	// third case through the ML-KEM-shaped generic code).
+	CK_RV encapsulateClassicMcEliece(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey,
+		unsigned long* opLogSecretLen);
+	CK_RV decapsulateClassicMcEliece(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPrivateKey,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey,
+		unsigned long* opLogSecretLen);
 	CK_RV getECDHPublicKey(ECPublicKey* publicKey, ECPrivateKey* privateKey, ByteString& pubData);
 	CK_RV getEDDHPublicKey(EDPublicKey* publicKey, EDPrivateKey* privateKey, ByteString& pubData);
 	CK_RV getSymmetricKey(SymmetricKey* skey, Token* token, OSObject* key);
@@ -628,6 +686,12 @@ private:
 	// assert non-extractability today with nothing behind the assertion; logging
 	// these at generation is what turns it into evidence.
 	std::string opLogKeyCustodyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
+
+	// The behaviour ring's `alg` byte for (mechanism, key): the key's
+	// CKA_PARAMETER_SET resolved through BehaviourIds::algFromCkm, or the
+	// family-level id when the key has none. Only ever called behind
+	// BehaviourRing::enabled(); one object lookup, no decryption.
+	uint8_t behaviourAlg(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, CK_MECHANISM_TYPE mech);
 
 	// Symmetric multi-part cipher primitives, shared between the single-op
 	// C_EncryptUpdate / C_DecryptUpdate paths and the §5.13 dual-function

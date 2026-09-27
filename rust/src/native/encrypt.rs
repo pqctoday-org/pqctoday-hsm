@@ -24,8 +24,8 @@ use super::CkRv;
 use crate::constants::*;
 use crate::state::{
     check_mechanism_allowed_from, get_ec_point_sec1_from, get_object_attr_u32_from,
-    get_object_param_set_from, get_object_value, get_object_value_from, read_bool_attr,
-    resolve_session_access, with_object_checked, SessionAccess, OBJECTS,
+    get_object_param_set_from, get_object_value_from, read_bool_attr,
+    resolve_session_access, with_object_checked, SessionAccess,
 };
 
 // PKCS#11 v3.2 §5.18 — KEM permission flags. CKA_ENCAPSULATE / CKA_DECAPSULATE.
@@ -59,8 +59,61 @@ pub fn encapsulate(
     public_key_handle: u32,
     mechanism: u32,
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    use ml_kem::{kem::Encapsulate, EncodedSizeUser, KemCore};
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(public_key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
+    let result = encapsulate_impl(session, public_key_handle, mechanism);
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Same record shape as ffi::C_EncapsulateKey (see rust/src/ffi.rs's
+        // "Operation-evidence wrappers" block) — this native path is what
+        // KMIP and PKCS#11 remoting actually call, never the ffi:: C-ABI.
+        let (rv, ct_len) = match &result {
+            Ok((ct, _ss)) => (CKR_OK, ct.len()),
+            Err(e) => (*e, 0),
+        };
+        if logging {
+            crate::oplog::emit(
+                "C_EncapsulateKey",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} ct={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    ct_len,
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            crate::behaviour::emit(crate::behaviour::p11_with_key(
+                crate::behaviour::OP_PKCS11_C_ENCAPSULATEKEY,
+                Some(mechanism),
+                public_key_handle,
+                rv,
+                0,
+                dur,
+            ));
+        }
+    }
+    result
+}
+
+fn encapsulate_impl(
+    session: u32,
+    public_key_handle: u32,
+    mechanism: u32,
+) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     let access = resolve_session_access(session)?;
 
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
@@ -103,35 +156,11 @@ pub fn encapsulate(
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-    let mut rng = rand::rngs::OsRng;
-
-    let (ct, ss) = match ps {
-        CKP_ML_KEM_512 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem512 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) =
-                Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_768 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) =
-                Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_1024 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem1024 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) =
-                Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        _ => return Err(CKR_ARGUMENTS_BAD),
-    };
+    // m from the OS RNG (one 32-byte draw, as ml-kem's encapsulate(rng)),
+    // then Encaps_internal on AWS-LC or ml-kem (crate::crypto::handlers).
+    let mut m = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut m);
+    let (ct, ss) = crate::crypto::handlers::ml_kem_encaps(ps, &pub_key_bytes, &m)?;
     Ok((ct, ss))
 }
 
@@ -157,8 +186,6 @@ pub fn encapsulate_deterministic(
     mechanism: u32,
     coins: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    use ml_kem::{EncapsulateDeterministic, EncodedSizeUser, KemCore};
-
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
@@ -184,39 +211,9 @@ pub fn encapsulate_deterministic(
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     // FIPS 203 §7.2 — m is exactly 32 bytes.
-    let m = ml_kem::B32::try_from(coins).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let m: [u8; 32] = coins.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
     let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-
-    let (ct, ss) = match ps {
-        CKP_ML_KEM_512 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem512 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = ek
-                .encapsulate_deterministic(&m)
-                .map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_768 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = ek
-                .encapsulate_deterministic(&m)
-                .map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_1024 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem1024 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = ek
-                .encapsulate_deterministic(&m)
-                .map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        _ => return Err(CKR_ARGUMENTS_BAD),
-    };
+    let (ct, ss) = crate::crypto::handlers::ml_kem_encaps(ps, &pub_key_bytes, &m)?;
     Ok((ct, ss))
 }
 
@@ -231,8 +228,62 @@ pub fn decapsulate(
     mechanism: u32,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
-    use ml_kem::{kem::Decapsulate, EncodedSizeUser, KemCore};
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(private_key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
+    let result = decapsulate_impl(session, private_key_handle, mechanism, ciphertext);
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Same record shape as ffi::C_DecapsulateKey — no probe field
+        // there either: decapsulation takes the ciphertext by value with
+        // no length-query form to distinguish (see rust/src/ffi.rs).
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        if logging {
+            crate::oplog::emit(
+                "C_DecapsulateKey",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    ciphertext.len(),
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            crate::behaviour::emit(crate::behaviour::p11_with_key(
+                crate::behaviour::OP_PKCS11_C_DECAPSULATEKEY,
+                Some(mechanism),
+                private_key_handle,
+                rv,
+                ciphertext.len() as u64,
+                dur,
+            ));
+        }
+    }
+    result
+}
+
+fn decapsulate_impl(
+    session: u32,
+    private_key_handle: u32,
+    mechanism: u32,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CkRv> {
     let access = resolve_session_access(session)?;
 
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
@@ -278,40 +329,17 @@ pub fn decapsulate(
         CKP_ML_KEM_1024 => 1568,
         _ => return Err(CKR_ARGUMENTS_BAD),
     };
+    // PKCS#11 v3.2 §5.18.9 return values name CKR_WRAPPED_KEY_LEN_RANGE
+    // (§5.1.6: input "invalid solely on the basis of its length"), not
+    // CKR_ARGUMENTS_BAD — same code as ffi::C_DecapsulateKey (E4).
     if ciphertext.len() != expected_ct_len {
-        return Err(CKR_ARGUMENTS_BAD);
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
     }
 
     let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-
-    let ss = match ps {
-        CKP_ML_KEM_512 => {
-            let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <ml_kem::MlKem512 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc =
-                ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
-        }
-        CKP_ML_KEM_768 => {
-            let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <ml_kem::MlKem768 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc =
-                ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
-        }
-        CKP_ML_KEM_1024 => {
-            let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <ml_kem::MlKem1024 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc =
-                ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
-        }
-        _ => return Err(CKR_ARGUMENTS_BAD),
-    };
-    Ok(ss.as_slice().to_vec())
+    // Decaps_internal on AWS-LC or ml-kem (crate::crypto::handlers), with
+    // the length checks and error codes this function always had.
+    crate::crypto::handlers::ml_kem_decaps(ps, &prv_key_bytes, ciphertext)
 }
 
 /// Classical-KEM encapsulation (2026-07-05, crypto-agility for `Encapsulate`).
@@ -391,7 +419,8 @@ fn classical_encapsulate(
                     let peer: [u8; 32] = point.as_slice().try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
                     let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
                     let eph_pub = x25519_dalek::PublicKey::from(&eph);
-                    let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+                    let ss = crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer)))
+                        .ok_or(CKR_ARGUMENTS_BAD)?;
                     Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
                 }
                 56 => {
@@ -472,18 +501,24 @@ fn classical_decapsulate(
             match scalar.len() {
                 32 => {
                     let arr: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    // §5.18.9 / §5.1.6 — wrong-length ciphertext (E4).
                     if ciphertext.len() != 32 {
-                        return Err(CKR_ARGUMENTS_BAD);
+                        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
                     }
-                    let eph_pub: [u8; 32] = ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let eph_pub: [u8; 32] = ciphertext.try_into().map_err(|_| CKR_WRAPPED_KEY_LEN_RANGE)?;
                     let secret = x25519_dalek::StaticSecret::from(arr);
-                    let ss = secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub));
+                    let ss = crate::crypto::handlers::x25519_contributory(secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub)))
+                        .ok_or(CKR_ARGUMENTS_BAD)?;
                     Ok(ss.as_bytes().to_vec())
                 }
                 56 => {
                     let mut arr = [0u8; 56];
                     arr.copy_from_slice(scalar.as_slice());
                     let secret = x448::StaticSecret::from(arr);
+                    // §5.18.9 / §5.1.6 — wrong-length ciphertext (E4).
+                    if ciphertext.len() != 56 {
+                        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+                    }
                     let eph_pub = x448::PublicKey::from_bytes(ciphertext).ok_or(CKR_ARGUMENTS_BAD)?;
                     let ss = secret.diffie_hellman(&eph_pub);
                     Ok(ss.as_bytes().to_vec())
@@ -559,6 +594,10 @@ fn frodokem_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphert
     let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let dk = frodo_kem::DecryptionKey::from_bytes(alg, &prv_key_bytes)
         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // §5.18.9 / §5.1.6 — wrong-length ciphertext is CKR_WRAPPED_KEY_LEN_RANGE (E4).
+    if ciphertext.len() != alg.params().ciphertext_length {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
     let ct = frodo_kem::Ciphertext::from_bytes(alg, ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
     // `B` is an unused generic on `DecryptionKey::decapsulate` (mirrors the
     // shape of `encapsulate`'s message-buffer type param, but decapsulate
@@ -568,16 +607,15 @@ fn frodokem_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphert
 }
 
 /// Classic McEliece encapsulation (BSI TR-02102-1 §2.4.2,
-/// `CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`). Scoped to `mceliece6688128`
-/// only (implementation plan Phase 0.5). Returns `(ciphertext,
+/// `CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`). Dispatches to the right of the
+/// `classic-mceliece-multi` fork's 10 namespaced modules by the key's stored
+/// `CKA_PARAMETER_SET` (implementation plan §4.2). Returns `(ciphertext,
 /// shared_secret)`.
 ///
 /// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8` — the same
 /// version this engine already uses elsewhere — so `rand::rngs::OsRng`
 /// works directly.
 fn classic_mceliece_encapsulate(access: &SessionAccess, public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    use classic_mceliece_rust::{encapsulate_boxed, PublicKey, CRYPTO_PUBLICKEYBYTES};
-
     let (can_encap, key_type, ps, pub_key_bytes) =
         with_object_checked(access, public_key_handle, |attrs| {
             (
@@ -593,27 +631,42 @@ fn classic_mceliece_encapsulate(access: &SessionAccess, public_key_handle: u32) 
     if key_type != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    if ps != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
+    let mceliece_ps = crate::native::keygen::classic_mceliece_parameter_set(ps)?;
     let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-    let mut pk_arr: [u8; CRYPTO_PUBLICKEYBYTES] = pub_key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    // v3+ API: `PublicKey::from` takes `&mut [u8; N]` now, not `&` (a
-    // breaking change from v2).
-    let pk = PublicKey::from(&mut pk_arr);
     let mut rng = rand::rngs::OsRng;
-    let (ct, ss) = encapsulate_boxed(&pk, &mut rng);
-    Ok((ct.as_array().to_vec(), ss.as_array().to_vec()))
+
+    macro_rules! encap_arm {
+        ($module:ident) => {{
+            let pk_arr: Box<[u8; classic_mceliece_multi::$module::CRYPTO_PUBLICKEYBYTES]> =
+                pub_key_bytes
+                    .into_boxed_slice()
+                    .try_into()
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pk = classic_mceliece_multi::$module::PublicKeyOwned::from(pk_arr);
+            let (ct, ss) = classic_mceliece_multi::$module::encapsulate_boxed(&pk, &mut rng);
+            (ct.as_array().to_vec(), ss.as_array().to_vec())
+        }};
+    }
+
+    use classic_mceliece_multi::ParameterSet::*;
+    let (ct_vec, ss_vec) = match mceliece_ps {
+        Mceliece348864 => encap_arm!(mceliece348864),
+        Mceliece348864f => encap_arm!(mceliece348864f),
+        Mceliece460896 => encap_arm!(mceliece460896),
+        Mceliece460896f => encap_arm!(mceliece460896f),
+        Mceliece6688128 => encap_arm!(mceliece6688128),
+        Mceliece6688128f => encap_arm!(mceliece6688128f),
+        Mceliece6960119 => encap_arm!(mceliece6960119),
+        Mceliece6960119f => encap_arm!(mceliece6960119f),
+        Mceliece8192128 => encap_arm!(mceliece8192128),
+        Mceliece8192128f => encap_arm!(mceliece8192128f),
+    };
+    Ok((ct_vec, ss_vec))
 }
 
 /// Classic McEliece decapsulation (`CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`).
 /// Returns the recovered shared secret.
 fn classic_mceliece_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use classic_mceliece_rust::{decapsulate_boxed, Ciphertext, SecretKey, CRYPTO_CIPHERTEXTBYTES, CRYPTO_SECRETKEYBYTES};
-
     let (can_decap, key_type, ps, prv_key_bytes) =
         with_object_checked(access, private_key_handle, |attrs| {
             (
@@ -629,22 +682,43 @@ fn classic_mceliece_decapsulate(access: &SessionAccess, private_key_handle: u32,
     if key_type != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    if ps != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
+    let mceliece_ps = crate::native::keygen::classic_mceliece_parameter_set(ps)?;
+    let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
+
+    macro_rules! decap_arm {
+        ($module:ident) => {{
+            // §5.18.9 / §5.1.6 — wrong-length ciphertext (E4).
+            if ciphertext.len() != classic_mceliece_multi::$module::CRYPTO_CIPHERTEXTBYTES {
+                return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+            }
+            let sk_arr: Box<[u8; classic_mceliece_multi::$module::CRYPTO_SECRETKEYBYTES]> =
+                prv_key_bytes
+                    .into_boxed_slice()
+                    .try_into()
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = classic_mceliece_multi::$module::SecretKeyOwned::from(sk_arr);
+            let ct_arr: [u8; classic_mceliece_multi::$module::CRYPTO_CIPHERTEXTBYTES] =
+                ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+            let ct = classic_mceliece_multi::$module::CiphertextOwned::from(ct_arr);
+            let ss = classic_mceliece_multi::$module::decapsulate_boxed(&ct, &sk);
+            ss.as_array().to_vec()
+        }};
     }
-    if ciphertext.len() != CRYPTO_CIPHERTEXTBYTES {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    let mut prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-    let sk_arr: &mut [u8; CRYPTO_SECRETKEYBYTES] = (&mut prv_key_bytes[..])
-        .try_into()
-        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    let sk = SecretKey::from(sk_arr);
-    let ct_arr: [u8; CRYPTO_CIPHERTEXTBYTES] =
-        ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let ct = Ciphertext::from(ct_arr);
-    let ss = decapsulate_boxed(&ct, &sk);
-    Ok(ss.as_array().to_vec())
+
+    use classic_mceliece_multi::ParameterSet::*;
+    let ss_vec = match mceliece_ps {
+        Mceliece348864 => decap_arm!(mceliece348864),
+        Mceliece348864f => decap_arm!(mceliece348864f),
+        Mceliece460896 => decap_arm!(mceliece460896),
+        Mceliece460896f => decap_arm!(mceliece460896f),
+        Mceliece6688128 => decap_arm!(mceliece6688128),
+        Mceliece6688128f => decap_arm!(mceliece6688128f),
+        Mceliece6960119 => decap_arm!(mceliece6960119),
+        Mceliece6960119f => decap_arm!(mceliece6960119f),
+        Mceliece8192128 => decap_arm!(mceliece8192128),
+        Mceliece8192128f => decap_arm!(mceliece8192128f),
+    };
+    Ok(ss_vec)
 }
 
 /// Classical encrypt. v0.1 supports `CKM_AES_GCM`.
@@ -1118,6 +1192,35 @@ fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Re
 /// `KeyFormatType=PKCS_1`, `HashingAlgorithm=SHA_384`,
 /// `MaskGeneratorHashingAlgorithm=SHA_256`, and a `PSource` label.
 fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+    // AWS-LC owns the unpad on native → constant time, no Marvin oracle on
+    // the path KMIP Decrypt (:5696) reaches. `None` means "not handled here"
+    // — wasm32, a PKCS#1 `RSAPrivateKey` DER (which AWS-LC's loader
+    // declines), or a hash/MGF pair with no matched AWS-LC algorithm — and
+    // falls through to the `rsa`-crate branch below unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let h = params.hash.unwrap_or(OaepHash::Sha256);
+        let m = params.mgf_hash.unwrap_or(h);
+        let ckm = |x: OaepHash| match x {
+            OaepHash::Sha256 => CKM_SHA256,
+            OaepHash::Sha384 => CKM_SHA384,
+            OaepHash::Sha512 => CKM_SHA512,
+        };
+        let ckg = |x: OaepHash| match x {
+            OaepHash::Sha256 => CKG_MGF1_SHA256,
+            OaepHash::Sha384 => CKG_MGF1_SHA384,
+            OaepHash::Sha512 => CKG_MGF1_SHA512,
+        };
+        if let Some(r) = crate::crypto::awslc::rsa_oaep_decrypt_ck(
+            priv_der,
+            ckm(h),
+            ckg(m),
+            params.label.unwrap_or(&[]),
+            ciphertext,
+        ) {
+            return r;
+        }
+    }
     let private_key = rsa_private_key_from_any_der(priv_der)?;
     let padding = oaep_for(params);
     private_key
@@ -1189,35 +1292,25 @@ fn aes_gcm_decrypt(
 /// `NISTKeyWrap`) wrap the TTLV-encoded KeyValue, which is 8-aligned
 /// by construction (TTLV §9.6 pads every frame to 8 bytes).
 pub fn aes_key_wrap(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if plaintext.len() % 8 != 0 || plaintext.len() < 16 {
         return Err(CKR_DATA_LEN_RANGE);
     }
-    let mut buf = vec![0u8; plaintext.len() + 8];
-    let ok = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    if ok { Ok(buf) } else { Err(CKR_FUNCTION_FAILED) }
+    crate::crypto::aeskw::kw_wrap(kek, plaintext).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_FUNCTION_FAILED,
+    })
 }
 
 /// AES Key Unwrap (RFC 3394 §2.2.2) — inverse of [`aes_key_wrap`].
 /// Integrity-check failure → `CKR_ENCRYPTED_DATA_INVALID`.
 pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if wrapped.len() % 8 != 0 || wrapped.len() < 24 {
         return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
     }
-    let mut buf = vec![0u8; wrapped.len() - 8];
-    let ok = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    if ok { Ok(buf) } else { Err(CKR_ENCRYPTED_DATA_INVALID) }
+    crate::crypto::aeskw::kw_unwrap(kek, wrapped).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_ENCRYPTED_DATA_INVALID,
+    })
 }
 
 /// AES Key Wrap with Padding (RFC 5649 / `CKM_AES_KEY_WRAP_KWP`) — the
@@ -1229,17 +1322,13 @@ pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
 /// it, hard-rejecting `BlockCipherMode::AESKeyWrapPadding` before ever
 /// reaching the engine.
 pub fn aes_key_wrap_kwp(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if plaintext.is_empty() {
         return Err(CKR_DATA_INVALID);
     }
-    let result = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    result.map_err(|_| CKR_FUNCTION_FAILED)
+    crate::crypto::aeskw::kwp_wrap(kek, plaintext).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_FUNCTION_FAILED,
+    })
 }
 
 /// AES Key Unwrap with Padding (RFC 5649) — inverse of
@@ -1247,17 +1336,13 @@ pub fn aes_key_wrap_kwp(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
 /// the 8-byte semiblock (RFC 5649 §5.18.4); integrity/padding-check
 /// failure → `CKR_WRAPPED_KEY_INVALID`, matching the FFI path exactly.
 pub fn aes_key_unwrap_kwp(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if wrapped.len() < 16 || wrapped.len() % 8 != 0 {
         return Err(CKR_WRAPPED_KEY_LEN_RANGE);
     }
-    let result = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    result.map_err(|_| CKR_WRAPPED_KEY_INVALID)
+    crate::crypto::aeskw::kwp_unwrap(kek, wrapped).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_WRAPPED_KEY_INVALID,
+    })
 }
 
 // ── AES-ECB ────────────────────────────────────────────────────────────────
@@ -1268,15 +1353,15 @@ pub fn aes_key_unwrap_kwp(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
 // with `CKR_DATA_LEN_RANGE` to match the spec.
 
 fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{BlockCipherEncrypt, KeyInit};
     if plaintext.is_empty() || plaintext.len() % 16 != 0 {
         return Err(CKR_DATA_LEN_RANGE);
     }
     let mut out = plaintext.to_vec();
-    fn enc<C: BlockEncrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
+    fn enc<C: BlockCipherEncrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
         let cipher = C::new_from_slice(k).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         for block in buf.chunks_exact_mut(16) {
-            cipher.encrypt_block(GenericArray::from_mut_slice(block));
+            cipher.encrypt_block(block.try_into().expect("chunks_exact_mut(16) yields 16-byte blocks"));
         }
         Ok(())
     }
@@ -1289,15 +1374,15 @@ fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
 }
 
 fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{BlockCipherDecrypt, KeyInit};
     if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
         return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
     }
     let mut out = ciphertext.to_vec();
-    fn dec<C: BlockDecrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
+    fn dec<C: BlockCipherDecrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
         let cipher = C::new_from_slice(k).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         for block in buf.chunks_exact_mut(16) {
-            cipher.decrypt_block(GenericArray::from_mut_slice(block));
+            cipher.decrypt_block(block.try_into().expect("chunks_exact_mut(16) yields 16-byte blocks"));
         }
         Ok(())
     }
@@ -1316,7 +1401,7 @@ fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
 // implemented here) for PKCS#7 padding.
 
 fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1329,14 +1414,14 @@ fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, C
             let cipher = cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         32 => {
             let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -1353,7 +1438,7 @@ fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, C
 // layer.
 
 fn aes_cbc_pad_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1366,14 +1451,14 @@ fn aes_cbc_pad_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
             let cipher = cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         32 => {
             let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -1382,7 +1467,7 @@ fn aes_cbc_pad_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
 }
 
 fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1395,7 +1480,7 @@ fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
             let cipher = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?
                 .len()
         }
@@ -1403,7 +1488,7 @@ fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
             let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?
                 .len()
         }
@@ -1470,7 +1555,8 @@ pub(crate) fn chacha20_encrypt_at(
         .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
     match nonce.len() {
         8 => {
-            let mut cipher = chacha20::ChaCha20Legacy::new(key.into(), nonce.into());
+            // Lengths are checked above (key 32, nonce 8), so this cannot fail.
+            let mut cipher = chacha20::ChaCha20Legacy::new_from_slices(key, nonce).map_err(|_| CKR_ARGUMENTS_BAD)?;
             if offset != 0 {
                 cipher.try_seek(offset).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
             }
@@ -1480,7 +1566,8 @@ pub(crate) fn chacha20_encrypt_at(
             // The IETF variant's counter is 32 bits, so the reachable
             // keystream ends at 2^32 blocks; `try_seek` reports the overflow
             // rather than wrapping into another block's keystream.
-            let mut cipher = chacha20::ChaCha20::new(key.into(), nonce.into());
+            // Lengths are checked above (key 32, nonce 12), so this cannot fail.
+            let mut cipher = chacha20::ChaCha20::new_from_slices(key, nonce).map_err(|_| CKR_ARGUMENTS_BAD)?;
             if offset != 0 {
                 cipher.try_seek(offset).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
             }
@@ -1498,13 +1585,13 @@ pub(crate) fn chacha20_poly1305_encrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
     if key.len() != 32 || nonce.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CKR_ARGUMENTS_BAD)?;
     cipher
-        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(&Nonce::try_from(nonce).map_err(|_| CKR_ARGUMENTS_BAD)?, Payload { msg: plaintext, aad })
         .map_err(|_| CKR_FUNCTION_FAILED)
 }
 
@@ -1515,18 +1602,18 @@ pub(crate) fn chacha20_poly1305_decrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
     if key.len() != 32 || nonce.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CKR_ARGUMENTS_BAD)?;
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(&Nonce::try_from(nonce).map_err(|_| CKR_ARGUMENTS_BAD)?, Payload { msg: ciphertext, aad })
         .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
 }
 
 fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1539,14 +1626,14 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
             let cipher = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
         }
         32 => {
             let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
         }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -1562,6 +1649,10 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the tests below. Kept here rather than in the module's
+    // top-level import list, where it was an unused-import warning in a
+    // non-test build — the warning was real, the symbols were not unused.
+    use crate::state::{get_object_value, OBJECTS};
     use crate::native::keygen::{
         generate_classic_mceliece_keypair, generate_frodokem_keypair, generate_ml_dsa_keypair,
         generate_ml_kem_keypair,
@@ -1850,12 +1941,10 @@ mod tests {
     /// `classic-mceliece-rust` v3.1.0, liboqs, and the spec text directly),
     /// ss = 32 bytes.
     ///
-    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-    /// takes minutes in an unoptimized debug build — too slow for every CI
-    /// run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_encap_decap` (release mode is fast).
+    /// Real keygen at native debug-build speed thanks to `rust/Cargo.toml`'s
+    /// `[profile.dev.package.classic-mceliece-multi] opt-level = 3`
+    /// (implementation plan §4.1 step 4) — no longer needs `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_encap_decap_round_trip() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -1962,14 +2051,12 @@ mod tests {
     /// Direction A for Classic McEliece (mceliece6688128): encaps with
     /// `oqs`, decaps with our PKCS#11 engine.
     ///
-    /// `#[ignore]`: 20 fresh mceliece6688128 keypairs in an unoptimized
-    /// debug build take tens of minutes, not seconds — too slow for every
-    /// CI run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_cross_validate` (release mode is fast).
-    /// `classic_mceliece_6688128_round_trip` already covers the basic
-    /// correctness path on every run.
+    /// Real keygen at native debug-build speed (see the doc comment on
+    /// `classic_mceliece_6688128_encap_decap_round_trip` above) — no longer
+    /// needs `#[ignore]`. `classic_mceliece_6688128_round_trip` already
+    /// covers the basic correctness path on every run; this is the
+    /// independent-implementation cross-check.
     #[test]
-    #[ignore]
     fn classic_mceliece_6688128_cross_validate_oqs_encap_our_decap() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -1977,17 +2064,17 @@ mod tests {
         let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::ClassicMcEliece6688128)
             .expect("liboqs Classic McEliece 6688128 unavailable");
 
-        // No independently-hosted static Classic McEliece KAT file exists
-        // (unlike FrodoKEM — PQClean and classic-mceliece-rust's own KAT
-        // harness both GENERATE vectors deterministically rather than
-        // shipping a static file, and using classic-mceliece-rust's own
-        // generator would be circular). Since liboqs IS a genuinely
-        // independent implementation (verified directly against the spec
-        // text earlier, and now proven interoperable), run N fresh
-        // liboqs-generated keypairs through our engine instead of just
-        // one — the same statistical breadth FrodoKEM's 100-per-variant
-        // static KAT file gives, via repeated independent trials rather
-        // than a fixed file.
+        // The official Round-4 KAT vectors are now sourced and checksummed
+        // (kmip/kat/classic-mceliece/, P0-3 of the all-parameter-sets
+        // implementation plan) and independently verify the
+        // classic-mceliece-multi fork against the reference implementation
+        // (see that crate's own tests/kat_verification.rs) — this test's
+        // job is different: cross-checking THIS ENGINE'S key-import and
+        // decapsulate wiring against liboqs, a second independent
+        // implementation, not re-proving the algorithm itself. Run N fresh
+        // liboqs-generated keypairs through our engine — the same
+        // statistical breadth FrodoKEM's 100-per-variant static KAT file
+        // gives, via repeated independent trials rather than a fixed file.
         const N: usize = 20;
         for i in 0..N {
             let (pk, sk) = kem.keypair().unwrap_or_else(|e| panic!("liboqs keygen #{i}: {e}"));
@@ -2022,10 +2109,9 @@ mod tests {
     /// Direction B for Classic McEliece: encaps with our PKCS#11 engine,
     /// decaps with `oqs`. Same N-trial breadth as Direction A.
     ///
-    /// `#[ignore]`: same reason as Direction A above — 20 fresh debug-build
-    /// mceliece6688128 keygens is too slow for every CI run.
+    /// Real keygen at native debug-build speed (see Direction A above) — no
+    /// longer needs `#[ignore]`.
     #[test]
-    #[ignore]
     fn classic_mceliece_6688128_cross_validate_our_encap_oqs_decap() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -2134,7 +2220,10 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// Decap with wrong-length ciphertext → CKR_ARGUMENTS_BAD.
+    /// Decap with wrong-length ciphertext → CKR_WRAPPED_KEY_LEN_RANGE
+    /// (PKCS#11 v3.2 §5.18.9 return values; §5.1.6 "invalid solely on the
+    /// basis of its length"). Was CKR_ARGUMENTS_BAD, which §5.18.9 lists for
+    /// argument errors, not for a ciphertext of the wrong size (E4).
     #[test]
     fn decap_with_wrong_ciphertext_length_returns_err() {
         let _guard = test_lock::acquire();
@@ -2143,7 +2232,7 @@ mod tests {
             generate_ml_kem_keypair(session, CKP_ML_KEM_768, b"\x01", "wrong-len").unwrap();
         // ML-KEM-768 expects ct.len() == 1088; pass 1024.
         let result = decapsulate(session, prv_h, CKM_ML_KEM, &vec![0u8; 1024]);
-        assert_eq!(result.unwrap_err(), CKR_ARGUMENTS_BAD);
+        assert_eq!(result.unwrap_err(), CKR_WRAPPED_KEY_LEN_RANGE);
         close_session(session).unwrap();
     }
 
@@ -2441,6 +2530,29 @@ mod tests {
             56,
             56,
         );
+    }
+
+    /// E4 — a Montgomery-KEM ciphertext (the ephemeral public u-coordinate)
+    /// of the wrong length → CKR_WRAPPED_KEY_LEN_RANGE (PKCS#11 v3.2 §5.18.9
+    /// return values; §5.1.6 "invalid solely on the basis of its length").
+    /// X25519 answered CKR_ARGUMENTS_BAD; X448 fell through to
+    /// `PublicKey::from_bytes`'s own CKR_ARGUMENTS_BAD.
+    #[test]
+    fn classical_montgomery_decap_wrong_length_is_wrapped_key_len_range() {
+        let _g = test_lock::acquire();
+        let session = fresh_session();
+        let (_p25, v25) =
+            crate::native::keygen::generate_x25519_keypair(session, b"\x01", "kem-x25519-len").unwrap();
+        let (_p448, v448) =
+            crate::native::keygen::generate_x448_keypair(session, b"\x01", "kem-x448-len").unwrap();
+        for (h, bad_len) in [(v25, 31usize), (v25, 33), (v448, 55), (v448, 57)] {
+            assert_eq!(
+                decapsulate(session, h, CKM_EC_MONTGOMERY_KEY_DERIVE, &vec![9u8; bad_len]).unwrap_err(),
+                CKR_WRAPPED_KEY_LEN_RANGE,
+                "ciphertext length {bad_len}"
+            );
+        }
+        close_session(session).unwrap();
     }
 
     /// A classical key without CKA_ENCAPSULATE/CKA_DECAPSULATE can't use

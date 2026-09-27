@@ -35,6 +35,7 @@
 #include <config.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 #include "DeriveTests.h"
 
 // CKA_TOKEN
@@ -281,34 +282,38 @@ void DeriveTests::ecdhDerive(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPubli
 	rv = CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hPublicKey, &valAttrib, 1) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
-	CK_ECDH1_DERIVE_PARAMS parms = { CKD_NULL, 0, NULL_PTR, 0, NULL_PTR };
-	// Use RAW or DER format
-	if (useRaw)
+	// CKA_EC_POINT is DER for CKK_EC keys (04 len 04||X||Y) but, since
+	// 2026-08-13, the bare RFC 7748 bytes for Montgomery/Edwards keys. Reduce it
+	// to the bare point by SIZE - the rule the engine's own getECDHPubData
+	// uses - never by sniffing a leading 0x04: a bare X25519 key begins with
+	// 0x04 about once in 256, and this helper used to strip two "header" bytes
+	// off such a key and hand the engine a wrong peer key, so the derive
+	// silently disagreed (testEddsaDerive's intermittent failure;
+	// testMontgomeryDeriveFixedKeys pins it). Then build whichever form the
+	// caller asked for, so the DER path really is DER for every key type.
+	unsigned char* buf = (unsigned char*)valAttrib.pValue;
+	CK_ULONG len = valAttrib.ulValueLen;
+	std::vector<unsigned char> bare;
+	if (len == 32 || len == 56 || len == 65 || len == 97 || len == 133)
 	{
-		size_t offset = 0;
-		unsigned char* buf = (unsigned char*)valAttrib.pValue;
-		if (valAttrib.ulValueLen > 2 && buf[0] == 0x04)
-		{
-			if (buf[1] < 0x80)
-			{
-				offset = 2;
-			}
-			else
-			{
-				if (valAttrib.ulValueLen > ((buf[1] & 0x7F) + (unsigned int)2))
-				{
-					offset = 2 + (buf[1] & 0x7F);
-				}
-			}
-		}
-		parms.pPublicData = buf + offset;
-		parms.ulPublicDataLen = valAttrib.ulValueLen - offset;
+		bare.assign(buf, buf + len);
 	}
 	else
 	{
-		parms.pPublicData = (unsigned char*)valAttrib.pValue;
-		parms.ulPublicDataLen = valAttrib.ulValueLen;
+		CPPUNIT_ASSERT_MESSAGE("CKA_EC_POINT is neither a bare point nor a DER OCTET STRING",
+		                       len > 2 && buf[0] == 0x04);
+		size_t offset = (buf[1] < 0x80) ? 2 : 2 + (buf[1] & 0x7F);
+		CPPUNIT_ASSERT(offset < len);
+		bare.assign(buf + offset, buf + len);
 	}
+	std::vector<unsigned char> der;
+	der.push_back(0x04);
+	if (bare.size() >= 0x80) der.push_back(0x81);
+	der.push_back((unsigned char)bare.size());
+	der.insert(der.end(), bare.begin(), bare.end());
+	std::vector<unsigned char>& peer = useRaw ? bare : der;
+
+	CK_ECDH1_DERIVE_PARAMS parms = { CKD_NULL, 0, NULL_PTR, (CK_ULONG)peer.size(), peer.data() };
 
 	CK_MECHANISM mechanism = { CKM_ECDH1_DERIVE, NULL, 0 };
 	mechanism.pParameter = &parms;
@@ -333,6 +338,92 @@ void DeriveTests::ecdhDerive(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPubli
 			 &hKey) );
 	free(valAttrib.pValue);
 	CPPUNIT_ASSERT(rv == CKR_OK);
+}
+#endif
+
+#ifdef WITH_EDDSA
+// X25519 with two FIXED keys and an independently computed answer.
+//
+// Key A's public key is 04 62 8d ..., i.e. it begins with the byte a DER
+// OCTET STRING begins with. Since 2026-08-13 this engine stores CKA_EC_POINT
+// for Montgomery/Edwards keys as the bare RFC 7748 bytes, so any reader that
+// guesses "DER" from a leading 0x04 misreads roughly 1 random key in 256 -
+// which is how testEddsaDerive failed intermittently (the helper stripped two
+// "header" bytes off a bare key; the derive then succeeded with the wrong
+// peer key). A is private key 761e0c...29f3 (found by search for exactly this
+// property); B is RFC 7748 §6.1's "Bob". The expected shared secret was
+// computed with Python's cryptography package (OpenSSL-backed X25519), and
+// B's public key there matches RFC 7748's published value.
+void DeriveTests::testMontgomeryDeriveFixedKeys()
+{
+	CK_SESSION_HANDLE hSession;
+	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
+	CK_RV rv = CRYPTOKI_F_PTR( C_Initialize(NULL_PTR) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+	rv = CRYPTOKI_F_PTR( C_OpenSession(m_initializedTokenSlotID, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL_PTR, NULL_PTR, &hSession) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+	rv = CRYPTOKI_F_PTR( C_Login(hSession, CKU_USER, m_userPin1, m_userPin1Length) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	CK_BYTE curve25519[] = { 0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39 };
+	CK_BYTE skA[] = { 0x76, 0x1e, 0x0c, 0xb7, 0xff, 0xc7, 0xbd, 0xf1, 0xa4, 0x0d, 0xd8, 0x66, 0x8f, 0xb2, 0xf2, 0xb4,
+	                  0xdd, 0x03, 0x55, 0xb3, 0xf8, 0x28, 0xb0, 0x47, 0xaf, 0xaa, 0xc6, 0x51, 0x69, 0x95, 0x29, 0xf3 };
+	CK_BYTE pkA[] = { 0x04, 0x62, 0x8d, 0x6c, 0xd4, 0x20, 0xb1, 0x26, 0x2b, 0x57, 0x8e, 0x85, 0xa2, 0x47, 0x2a, 0x17,
+	                  0xb9, 0x8b, 0xc8, 0x38, 0xc7, 0x52, 0x4d, 0xbc, 0x1d, 0x1a, 0xc9, 0x47, 0xce, 0x02, 0x26, 0x0c };
+	CK_BYTE skB[] = { 0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80, 0x0e, 0xe6,
+	                  0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88, 0xe0, 0xeb };
+	CK_BYTE pkB[] = { 0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4, 0x35, 0x37,
+	                  0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f };
+	const CK_BYTE shared[] = { 0xfa, 0xa8, 0xa3, 0x54, 0xea, 0x6b, 0xd3, 0x70, 0x6a, 0x58, 0x19, 0x65, 0xa1, 0x57, 0xaf, 0x0b,
+	                           0x59, 0x7c, 0x2b, 0x1a, 0xc5, 0x74, 0x08, 0x6f, 0xe0, 0xf9, 0xed, 0x8e, 0x66, 0x21, 0xe9, 0x24 };
+
+	CK_KEY_TYPE kt = CKK_EC_MONTGOMERY;
+	CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+	CK_BBOOL bFalse = CK_FALSE, bTrue = CK_TRUE;
+	CK_OBJECT_HANDLE hPub[2], hPriv[2];
+	CK_BYTE* sks[2] = { skA, skB };
+	CK_BYTE* pks[2] = { pkA, pkB };
+	for (int i = 0; i < 2; i++)
+	{
+		CK_ATTRIBUTE pub[] = {
+			{ CKA_CLASS, &pubClass, sizeof(pubClass) },
+			{ CKA_KEY_TYPE, &kt, sizeof(kt) },
+			{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+			{ CKA_EC_PARAMS, curve25519, sizeof(curve25519) },
+			{ CKA_EC_POINT, pks[i], 32 },
+		};
+		rv = CRYPTOKI_F_PTR( C_CreateObject(hSession, pub, sizeof(pub) / sizeof(CK_ATTRIBUTE), &hPub[i]) );
+		CPPUNIT_ASSERT(rv == CKR_OK);
+		CK_ATTRIBUTE priv[] = {
+			{ CKA_CLASS, &privClass, sizeof(privClass) },
+			{ CKA_KEY_TYPE, &kt, sizeof(kt) },
+			{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+			{ CKA_DERIVE, &bTrue, sizeof(bTrue) },
+			{ CKA_EC_PARAMS, curve25519, sizeof(curve25519) },
+			{ CKA_VALUE, sks[i], 32 },
+		};
+		rv = CRYPTOKI_F_PTR( C_CreateObject(hSession, priv, sizeof(priv) / sizeof(CK_ATTRIBUTE), &hPriv[i]) );
+		CPPUNIT_ASSERT(rv == CKR_OK);
+	}
+
+	// Both directions, and the peer key in both forms §6.3.17 names: the bare
+	// RFC 7748 bytes and the DER-wrapped ECPoint.
+	for (int useRaw = 0; useRaw < 2; useRaw++)
+	{
+		for (int i = 0; i < 2; i++)
+		{
+			CK_OBJECT_HANDLE hKey = CK_INVALID_HANDLE;
+			ecdhDerive(hSession, hPub[1 - i], hPriv[i], hKey, useRaw != 0);
+			CK_BYTE val[32];
+			CK_ATTRIBUTE a = { CKA_VALUE, val, sizeof(val) };
+			rv = CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hKey, &a, 1) );
+			CPPUNIT_ASSERT(rv == CKR_OK);
+			CPPUNIT_ASSERT_EQUAL((CK_ULONG)32, a.ulValueLen);
+			CPPUNIT_ASSERT_MESSAGE(std::string(useRaw ? "bare" : "DER") + " peer key, private key " +
+			                       (i == 0 ? "A" : "B") + ": shared secret differs from the reference",
+			                       memcmp(val, shared, 32) == 0);
+		}
+	}
 }
 #endif
 

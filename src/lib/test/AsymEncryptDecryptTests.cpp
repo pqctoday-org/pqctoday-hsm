@@ -116,7 +116,11 @@ void AsymEncryptDecryptTests::rsaEncryptDecrypt(CK_MECHANISM_TYPE mechanismType,
 	CPPUNIT_ASSERT(memcmp(plainText, &recoveredText[ulRecoveredTextLen-sizeof(plainText)], sizeof(plainText)) == 0);
 }
 
-// Check that RSA OAEP mechanism properly validates all input parameters
+// Check that RSA OAEP mechanism properly validates all input parameters.
+// Every case below is a malformed or unsupported CK_RSA_PKCS_OAEP_PARAMS, so
+// the answer is CKR_MECHANISM_PARAM_INVALID — PKCS#11 v3.2 §5.1.6 ("Invalid
+// parameters were supplied to the mechanism"); §5.8.1 C_EncryptInit does not
+// list CKR_ARGUMENTS_BAD, which these asserted until decision D6 (2026-09-25).
 void AsymEncryptDecryptTests::rsaOAEPParams(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey)
 {
 	// This is only supported combination of parameters
@@ -125,40 +129,40 @@ void AsymEncryptDecryptTests::rsaOAEPParams(CK_SESSION_HANDLE hSession, CK_OBJEC
 	CK_RV rv;
 
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	mechanism.pParameter = &oaepParams;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	mechanism.ulParameterLen = sizeof(oaepParams);
 
 	oaepParams.hashAlg = CKM_AES_CBC;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	oaepParams.hashAlg = CKM_SHA_1;
 	oaepParams.mgf = CKG_MGF1_SHA256;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	oaepParams.mgf = CKG_MGF1_SHA1;
 	oaepParams.source = CKZ_DATA_SPECIFIED - 1;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	oaepParams.source = CKZ_DATA_SPECIFIED;
 	oaepParams.pSourceData = &oaepParams;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	oaepParams.ulSourceDataLen = sizeof(oaepParams);
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 
 	oaepParams.pSourceData = NULL;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_MECHANISM_PARAM_INVALID);
 }
 
 void AsymEncryptDecryptTests::testRsaEncryptDecrypt()

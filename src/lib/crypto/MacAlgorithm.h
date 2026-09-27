@@ -117,6 +117,15 @@ public:
 	// use for an IV (the base class default — every non-GMAC MAC).
 	virtual bool setIV(const ByteString& iv);
 
+	// CKM_KMAC_128/256 (E16, 2026-09-25): NIST SP 800-185 KMAC takes the
+	// output length L and a customization string S as INPUTS to the
+	// computation (L is encoded into the final block), so it is not a
+	// truncation and cannot use setTruncatedMacSize(). @p outputLen is L in
+	// bytes (0 = the implementation's default). Same "call before
+	// signInit()/verifyInit()" contract; the base class returns false (every
+	// non-KMAC MAC).
+	virtual bool setKmacParams(size_t outputLen, const ByteString& customization);
+
 protected:
 	// The current key
 	const SymmetricKey* currentKey;

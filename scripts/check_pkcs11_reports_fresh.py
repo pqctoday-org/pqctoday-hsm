@@ -302,7 +302,33 @@ def main() -> int:
             print(f"  - {p}", file=sys.stderr)
         return 1
     print("PKCS#11 REPORT STALENESS GUARD OK")
+    rels: list[str] = []
+    if args.cpp:
+        rels += ["cpp_compliance_report.json", "cpp_compliance_report.md"]
+    if args.rust:
+        rels += ["rust/RUST_P11_V32_CONFORMANCE_REPORT.md"]
+    restore_unchanged(root, rels)
     return 0
+
+
+def restore_unchanged(root: Path, rels: list[str]) -> None:
+    """Put the committed bytes back when a fresh run matched them.
+
+    Only called after the guard PASSED, i.e. the fresh report differs from
+    HEAD's in the normalized fields alone (engine commit, timestamp, the
+    by-design non-deterministic test details). Leaving the fresh copy in
+    place dirtied the tree on every gate run with a one-line header diff --
+    noise that hides a real diff and invites `git add -A`. A report whose
+    content changed never gets here (the guard fails first) and stays in
+    the tree to be committed. Same rule as kmip/conformance/
+    check_report_fresh.py. (2026-09-24)
+    """
+    for rel in rels:
+        path = root / rel
+        committed = head_blob(root, Path(rel))
+        if committed is not None and path.exists() and path.read_text() != committed:
+            path.write_text(committed)
+            print(f"  restored {rel} (fresh run identical apart from its normalized fields)")
 
 
 if __name__ == "__main__":

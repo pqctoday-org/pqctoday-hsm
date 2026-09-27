@@ -612,6 +612,28 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_RSA_AES_KEY_WRAP_PARAMS` (v3.2 §6.4.7) — the AES key size in BITS
+    /// plus a POINTER to a nested `CK_RSA_PKCS_OAEP_PARAMS`. The nesting is
+    /// why this cannot reuse the OAEP layout directly: the OAEP struct lives
+    /// behind `P_OAEP_PARAMS`, not inline.
+    rsa_aes_key_wrap, "CK_RSA_AES_KEY_WRAP_PARAMS", {
+    UL_AES_KEY_BITS: F::Ulong,
+    P_OAEP_PARAMS: F::Ptr,
+});
+
+ck_struct!(
+    /// `CK_AES_CBC_ENCRYPT_DATA_PARAMS` (v3.2 §6.27) — a FIXED 16-byte IV
+    /// followed by the data pointer/length pair, unlike
+    /// `CK_KEY_DERIVATION_STRING_DATA` which is just the pair. The IV being
+    /// an inline array rather than a pointer is why this needs its own
+    /// layout instead of reusing that one.
+    aes_cbc_encrypt_data, "CK_AES_CBC_ENCRYPT_DATA_PARAMS", {
+    IV: F::Bytes(16),
+    P_DATA: F::Ptr,
+    UL_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_PRF_DATA_PARAM` (v3.2 §6.42) — one element of the SP 800-108
     /// data-parameter array.
     prf_data_param, "CK_PRF_DATA_PARAM", {
@@ -741,7 +763,7 @@ ck_struct!(
     /// an OASIS structure. `CKM_BIP32_CHILD_DERIVE` is
     /// `CKM_VENDOR_DEFINED | 0x105c`; neither the mechanism nor the struct
     /// appears in `docs/refs/pkcs11t-canonical-v3.2.h` or in the v3.2
-    /// Standard's text. `src/lib/pkcs11/pkcs11t.h:2139` is therefore the sole
+    /// Standard's text. `src/lib/pkcs11/pkcs11t.h:2148` is therefore the sole
     /// definition, and it is what a third party compiles against:
     ///
     /// ```c
@@ -754,7 +776,7 @@ ck_struct!(
     ///
     /// So `flags` is at one word and `index` at two — 24 bytes on LP64, 12 on
     /// wasm32. The C++ engine already reads it exactly this way and rejects
-    /// any other `ulParameterLen` (`SoftHSM_keygen.cpp:3010`). Until
+    /// any other `ulParameterLen` (`SoftHSM_keygen.cpp:3222`). Until
     /// 2026-08-14 the Rust engine read two **`u32`s at offsets 0 and 4**, so
     /// it took `pNext` as `flags` and, on LP64, the high half of `pNext` as
     /// `index` — a field-ORDER defect on top of a width one, on every target.

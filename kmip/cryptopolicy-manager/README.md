@@ -18,16 +18,45 @@ tooling can **read, author, validate, dry-run, and activate** crypto-agility
 policies on a *running* server — without editing files on the box or
 restarting it.
 
+All routes below are versioned under `/api/v1/` except the three
+infrastructure endpoints (`/healthz`, `/version`, `/openapi.yaml`), per the
+module doc-comment in [`manager.rs`](manager.rs) and the routing match in its
+`route()` function (the source of truth — verify against those, not this
+table, if the two ever disagree). Errors are RFC 7807 `application/problem+json`.
+
 | HTTP route | `PolicyStore` primitive | Effect |
 |---|---|---|
-| `GET /policies` | `list()` | enumerate policies |
-| `GET /policies/{name}` | `load()` + raw YAML | read one (for an editor) |
-| `GET /active` | `read_active()` | what's active now |
-| `GET /audit?limit=N` | `RingSink.snapshot()` | the three-plane audit trail (p1/p2/p3), newest last — the "inspect logs" source |
-| `POST /validate` | `validate_draft(yaml)` | parse + validate, no disk (live lint) |
-| `POST /dry-run` | `dry_run(yaml, {op,algorithm})` | evaluate a sample request, no side effects |
-| `PUT /policies/{name}` | `save(name, yaml)` | persist (atomic) |
-| `POST /policies/{name}/activate` | `activate_with_engine(name, engine)` | **swap the live enforcement policy** |
+| `GET /healthz` | — | `{"status":"ok"}` liveness check |
+| `GET /version` | — | `{version, git_sha}` |
+| `GET /openapi.yaml` | — | the OpenAPI 3.1 spec, embedded at compile time from [`openapi.yaml`](openapi.yaml) |
+| `GET /api/v1/policies` | `list()` | enumerate policy names on disk |
+| `POST /api/v1/policies` (body: YAML) | `validate_draft()` + `save()` | create a new policy file; name comes from the YAML's own `metadata.name` |
+| `GET /api/v1/policies/{name}` | `load()` + raw YAML | read one (for an editor) |
+| `PUT /api/v1/policies/{name}` (body: YAML) | `save(name, yaml)` | persist (atomic tempfile + rename) |
+| `GET /api/v1/active` | `read_active()` | the active **legacy** (unscoped) policy, or `null` |
+| `PUT /api/v1/active` (body: `{"name":"…"}`) | `activate_with_engine(name, engine)` | **swap the live legacy enforcement policy** — replaces the old `POST /policies/{name}/activate` route |
+| `GET /api/v1/active-modules` | `read_active_modules()` | the active **modular** set: `{uncovered_ops, modules}` (schema v3 — see [`../policies/README.md`](../policies/README.md#modular-policies-schema-v3--scopes-and-multi-file-composition)) |
+| `POST /api/v1/active-modules` (body: `{"name":"…"}`) | `activate_module_with_engine()` | push/upsert one scoped module onto the live set |
+| `DELETE /api/v1/active-modules` | `clear_modules_with_engine()` | drop the entire modular set (fail-closed OFF) |
+| `DELETE /api/v1/active-modules/{name}` | `deactivate_module_with_engine()` | deactivate one module by name |
+| `PATCH /api/v1/active-modules/{name}` (body: `{"enabled":bool}`) | `set_module_enabled_with_engine()` | disable/re-enable a module without unloading it |
+| `GET /api/v1/config/uncovered-ops` | `engine.uncovered_ops()` | current `deny`/`allow` policy for ops no active module claims |
+| `PUT /api/v1/config/uncovered-ops` (body: `{"mode":"deny"\|"allow"}`) | `set_uncovered_ops_with_engine()` | change it live |
+| `POST /api/v1/validate` (body: YAML) | `validate_draft(yaml)` | parse + validate, no disk (live lint) |
+| `POST /api/v1/dry-run` (body: `{yaml,op,algorithm?}`) | `dry_run(yaml, {op,algorithm})` | evaluate a sample request, no side effects |
+| `GET /api/v1/audit[?limit=N]` | `RingSink.snapshot()` | the three-plane audit trail (p1/p2/p3), newest last, capped at 2000 |
+| `GET /api/v1/audit/stream` | `SseSink` | live `text/event-stream` of new audit events (heartbeat comments filtered by the client) |
+
+**Legacy (`/api/v1/active`) and modular (`/api/v1/active-modules`) are
+mutually exclusive slots** — whichever is non-empty governs; see
+[`../policies/README.md`](../policies/README.md)'s "Modular policies" section
+for `Engine::activate`/`replace_all`'s exact interaction.
+
+The active-modules and `config/uncovered-ops` routes (added 2026-08-28 with
+the modular-policy plan) are **not yet wrapped by the Python `AdminClient`**
+in [`../python-client/`](../python-client/) — that client still only covers
+the original twelve A1 endpoints. Reach them with a raw HTTPS request (or
+extend `admin.py`) until a client method exists.
 
 ## Consumers
 
@@ -90,30 +119,42 @@ pqctoday-kmip \
   --listen 127.0.0.1:5696 --store-memory --policy-dir policies --policy aead-only \
   --admin-listen 127.0.0.1:5697 \
   --admin-tls-cert admin-server.crt --admin-tls-key admin-server.key \
-  --admin-client-ca admin-client-ca.crt
+  --admin-client-ca admin-client-ca.crt \
+  --admin-write-cn policy-admin-alice
 ```
+
+`--admin-write-cn` is required for anything beyond a read — with no CN
+authorized, every mutating route (`POST`/`PUT policies`, `PUT active`, the
+`active-modules` verbs, `PUT config/uncovered-ops`) returns 403 even over a
+successfully-authenticated mTLS connection (S-1: mTLS authenticates, this
+authorizes writes).
 
 Client must offer `X25519MLKEM768` (OpenSSL ≥ 3.5 / aws-lc-rs / BoringSSL) and
 present a client cert signed by `--admin-client-ca`, e.g.:
 
 ```bash
-printf 'POST /policies/pqc/activate HTTP/1.1\r\nConnection: close\r\n\r\n' | \
+printf 'PUT /api/v1/active HTTP/1.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{"name":"pqc"}' | \
   openssl s_client -connect 127.0.0.1:5697 -groups X25519MLKEM768 \
     -cert client.crt -key client.key -CAfile admin-client-ca.crt -quiet
 ```
+
+(the client cert's subject CN must be one of the `--admin-write-cn` values,
+e.g. `policy-admin-alice` above — otherwise this specific `PUT` gets 403; a
+plain `GET /api/v1/active` needs no CN authorization, only a valid client cert)
 
 ## Verified (manual, OpenSSL 3.6.2 client)
 
 - `Negotiated TLS1.3 group: X25519MLKEM768` ✓ (handshake fails on any other group).
 - mTLS enforced — a certless client is rejected (`tlsv13 alert certificate required`).
-- `GET /policies`, `GET /active`, `POST /validate` (clean line/col error),
-  `POST /dry-run` (`{"decision":{"outcome":"allow"}}`), `PUT /policies/{name}`,
-  and **`POST /policies/{name}/activate`** all return correct JSON.
-- **`GET /audit`** returns the live three-plane trail — a pykmip-driven
+- `GET /api/v1/policies`, `GET /api/v1/active`, `POST /api/v1/validate` (clean
+  line/col error), `POST /api/v1/dry-run` (`{"decision":{"outcome":"allow"}}`),
+  `PUT /api/v1/policies/{name}`, and **`PUT /api/v1/active`** all return
+  correct JSON.
+- **`GET /api/v1/audit`** returns the live three-plane trail — a pykmip-driven
   CreateKeyPair shows up as p1 PolicyDecided + p2 KmipRequestReceived/Sent +
   p3 Pkcs11Call, consumed via the same mTLS admin interface.
-- Live activation flips the running engine (`/active` reflects it immediately)
-  and is audited with the client-cert CN:
+- Live activation flips the running engine (`GET /api/v1/active` reflects it
+  immediately) and is audited with the client-cert CN:
   `admin: LIVE policy activated name="pqc" fp=… by cn="policy-admin-alice"`.
 
 Unit tests in [`manager.rs`](manager.rs) cover the router + the PQC-mTLS config

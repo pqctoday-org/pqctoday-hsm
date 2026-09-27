@@ -24,6 +24,8 @@ p11test_SOURCES =		p11test.cpp \
 				SignVerifyTests.cpp \
 				AsymEncryptDecryptTests.cpp \
 				AsymWrapUnwrapTests.cpp \
+				BehaviourRingTests.cpp \
+				ErrorPathTests.cpp \
 				TestsBase.cpp \
 				TestsNoPINInitBase.cpp \
 				ForkTests.cpp \

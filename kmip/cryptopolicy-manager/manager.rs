@@ -42,7 +42,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
@@ -87,15 +88,14 @@ pub fn pqc_mtls_config(
     ];
     let provider = Arc::new(provider);
 
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &server_cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(server_cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AdminError::Tls(format!("server cert: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &server_key_pem[..])
-        .map_err(|e| AdminError::Tls(format!("server key: {e}")))?
-        .ok_or_else(|| AdminError::Tls("no server private key in PEM".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(server_key_pem)
+        .map_err(|e| AdminError::Tls(format!("server key: {e}")))?;
 
     let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &client_ca_pem[..]) {
+    for cert in CertificateDer::pem_slice_iter(client_ca_pem) {
         roots
             .add(cert.map_err(|e| AdminError::Tls(format!("client CA: {e}")))?)
             .map_err(|e| AdminError::Tls(format!("root store add: {e}")))?;
@@ -166,7 +166,7 @@ pub async fn serve_admin(
         let write_cns = write_cns.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the connection's lifetime
-            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring, sse, write_cns).await {
+            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring, sse, write_cns, peer).await {
                 tracing::warn!("admin conn from {peer} ended: {e}");
             }
         });
@@ -186,12 +186,24 @@ async fn handle_conn(
     ring: Arc<crate::auditlog::RingSink>,
     sse: Arc<crate::auditlog::SseSink>,
     write_cns: Arc<Vec<String>>,
+    peer: std::net::SocketAddr,
 ) -> Result<(), AdminError> {
     // S-5 — bound the handshake so a client that never completes TLS can't hold
     // a connection (and its semaphore permit) open indefinitely.
     let mut tls = match tokio::time::timeout(ADMIN_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
         Ok(Ok(t)) => t,
-        Ok(Err(e)) => return Err(e.into()),
+        Ok(Err(e)) => {
+            // Gap 1 (docs/remediation-plan-auth-visibility-evidence-log-
+            // 09102026.md) — a rejected admin-facade handshake (wrong/absent
+            // client cert), as distinct from the "handshake never finished"
+            // timeout case just below, which isn't a rejection at all.
+            crate::metrics::record_auth_failure(
+                "kmip-tls-handshake",
+                "handshake-rejected",
+                Some(&peer.to_string()),
+            );
+            return Err(e.into());
+        }
         Err(_) => {
             tracing::warn!("admin: TLS handshake timed out");
             return Ok(());

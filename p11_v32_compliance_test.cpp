@@ -5,6 +5,7 @@
 #include <getopt.h>
 #include <string>
 #include <vector>
+#include <map>
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -3159,7 +3160,10 @@ void test_v32_kdfs() {
     rv = fl->C_DeriveKey(hSess, &ctrMechBad, hBaseKey, deriveTmpl, 7, &hDerivedBad);
     if (!mech_advertised(CKM_SP800_108_COUNTER_KDF)) {
         record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "SKIP", "Mechanism not advertised");
-    } else if (rv == CKR_MECHANISM_PARAM_INVALID || rv == CKR_ARGUMENTS_BAD) {
+    } else if (rv == CKR_MECHANISM_PARAM_INVALID) {
+        // §5.1.6 CKR_MECHANISM_PARAM_INVALID is the one code for an invalid
+        // mechanism parameter (decision D6, 2026-09-25: CKR_ARGUMENTS_BAD is
+        // no longer accepted as an alternative).
         record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "PASS",
                       "bare CKM_SHA256 PRF correctly rejected, RV=" + std::to_string(rv));
     } else {
@@ -3526,6 +3530,40 @@ void test_message_signatures() {
         record_result("MsgSign", "C_SignMessageBegin", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
         
         if (rv == CKR_OK) {
+            // The NON-FINAL part first (pulSignatureLen == NULL_PTR), which is
+            // the half of the streaming contract nothing had ever exercised.
+            //
+            // §5.14.3: "After calling C_SignMessageBegin, the application should
+            // call C_SignMessageNext one or more times to sign the message in
+            // multiple parts. The message signature operation is active until the
+            // application uses a call to C_SignMessageNext with a non-NULL
+            // pulSignatureLen to actually obtain the signature." A NULL
+            // pulSignatureLen is therefore the CONTINUE shape, not an error.
+            //
+            // History, kept because it is the point of this check existing:
+            // when first added (2026-09-25) BOTH engines answered
+            // CKR_ARGUMENTS_BAD here, so neither could stream a signature. It
+            // was recorded as XFAIL rather than FAIL, and it was found only
+            // because this suite measures ONE engine against the spec — the
+            // cross-engine differential harness could not see it at all, since
+            // the two engines agreed and so produced no divergence. Comparing
+            // implementations finds disagreements; only the spec finds a shared
+            // defect.
+            //
+            // Both engines were fixed in the same change (C++ here,
+            // Rust via ck_abi.rs's shim), so this now reports PASS, and
+            // CKF_MULTI_MESSAGE became advertisable at that moment. The
+            // status is still computed rather than asserted, so a regression
+            // drops back to XFAIL and stays visible instead of vanishing.
+            CK_BYTE part1[] = "streamed-";
+            CK_RV rvNonFinal = SignNext(hSess, NULL_PTR, 0, part1, sizeof(part1)-1,
+                                        NULL_PTR, NULL_PTR);
+            record_result("MsgSign", "C_SignMessageNext_NonFinalPart",
+                          rvNonFinal == CKR_OK ? "PASS" : "XFAIL",
+                          "RV=" + std::to_string(rvNonFinal) +
+                          " (v3.2 5.14.3: NULL pulSignatureLen continues the operation; "
+                          "engine rejects it, so streaming sign is unimplemented)");
+
             CK_BYTE msg[] = "test";
             CK_BYTE sig[5000]; CK_ULONG sigLen = sizeof(sig);
             // v3.0 signature call for single MessageNext finishing string.
@@ -3540,7 +3578,8 @@ void test_message_signatures() {
 
         // Negative: CKM_RSA_PKCS takes NO mechanism parameter. Supplying a
         // CK_SIGN_ADDITIONAL_CONTEXT (an ML-DSA/SLH-DSA parameter) MUST be
-        // rejected with CKR_MECHANISM_PARAM_INVALID (or CKR_ARGUMENTS_BAD).
+        // rejected with CKR_MECHANISM_PARAM_INVALID (§5.1.6; CKR_ARGUMENTS_BAD
+        // stopped being accepted with decision D6, 2026-09-25).
         refresh_session();
         CK_OBJECT_HANDLE hPub2=0, hPriv2=0;
         fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 6, privTmpl, 4, &hPub2, &hPriv2);
@@ -3554,7 +3593,7 @@ void test_message_signatures() {
         CK_MECHANISM signMechPQC = { CKM_RSA_PKCS, paramsPQC, sizeof(pqcParams) };
         rv = SignInit(hSess, &signMechPQC, hPriv2);
         record_result("MsgSign", "C_MessageSignInit_RSA_RejectsSignCtxParam",
-                      (rv == CKR_MECHANISM_PARAM_INVALID || rv == CKR_ARGUMENTS_BAD) ? "PASS" : "FAIL",
+                      rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
                       "expected CKR_MECHANISM_PARAM_INVALID, got RV=" + std::to_string(rv));
     } else {
         record_result("MsgSign", "C_GenerateKeyPair", "FAIL", "RV=" + std::to_string(rvGenDsa));
@@ -3953,8 +3992,9 @@ void test_message_verification() {
  *   - both mechs appear in C_GetMechanismList
  *   - CKM_SHA3_384_RSA_PKCS sign→verify round-trip (RSA-2048)
  *   - CKM_SHA3_384_RSA_PKCS_PSS round-trip with correct PSS params
- *   - PSS with a mismatched hashAlg is rejected (CKR_ARGUMENTS_BAD /
- *     CKR_MECHANISM_PARAM_INVALID), mirroring the SHA3-256 sibling.
+ *   - PSS with a mismatched hashAlg is rejected with
+ *     CKR_MECHANISM_PARAM_INVALID (§5.1.6; decision D6), mirroring the
+ *     SHA3-256 sibling.
  * ------------------------------------------------------------------------- */
 void test_g7_sha3_384_rsa() {
     // 1. Both new mechs advertised in C_GetMechanismList
@@ -4047,10 +4087,12 @@ void test_g7_sha3_384_rsa() {
         CK_RSA_PKCS_PSS_PARAMS badParams = { CKM_SHA3_256, CKG_MGF1_SHA3_256, 32 };
         CK_MECHANISM signMech = { CKM_SHA3_384_RSA_PKCS_PSS, &badParams, sizeof(badParams) };
         rv = fl->C_SignInit(hSess, &signMech, hPriv);
-        bool rejected = (rv == CKR_ARGUMENTS_BAD || rv == CKR_MECHANISM_PARAM_INVALID);
+        // §5.1.6 CKR_MECHANISM_PARAM_INVALID ("Invalid parameters were supplied
+        // to the mechanism"); CKR_ARGUMENTS_BAD is no longer accepted (D6).
+        bool rejected = (rv == CKR_MECHANISM_PARAM_INVALID);
         record_result("G7Sha3Rsa", "C_SignInit_PSS_wrong_hashAlg",
                       rejected ? "PASS" : "FAIL",
-                      "expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
+                      "expected CKR_MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
     }
 }
 
@@ -4254,9 +4296,12 @@ void test_g2_prehash_mechanisms() {
  *
  * UPDATE (2026-08-29): the HMAC_GENERAL half of that is no longer true. The
  * whole CKM_*_HMAC_GENERAL family is now implemented and advertised, and
- * carries its own coverage in test_hmac_general_mechanisms() below. The
- * CKM_SHA3_*_KEY_DERIVATION mechanisms remain unadvertised and unimplemented,
- * so the reasoning above still holds for them. The real
+ * carries its own coverage in test_hmac_general_mechanisms() below.
+ * CORRECTION (2026-09-27, plan 2.F): the CKM_SHA3_*_KEY_DERIVATION (and
+ * SHA-2) *_KEY_DERIVATION mechanisms ARE advertised and implemented
+ * (SoftHSM_keygen.cpp); they had no test anywhere in this file, which the
+ * invariant's "covered elsewhere" SKIP hid. test_2f_hidden_coverage() now
+ * checks all eight against an OpenSSL digest oracle. The real
  * 13-strong tail, confirmed by grepping every CKM_ reference already in
  * this file against the advertised table, is:
  *   - 2 bare digests:      CKM_SHA3_224, CKM_SHA3_512
@@ -4819,13 +4864,13 @@ void test_fips_edge_constraints() {
         };
         CK_MECHANISM signMech = { 0x0000001dUL /* CKM_ML_DSA */, &sigCtx, sizeof(sigCtx) };
         CK_RV rv = fl->C_SignInit(hSess, &signMech, hDsaPriv);
-        // FIPS 204 limits the context string to 255 bytes. Both rejection codes
-        // are defensible: CKR_MECHANISM_PARAM_INVALID (the mechanism parameter
-        // CK_SIGN_ADDITIONAL_CONTEXT carries an invalid field) and
-        // CKR_ARGUMENTS_BAD (a caller-supplied argument is out of range) —
-        // the spec does not pin one. Accept either; anything else is a FAIL.
+        // FIPS 204 limits the context string to 255 bytes. The oversized
+        // context is a field of the mechanism parameter
+        // CK_SIGN_ADDITIONAL_CONTEXT, so the answer is
+        // CKR_MECHANISM_PARAM_INVALID (§5.1.6). CKR_ARGUMENTS_BAD used to be
+        // accepted too; decision D6 (2026-09-25) pinned the one code.
         record_result("FIPS", "ML-DSA_Oversized_Ctx",
-                      (rv == CKR_ARGUMENTS_BAD || rv == CKR_MECHANISM_PARAM_INVALID) ? "PASS" : "FAIL",
+                      rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
                       "ctx>255 must be rejected, RV=" + std::to_string(rv));
         // Force cancel in case it (wrongly) succeeds
         if (rv == CKR_OK) fl->C_SignFinal(hSess, NULL_PTR, NULL_PTR);
@@ -4959,9 +5004,14 @@ void test_authenticated_wrap() {
         CK_MECHANISM nistMech = { 0x00001087UL /* CKM_AES_GCM */, &nistGcmParams, sizeof(nistGcmParams) };
         
         CK_OBJECT_HANDLE hNistTarget = 0;
+        // The payload is Test Case 4's 60-byte plaintext, so the target is a
+        // GENERIC secret: 60 bytes is not an AES key length, and since plan
+        // 2.D the engine refuses that (§5.18.4, CKR_WRAPPED_KEY_LEN_RANGE) —
+        // this template used to ask for CKK_AES and got a 60-byte "AES key".
+        CK_KEY_TYPE nistTargetKt = CKK_GENERIC_SECRET;
         CK_ATTRIBUTE unwrapTmplNist[] = { 
             { CKA_CLASS, &secClass, sizeof(secClass) },
-            { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
+            { CKA_KEY_TYPE, &nistTargetKt, sizeof(nistTargetKt) },
             { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) }
         };
         CK_RV rvKat = UnwrapAuth(hSess, &nistMech, hNistWrapKey, nistCTandTag, sizeof(nistCTandTag), unwrapTmplNist, 3, nistAAD, sizeof(nistAAD), &hNistTarget);
@@ -6423,9 +6473,12 @@ void test_check_value_templates() {
         if (rvv != CKR_OK)
         {
             // No independent oracle is possible when the key bits are not
-            // readable — the concatenate family publishes a sensitive key
-            // whatever the template asks for. The three §4.11 cases below still
-            // run against the value the engine itself published.
+            // readable. (This comment used to say the concatenate family
+            // "publishes a sensitive key whatever the template asks for" —
+            // wrong: the result inherits the BASE key's CKA_SENSITIVE /
+            // CKA_EXTRACTABLE per §6.43.4, and the base key is now created
+            // readable, so this branch should not be reached.) The three
+            // §4.11 cases below still run against the engine's own value.
             record_result(CAT, name + "_KCV_matches_oracle", "SKIP",
                           "CKA_VALUE unreadable (RV=" + std::to_string(rvv) +
                           "), engine KCV=" + hex_bytes(engineKcv));
@@ -6689,10 +6742,16 @@ void test_check_value_templates() {
             { CKA_VALUE_LEN, &len32,    sizeof(len32) },
             { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
             { CKA_DERIVE,    &bTrue,    sizeof(bTrue) },
+            // Readable on purpose (plan 2.F): CKM_CONCATENATE_BASE_AND_DATA's
+            // result inherits CKA_SENSITIVE/CKA_EXTRACTABLE from this key
+            // (§6.43.4), so with the defaults its value was unreadable and the
+            // concatenate KCV oracle below always SKIPped.
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue) },
         };
         CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
         CK_OBJECT_HANDLE hBase2 = 0;
-        if (fl->C_GenerateKey(hSess, &genMech, baseT, 5, &hBase2) != CKR_OK) {
+        if (fl->C_GenerateKey(hSess, &genMech, baseT, 7, &hBase2) != CKR_OK) {
             record_result(CAT, "DeriveKey_SP800108_setup", "FAIL", "base key generation failed");
         } else {
             static CK_BYTE lbl[] = "kcv-label";
@@ -8831,15 +8890,18 @@ void test_aes_key_wrap_kwp() {
 
     // A KWP mechanism parameter is the optional 4-byte alternative initial
     // value (§6.16.2); this engine does not implement one, and says so with
-    // CKR_ARGUMENTS_BAD rather than ignoring the caller's IV.
+    // CKR_MECHANISM_PARAM_INVALID rather than ignoring the caller's IV —
+    // §5.1.6: "Which parameter values are supported by a given mechanism can
+    // vary from token to token". (Was CKR_ARGUMENTS_BAD until decision D6,
+    // 2026-09-25.)
     {
         CK_BYTE iv[4] = { 0xA6, 0x59, 0x59, 0xA6 };
         CK_MECHANISM withIv = { CKM_AES_KEY_WRAP_KWP, iv, sizeof(iv) };
         CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
         CK_RV r = fl->C_WrapKey(hSess, &withIv, hKek, hTarget, out, &outLen);
         record_result(CAT, "KWP_rejects_unsupported_iv_param",
-                      r == CKR_ARGUMENTS_BAD ? "PASS" : "FAIL",
-                      "RV=" + std::to_string(r) + " (want CKR_ARGUMENTS_BAD=0x7)");
+                      r == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_MECHANISM_PARAM_INVALID=0x71)");
     }
 }
 
@@ -8893,6 +8955,11 @@ void test_aes_key_wrap_kwp() {
  * (CKM_RIPEMD160 on the no-legacy build, CKM_KECCAK_256) by hand instead --
  * this file has no full inverse-enumeration anywhere, and does not claim one.
  * ----------------------------------------------------------------------------- */
+
+// Advertised mechanisms with no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag,
+// collected by test_advertise_implies_dispatch and checked at the end of the
+// run by test_2f_nonforward_coverage (plan 2.F).
+static std::vector<CK_MECHANISM_TYPE> g_nonforward_mechs;
 
 static std::string mech_hex(CK_MECHANISM_TYPE m) {
     char buf[16];
@@ -9018,11 +9085,13 @@ void test_advertise_implies_dispatch() {
         if (probed) {
             probedMechs++;
         } else {
+            // No forward operation to probe. This used to record a SKIP that
+            // claimed "covered by this file's per-mechanism round-trip tests"
+            // — false for 16 of 48 (plan 2.F). The claim is now CHECKED:
+            // test_2f_nonforward_coverage(), run last, requires a passing
+            // named test for every mechanism collected here.
             skippedMechs++;
-            record_result(CAT, "OutOfScope_" + label, "SKIP",
-                          "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only "
-                          "mechanism, out of this invariant's documented forward-direction scope; "
-                          "covered by this file's per-mechanism round-trip tests instead");
+            g_nonforward_mechs.push_back(mechs[i]);
         }
     }
 
@@ -9031,8 +9100,497 @@ void test_advertise_implies_dispatch() {
                   std::to_string(count) + " advertised, " + std::to_string(probedMechs) +
                   " mechanisms probed (" + std::to_string(opProbes) + " Init calls across " +
                   "DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), " + std::to_string(skippedMechs) +
-                  " out-of-scope (derive/generate/wrap-only), " + std::to_string(opFails) +
+                  " without a forward operation (checked by NonForwardCoverage at the end of the run), " + std::to_string(opFails) +
                   " answered CKR_MECHANISM_INVALID");
+}
+
+/* ---------------------------------------------------------------------------
+ * test_2f_hidden_coverage  (gap-closure plan item 2.F, 2026-09-27)
+ *
+ * The advertised-implies-dispatchable invariant skipped every mechanism with
+ * no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag as "covered by this file's
+ * per-mechanism round-trip tests". For 16 of those 48 mechanisms that was
+ * false: nothing in this file used them. This function gives each one a real
+ * check against an independent oracle (OpenSSL digests/HKDF, RFC 7748, NIST
+ * ACVP), and test_2f_nonforward_coverage() below replaces the placeholder
+ * SKIPs with a check that every such mechanism is named by a passing test.
+ * ------------------------------------------------------------------------- */
+#ifndef CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN
+#define CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN 0x80000003UL
+#define CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE  0x80000004UL
+#define CKK_PQCTODAY_CLASSIC_MCELIECE              0x80000002UL
+#define CKP_CLASSIC_MCELIECE_348864                0x2UL
+#endif
+
+static std::vector<CK_BYTE> hex2v(const std::string& h) {
+    std::vector<CK_BYTE> v;
+    for (size_t i = 0; i + 1 < h.size(); i += 2) v.push_back((CK_BYTE)strtoul(h.substr(i, 2).c_str(), NULL, 16));
+    return v;
+}
+static std::string v2hex(const std::vector<CK_BYTE>& v) {
+    static const char* d = "0123456789abcdef";
+    std::string s;
+    for (CK_BYTE b : v) { s += d[b >> 4]; s += d[b & 15]; }
+    return s;
+}
+static std::vector<CK_BYTE> read_value(CK_OBJECT_HANDLE h) {
+    CK_ATTRIBUTE a = { CKA_VALUE, NULL_PTR, 0 };
+    if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK || a.ulValueLen == CK_UNAVAILABLE_INFORMATION) return {};
+    std::vector<CK_BYTE> v(a.ulValueLen);
+    a.pValue = v.data();
+    if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return {};
+    v.resize(a.ulValueLen);
+    return v;
+}
+static CK_ULONG read_ulong(CK_OBJECT_HANDLE h, CK_ATTRIBUTE_TYPE t) {
+    CK_ULONG x = (CK_ULONG)-1;
+    CK_ATTRIBUTE a = { t, &x, sizeof(x) };
+    if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return (CK_ULONG)-1;
+    return x;
+}
+// A session secret key with a known value, usable as a derive base.
+static CK_OBJECT_HANDLE secret_with_value(const std::vector<CK_BYTE>& value, CK_KEY_TYPE kt = CKK_GENERIC_SECRET) {
+    CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+    CK_BBOOL t = CK_TRUE, f = CK_FALSE;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &cls, sizeof(cls) }, { CKA_KEY_TYPE, &kt, sizeof(kt) },
+        { CKA_TOKEN, &f, sizeof(f) }, { CKA_DERIVE, &t, sizeof(t) },
+        { CKA_SIGN, &t, sizeof(t) }, { CKA_EXTRACTABLE, &t, sizeof(t) },
+        { CKA_SENSITIVE, &f, sizeof(f) },
+        { CKA_VALUE, (CK_VOID_PTR)value.data(), (CK_ULONG)value.size() },
+    };
+    CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+    if (fl->C_CreateObject(hSess, tmpl, 8, &h) != CKR_OK) return CK_INVALID_HANDLE;
+    return h;
+}
+// Derive a readable generic secret of `len` bytes.
+static CK_RV derive_readable(CK_MECHANISM* m, CK_OBJECT_HANDLE base, CK_ULONG len, std::vector<CK_BYTE>& out) {
+    CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+    CK_KEY_TYPE kt = CKK_GENERIC_SECRET;
+    CK_BBOOL t = CK_TRUE, f = CK_FALSE;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &cls, sizeof(cls) }, { CKA_KEY_TYPE, &kt, sizeof(kt) },
+        { CKA_VALUE_LEN, &len, sizeof(len) }, { CKA_TOKEN, &f, sizeof(f) },
+        { CKA_EXTRACTABLE, &t, sizeof(t) }, { CKA_SENSITIVE, &f, sizeof(f) },
+    };
+    CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+    CK_RV rv = fl->C_DeriveKey(hSess, m, base, tmpl, 6, &h);
+    if (rv == CKR_OK) out = read_value(h);
+    return rv;
+}
+
+/* ---------------------------------------------------------------------------
+ * test_3c_structure_packing  (plan 3.C, ruling 2026-09-26: cited XFAIL)
+ *
+ * PKCS#11 v3.2 §2.1: "Cryptoki structures SHALL be packed with 1-byte
+ * alignment." This engine (like the Rust one) uses natural alignment, as
+ * every Unix consumer does: OpenSC's and p11-kit's pkcs11.h apply
+ * #pragma pack(push, cryptoki, 1) only under _WIN32 / CRYPTOKI_FORCE_WIN32,
+ * and the vendored pkcs11-provider never packs. Packing here would break the
+ * ABI with all of them, so each info structure whose natural size differs
+ * from its packed size is reported as a known, cited XFAIL — measured, not
+ * assumed — and becomes a PASS if the two ever coincide.
+ * ------------------------------------------------------------------------- */
+#define P11_MEMBER_SIZE(T, m) sizeof(((T*)0)->m)
+void test_3c_structure_packing() {
+    const char* CAT = "StructPacking";
+    const std::string why = " — §2.1 SHALL 1-byte alignment; natural alignment kept because OpenSC and p11-kit "
+                            "pack only on _WIN32 and pkcs11-provider never does (ruling 2026-09-26, plan 3.C)";
+    struct { const char* name; size_t natural; size_t packed; } s[] = {
+        { "CK_INFO", sizeof(CK_INFO),
+          P11_MEMBER_SIZE(CK_INFO, cryptokiVersion) + P11_MEMBER_SIZE(CK_INFO, manufacturerID) +
+          P11_MEMBER_SIZE(CK_INFO, flags) + P11_MEMBER_SIZE(CK_INFO, libraryDescription) +
+          P11_MEMBER_SIZE(CK_INFO, libraryVersion) },
+        { "CK_SLOT_INFO", sizeof(CK_SLOT_INFO),
+          P11_MEMBER_SIZE(CK_SLOT_INFO, slotDescription) + P11_MEMBER_SIZE(CK_SLOT_INFO, manufacturerID) +
+          P11_MEMBER_SIZE(CK_SLOT_INFO, flags) + P11_MEMBER_SIZE(CK_SLOT_INFO, hardwareVersion) +
+          P11_MEMBER_SIZE(CK_SLOT_INFO, firmwareVersion) },
+        { "CK_TOKEN_INFO", sizeof(CK_TOKEN_INFO),
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, label) + P11_MEMBER_SIZE(CK_TOKEN_INFO, manufacturerID) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, model) + P11_MEMBER_SIZE(CK_TOKEN_INFO, serialNumber) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, flags) + 10 * sizeof(CK_ULONG) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, hardwareVersion) + P11_MEMBER_SIZE(CK_TOKEN_INFO, firmwareVersion) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, utcTime) },
+        { "CK_SESSION_INFO", sizeof(CK_SESSION_INFO),
+          P11_MEMBER_SIZE(CK_SESSION_INFO, slotID) + P11_MEMBER_SIZE(CK_SESSION_INFO, state) +
+          P11_MEMBER_SIZE(CK_SESSION_INFO, flags) + P11_MEMBER_SIZE(CK_SESSION_INFO, ulDeviceError) },
+        { "CK_MECHANISM_INFO", sizeof(CK_MECHANISM_INFO),
+          P11_MEMBER_SIZE(CK_MECHANISM_INFO, ulMinKeySize) + P11_MEMBER_SIZE(CK_MECHANISM_INFO, ulMaxKeySize) +
+          P11_MEMBER_SIZE(CK_MECHANISM_INFO, flags) },
+    };
+    for (auto& x : s) {
+        std::string d = "sizeof=" + std::to_string(x.natural) + " packed=" + std::to_string(x.packed);
+        record_result(CAT, std::string(x.name) + "_packing", x.natural == x.packed ? "PASS" : "XFAIL",
+                      x.natural == x.packed ? d : d + why);
+    }
+}
+#undef P11_MEMBER_SIZE
+
+void test_2f_hidden_coverage() {
+    const char* CAT = "2F";
+
+    // ── §6.22-§6.31: the eight SHA-2/SHA-3 *_KEY_DERIVATION mechanisms.
+    // The derived value is the digest of the base key's value (PKCS#11 v3.2
+    // §6.22.1 and its siblings); oracle: OpenSSL EVP_Digest.
+    {
+        const std::vector<CK_BYTE> baseVal = hex2v("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        struct { const char* name; CK_MECHANISM_TYPE mech; const EVP_MD* (*md)(); } kd[] = {
+            { "CKM_SHA256_KEY_DERIVATION",     CKM_SHA256_KEY_DERIVATION,     EVP_sha256 },
+            { "CKM_SHA384_KEY_DERIVATION",     CKM_SHA384_KEY_DERIVATION,     EVP_sha384 },
+            { "CKM_SHA512_KEY_DERIVATION",     CKM_SHA512_KEY_DERIVATION,     EVP_sha512 },
+            { "CKM_SHA512_224_KEY_DERIVATION", CKM_SHA512_224_KEY_DERIVATION, EVP_sha512_224 },
+            { "CKM_SHA512_256_KEY_DERIVATION", CKM_SHA512_256_KEY_DERIVATION, EVP_sha512_256 },
+            { "CKM_SHA3_256_KEY_DERIVATION",   CKM_SHA3_256_KEY_DERIVATION,   EVP_sha3_256 },
+            { "CKM_SHA3_384_KEY_DERIVATION",   CKM_SHA3_384_KEY_DERIVATION,   EVP_sha3_384 },
+            { "CKM_SHA3_512_KEY_DERIVATION",   CKM_SHA3_512_KEY_DERIVATION,   EVP_sha3_512 },
+        };
+        for (auto& k : kd) {
+            unsigned char dig[EVP_MAX_MD_SIZE]; unsigned int dl = 0;
+            EVP_Digest(baseVal.data(), baseVal.size(), dig, &dl, k.md(), NULL);
+            std::vector<CK_BYTE> want(dig, dig + dl), got;
+            CK_OBJECT_HANDLE hBase = secret_with_value(baseVal);
+            CK_MECHANISM m = { k.mech, NULL_PTR, 0 };
+            CK_RV rv = hBase == CK_INVALID_HANDLE ? CKR_GENERAL_ERROR : derive_readable(&m, hBase, dl, got);
+            bool ok = rv == CKR_OK && got == want;
+            record_result(CAT, std::string(k.name) + "_matches_digest_oracle", ok ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " got=" + v2hex(got) + " want=" + v2hex(want));
+        }
+    }
+
+    // ── §6.62: CKM_HKDF_DATA produces a CKO_DATA object with the same bytes
+    // CKM_HKDF_DERIVE produces, and both match OpenSSL's HKDF.
+    {
+        const std::vector<CK_BYTE> ikm = hex2v("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");
+        static CK_BYTE salt[] = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c };
+        static CK_BYTE info[] = { 0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9 };
+        CK_HKDF_PARAMS hp = { CK_TRUE, CK_TRUE, CKM_SHA256, CKF_HKDF_SALT_DATA, salt, sizeof(salt), 0, info, sizeof(info) };
+        CK_ULONG outLen = 42;
+        // RFC 5869 A.1 OKM for exactly these inputs.
+        const std::vector<CK_BYTE> okm = hex2v("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865");
+        CK_OBJECT_HANDLE hBase = secret_with_value(ikm);
+        std::vector<CK_BYTE> viaDerive;
+        CK_MECHANISM md = { CKM_HKDF_DERIVE, &hp, sizeof(hp) };
+        CK_RV rv1 = derive_readable(&md, hBase, outLen, viaDerive);
+        CK_OBJECT_CLASS dataCls = CKO_DATA;
+        CK_BBOOL f = CK_FALSE;
+        CK_ATTRIBUTE dt[] = { { CKA_CLASS, &dataCls, sizeof(dataCls) }, { CKA_VALUE_LEN, &outLen, sizeof(outLen) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_MECHANISM mdata = { CKM_HKDF_DATA, &hp, sizeof(hp) };
+        CK_OBJECT_HANDLE hData = CK_INVALID_HANDLE;
+        CK_RV rv2 = fl->C_DeriveKey(hSess, &mdata, hBase, dt, 3, &hData);
+        std::vector<CK_BYTE> viaData = rv2 == CKR_OK ? read_value(hData) : std::vector<CK_BYTE>();
+        CK_ULONG cls = rv2 == CKR_OK ? read_ulong(hData, CKA_CLASS) : (CK_ULONG)-1;
+        bool ok = rv1 == CKR_OK && rv2 == CKR_OK && cls == CKO_DATA && viaData == okm && viaDerive == okm;
+        record_result(CAT, "CKM_HKDF_DATA_matches_RFC5869_A1", ok ? "PASS" : "FAIL",
+                      "derive RV=" + std::to_string(rv1) + " data RV=" + std::to_string(rv2) + " class=" + std::to_string(cls) +
+                      " data=" + v2hex(viaData) + " derive=" + v2hex(viaDerive));
+    }
+
+    // ── §6.42.5: CKM_SP800_108_DOUBLE_PIPELINE_KDF against the NIST ACVP
+    // KDF (SP 800-108r1) double-pipeline vectors the wasm harness also runs.
+    {
+        std::string path = std::string(ACVP_VECTOR_DIR) + "/sp800_108_double_pipeline_test.json";
+        std::ifstream in(path);
+        if (!in) {
+            record_result(CAT, "CKM_SP800_108_DOUBLE_PIPELINE_KDF_ACVP", "FAIL", "cannot open " + path);
+        } else {
+            json j = json::parse(in);
+            int pass = 0, fail = 0;
+            std::string firstFail;
+            for (auto& g : j["testGroups"]) {
+                std::string mac = g["macMode"];
+                CK_MECHANISM_TYPE prf = 0; CK_KEY_TYPE baseKt = CKK_GENERIC_SECRET;
+                if (mac == "HMAC-SHA-1") prf = CKM_SHA_1_HMAC;
+                else if (mac == "HMAC-SHA2-224") prf = CKM_SHA224_HMAC;
+                else if (mac == "HMAC-SHA2-256") prf = CKM_SHA256_HMAC;
+                else if (mac == "HMAC-SHA2-384") prf = CKM_SHA384_HMAC;
+                else if (mac == "HMAC-SHA2-512") prf = CKM_SHA512_HMAC;
+                else if (mac == "HMAC-SHA2-512/224") prf = CKM_SHA512_224_HMAC;
+                else if (mac == "HMAC-SHA2-512/256") prf = CKM_SHA512_256_HMAC;
+                else if (mac == "HMAC-SHA3-224") prf = CKM_SHA3_224_HMAC;
+                else if (mac == "HMAC-SHA3-256") prf = CKM_SHA3_256_HMAC;
+                else if (mac == "HMAC-SHA3-384") prf = CKM_SHA3_384_HMAC;
+                else if (mac == "HMAC-SHA3-512") prf = CKM_SHA3_512_HMAC;
+                else if (mac.rfind("CMAC-AES", 0) == 0) { prf = CKM_AES_CMAC; baseKt = CKK_AES; }
+                std::string loc = g["counterLocation"];
+                CK_ULONG ctrBits = g["counterLength"];
+                CK_ULONG outBits = g["keyOutLength"];
+                for (auto& t : g["tests"]) {
+                    std::string id = "tg" + std::to_string((int)g["tgId"]) + "/tc" + std::to_string((int)t["tcId"]);
+                    if (prf == 0 || loc != "before fixed data" || outBits % 8 != 0) {
+                        fail++; if (firstFail.empty()) firstFail = id + " unmapped " + mac + "/" + loc; continue;
+                    }
+                    std::vector<CK_BYTE> keyIn = hex2v(t["keyIn"]), fixed = hex2v(t["fixedData"]), want = hex2v(t["keyOut"]);
+                    CK_OBJECT_HANDLE hBase = secret_with_value(keyIn, baseKt);
+                    CK_SP800_108_COUNTER_FORMAT cf = { CK_FALSE, ctrBits };
+                    CK_PRF_DATA_PARAM dp[] = {
+                        { CK_SP800_108_ITERATION_VARIABLE, NULL_PTR, 0 },
+                        { CK_SP800_108_COUNTER, &cf, sizeof(cf) },
+                        { CK_SP800_108_BYTE_ARRAY, fixed.data(), (CK_ULONG)fixed.size() },
+                    };
+                    CK_SP800_108_KDF_PARAMS kp = { prf, 3, dp, 0, NULL_PTR };
+                    CK_MECHANISM m = { CKM_SP800_108_DOUBLE_PIPELINE_KDF, &kp, sizeof(kp) };
+                    std::vector<CK_BYTE> got;
+                    CK_RV rv = hBase == CK_INVALID_HANDLE ? CKR_GENERAL_ERROR : derive_readable(&m, hBase, outBits / 8, got);
+                    if (rv == CKR_OK && got == want) pass++;
+                    else { fail++; if (firstFail.empty()) firstFail = id + " RV=" + std::to_string(rv) + " got=" + v2hex(got) + " want=" + v2hex(want); }
+                }
+            }
+            record_result(CAT, "CKM_SP800_108_DOUBLE_PIPELINE_KDF_ACVP", (fail == 0 && pass > 0) ? "PASS" : "FAIL",
+                          std::to_string(pass) + " pass / " + std::to_string(fail) + " fail" + (firstFail.empty() ? "" : "; first: " + firstFail));
+        }
+    }
+
+    // ── RFC 7748 §6.1 / §6.2: CKM_X25519 and CKM_X448 derive the published
+    // shared secrets from Alice's private key and Bob's public key.
+    {
+        struct { const char* name; CK_MECHANISM_TYPE mech; std::vector<CK_BYTE> oid; const char* a; const char* bpub; const char* ss; } v[] = {
+            { "CKM_X25519", CKM_X25519, { 0x06, 0x03, 0x2b, 0x65, 0x6e },
+              "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+              "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+              "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742" },
+            { "CKM_X448", CKM_X448, { 0x06, 0x03, 0x2b, 0x65, 0x6f },
+              "9a8f4925d1519f5775cf46b04b5800d4ee9ee8bae8bc5565d498c28dd9c9baf574a9419744897391006382a6f127ab1d9ac2d8c0a598726b",
+              "3eb7a829b0cd20f5bcfc0b599b6feccf6da4627107bdb0d4f345b43027d8b972fc3e34fb4232a13ca706dcb57aec3dae07bdc1c67bf33609",
+              "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d" },
+        };
+        for (auto& x : v) {
+            std::vector<CK_BYTE> a = hex2v(x.a), bpub = hex2v(x.bpub), want = hex2v(x.ss), got;
+            CK_OBJECT_CLASS pc = CKO_PRIVATE_KEY; CK_KEY_TYPE kt = CKK_EC_MONTGOMERY;
+            CK_BBOOL t = CK_TRUE, f = CK_FALSE;
+            CK_ATTRIBUTE pt[] = {
+                { CKA_CLASS, &pc, sizeof(pc) }, { CKA_KEY_TYPE, &kt, sizeof(kt) }, { CKA_TOKEN, &f, sizeof(f) },
+                { CKA_DERIVE, &t, sizeof(t) }, { CKA_EC_PARAMS, x.oid.data(), (CK_ULONG)x.oid.size() },
+                { CKA_VALUE, a.data(), (CK_ULONG)a.size() },
+            };
+            CK_OBJECT_HANDLE hPriv = CK_INVALID_HANDLE;
+            CK_RV rv = fl->C_CreateObject(hSess, pt, 6, &hPriv);
+            if (rv == CKR_OK) {
+                CK_ECDH1_DERIVE_PARAMS ep; memset(&ep, 0, sizeof(ep));
+                ep.kdf = CKD_NULL; ep.pPublicData = bpub.data(); ep.ulPublicDataLen = bpub.size();
+                CK_MECHANISM m = { x.mech, &ep, sizeof(ep) };
+                rv = derive_readable(&m, hPriv, want.size(), got);
+            }
+            record_result(CAT, std::string(x.name) + "_derive_RFC7748", (rv == CKR_OK && got == want) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " got=" + v2hex(got));
+        }
+    }
+
+    // ── §6.3.18: CKM_ECDH1_COFACTOR_DERIVE succeeds on a CKK_EC P-256 pair,
+    // both sides agree, and (cofactor 1) it equals CKM_ECDH1_DERIVE.
+    {
+        CK_BYTE p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_BBOOL t = CK_TRUE, f = CK_FALSE;
+        CK_MECHANISM kg = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_ATTRIBUTE pubT[] = { { CKA_EC_PARAMS, p256, sizeof(p256) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_ATTRIBUTE privT[] = { { CKA_DERIVE, &t, sizeof(t) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_OBJECT_HANDLE pa, sa, pb, sb;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kg, pubT, 2, privT, 2, &pa, &sa);
+        if (rv == CKR_OK) rv = fl->C_GenerateKeyPair(hSess, &kg, pubT, 2, privT, 2, &pb, &sb);
+        std::vector<CK_BYTE> ab, ba, plain;
+        if (rv == CKR_OK) {
+            auto point = [&](CK_OBJECT_HANDLE h) {
+                CK_ATTRIBUTE a = { CKA_EC_POINT, NULL_PTR, 0 };
+                fl->C_GetAttributeValue(hSess, h, &a, 1);
+                std::vector<CK_BYTE> v(a.ulValueLen); a.pValue = v.data();
+                fl->C_GetAttributeValue(hSess, h, &a, 1);
+                if (v.size() == 67 && v[0] == 0x04 && v[1] == 0x41) v.erase(v.begin(), v.begin() + 2); // DER OCTET STRING
+                return v;
+            };
+            std::vector<CK_BYTE> qa = point(pa), qb = point(pb);
+            auto dh = [&](CK_MECHANISM_TYPE mt, CK_OBJECT_HANDLE priv, std::vector<CK_BYTE>& peer, std::vector<CK_BYTE>& out) {
+                CK_ECDH1_DERIVE_PARAMS ep; memset(&ep, 0, sizeof(ep));
+                ep.kdf = CKD_NULL; ep.pPublicData = peer.data(); ep.ulPublicDataLen = peer.size();
+                CK_MECHANISM m = { mt, &ep, sizeof(ep) };
+                return derive_readable(&m, priv, 32, out);
+            };
+            rv = dh(CKM_ECDH1_COFACTOR_DERIVE, sa, qb, ab);
+            if (rv == CKR_OK) rv = dh(CKM_ECDH1_COFACTOR_DERIVE, sb, qa, ba);
+            if (rv == CKR_OK) rv = dh(CKM_ECDH1_DERIVE, sa, qb, plain);
+        }
+        bool ok = rv == CKR_OK && !ab.empty() && ab == ba && ab == plain;
+        // Fresh keys each run: the details must not print the secret, or the
+        // committed report would differ on every run (report freshness guard).
+        record_result(CAT, "CKM_ECDH1_COFACTOR_DERIVE_P256_agrees", ok ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv) + " secret_len=" + std::to_string(ab.size()) +
+                      (ok ? " A·B == B·A == ECDH1_DERIVE" : " ab=" + v2hex(ab) + " ba=" + v2hex(ba) + " plain=" + v2hex(plain)));
+    }
+
+    // ── §6.15: CKM_AES_XTS_KEY_GEN makes a CKK_AES_XTS key of the requested
+    // length and records its generating mechanism.
+    {
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_ULONG len = 64;
+        CK_BBOOL f = CK_FALSE;
+        CK_ATTRIBUTE tm[] = { { CKA_CLASS, &cls, sizeof(cls) }, { CKA_VALUE_LEN, &len, sizeof(len) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_MECHANISM m = { CKM_AES_XTS_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV rv = fl->C_GenerateKey(hSess, &m, tm, 3, &h);
+        CK_ULONG kt = rv == CKR_OK ? read_ulong(h, CKA_KEY_TYPE) : 0;
+        CK_ULONG gm = rv == CKR_OK ? read_ulong(h, CKA_KEY_GEN_MECHANISM) : 0;
+        CK_ULONG vl = rv == CKR_OK ? read_ulong(h, CKA_VALUE_LEN) : 0;
+        bool ok = rv == CKR_OK && kt == CKK_AES_XTS && gm == CKM_AES_XTS_KEY_GEN && vl == 64;
+        record_result(CAT, "CKM_AES_XTS_KEY_GEN_keytype_length_mech", ok ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv) + " keyType=" + std::to_string(kt) + " genMech=" + std::to_string(gm) + " len=" + std::to_string(vl));
+    }
+
+    // ── §6.3.9: CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS makes a usable CKK_EC pair.
+    {
+        CK_BYTE p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_BBOOL t = CK_TRUE, f = CK_FALSE;
+        CK_MECHANISM kg = { CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, NULL_PTR, 0 };
+        CK_ATTRIBUTE pubT[] = { { CKA_EC_PARAMS, p256, sizeof(p256) }, { CKA_TOKEN, &f, sizeof(f) }, { CKA_VERIFY, &t, sizeof(t) } };
+        CK_ATTRIBUTE privT[] = { { CKA_SIGN, &t, sizeof(t) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_OBJECT_HANDLE hp = 0, hs = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kg, pubT, 3, privT, 2, &hp, &hs);
+        CK_ULONG kt = rv == CKR_OK ? read_ulong(hs, CKA_KEY_TYPE) : 0;
+        CK_ULONG gm = rv == CKR_OK ? read_ulong(hs, CKA_KEY_GEN_MECHANISM) : 0;
+        bool signed_ok = false;
+        if (rv == CKR_OK) {
+            CK_MECHANISM ec = { CKM_ECDSA, NULL_PTR, 0 };
+            CK_BYTE digest[32] = { 1 };
+            CK_BYTE sig[64]; CK_ULONG sl = sizeof(sig);
+            signed_ok = fl->C_SignInit(hSess, &ec, hs) == CKR_OK && fl->C_Sign(hSess, digest, 32, sig, &sl) == CKR_OK &&
+                        fl->C_VerifyInit(hSess, &ec, hp) == CKR_OK && fl->C_Verify(hSess, digest, 32, sig, sl) == CKR_OK;
+        }
+        bool ok = rv == CKR_OK && kt == CKK_EC && gm == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS && signed_ok;
+        record_result(CAT, "CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS_signs", ok ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv) + " keyType=" + std::to_string(kt) + " genMech=" + std::to_string(gm) +
+                      " sign+verify=" + (signed_ok ? "ok" : "failed"));
+    }
+
+    // ── Vendor Classic McEliece: keygen, encapsulate, decapsulate, and both
+    // sides hold the same shared secret (smallest set, 348864).
+    {
+        typedef CK_RV (*Encap_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+        typedef CK_RV (*Decap_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+        void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+        Encap_t EncapFn = dlib ? (Encap_t)dlsym(dlib, "C_EncapsulateKey") : NULL;
+        Decap_t DecapFn = dlib ? (Decap_t)dlsym(dlib, "C_DecapsulateKey") : NULL;
+        CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE kt = CKK_PQCTODAY_CLASSIC_MCELIECE;
+        CK_ULONG ps = CKP_CLASSIC_MCELIECE_348864;
+        CK_BBOOL t = CK_TRUE, f = CK_FALSE;
+        CK_ATTRIBUTE pubT[] = { { CKA_CLASS, &pubC, sizeof(pubC) }, { CKA_KEY_TYPE, &kt, sizeof(kt) },
+                                { CKA_ENCAPSULATE, &t, sizeof(t) }, { CKA_PARAMETER_SET, &ps, sizeof(ps) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_ATTRIBUTE privT[] = { { CKA_CLASS, &privC, sizeof(privC) }, { CKA_KEY_TYPE, &kt, sizeof(kt) },
+                                 { CKA_DECAPSULATE, &t, sizeof(t) }, { CKA_PARAMETER_SET, &ps, sizeof(ps) }, { CKA_TOKEN, &f, sizeof(f) } };
+        CK_MECHANISM kg = { CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hp = 0, hs = 0;
+        CK_RV rv = (EncapFn && DecapFn) ? fl->C_GenerateKeyPair(hSess, &kg, pubT, 5, privT, 5, &hp, &hs) : CKR_FUNCTION_NOT_SUPPORTED;
+        std::vector<CK_BYTE> s1, s2;
+        if (rv == CKR_OK) {
+            CK_MECHANISM em = { CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, NULL_PTR, 0 };
+            CK_OBJECT_CLASS sc = CKO_SECRET_KEY; CK_KEY_TYPE gk = CKK_GENERIC_SECRET; CK_ULONG sl = 32;
+            CK_ATTRIBUTE st[] = { { CKA_CLASS, &sc, sizeof(sc) }, { CKA_KEY_TYPE, &gk, sizeof(gk) }, { CKA_VALUE_LEN, &sl, sizeof(sl) },
+                                  { CKA_TOKEN, &f, sizeof(f) }, { CKA_EXTRACTABLE, &t, sizeof(t) }, { CKA_SENSITIVE, &f, sizeof(f) } };
+            std::vector<CK_BYTE> ct(4096); CK_ULONG ctLen = ct.size();
+            CK_OBJECT_HANDLE h1 = 0, h2 = 0;
+            rv = EncapFn(hSess, &em, hp, st, 6, ct.data(), &ctLen, &h1);
+            if (rv == CKR_OK) rv = DecapFn(hSess, &em, hs, st, 6, ct.data(), ctLen, &h2);
+            if (rv == CKR_OK) { s1 = read_value(h1); s2 = read_value(h2); }
+        }
+        bool ok = rv == CKR_OK && !s1.empty() && s1 == s2;
+        record_result(CAT, "CLASSIC_MCELIECE_348864_encap_decap_roundtrip", ok ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv) + " ss_len=" + std::to_string(s1.size()));
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * test_2f_nonforward_coverage  (plan 2.F, 2026-09-27)
+ *
+ * Replaces the invariant's 48 placeholder SKIPs. Every advertised mechanism
+ * with no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag must be NAMED by at least
+ * one test in this file that PASSED in this run; otherwise FAIL. The claim
+ * "covered by this file's per-mechanism tests" used to be free text — for 16
+ * mechanisms it was false and nothing noticed. Runs last, because many of the
+ * covering tests run after the invariant. A mechanism absent from the map is
+ * a FAIL too: a newly advertised derive/generate/wrap mechanism has to arrive
+ * with a test.
+ * ------------------------------------------------------------------------- */
+static bool test_passed(const std::string& catTest) {
+    size_t slash = catTest.find('/');
+    std::string cat = catTest.substr(0, slash), name = catTest.substr(slash + 1);
+    if (!report.contains(cat)) return false;
+    for (auto& r : report[cat]) if (r["test"] == name && r["status"] == "PASS") return true;
+    return false;
+}
+
+void test_2f_nonforward_coverage() {
+    const char* CAT = "NonForwardCoverage";
+    static const std::map<CK_MECHANISM_TYPE, std::vector<std::string>> covered = {
+        { CKM_AES_CBC_ENCRYPT_DATA,        { "GapAes/CBC_ENCRYPT_DATA_derive" } },
+        { CKM_AES_ECB_ENCRYPT_DATA,        { "GapAes/ECB_ENCRYPT_DATA_derive" } },
+        { CKM_AES_KEY_GEN,                 { "KcvTemplate/GenerateKey_AES_KCV_matches_oracle" } },
+        { CKM_AES_KEY_WRAP,                { "WrapTemplate/Wrap_without_template_baseline" } },
+        { CKM_AES_KEY_WRAP_KWP,            { "AesKwp/KWP_roundtrip" } },
+        { CKM_AES_KEY_WRAP_PAD,            { "GapAes/KEY_WRAP_PAD_roundtrip" } },
+        { CKM_AES_XTS_KEY_GEN,             { "2F/CKM_AES_XTS_KEY_GEN_keytype_length_mech" } },
+        { CKM_BIP32_CHILD_DERIVE,          { "BIP32/Child_Derive" } },
+        { CKM_BIP32_MASTER_DERIVE,         { "BIP32/Master_Derive" } },
+        { CKM_CHACHA20_KEY_GEN,            { "G2ChaCha20/Keygen_KeyType" } },
+        { CKM_CONCATENATE_BASE_AND_DATA,   { "KcvTemplate/DeriveKey_Concat_correct_value_accepted" } },
+        { CKM_CONCATENATE_BASE_AND_KEY,    { "HybridKEM/Combine_send" } },
+        { CKM_CONCATENATE_DATA_AND_BASE,   { "GapDerive/CONCATENATE_DATA_AND_BASE" } },
+        { CKM_ECDH1_COFACTOR_DERIVE,       { "2F/CKM_ECDH1_COFACTOR_DERIVE_P256_agrees" } },
+        { CKM_ECDH1_DERIVE,                { "ECDH/Derive_X25519", "2F/CKM_ECDH1_COFACTOR_DERIVE_P256_agrees" } },
+        { CKM_EC_EDWARDS_KEY_PAIR_GEN,     { "EdDSA/Generate_Ed25519" } },
+        { CKM_EC_KEY_PAIR_GEN,             { "ECDSA/Generate_P256" } },
+        { CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,{ "2F/CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS_signs" } },
+        { CKM_EC_MONTGOMERY_KEY_PAIR_GEN,  { "ECDH/Generate_X25519" } },
+        { CKM_GENERIC_SECRET_KEY_GEN,      { "KcvTemplate/GenerateKey_Generic_KCV_matches_oracle" } },
+        { CKM_HKDF_DATA,                   { "2F/CKM_HKDF_DATA_matches_RFC5869_A1" } },
+        { CKM_HKDF_DERIVE,                 { "KDF/CKM_HKDF_DERIVE" } },
+        { CKM_HSS_KEY_PAIR_GEN,            { "G3Keygen/V21_HSS_keys_remaining" } },
+        { CKM_ML_DSA_KEY_PAIR_GEN,         { "DSA/Generate_ML_DSA_44" } },
+        { CKM_ML_KEM,                      { "KEM/C_EncapsulateKey_512" } },
+        { CKM_ML_KEM_KEY_PAIR_GEN,         { "KEM/Generate_ML_KEM_512" } },
+        { CKM_PKCS5_PBKD2,                 { "KDF/CKM_PKCS5_PBKD2" } },
+        { CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, { "2F/CLASSIC_MCELIECE_348864_encap_decap_roundtrip" } },
+        { CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, { "2F/CLASSIC_MCELIECE_348864_encap_decap_roundtrip" } },
+        { CKM_RSA_AES_KEY_WRAP,            { "GapRsaCipher/RSA_AES_KEY_WRAP_roundtrip" } },
+        { CKM_RSA_PKCS_KEY_PAIR_GEN,       { "Classical/Generate_RSA_2048" } },
+        { CKM_SHA256_KEY_DERIVATION,       { "2F/CKM_SHA256_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA384_KEY_DERIVATION,       { "2F/CKM_SHA384_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA512_KEY_DERIVATION,       { "2F/CKM_SHA512_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA512_224_KEY_DERIVATION,   { "2F/CKM_SHA512_224_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA512_256_KEY_DERIVATION,   { "2F/CKM_SHA512_256_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA3_256_KEY_DERIVATION,     { "2F/CKM_SHA3_256_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA3_384_KEY_DERIVATION,     { "2F/CKM_SHA3_384_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHA3_512_KEY_DERIVATION,     { "2F/CKM_SHA3_512_KEY_DERIVATION_matches_digest_oracle" } },
+        { CKM_SHAKE_256_KEY_DERIVATION,    { "KDF/CKM_SHAKE_256_KEY_DERIVATION" } },
+        { CKM_SLH_DSA_KEY_PAIR_GEN,        { "SLHDSA/Generate_SLH_DSA_SHA2_128S" } },
+        { CKM_SP800_108_COUNTER_KDF,       { "KDF/CKM_SP800_108_COUNTER_KDF" } },
+        { CKM_SP800_108_DOUBLE_PIPELINE_KDF, { "2F/CKM_SP800_108_DOUBLE_PIPELINE_KDF_ACVP" } },
+        { CKM_SP800_108_FEEDBACK_KDF,      { "KDF/CKM_SP800_108_FEEDBACK_KDF" } },
+        { CKM_X25519,                      { "2F/CKM_X25519_derive_RFC7748" } },
+        { CKM_X448,                        { "2F/CKM_X448_derive_RFC7748" } },
+        { CKM_XMSSMT_KEY_PAIR_GEN,         { "G3Keygen/V8_XMSSMT_keygen" } },
+        { CKM_XMSS_KEY_PAIR_GEN,           { "XMSS/Generate_XMSS_SHA2_10_256" } },
+    };
+    int ok = 0, bad = 0;
+    for (CK_MECHANISM_TYPE m : g_nonforward_mechs) {
+        auto it = covered.find(m);
+        std::string label = mech_hex(m);
+        if (it == covered.end()) {
+            bad++;
+            record_result(CAT, label, "FAIL", "advertised without a forward operation, and no test in this file is mapped to it");
+            continue;
+        }
+        std::string passedBy;
+        for (auto& t : it->second) if (test_passed(t)) { passedBy = t; break; }
+        if (passedBy.empty()) {
+            bad++;
+            std::string names;
+            for (auto& t : it->second) names += (names.empty() ? "" : ", ") + t;
+            record_result(CAT, label, "FAIL", "none of its covering tests passed in this run: " + names);
+        } else {
+            ok++;
+            record_result(CAT, label, "PASS", "covered by " + passedBy);
+        }
+    }
+    record_result(CAT, "Summary", bad == 0 ? "PASS" : "FAIL",
+                  std::to_string(g_nonforward_mechs.size()) + " non-forward mechanisms: " + std::to_string(ok) +
+                  " covered by a passing named test, " + std::to_string(bad) + " not");
 }
 
 // ─── G3: keygen template validation + XMSSMT enablement + real AES-CBC wrap ──
@@ -10756,6 +11314,16 @@ int main(int argc, char** argv) {
 #endif
         refresh_session(); test_bip32_wallets();
     }
+    if (opt_category == "all" || opt_category == "2f") {
+        refresh_session(); test_2f_hidden_coverage();
+    }
+    if (opt_category == "all" || opt_category == "packing") {
+        test_3c_structure_packing();
+    }
+    // Last, and only on a full run: it checks tests from every category.
+    if (opt_category == "all") {
+        refresh_session(); test_2f_nonforward_coverage();
+    }
     
     fl->C_Finalize(NULL);
     
@@ -10790,8 +11358,9 @@ int main(int argc, char** argv) {
     md << "- **Total SKIP:** " << total_skip << "\n";
     md << "- **Total XFAIL (known engine bugs, documented in-line):** " << total_xfail << "\n\n";
     md << "Status legend: PASS = spec-conformant behavior for an advertised feature; "
-          "FAIL = unexpected non-conformance; SKIP = feature not advertised by the token "
-          "(v3.2 mandates no particular mechanism set); XFAIL = known, pre-existing engine "
+          "FAIL = unexpected non-conformance; SKIP = a check that could not be observed "
+          "(the details say why — e.g. a feature the token does not advertise, or a value "
+          "no caller can know in advance); XFAIL = known, pre-existing engine "
           "non-conformance reported here but outside this suite's scope to fix.\n\n";
 
     for (auto it = report.begin(); it != report.end(); ++it) {

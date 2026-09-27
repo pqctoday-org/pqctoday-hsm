@@ -1,5 +1,4 @@
 use rand_chacha::ChaCha20Rng;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
@@ -28,6 +27,147 @@ impl<T> GlobalState<T> {
     #[track_caller]
     pub fn borrow(&self) -> MutexGuard<'_, T> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A per-session table split into `SHARDS` independently locked maps, chosen
+/// by session handle. A3 (AES plan, 2026-09-27): every per-session table used
+/// to be ONE `Mutex<HashMap>`, so every operation of every session on every
+/// thread serialised on the same few locks. Measured on the M4 Pro, small
+/// operations lost throughput as workers were added (SHA-256 64 B: 5.19M
+/// ops/s with one worker per tenant, 1.22M with two). Sessions are
+/// single-threaded by PKCS#11 rules (§5.6), so two sessions never need each
+/// other's entries; sharding by handle gives each session its own lock in
+/// practice, while the whole-table operations (C_CloseAllSessions,
+/// C_Finalize) still reach every entry through `for_each_shard`.
+///
+/// Lock-order rule for callers: hold at most ONE shard of a given table at a
+/// time. Two keys can map to the same shard and std `Mutex` is not
+/// re-entrant, so a second `shard()` call on the same table while holding a
+/// guard can self-deadlock. Different tables may still be nested exactly as
+/// the single-lock tables were.
+pub const SHARDS: usize = 64;
+
+pub struct Sharded<C> {
+    shards: Box<[Mutex<C>]>,
+}
+
+impl<C: Default> Sharded<C> {
+    pub fn new() -> Self {
+        Self { shards: (0..SHARDS).map(|_| Mutex::new(C::default())).collect() }
+    }
+}
+
+impl<C> Sharded<C> {
+    #[inline]
+    fn index(key: u32) -> usize {
+        (key as usize) % SHARDS
+    }
+    /// The shard holding `key`'s entry. Poisoning is ignored, as `GlobalState`
+    /// does.
+    #[track_caller]
+    #[inline]
+    pub fn shard(&self, key: u32) -> MutexGuard<'_, C> {
+        self.shards[Self::index(key)].lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Same entry-point shape as `GlobalState::with`, so a converted call
+    /// site reads `TABLE.with(|s| s.shard(h).…)`.
+    pub fn with<R, F: FnOnce(&Self) -> R>(&self, f: F) -> R {
+        f(self)
+    }
+    /// Run `f` on every shard in turn, one lock at a time (clear, retain,
+    /// counting). Never call `shard()` on the same table inside `f`.
+    pub fn for_each_shard(&self, mut f: impl FnMut(&mut C)) {
+        for m in self.shards.iter() {
+            f(&mut m.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+    }
+}
+
+impl<V> Sharded<HashMap<u32, V>> {
+    /// True if any entry satisfies `f`. Shards are visited one at a time, so
+    /// the answer is not a single atomic snapshot of the whole table; it
+    /// never was a guarantee past the call anyway, since the old single lock
+    /// was released before the caller acted on the answer.
+    pub fn any(&self, mut f: impl FnMut(&u32, &V) -> bool) -> bool {
+        let mut hit = false;
+        self.for_each_shard(|m| {
+            if !hit {
+                hit = m.iter().any(|(k, v)| f(k, v));
+            }
+        });
+        hit
+    }
+    /// Keys of the entries satisfying `f`.
+    pub fn keys_where(&self, mut f: impl FnMut(&u32, &V) -> bool) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.for_each_shard(|m| out.extend(m.iter().filter(|(k, v)| f(k, v)).map(|(k, _)| *k)));
+        out
+    }
+    /// Insert into `key`'s shard (one lock, released on return).
+    pub fn insert(&self, key: u32, v: V) -> Option<V> {
+        self.shard(key).insert(key, v)
+    }
+    /// Entries across all shards (tests and diagnostics).
+    pub fn len(&self) -> usize {
+        let mut n = 0;
+        self.for_each_shard(|m| n += m.len());
+        n
+    }
+}
+
+/// Bumped by every write access to `OBJECTS` (see `ObjectTable::borrow_mut`).
+/// A3: an operation context caches its expanded AES key schedule at Init
+/// together with the epoch it read; at operation time the cache is used only
+/// if the epoch is unchanged, so any object write since Init (a destroyed
+/// key, a changed attribute, a new object, anything) sends the operation back
+/// to re-reading the key from the object table exactly as before. It
+/// over-invalidates on purpose: correctness never depends on knowing which
+/// write touched which key.
+pub static OBJECT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+pub fn object_epoch() -> u64 {
+    OBJECT_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The object table, behind a read/write lock with the read and write paths
+/// split. `borrow()` hands out a shared read guard, so concurrent operations
+/// looking up their keys no longer queue behind each other (A3: with a
+/// single `Mutex` here, AES Init + op stopped scaling past two workers even
+/// after the per-session tables were sharded). Code that mutates must go
+/// through `borrow_mut()`, which takes the exclusive lock and bumps
+/// `OBJECT_EPOCH`; the compiler rejects a mutation through a read guard.
+pub struct ObjectTable(std::sync::RwLock<HashMap<u32, Attributes>>);
+
+pub struct ObjectsRead<'a>(std::sync::RwLockReadGuard<'a, HashMap<u32, Attributes>>);
+
+impl std::ops::Deref for ObjectsRead<'_> {
+    type Target = HashMap<u32, Attributes>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ObjectTable {
+    pub fn new() -> Self {
+        Self(std::sync::RwLock::new(HashMap::new()))
+    }
+    pub fn with<R, F: FnOnce(&Self) -> R>(&self, f: F) -> R {
+        f(self)
+    }
+    #[track_caller]
+    pub fn borrow(&self) -> ObjectsRead<'_> {
+        ObjectsRead(self.0.read().unwrap_or_else(|e| e.into_inner()))
+    }
+    /// Write access. The epoch moves before the guard is handed out, so an
+    /// operation that compares epochs after this point can never use a key
+    /// schedule cached before the write.
+    #[track_caller]
+    pub fn borrow_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<u32, Attributes>> {
+        let g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        OBJECT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        g
     }
 }
 
@@ -70,9 +210,9 @@ pub static UNIQUE_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::
 pub static NEXT_SESSION_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 lazy_static! {
-    pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
-    pub static ref SIGN_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
-    pub static ref VERIFY_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
+    pub static ref OBJECTS: ObjectTable = ObjectTable::new();
+    pub static ref SIGN_STATE: Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = Sharded::new();
+    pub static ref VERIFY_STATE: Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = Sharded::new();
     /// §5.13 sign/verify-WITH-RECOVERY state (2026-07-25 — RSA_PKCS/RSA_X_509
     /// only, single-part-only per spec; `(mech_type, h_key)`, no ctx/det
     /// fields needed since RSA sign-recover takes no additional params).
@@ -97,24 +237,24 @@ lazy_static! {
     /// removed in lockstep with SIGN_STATE/VERIFY_STATE (a deliberate,
     /// bounded simplification -- at most one u32 per session that has
     /// ever used the generic mechanism, not a per-operation leak).
-    pub static ref GENERIC_HASH_STATE: GlobalState<HashMap<u32, u32>> = GlobalState::new(HashMap::new());
-    pub static ref SIGN_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
-    pub static ref VERIFY_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
-    pub static ref VERIFY_SIG_STATE: GlobalState<HashMap<u32, VerifySigCtx>> = GlobalState::new(HashMap::new());
-    pub static ref ENCRYPT_STATE: GlobalState<HashMap<u32, EncryptCtx>> = GlobalState::new(HashMap::new());
-    pub static ref DECRYPT_STATE: GlobalState<HashMap<u32, EncryptCtx>> = GlobalState::new(HashMap::new());
-    pub static ref MESSAGE_ENCRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
-    pub static ref MESSAGE_DECRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
-    pub static ref DIGEST_STATE: GlobalState<HashMap<u32, DigestCtx>> = GlobalState::new(HashMap::new());
+    pub static ref GENERIC_HASH_STATE: Sharded<HashMap<u32, u32>> = Sharded::new();
+    pub static ref SIGN_RECOVER_STATE: Sharded<HashMap<u32, (u32, u32)>> = Sharded::new();
+    pub static ref VERIFY_RECOVER_STATE: Sharded<HashMap<u32, (u32, u32)>> = Sharded::new();
+    pub static ref VERIFY_SIG_STATE: Sharded<HashMap<u32, VerifySigCtx>> = Sharded::new();
+    pub static ref ENCRYPT_STATE: Sharded<HashMap<u32, EncryptCtx>> = Sharded::new();
+    pub static ref DECRYPT_STATE: Sharded<HashMap<u32, EncryptCtx>> = Sharded::new();
+    pub static ref MESSAGE_ENCRYPT_STATE: Sharded<HashMap<u32, MsgAeadCtx>> = Sharded::new();
+    pub static ref MESSAGE_DECRYPT_STATE: Sharded<HashMap<u32, MsgAeadCtx>> = Sharded::new();
+    pub static ref DIGEST_STATE: Sharded<HashMap<u32, DigestCtx>> = Sharded::new();
     /// Sessions whose digest op entered the multi-part phase (C_DigestUpdate
     /// called). PKCS#11 v3.2 §5.13 convention — the one-shot C_Digest is then
     /// CKR_OPERATION_ACTIVE until the op finishes. Maintained strictly in
     /// lockstep with DIGEST_STATE removal/clear sites.
-    pub static ref DIGEST_MULTIPART: GlobalState<std::collections::HashSet<u32>> = GlobalState::new(std::collections::HashSet::new());
+    pub static ref DIGEST_MULTIPART: Sharded<std::collections::HashSet<u32>> = Sharded::new();
     /// C_SignMessageBegin/Next accumulator (message parts between Begin and the final Next).
-    pub static ref MESSAGE_SIGN_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    pub static ref MESSAGE_SIGN_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// C_VerifyMessageBegin/Next accumulator.
-    pub static ref MESSAGE_VERIFY_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    pub static ref MESSAGE_VERIFY_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// T4 — C_SignUpdate accumulator. Presence of a session key marks the
     /// sign op as having entered its multi-part phase (the one-shot C_Sign is
     /// then CKR_OPERATION_ACTIVE until C_SignFinal — mirrors
@@ -123,17 +263,17 @@ lazy_static! {
     /// lockstep with SIGN_STATE removal/clear sites. Follow-up (NOT this
     /// slice): stream the hash-composite mechanisms into an incremental
     /// digest to bound memory instead of accumulating the whole message.
-    pub static ref SIGN_MULTIPART_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    pub static ref SIGN_MULTIPART_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// T4 — C_VerifyUpdate accumulator (see SIGN_MULTIPART_ACC).
-    pub static ref VERIFY_MULTIPART_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
-    pub static ref FIND_STATE: GlobalState<HashMap<u32, FindCtx>> = GlobalState::new(HashMap::new());
+    pub static ref VERIFY_MULTIPART_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
+    pub static ref FIND_STATE: Sharded<HashMap<u32, FindCtx>> = Sharded::new();
     /// Persistent ACVP deterministic RNG — created once in C_Initialize, advances
     /// across all operations, cleared in C_Finalize. Uses IETF ChaCha20 (RFC 8439)
     /// to match the C++ OpenSSL EVP_chacha20 implementation.
     pub static ref ACVP_RNG: GlobalState<Option<ChaCha20Rng>> = GlobalState::new(None);
 
     // PKCS#11 v3.2 token and session tracking
-    pub static ref SESSIONS: GlobalState<HashMap<u32, SessionState>> = GlobalState::new(HashMap::new());
+    pub static ref SESSIONS: Sharded<HashMap<u32, SessionState>> = Sharded::new();
     pub static ref TOKEN_STORE: GlobalState<HashMap<u32, TokenState>> = GlobalState::new(HashMap::new());
 }
 
@@ -320,6 +460,13 @@ pub struct EncryptCtx {
     /// any non-zero value, which defeated the field's entire purpose and made
     /// random-access ChaCha20 unusable. Zero for every other mechanism.
     pub block_counter: u64,
+    /// A3 — the expanded AES key schedule, built at Init for the
+    /// mechanisms that run on `AesKey`, with the `OBJECT_EPOCH` read before
+    /// the key bytes were. Used by the one-shot C_Encrypt / C_Decrypt only
+    /// while the epoch is unchanged (`cached_aes_key` in ffi.rs); any object
+    /// write since Init falls back to re-reading the key. `None` for every
+    /// other mechanism.
+    pub aes_key: Option<(u64, crate::crypto::multipart::AesKey)>,
 }
 
 /// PKCS#11 v3.2 §5.15 message-based AEAD state (C_MessageEncryptInit …
@@ -373,7 +520,65 @@ pub struct VerifySigCtx {
 /// * `CKA_TRUSTED`            (0x086) — default `FALSE` — public keys and secret keys
 /// * `CKA_WRAP_WITH_TRUSTED`  (0x210) — default `FALSE` — private keys and secret keys
 /// * `CKA_ALWAYS_AUTHENTICATE`(0x202) — default `FALSE` — private keys only
+/// True for a private key of one of the three hash-based one-time-signature
+/// types (PKCS#11 v3.2 §6.65 HSS/LMS, §6.66 XMSS/XMSS-MT). `attrs` carries
+/// CKA_VALUE / vendor state attributes holding one-time signature state; a
+/// second live copy or an exported value can independently advance or
+/// replay that state, producing two valid signatures over the same
+/// one-time key — the forgery hazard these schemes exist to prevent.
+fn is_stateful_signature_private_key(attrs: &Attributes) -> bool {
+    if get_object_attr_u32_from(attrs, CKA_CLASS) != Some(CKO_PRIVATE_KEY) {
+        return false;
+    }
+    matches!(
+        get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+        Some(CKK_HSS) | Some(CKK_XMSS) | Some(CKK_XMSSMT)
+    )
+}
+
+/// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE
+/// MUST be false, and CKA_COPYABLE MUST be false for this key." §6.66.4/
+/// §6.66.5 (XMSS/XMSS-MT) name only the first two in that exact wording —
+/// this engine treats the underlying hazard (see
+/// [`is_stateful_signature_private_key`]) as identical across all three key
+/// types and enforces CKA_COPYABLE FALSE for XMSS/XMSS-MT too, matching the
+/// equivalent C++ engine hardening.
+///
+/// Called on an already-merged attribute map (defaults + any caller
+/// template): a template that omits one of the three is silently fine (the
+/// caller of this function, or `apply_object_defaults`, fills the mandated
+/// value); one that restates the mandated value is a harmless no-op; one
+/// that contradicts it is rejected — a caller may never override, only
+/// confirm.
+pub fn reject_stateful_signature_key_override(attrs: &Attributes) -> Result<(), u32> {
+    if !is_stateful_signature_private_key(attrs) {
+        return Ok(());
+    }
+    if attrs.contains_key(&CKA_SENSITIVE) && !read_bool_attr(attrs, CKA_SENSITIVE) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    if attrs.contains_key(&CKA_EXTRACTABLE) && read_bool_attr(attrs, CKA_EXTRACTABLE) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    if attrs.contains_key(&CKA_COPYABLE) && read_bool_attr(attrs, CKA_COPYABLE) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(())
+}
+
 fn apply_object_defaults(attrs: &mut Attributes) {
+    // §4.4 Table — every storage object has CKA_TOKEN, "CK_TRUE if object is
+    // a token object; CK_FALSE if object is a session object. Default is
+    // CK_FALSE." The engine READ this correctly everywhere (read_bool_attr
+    // treats absent as false) but never materialised it, so
+    // C_GetAttributeValue answered CKR_ATTRIBUTE_TYPE_INVALID — "the object
+    // does not possess such an attribute" — for an attribute every storage
+    // object possesses by definition. Surfaced by the new CKO_TRUST
+    // differential scenario, the first one that does not pass CKA_TOKEN in
+    // its own template; C++ has always materialised it.
+    if !attrs.contains_key(&CKA_TOKEN) {
+        store_bool(attrs, CKA_TOKEN, false);
+    }
     if !attrs.contains_key(&CKA_MODIFIABLE) {
         store_bool(attrs, CKA_MODIFIABLE, true);
     }
@@ -392,6 +597,23 @@ fn apply_object_defaults(attrs: &mut Attributes) {
         }
     });
     if let Some(class) = obj_class {
+        // §4.7 — a trust object's own defaults are spelled out in prose rather
+        // than in Table 25: "If CKA_MODIFIABLE is not set in the template, it
+        // defaults to CK_TRUE; if CKA_PRIVATE is not set in the template, it
+        // defaults to CK_FALSE." CKA_MODIFIABLE is already handled above for
+        // every class; CKA_PRIVATE was not set for this one at all.
+        //
+        // CKA_NAME_HASH_ALGORITHM's row says it "defaults to SHA-1 if not
+        // present", so materialise that rather than leaving the caller to
+        // guess which hash CKA_HASH_OF_CERTIFICATE was computed with.
+        if class == CKO_TRUST {
+            if !attrs.contains_key(&CKA_PRIVATE) {
+                store_bool(attrs, CKA_PRIVATE, false);
+            }
+            if !attrs.contains_key(&CKA_NAME_HASH_ALGORITHM) {
+                store_ulong(attrs, CKA_NAME_HASH_ALGORITHM, CKM_SHA_1);
+            }
+        }
         // CKA_TRUSTED: public keys + secret keys (object is not trusted-marked by default)
         if (class == CKO_PUBLIC_KEY || class == CKO_SECRET_KEY) && !attrs.contains_key(&CKA_TRUSTED)
         {
@@ -455,23 +677,35 @@ fn apply_object_defaults(attrs: &mut Attributes) {
             }
         }
     }
+    // Defense-in-depth companion to `reject_stateful_signature_key_override`:
+    // every creation path (C_CreateObject, C_GenerateKeyPair, and any future
+    // one) funnels through `allocate_handle`, which calls this function last.
+    // A path that forgot to call the reject-on-override check still cannot
+    // produce a stateful-signature private key with a defeated invariant —
+    // this unconditionally forces the mandated value rather than only
+    // filling an absent one.
+    if is_stateful_signature_private_key(attrs) {
+        store_bool(attrs, CKA_SENSITIVE, true);
+        store_bool(attrs, CKA_EXTRACTABLE, false);
+        store_bool(attrs, CKA_COPYABLE, false);
+    }
 }
 
 /// Return the slot id backing a session handle, if the session exists.
 pub fn session_slot(h_session: u32) -> Option<u32> {
-    SESSIONS.with(|s| s.borrow().get(&h_session).map(|ss| ss.slot_id))
+    SESSIONS.shard(h_session).get(&h_session).map(|ss| ss.slot_id)
 }
 
 /// True if a session handle refers to a live session.
 pub fn session_exists(h_session: u32) -> bool {
-    SESSIONS.with(|s| s.borrow().contains_key(&h_session))
+    SESSIONS.shard(h_session).contains_key(&h_session)
 }
 
 /// True if the session is read/write (CKF_RW_SESSION). Returns false for an
 /// unknown handle.
 pub fn session_is_rw(h_session: u32) -> bool {
     SESSIONS.with(|s| {
-        s.borrow()
+        s.shard(h_session)
             .get(&h_session)
             .map(|ss| ss.rw_session)
             .unwrap_or(false)
@@ -538,18 +772,17 @@ pub fn token_info_flags(token: &TokenState) -> u32 {
 /// Live (total, read-write) session counts for a slot, from the session
 /// table — backs CK_TOKEN_INFO.ulSessionCount / ulRwSessionCount.
 pub fn session_counts(slot_id: u32) -> (u32, u32) {
-    SESSIONS.with(|s| {
-        let store = s.borrow();
-        let mut total = 0u32;
-        let mut rw = 0u32;
+    let mut total = 0u32;
+    let mut rw = 0u32;
+    SESSIONS.for_each_shard(|store| {
         for ss in store.values().filter(|ss| ss.slot_id == slot_id) {
             total += 1;
             if ss.rw_session {
                 rw += 1;
             }
         }
-        (total, rw)
-    })
+    });
+    (total, rw)
 }
 
 /// True if the session's token is logged in (User or SO).
@@ -1303,37 +1536,35 @@ pub fn get_object_value_from(attrs: &Attributes) -> Option<Vec<u8>> {
     attrs.get(&CKA_VALUE).cloned()
 }
 
-/// PKCS#11 v3.2 §2.3.3 — strip the DER OCTET STRING header some CKA_EC_POINT
-/// values carry around the raw SEC1 point. See [`get_ec_point_sec1_from`].
-fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
-    // Two encodings exist:
-    //   - Short form  : 0x04 <len ≤ 127> <data>            (len = data.len())
-    //   - Long form 1B: 0x04 0x81 <len> <data>             (P-521 path — data=133)
-    // P-256 / P-384 / secp256k1 fit short form (65 / 97 / 65 ≤ 127).
-    // P-521's 133-byte SEC1 point requires long form.
-    //
-    // The tag byte ALONE cannot tell the two apart, and assuming it can was a
-    // real, silent, data-dependent bug (found 2026-09-02). A raw uncompressed
-    // SEC1 point also begins 0x04 — that is its "uncompressed" marker, not a
-    // DER OCTET STRING tag — so for a raw 65-byte P-256 point the old code
-    // compared ec_point[1], which is simply the FIRST BYTE OF THE X
-    // COORDINATE, against len-2 (= 63). Whenever X started with byte 63 it
-    // stripped two bytes off a perfectly good point and returned 63 bytes of
-    // garbage, which downstream surfaces as a bogus CKR_ARGUMENTS_BAD from
-    // p256::PublicKey::from_sec1_bytes. That is ~1 imported P-256 key in 256.
-    // The same trap applies to the bare Edwards/Montgomery values this
-    // function also serves (see get_key_material_from): a 32-byte X25519
-    // point whose first two bytes happen to be 0x04, 0x1e would be mangled
-    // identically. Engine-GENERATED keys always take the DER-wrapped path
-    // (native::keygen writes 0x04 <len> <point>), so this only ever bit
-    // IMPORTED keys — which is exactly why the test suite never caught it.
-    //
-    // Fix: decide on LENGTH, which is unambiguous here, not on the tag byte.
-    // Every key type this engine stores in CKA_EC_POINT has a known raw size,
-    // and no DER-wrapped total collides with any raw size (wrapped totals are
-    // 34/58/59/67/99/136; raw are 32/56/57/65/97/133), so the two sets can be
-    // told apart exactly rather than guessed at.
-    const RAW_LENS: [usize; 6] = [
+/// PKCS#11 v3.2 §2.3.5 (`CK_ECDH1_DERIVE_PARAMS.pPublicData`) and §2.3.3
+/// (`CKA_EC_POINT`) both allow a peer/stored EC point in two forms: a raw
+/// SEC1/RFC 7748 octet string (the MUST form for pPublicData; the form this
+/// engine itself writes for Montgomery CKA_VALUE) or a DER OCTET STRING
+/// wrapping it (the MAY form; what this engine writes for CKA_EC_POINT).
+///
+/// Which form is present is decided by LENGTH, never by the leading tag
+/// byte. A raw uncompressed SEC1 point also begins `0x04` — that is its
+/// "uncompressed point" marker, not a DER OCTET STRING tag — so sniffing the
+/// tag byte and then reading the NEXT byte as a DER length is reading the
+/// first byte of the X coordinate instead. Whenever X happens to equal
+/// `len - 2` (1 point in 256 for P-256/P-384/P-521; found live 2026-09-02 as
+/// a silent import bug here, and again 2026-09-03 as an intermittent
+/// `C_DeriveKey(CKM_ECDH1_DERIVE)` → `CKR_ARGUMENTS_BAD` — three independent
+/// copies of this exact mistake existed in this crate before this function
+/// became the one place the decision is made), two bytes get stripped off a
+/// perfectly good point and the truncated remainder fails to parse.
+///
+/// `raw_len`: the caller's known raw-point size for the curve/key already in
+/// hand (`Some(65)` for P-256, etc.) — pass this whenever the curve is known,
+/// which anchors the length check exactly and makes the ambiguity above
+/// impossible. Pass `None` only when no such ground truth exists (e.g. a
+/// `CKA_EC_POINT` attribute read with no key-type context at hand); the
+/// fallback then matches against every raw size this engine ever stores,
+/// which cannot collide with any DER-wrapped total (wrapped totals are
+/// 34/58/59/67/99/136; raw are 32/56/57/65/97/133) but is strictly weaker
+/// disambiguation than a known `raw_len`.
+pub(crate) fn unwrap_peer_ec_point(data: &[u8], raw_len: Option<usize>) -> &[u8] {
+    const KNOWN_RAW_LENS: [usize; 6] = [
         32,  // X25519 / Ed25519
         56,  // X448
         57,  // Ed448
@@ -1341,28 +1572,39 @@ fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
         97,  // P-384
         133, // P-521
     ];
+    let is_plausible_raw =
+        |n: usize| raw_len.map_or_else(|| KNOWN_RAW_LENS.contains(&n), |want| n == want);
 
-    // Already a bare value of a known size: never touch it, whatever its
-    // leading bytes happen to be. This is the case the old code got wrong.
-    if RAW_LENS.contains(&ec_point.len()) {
-        return ec_point;
+    // Already a bare value of the expected (or, with no curve context, any
+    // known) size: never touch it, whatever its leading bytes happen to be.
+    if is_plausible_raw(data.len()) {
+        return data;
     }
 
-    if ec_point.len() > 2 && ec_point[0] == 0x04 {
-        // Short form — and only when what's inside is itself a plausible
-        // point, not merely when the arithmetic happens to line up.
-        if ec_point[1] as usize == ec_point.len() - 2 && RAW_LENS.contains(&(ec_point.len() - 2)) {
-            return ec_point[2..].to_vec();
+    if data.len() > 2 && data[0] == 0x04 {
+        // Short form: 0x04 <len ≤ 127> <data>, len = data.len() - 2.
+        if data[1] as usize == data.len() - 2 && is_plausible_raw(data.len() - 2) {
+            return &data[2..];
         }
-        if ec_point.len() > 3
-            && ec_point[1] == 0x81
-            && ec_point[2] as usize == ec_point.len() - 3
-            && RAW_LENS.contains(&(ec_point.len() - 3))
+        // Long form (1-byte length octet count): 0x04 0x81 <len> <data> —
+        // needed for P-521's 133-byte point, which exceeds short form's
+        // 127-byte ceiling.
+        if data.len() > 3 && data[1] == 0x81 && data[2] as usize == data.len() - 3
+            && is_plausible_raw(data.len() - 3)
         {
-            return ec_point[3..].to_vec();
+            return &data[3..];
         }
     }
-    ec_point
+    data
+}
+
+/// PKCS#11 v3.2 §2.3.3 — strip the DER OCTET STRING header some CKA_EC_POINT
+/// values carry around the raw SEC1 point. See [`get_ec_point_sec1_from`].
+/// No curve/key-type context is available at this call site, so this uses
+/// [`unwrap_peer_ec_point`]'s length-only fallback (`raw_len: None`) — see
+/// its doc comment for why that is still exact, just not curve-anchored.
+fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
+    unwrap_peer_ec_point(&ec_point, None).to_vec()
 }
 
 /// E4 (2026-08-13) — the raw public-key MATERIAL of any key object,
@@ -1633,7 +1875,7 @@ pub fn read_bool_attr(attrs: &Attributes, attr_type: u32) -> bool {
 /// - Generic secret (HMAC): first 3 bytes of SHA-256(key_value)
 /// - Asymmetric keys (public/private): first 3 bytes of SHA-256(CKA_VALUE)
 pub fn compute_kcv(attrs: &mut Attributes) {
-    use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
     use sha2::{Digest, Sha256};
 
     let class = attrs
@@ -1657,22 +1899,22 @@ pub fn compute_kcv(attrs: &mut Attributes) {
             match key_type {
                 CKK_AES => {
                     // AES-ECB encrypt a 16-byte zero block, take first 3 bytes
-                    let zero_block = GenericArray::default();
+                    let zero_block = Block::<aes::Aes128>::default();
                     match key_value.len() {
                         16 => {
-                            let cipher = aes::Aes128::new(GenericArray::from_slice(&key_value));
+                            let cipher = aes::Aes128::new_from_slice(&key_value).expect("key length matched above");
                             let mut block = zero_block;
                             cipher.encrypt_block(&mut block);
                             block[..3].to_vec()
                         }
                         24 => {
-                            let cipher = aes::Aes192::new(GenericArray::from_slice(&key_value));
+                            let cipher = aes::Aes192::new_from_slice(&key_value).expect("key length matched above");
                             let mut block = zero_block;
                             cipher.encrypt_block(&mut block);
                             block[..3].to_vec()
                         }
                         32 => {
-                            let cipher = aes::Aes256::new(GenericArray::from_slice(&key_value));
+                            let cipher = aes::Aes256::new_from_slice(&key_value).expect("key length matched above");
                             let mut block = zero_block;
                             cipher.encrypt_block(&mut block);
                             block[..3].to_vec()
@@ -1910,5 +2152,63 @@ mod ec_point_encoding_tests {
             x25519,
             "a bare 32-byte X25519/Ed25519 value must never be stripped"
         );
+    }
+
+    /// The curve-anchored form `unwrap_peer_ec_point` gained for
+    /// `C_DeriveKey(CKM_ECDH1_DERIVE)`'s `pPublicData` (2026-09-03): same
+    /// ambiguous X[0]==len-2 shape as above, but now checked with the exact
+    /// expected length in hand rather than the length-only fallback.
+    /// Anchoring changes nothing about WHEN a raw point survives (it always
+    /// did, per the tests above) — what it buys is at the OTHER boundary:
+    /// a truly wrapped point whose inner length happens to collide with a
+    /// DIFFERENT curve's raw size can no longer be misread, which the
+    /// length-only fallback cannot rule out. Exercised end-to-end (not just
+    /// this helper) by ffi.rs's `ecdh1_raw_peer_point_regression_tests`.
+    #[test]
+    fn raw_point_with_ambiguous_x0_survives_with_curve_anchored_length() {
+        let mut raw = None;
+        for _ in 0..20_000 {
+            let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+            let vk = p256::ecdsa::VerifyingKey::from(&sk);
+            let pt = vk.to_encoded_point(false).as_bytes().to_vec();
+            if pt[1] == 0x3f {
+                raw = Some(pt);
+                break;
+            }
+        }
+        let raw = raw.expect("no P-256 key with X[0]==0x3f in 20k tries");
+        assert_eq!(
+            unwrap_peer_ec_point(&raw, Some(65)),
+            raw.as_slice(),
+            "curve-anchored (raw_len=Some(65)) must also leave a raw point untouched"
+        );
+    }
+
+    /// A wrapped point still unwraps correctly when the caller knows the
+    /// curve, for both DER forms.
+    #[test]
+    fn der_wrapped_points_still_unwrap_with_curve_anchored_length() {
+        let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let vk = p256::ecdsa::VerifyingKey::from(&sk);
+        let inner = vk.to_encoded_point(false).as_bytes().to_vec();
+        let mut wrapped = vec![0x04, inner.len() as u8];
+        wrapped.extend_from_slice(&inner);
+        assert_eq!(unwrap_peer_ec_point(&wrapped, Some(65)), inner.as_slice());
+
+        let mut inner521 = vec![0x04u8];
+        inner521.extend(std::iter::repeat(0xABu8).take(132));
+        let mut wrapped521 = vec![0x04, 0x81, 133u8];
+        wrapped521.extend_from_slice(&inner521);
+        assert_eq!(unwrap_peer_ec_point(&wrapped521, Some(133)), inner521.as_slice());
+    }
+
+    /// A length that matches NEITHER the raw size for the given curve NOR a
+    /// recognizable wrapped form of it is returned untouched — the caller
+    /// (e.g. `p256::PublicKey::from_sec1_bytes`) is left to reject it, which
+    /// is the correct `CKR_ARGUMENTS_BAD` path for genuinely malformed input.
+    #[test]
+    fn wrong_length_for_the_given_curve_is_passed_through_unmodified() {
+        let garbage = vec![0x04u8; 40]; // neither 65 raw nor 65+2/65+3 wrapped
+        assert_eq!(unwrap_peer_ec_point(&garbage, Some(65)), garbage.as_slice());
     }
 }

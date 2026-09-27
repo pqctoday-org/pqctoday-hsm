@@ -162,6 +162,19 @@ fn decode_value(
                 .map_err(|_| CodecError::InvalidUtf8)?;
             Value::TextString(s.to_string())
         }
+        // §10.1.2 — the three KMIP 3.0 identifier/reference types decode
+        // exactly like a Text String (UTF-8, RFC 3629); the type byte is
+        // what carries the meaning.
+        ItemType::Identifier | ItemType::Reference | ItemType::NameReference => {
+            let s = std::str::from_utf8(&input[start..end])
+                .map_err(|_| CodecError::InvalidUtf8)?;
+            match item_type {
+                ItemType::Identifier    => Value::Identifier(s.to_string()),
+                ItemType::Reference     => Value::Reference(s.to_string()),
+                ItemType::NameReference => Value::NameReference(s.to_string()),
+                _ => unreachable!("outer match arm restricts these three"),
+            }
+        }
         ItemType::ByteString => Value::ByteString(input[start..end].to_vec()),
         ItemType::DateTime => {
             check_fixed_length(item_type, length, 8)?;
