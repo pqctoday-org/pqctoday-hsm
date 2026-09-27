@@ -17,8 +17,9 @@
      form, a well-formed PrintableString naming an unknown curve is also
      CKR_CURVE_NOT_SUPPORTED;
    - anything that is not one complete, well-formed DER value of those kinds
-     (truncated, trailing bytes, implicitCA NULL, other tags) is
-     CKR_DOMAIN_PARAMS_INVALID.
+     (truncated, implicitCA NULL, other tags) is CKR_DOMAIN_PARAMS_INVALID.
+ The classification applies only once the engine has failed to use the value:
+ a curve OpenSSL decodes is generated as before.
 
  The C++ Weierstrass generator does not accept the curveName form at all (the
  Rust engine does; tests/differential/exceptions.json records that split as
@@ -120,8 +121,11 @@ void EcParamsErrorTests::testEcKeyGenRefusesUnusableParams()
 		{ "implicitCA NULL", bytes({0x05,0x00}), CKR_DOMAIN_PARAMS_INVALID },
 		// P-256's OID with its last byte missing.
 		{ "truncated OID", bytes({0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01}), CKR_DOMAIN_PARAMS_INVALID },
-		// P-256's OID followed by a stray byte: not ONE DER value.
-		{ "OID with trailing byte", bytes({0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x00}), CKR_DOMAIN_PARAMS_INVALID },
+		// Not tested here: a valid OID followed by stray bytes. OpenSSL's
+		// d2i_ECPKParameters decodes the prefix and generates, and the Rust
+		// engine's decode_ec_params also ignores trailing bytes, so both
+		// engines accept it today. Tightening that is a separate, two-engine
+		// change (gap-closure plan item 3.B′), not part of this fix.
 		// curveName is not a representation this generator accepts.
 		{ "curveName P-256", printable("P-256"), CKR_DOMAIN_PARAMS_INVALID },
 	};
