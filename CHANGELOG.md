@@ -94,6 +94,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so the measured operation is unchanged). Verified by running the full
   matrix against that engine: 262/262 rows, no zero-op points.
 
+- **Local gate: the Rust PKCS#11 conformance step built wasm with a 2 MiB
+  stack, while the shipped bundle uses 8 MiB.** So the gate checked a
+  configuration nobody ships. With 2 MiB, the ACVP wasm harness crashes at
+  SLH-DSA-192f with `memory access out of bounds` (a wasm stack overflow);
+  with 8 MiB it runs through. The gate step and the documented manual build
+  commands now use 8 MiB, the value `rust/build-wasm-bundle.sh` ships. The
+  `.wasm` file size is unchanged; initial memory grows from 2.6 to 8.6 MiB.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
