@@ -131,13 +131,16 @@ pub fn object_epoch() -> u64 {
     OBJECT_EPOCH.load(std::sync::atomic::Ordering::Acquire)
 }
 
-/// The object table: one lock, with the read and write paths split so every
-/// write provably bumps `OBJECT_EPOCH`. `borrow()` hands out a read-only
-/// guard, so code that mutates must go through `borrow_mut()`; the compiler
-/// rejects a mutation through a read guard.
-pub struct ObjectTable(Mutex<HashMap<u32, Attributes>>);
+/// The object table, behind a read/write lock with the read and write paths
+/// split. `borrow()` hands out a shared read guard, so concurrent operations
+/// looking up their keys no longer queue behind each other (A3: with a
+/// single `Mutex` here, AES Init + op stopped scaling past two workers even
+/// after the per-session tables were sharded). Code that mutates must go
+/// through `borrow_mut()`, which takes the exclusive lock and bumps
+/// `OBJECT_EPOCH`; the compiler rejects a mutation through a read guard.
+pub struct ObjectTable(std::sync::RwLock<HashMap<u32, Attributes>>);
 
-pub struct ObjectsRead<'a>(MutexGuard<'a, HashMap<u32, Attributes>>);
+pub struct ObjectsRead<'a>(std::sync::RwLockReadGuard<'a, HashMap<u32, Attributes>>);
 
 impl std::ops::Deref for ObjectsRead<'_> {
     type Target = HashMap<u32, Attributes>;
@@ -148,21 +151,21 @@ impl std::ops::Deref for ObjectsRead<'_> {
 
 impl ObjectTable {
     pub fn new() -> Self {
-        Self(Mutex::new(HashMap::new()))
+        Self(std::sync::RwLock::new(HashMap::new()))
     }
     pub fn with<R, F: FnOnce(&Self) -> R>(&self, f: F) -> R {
         f(self)
     }
     #[track_caller]
     pub fn borrow(&self) -> ObjectsRead<'_> {
-        ObjectsRead(self.0.lock().unwrap_or_else(|e| e.into_inner()))
+        ObjectsRead(self.0.read().unwrap_or_else(|e| e.into_inner()))
     }
     /// Write access. The epoch moves before the guard is handed out, so an
     /// operation that compares epochs after this point can never use a key
     /// schedule cached before the write.
     #[track_caller]
-    pub fn borrow_mut(&self) -> MutexGuard<'_, HashMap<u32, Attributes>> {
-        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn borrow_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<u32, Attributes>> {
+        let g = self.0.write().unwrap_or_else(|e| e.into_inner());
         OBJECT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         g
     }
