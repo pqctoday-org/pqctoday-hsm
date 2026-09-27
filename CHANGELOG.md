@@ -10,6 +10,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine: key lookups no longer contend across threads.** After the
+  per-session work, small AES still stopped scaling past four workers: every
+  worker's Init read the same key object through the shared object-table
+  lock. Non-secret attribute lookups now go through a per-thread cache
+  validated by the object-write epoch: steady-state reads take no lock and
+  write no shared memory. Rules: attribute snapshots only (access checks
+  still run on every call; login, logout, the last session closing and
+  C_Finalize invalidate every cache); secret attributes (key values, private
+  components, seeds, BIP32 chain codes, stateful-key state) are never cached
+  and are read under the lock as before; at most 256 entries per thread
+  (LRU); the epoch saturates and caching turns off for good at its maximum.
+  M4 Pro: AES-CBC 64 B at 8 workers 1.85M → 5.06M ops/s (2.7×), AES-GCM
+  64 B 2.1×, single worker unchanged.
+
 - **The local gate can run on another machine.** `bash scripts/local-gate.sh
   --host=user@host --cpp` runs the same gate on a second host (today the
   M4 Pro) and writes the pre-push marker here only if it passed there on
