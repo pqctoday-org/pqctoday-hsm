@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine (behaviour change): the bare BIP32 codes `0x105B`/`0x105C` are
+  no longer accepted.** They were silent aliases of the vendor
+  `CKM_BIP32_MASTER_DERIVE`/`CKM_BIP32_CHILD_DERIVE` (`0x8000105B`/`0x8000105C`),
+  never advertised, and sit in space OASIS reserves for future mechanisms.
+  `C_DeriveKey` now answers `CKR_MECHANISM_INVALID` for them, as the C++
+  engine always has. Derived keys no longer carry a second copy of the chain
+  code under the bare attribute ID `0x1021`. No known caller used either form.
+
 - **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
   the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
   flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
@@ -187,6 +195,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   caller's context was also dropped, so the signature was made with an empty
   one. Both are now honoured, through `C_Sign` and `C_SignMessage`. The
   hash-specific `CKM_HASH_*_<hash>` mechanisms were not affected.
+
+- **Rust engine: KMIP key agreement ran every 32-byte EC key as P-256.** The
+  curve was guessed from the private key's length, so a secp256k1 key failed
+  with `CKR_ARGUMENTS_BAD` over KMIP, although `C_DeriveKey` handled it. The
+  key's stored curve is now used.
 
 ### Added
 

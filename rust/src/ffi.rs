@@ -1959,8 +1959,8 @@ mod mechanism_table_tests {
 
     /// F1 — canonical OASIS v3.2 re-sync: CKA_UNIQUE_ID is 0x4 (the local
     /// header had drifted to 0x17), and the BIP32 inventions live in the
-    /// vendor-defined space; the legacy bare codepoints are dispatch-only
-    /// deprecated aliases and must NOT be advertised.
+    /// vendor-defined space; the bare, OASIS-reserved 0x105B/0x105C are
+    /// neither advertised nor (since 4.D) accepted.
     #[test]
     fn f1_canonical_constant_values() {
         assert_eq!(CKA_UNIQUE_ID, 0x0000_0004);
@@ -1968,7 +1968,7 @@ mod mechanism_table_tests {
         assert_eq!(CKM_BIP32_CHILD_DERIVE, 0x8000_105C);
         assert_eq!(CKA_BIP32_CHAIN_CODE, 0x8000_1021);
         assert_eq!(CKA_BIP32_CHILD_INDEX, 0x8000_1022);
-        for legacy in [CKM_BIP32_MASTER_DERIVE_LEGACY, CKM_BIP32_CHILD_DERIVE_LEGACY] {
+        for legacy in [0x0000_105Bu32, 0x0000_105C] {
             assert!(
                 !SUPPORTED_MECHS.contains(&legacy),
                 "legacy BIP32 codepoint {legacy:#06x} must not be advertised"
@@ -11462,17 +11462,9 @@ pub fn C_DeriveKey(
         {
             return rv;
         }
+        // The bare BIP32 codepoints 0x105B/0x105C (OASIS-reserved) are no
+        // longer accepted as aliases of the vendor CKM_BIP32_* (4.D, 2026-09-27).
         let mech_type = ck_param::mech(p_mechanism).mechanism;
-        // DEPRECATED aliases: BIP32 mechanisms formerly shipped on the bare
-        // (OASIS-unassigned) codepoints 0x105B/0x105C before moving to the
-        // vendor space (F1 re-sync). Only the vendor codepoints are
-        // advertised, but in-the-wild JS callers may still send the old
-        // values — accept them at dispatch.
-        let mech_type = match mech_type {
-            CKM_BIP32_MASTER_DERIVE_LEGACY => CKM_BIP32_MASTER_DERIVE,
-            CKM_BIP32_CHILD_DERIVE_LEGACY => CKM_BIP32_CHILD_DERIVE,
-            m => m,
-        };
         let key_len =
             get_attr_ulong(p_template, ul_attribute_count, CKA_VALUE_LEN).unwrap_or(32) as usize;
 
@@ -11555,11 +11547,6 @@ pub fn C_DeriveKey(
                         if let Some(v) = o_attrs.get(&CKA_BIP32_CHAIN_CODE) {
                             return v.clone();
                         }
-                        // Deprecated alias: objects imported by older callers
-                        // may carry the chain code under the bare legacy id.
-                        if let Some(v) = o_attrs.get(&CKA_BIP32_CHAIN_CODE_LEGACY) {
-                            return v.clone();
-                        }
                     }
                     vec![]
                 });
@@ -11639,10 +11626,7 @@ pub fn C_DeriveKey(
             store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
             store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_EC);
             attrs.insert(CKA_VALUE, priv_key);
-            attrs.insert(CKA_BIP32_CHAIN_CODE, chain_code.clone());
-            // Deprecated alias: also expose the chain code under the bare
-            // legacy id so pre-F1 readers (GetAttributeValue 0x1021) work.
-            attrs.insert(CKA_BIP32_CHAIN_CODE_LEGACY, chain_code);
+            attrs.insert(CKA_BIP32_CHAIN_CODE, chain_code);
 
             store_bool(&mut attrs, CKA_TOKEN, false);
             store_bool(&mut attrs, CKA_PRIVATE, true);
@@ -19631,24 +19615,27 @@ mod return_code_ffi_tests {
         assert_eq!(rv, CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
 
-    /// F1 — the legacy bare BIP32 codepoints (0x105B/0x105C) must still be
-    /// ACCEPTED at C_DeriveKey dispatch as deprecated aliases: with a valid
-    /// base key and an empty template they must reach the BIP32 arm (which
-    /// rejects the missing CKA_EC_PARAMS with CKR_TEMPLATE_INCONSISTENT)
-    /// rather than fall through to CKR_MECHANISM_INVALID.
+    /// The bare 0x105B/0x105C are OASIS-reserved, unadvertised, and no longer
+    /// accepted (ruling 2026-09-27, gap-closure plan item 4.D). They used to be
+    /// dispatch-only aliases of the vendor CKM_BIP32_*; no caller sends them
+    /// (the hub's constants.ts says so), and the C++ engine never accepted
+    /// them. Now C_DeriveKey refuses them with CKR_MECHANISM_INVALID like any
+    /// other unknown mechanism, while the vendor codepoints still reach the
+    /// BIP32 arm (which rejects the empty template with
+    /// CKR_TEMPLATE_INCONSISTENT).
     #[test]
-    fn bip32_legacy_codepoints_accepted_at_dispatch() {
+    fn bip32_bare_codepoints_are_refused_vendor_ones_dispatch() {
         let _guard = test_lock::acquire();
         setup();
         const H_SEED: u32 = 0x5334_3001;
         install_key(H_SEED, 32, &[(CKA_DERIVE, true)]);
-        for legacy in [
-            CKM_BIP32_MASTER_DERIVE_LEGACY,
-            CKM_BIP32_CHILD_DERIVE_LEGACY,
-            CKM_BIP32_MASTER_DERIVE,
-            CKM_BIP32_CHILD_DERIVE,
+        for (mech_type, want) in [
+            (0x0000_105Bu32, CKR_MECHANISM_INVALID),
+            (0x0000_105Cu32, CKR_MECHANISM_INVALID),
+            (CKM_BIP32_MASTER_DERIVE, CKR_TEMPLATE_INCONSISTENT),
+            (CKM_BIP32_CHILD_DERIVE, CKR_TEMPLATE_INCONSISTENT),
         ] {
-            let mut mech: [usize; 3] = [legacy as usize, 0, 0];
+            let mut mech: [usize; 3] = [mech_type as usize, 0, 0];
             let mut h_new: u32 = 0;
             assert_eq!(
                 C_DeriveKey(
@@ -19659,8 +19646,8 @@ mod return_code_ffi_tests {
                     0,
                     &mut h_new,
                 ),
-                CKR_TEMPLATE_INCONSISTENT,
-                "mech {legacy:#010x} did not reach the BIP32 dispatch arm"
+                want,
+                "mech {mech_type:#010x}"
             );
         }
     }
