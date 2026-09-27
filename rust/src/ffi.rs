@@ -1720,6 +1720,10 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
         CKM_ECDSA => (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS | MSG_CAPABILITY),
+        // Explicit-nonce ECDSA (vendor, SECURITY.md) — CKF_SIGN only: no
+        // verify (plain CKM_ECDSA verifies its signatures) and no message
+        // flags (single-part; see C_MessageSignInit).
+        CKM_PQCTODAY_ECDSA_EXPLICIT_K => (256, 521, 0x00000800 | EC_CAPABILITY_FLAGS),
         // Ed25519ph / Ed448ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
         CKM_EDDSA_PH => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
@@ -7000,7 +7004,7 @@ fn mech_key_types(mech: u32) -> Option<&'static [u32]> {
         // §6.3 — ECDSA (Weierstrass curves only).
         CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256
         | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256
-        | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => &[CKK_EC],
+        | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 | CKM_PQCTODAY_ECDSA_EXPLICIT_K => &[CKK_EC],
         // §6.3.15 — EdDSA.
         CKM_EDDSA | CKM_EDDSA_PH => &[CKK_EC_EDWARDS],
         // §6.3.17 Table 78 — ECDH allows CKK_EC and CKK_EC_MONTGOMERY;
@@ -7413,6 +7417,17 @@ unsafe fn parse_sign_mech_params(
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
         return Ok((context, false));
+    }
+    if mech_type == CKM_PQCTODAY_ECDSA_EXPLICIT_K {
+        // pParameter IS k (big-endian, the order's byte length). It is
+        // required, and validated against the key's curve here so a bad k is
+        // CKR_MECHANISM_PARAM_INVALID at init (§5.13.1), not a C_Sign failure.
+        let k = m.raw().to_vec();
+        if k.is_empty() {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        crate::crypto::handlers::ecdsa_explicit_k_check(get_object_param_set(h_key), &k)?;
+        return Ok((k, false));
     }
     if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
         // CK_RSA_PKCS_PSS_PARAMS (v3.2 §6.1.9) — hashAlg/mgf must match the
@@ -7907,6 +7922,10 @@ fn C_Sign_impl(
             CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
             | CKM_ECDSA_SHA3_512 => sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg),
+            // ctx_bytes is k, already range-checked by parse_sign_mech_params.
+            CKM_PQCTODAY_ECDSA_EXPLICIT_K => {
+                crate::crypto::handlers::sign_ecdsa_explicit_k(ps, &sk_bytes, eff_msg, &ctx_bytes)
+            }
             // ctx_bytes is CK_EDDSA_PARAMS.pContextData/ulContextDataLen,
             // parsed by parse_sign_mech_params's CKM_EDDSA branch — empty
             // means plain EdDSA, non-empty means RFC 8032 Ed25519ctx/
@@ -7961,6 +7980,11 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
+        }
+        // CKM_PQCTODAY_ECDSA_EXPLICIT_K is sign-only (no CKF_VERIFY): its
+        // signatures are ordinary ECDSA and verify under CKM_ECDSA.
+        if ck_param::mech(p_mechanism).mechanism == CKM_PQCTODAY_ECDSA_EXPLICIT_K {
+            return CKR_MECHANISM_INVALID;
         }
         // PKCS#11 v3.2 §5.15.1 — key handle, visibility, key type (E5/E6),
         // and CKA_VERIFY permission.
@@ -8321,6 +8345,13 @@ fn C_Verify_impl(
 pub fn C_MessageSignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // CKM_PQCTODAY_ECDSA_EXPLICIT_K carries no CKF_MESSAGE_SIGN: a message
+    // operation would sign every message under the one k fixed at init.
+    if !p_mechanism.is_null()
+        && unsafe { ck_param::mech(p_mechanism).mechanism } == CKM_PQCTODAY_ECDSA_EXPLICIT_K
+    {
+        return CKR_MECHANISM_INVALID;
+    }
     C_SignInit(h_session, p_mechanism, h_key)
 }
 
@@ -27116,6 +27147,300 @@ mod pkcs8_encoding_fixture_tests {
 #[cfg(test)]
 #[path = "p11_behaviour_tests.rs"]
 mod p11_behaviour_tests;
+
+#[cfg(test)]
+mod ecdsa_explicit_k_ffi_tests {
+    //! CKM_PQCTODAY_ECDSA_EXPLICIT_K end-to-end through C_CreateObject /
+    //! C_SignInit / C_Sign: NIST ACVP ECDSA SigGen (FIPS 186-5) byte-matches,
+    //! the parameter refusals, sabotage controls, and the key recovery the
+    //! mechanism exists to teach.
+    use super::*;
+    use crate::native::test_lock;
+
+    const OID_P256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    const OID_P384: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+    const OID_P521: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23];
+    const OID_P224: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21];
+    const OID_K256: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a];
+    /// P-256 group order n (SP 800-186 §3.2.1.3).
+    const N_P256: &str = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    fn setup() -> u32 {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "explicit-k-test")
+                .unwrap();
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        session
+    }
+
+    fn create(session: u32, attrs: &[(u32, *const u8, usize)]) -> u32 {
+        let tmpl: Vec<usize> =
+            attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+        let mut h = 0u32;
+        assert_eq!(
+            C_CreateObject(session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h),
+            CKR_OK
+        );
+        h
+    }
+
+    fn ec_private(session: u32, oid: &[u8], d: &[u8]) -> u32 {
+        let (class, kt) = (CKO_PRIVATE_KEY as usize, CKK_EC as usize);
+        let us = std::mem::size_of::<usize>();
+        create(
+            session,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, us),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, us),
+                (CKA_TOKEN, [0u8].as_ptr(), 1),
+                (CKA_SIGN, [1u8].as_ptr(), 1),
+                (CKA_EC_PARAMS, oid.as_ptr(), oid.len()),
+                (CKA_VALUE, d.as_ptr(), d.len()),
+            ],
+        )
+    }
+
+    fn ec_public(session: u32, oid: &[u8], qx: &[u8], qy: &[u8]) -> u32 {
+        let (class, kt) = (CKO_PUBLIC_KEY as usize, CKK_EC as usize);
+        let us = std::mem::size_of::<usize>();
+        // CKA_EC_POINT: DER OCTET STRING around 04 || x || y.
+        let mut sec1 = vec![0x04];
+        sec1.extend_from_slice(qx);
+        sec1.extend_from_slice(qy);
+        let mut point = vec![0x04];
+        if sec1.len() > 127 {
+            point.push(0x81);
+        }
+        point.push(sec1.len() as u8);
+        point.extend_from_slice(&sec1);
+        create(
+            session,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, us),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, us),
+                (CKA_TOKEN, [0u8].as_ptr(), 1),
+                (CKA_VERIFY, [1u8].as_ptr(), 1),
+                (CKA_EC_PARAMS, oid.as_ptr(), oid.len()),
+                (CKA_EC_POINT, point.as_ptr(), point.len()),
+            ],
+        )
+    }
+
+    fn init(session: u32, key: u32, k: Option<&[u8]>) -> u32 {
+        let (p, l) = k.map(|k| (k.as_ptr() as usize, k.len())).unwrap_or((0, 0));
+        let mut m: [usize; 3] = [CKM_PQCTODAY_ECDSA_EXPLICIT_K as usize, p, l];
+        C_SignInit(session, m.as_mut_ptr() as *mut u8, key)
+    }
+
+    fn sign(session: u32, key: u32, k: &[u8], digest: &[u8]) -> Vec<u8> {
+        assert_eq!(
+            init(session, key, Some(k)),
+            CKR_OK,
+            "C_SignInit: k[{}] curve {}",
+            k.len(),
+            get_object_param_set(key)
+        );
+        let mut sig = vec![0u8; 132];
+        let mut len = sig.len() as u32;
+        assert_eq!(
+            C_Sign(session, digest.as_ptr() as *mut u8, digest.len() as u32, sig.as_mut_ptr(), &mut len),
+            CKR_OK
+        );
+        sig.truncate(len as usize);
+        sig
+    }
+
+    fn oid_for(curve: &str) -> &'static [u8] {
+        match curve {
+            "P-256" => OID_P256,
+            "P-384" => OID_P384,
+            "P-521" => OID_P521,
+            other => panic!("unexpected curve {other}"),
+        }
+    }
+
+    #[test]
+    fn explicit_k_reproduces_nist_acvp_siggen() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/acvp/ecdsa_siggen_explicit_k_test.json"
+        ))
+        .expect("vector json");
+        let mut ran = 0usize;
+        let mut groups = std::collections::HashSet::new();
+        for g in v["testGroups"].as_array().expect("testGroups") {
+            let curve = g["curve"].as_str().unwrap();
+            let oid = oid_for(curve);
+            let priv_h = ec_private(session, oid, &unhex(g["d"].as_str().unwrap()));
+            let pub_h = ec_public(
+                session,
+                oid,
+                &unhex(g["qx"].as_str().unwrap()),
+                &unhex(g["qy"].as_str().unwrap()),
+            );
+            for t in g["tests"].as_array().unwrap() {
+                let digest = unhex(t["digest"].as_str().unwrap());
+                let k = unhex(t["k"].as_str().unwrap());
+                let mut want = unhex(t["r"].as_str().unwrap());
+                want.extend(unhex(t["s"].as_str().unwrap()));
+                let got = sign(session, priv_h, &k, &digest);
+                assert_eq!(
+                    got, want,
+                    "{curve}/{} tc{}: (r, s) differs from NIST",
+                    g["hashAlg"], t["tcId"]
+                );
+                // The signature is ordinary ECDSA: CKM_ECDSA verifies it.
+                let mut m: [usize; 3] = [CKM_ECDSA as usize, 0, 0];
+                assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
+                assert_eq!(
+                    C_Verify(
+                        session,
+                        digest.as_ptr() as *mut u8,
+                        digest.len() as u32,
+                        got.as_ptr() as *mut u8,
+                        got.len() as u32
+                    ),
+                    CKR_OK
+                );
+                ran += 1;
+            }
+            groups.insert((curve.to_string(), g["hashAlg"].as_str().unwrap().to_string()));
+        }
+        // Reachability: every case ran, and the truncation group (SHA-512 on
+        // P-256, a digest longer than the order) is among them.
+        assert_eq!(ran, 40, "expected all 40 vectors to run");
+        assert!(groups.contains(&("P-256".into(), "SHA2-512".into())));
+        assert_eq!(groups.len(), 4);
+    }
+
+    #[test]
+    fn explicit_k_sabotage_is_detected() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/acvp/ecdsa_siggen_explicit_k_test.json"
+        ))
+        .unwrap();
+        let g = &v["testGroups"][0];
+        let t = &g["tests"][0];
+        let priv_h = ec_private(session, oid_for(g["curve"].as_str().unwrap()), &unhex(g["d"].as_str().unwrap()));
+        let digest = unhex(t["digest"].as_str().unwrap());
+        let k = unhex(t["k"].as_str().unwrap());
+        let mut want = unhex(t["r"].as_str().unwrap());
+        want.extend(unhex(t["s"].as_str().unwrap()));
+        let got = sign(session, priv_h, &k, &digest);
+        assert_eq!(got, want, "positive control");
+
+        // A flipped expected byte is a mismatch — the comparison has teeth.
+        let mut flipped = want.clone();
+        flipped[40] ^= 0x01;
+        assert_ne!(got, flipped);
+        // A different k gives a different signature — k is really used.
+        let mut k2 = k.clone();
+        *k2.last_mut().unwrap() ^= 0x01;
+        assert_ne!(sign(session, priv_h, &k2, &digest), want);
+        // A different digest changes s but not r (r depends on k alone).
+        let mut d2 = digest.clone();
+        d2[0] ^= 0x80;
+        let other = sign(session, priv_h, &k, &d2);
+        assert_eq!(other[..32], want[..32], "r = x(kG) mod n is independent of the digest");
+        assert_ne!(other[32..], want[32..]);
+    }
+
+    /// The lesson: one signature plus its k gives the private key,
+    /// d = r^-1 (s·k - z) mod n.
+    #[test]
+    fn known_k_recovers_the_private_key() {
+        use p256::elliptic_curve::ops::Reduce;
+        use p256::elliptic_curve::PrimeField;
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let d_bytes = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+        let k_bytes = unhex("a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60");
+        let digest: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(b"a leaked nonce is a leaked key").into()
+        };
+        let priv_h = ec_private(session, OID_P256, &d_bytes);
+        let sig = sign(session, priv_h, &k_bytes, &digest);
+
+        let scalar = |b: &[u8]| {
+            Option::<p256::Scalar>::from(p256::Scalar::from_repr(*p256::FieldBytes::from_slice(b)))
+                .unwrap()
+        };
+        let (r, s, k) = (scalar(&sig[..32]), scalar(&sig[32..]), scalar(&k_bytes));
+        let z = <p256::Scalar as Reduce<p256::U256>>::reduce_bytes(p256::FieldBytes::from_slice(&digest));
+        let d = Option::<p256::Scalar>::from(r.invert()).unwrap() * (s * k - z);
+        assert_eq!(d.to_repr().to_vec(), d_bytes, "d recovered from (r, s, k, z)");
+    }
+
+    #[test]
+    fn explicit_k_refuses_bad_parameters_and_keys() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let d = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+        let priv_h = ec_private(session, OID_P256, &d);
+        let good = unhex("a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60");
+
+        // No parameter, k = 0, k = n, k > n, and the wrong length.
+        assert_eq!(init(session, priv_h, None), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(init(session, priv_h, Some(&[0u8; 32])), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(init(session, priv_h, Some(&unhex(N_P256))), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(init(session, priv_h, Some(&[0xffu8; 32])), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(init(session, priv_h, Some(&good[..31])), CKR_MECHANISM_PARAM_INVALID);
+        let mut long = vec![0u8];
+        long.extend_from_slice(&good);
+        assert_eq!(init(session, priv_h, Some(&long)), CKR_MECHANISM_PARAM_INVALID);
+        // n - 1 is the largest legal k.
+        let mut n_minus_1 = unhex(N_P256);
+        *n_minus_1.last_mut().unwrap() -= 1;
+        assert_eq!(init(session, priv_h, Some(&n_minus_1)), CKR_OK);
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+
+        // Curves outside P-256/384/521: the two key codes §5.13.1 allows.
+        let p224 = ec_private(session, OID_P224, &unhex("3f0c488e987c80be0fee521f8d90be6034ec69ae11ca72aa777481e8"));
+        assert_eq!(init(session, p224, Some(&good[..28])), CKR_KEY_SIZE_RANGE);
+        let k256 = ec_private(session, OID_K256, &d);
+        assert_eq!(init(session, k256, Some(&good)), CKR_KEY_TYPE_INCONSISTENT);
+
+        // Sign only, single-part. The verify refusal uses a real P-256 verify
+        // key (vector group 0's Q), so the mechanism is the only thing wrong.
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/acvp/ecdsa_siggen_explicit_k_test.json"
+        ))
+        .unwrap();
+        let g0 = &v["testGroups"][0];
+        let pub_h = ec_public(
+            session,
+            OID_P256,
+            &unhex(g0["qx"].as_str().unwrap()),
+            &unhex(g0["qy"].as_str().unwrap()),
+        );
+        let mut m: [usize; 3] = [CKM_PQCTODAY_ECDSA_EXPLICIT_K as usize, good.as_ptr() as usize, 32];
+        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, pub_h), CKR_MECHANISM_INVALID);
+        assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_INVALID);
+        assert_eq!(init(session, priv_h, Some(&good)), CKR_OK);
+        assert_ne!(C_SignUpdate(session, good.as_ptr() as *mut u8, 32), CKR_OK);
+    }
+
+    #[test]
+    fn explicit_k_is_advertised_sign_only() {
+        let (min, max, flags) =
+            mechanism_info(CKM_PQCTODAY_ECDSA_EXPLICIT_K).expect("mechanism info");
+        assert_eq!((min, max), (256, 521));
+        assert_ne!(flags & 0x0000_0800, 0, "CKF_SIGN");
+        assert_eq!(flags & 0x0000_2000, 0, "no CKF_VERIFY");
+        assert!(SUPPORTED_MECHS.contains(&CKM_PQCTODAY_ECDSA_EXPLICIT_K));
+    }
+}
 
 #[cfg(test)]
 mod rsa_private_component_import_tests {

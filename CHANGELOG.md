@@ -49,6 +49,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
+  caller-supplied nonce — a deliberate key-recovery primitive for teaching.**
+
+  Signs a digest, exactly like `CKM_ECDSA`, but uses the k given as the
+  mechanism parameter instead of generating one. With k and one signature,
+  anyone recovers the private key (d = r⁻¹(s·k − z) mod n), which is the
+  lesson the mechanism exists to show; `SECURITY.md` describes the risk and how
+  to turn it off per key (`CKA_ALLOWED_MECHANISMS`) or per C++ token
+  (`slots.mechanisms`). Sign only, single-part, P-256 / P-384 / P-521.
+  k must be exactly the order's byte length with 1 ≤ k < n, else
+  `CKR_MECHANISM_PARAM_INVALID` at `C_SignInit`. A P-224 key gets
+  `CKR_KEY_SIZE_RANGE` and any other curve `CKR_KEY_TYPE_INCONSISTENT`.
+
+  It also makes NIST's ECDSA SigGen vectors checkable at all. They are
+  random-k, so (r, s) can only be reproduced when k is an input. 40 ACVP-Server
+  cases (P-256, P-384 and P-521, including SHA-512 on P-256 for digest
+  truncation) now byte-match in both engines. Rust uses RustCrypto's
+  `ecdsa::hazmat::sign_prehashed`. The C++ engine uses OpenSSL's BN and
+  EC_POINT API directly, since OpenSSL 3.x has no public way to sign with a
+  given k.
+
 - **`bench-harness`: AES and SHA-2/SHA-3 measurement cells.**
 
   The benchmark measured only asymmetric work — signatures, key agreement,

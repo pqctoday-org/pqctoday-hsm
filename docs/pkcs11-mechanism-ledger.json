@@ -9,8 +9,8 @@
   },
   "counts": {
     "canonical_header_mechanisms": 473,
-    "cpp_advertised": 168,
-    "rust_advertised": 174,
+    "cpp_advertised": 169,
+    "rust_advertised": 175,
     "cpp_only": [],
     "rust_only_count": 6
   },
@@ -3149,6 +3149,16 @@
       "cpp_max": 1357824,
       "rust_min": 261120,
       "rust_max": 1357824
+    },
+    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Vendor mechanism 0x80000015 (CKM_VENDOR_DEFINED range; priv allocation ledger §1.4). ECDSA with a caller-supplied nonce k — a deliberate key-recovery teaching primitive, see SECURITY.md. Sign only, single-part, P-256/P-384/P-521; NIST ACVP ECDSA SigGen byte-matches in both engines (tests/acvp/ecdsa_siggen_explicit_k_test.json).",
+      "cpp_min": 256,
+      "cpp_max": 521,
+      "rust_min": 256,
+      "rust_max": 521
     },
     "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": {
       "value": "engine-extension",

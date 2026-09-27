@@ -1166,6 +1166,23 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			bAllowMultiPartOp = true;
 			isECDSA = true;
 			break;
+		case CKM_PQCTODAY_ECDSA_EXPLICIT_K:
+			// Vendor, deliberate key-recovery primitive (SECURITY.md).
+			// pParameter IS k; it is required, and its length and range
+			// (1 <= k < n) depend on the key, so they are checked by
+			// checkSignParameters once the key is loaded, below. Single-part
+			// only, like CKM_ECDSA's digest input.
+			if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen == 0)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ECDSA_EXPLICIT_K requires k as its parameter");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			mechanism = AsymMech::ECDSA_EXPLICIT_K;
+			bAllowMultiPartOp = false;
+			isECDSA = true;
+			param = pMechanism->pParameter;
+			paramLen = pMechanism->ulParameterLen;
+			break;
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
@@ -1502,6 +1519,18 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		// is unreachable today, but assert defensively to prevent a NULL
 		// dereference if a future mechanism case forgets to set a flag.
 		return CKR_MECHANISM_INVALID;
+	}
+
+	// Key-dependent parameter checks (CKM_PQCTODAY_ECDSA_EXPLICIT_K's k).
+	const SignParamCheck::Type chk =
+		asymCrypto->checkSignParameters(privateKey, mechanism, param, paramLen);
+	if (chk != SignParamCheck::OK)
+	{
+		asymCrypto->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(asymCrypto);
+		if (chk == SignParamCheck::KEY_SIZE_RANGE) return CKR_KEY_SIZE_RANGE;
+		if (chk == SignParamCheck::KEY_TYPE_INCONSISTENT) return CKR_KEY_TYPE_INCONSISTENT;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	// Initialize signing
@@ -3845,6 +3874,10 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	// per-family cancel semantics (and the initialisation and session-handle
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_SIGN);
+
+	// CKM_PQCTODAY_ECDSA_EXPLICIT_K carries no CKF_MESSAGE_SIGN: a message
+	// operation would sign every message under the one k fixed at init.
+	if (pMechanism->mechanism == CKM_PQCTODAY_ECDSA_EXPLICIT_K) return CKR_MECHANISM_INVALID;
 
 	// Reuse the existing sign inits; they validate the key, mechanism, and
 	// session. The dispatch mirrors C_SignInit's: a MAC mechanism must go to

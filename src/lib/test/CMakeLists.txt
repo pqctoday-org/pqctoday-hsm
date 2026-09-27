@@ -28,6 +28,7 @@ set(SOURCES p11test.cpp
             BehaviourRingTests.cpp
             AcvpSlhDsaTests.cpp
             AcvpEcKeyVerTests.cpp
+            AcvpEcdsaExplicitKTests.cpp
             MlKemInputCheckTests.cpp
             KmacParamsTests.cpp
             HmacMinKeySizeTests.cpp
