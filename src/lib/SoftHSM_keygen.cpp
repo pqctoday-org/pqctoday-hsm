@@ -9435,11 +9435,16 @@ bool SoftHSM::setECPrivateKey(OSObject* key, const ByteString &ber, Token* token
 {
 	// Raw scalar path: hardware HSM flows (e.g. GSMA SUCI) wrap the raw 32-byte (P-256)
 	// or 48-byte (P-384) private scalar directly under AES-KEY-WRAP / AES-GCM without a
-	// PKCS#8 envelope.  Detect by size (never >48 for supported curves) and the absence
-	// of a DER SEQUENCE header (0x30).  CKA_EC_PARAMS must be in the unwrap template and
-	// is already stored on the object via C_CreateObject; only CKA_VALUE needs setting.
-	bool isRawScalar = (ber.size() == 32 || ber.size() == 48) &&
-	                   (ber.size() == 0 || ber.const_byte_str()[0] != 0x30);
+	// PKCS#8 envelope, and BIP32 derivation stores its 32-byte scalar here too.
+	// CKA_EC_PARAMS is already on the object; only CKA_VALUE needs setting.
+	//
+	// Decided by SIZE alone. A PKCS#8 EC PrivateKeyInfo is never 32 or 48 bytes (the
+	// smallest, P-256 without the optional public key, is 67). This used to ALSO
+	// require the first byte not to be 0x30 (the DER SEQUENCE tag) — but a random
+	// scalar begins with 0x30 about once in 256, and such a key was then taken for DER,
+	// failed PKCS8Decode, and the derive/unwrap returned CKR_FUNCTION_FAILED
+	// (MechanismInfoEcAdvertisementTests::testBip32MasterKeyStartingWith0x30).
+	bool isRawScalar = (ber.size() == 32 || ber.size() == 48);
 	if (isRawScalar)
 	{
 		ByteString value;

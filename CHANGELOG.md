@@ -60,6 +60,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **C++ engine: about 1 in 256 BIP32 derivations failed with
+  `CKR_FUNCTION_FAILED`.** `setECPrivateKey` decided whether a 32- or 48-byte
+  key was a raw EC scalar or a PKCS#8 blob partly by checking whether its first
+  byte was `0x30`, the DER SEQUENCE tag. A random scalar starts with `0x30`
+  about once in 256, and such a key failed to decode. That broke the
+  `CKM_BIP32_MASTER_DERIVE` and `CKM_BIP32_CHILD_DERIVE` paths, and the
+  raw-scalar unwrap path used by GSMA SUCI flows. The size alone now decides: a
+  PKCS#8 EC key is never 32 or 48 bytes. It surfaced as an intermittent
+  failure of `testBip32ChildDeriveAdvertisesItsParentKeySize`; a new test pins
+  it with a seed whose master key starts with `0x30`.
 - **Rust engine: RSA-OAEP with SHA-1, SHA-224 and SHA-3 was refused.** The
   engine only accepted SHA-256, SHA-384 and SHA-512, so every other hash got
   `CKR_MECHANISM_PARAM_INVALID` at `C_EncryptInit` / `C_DecryptInit` /
