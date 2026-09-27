@@ -1,4 +1,5 @@
 pub mod bip32;
+pub(crate) mod aeskw;
 // Native-only AWS-LC fast path; see its module doc for the dispatch rule.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod awslc;

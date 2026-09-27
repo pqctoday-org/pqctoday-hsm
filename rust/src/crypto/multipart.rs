@@ -32,7 +32,7 @@
 //! finalisation the prediction is an upper bound, which §5.2 explicitly
 //! permits ("the size may be somewhat larger than precisely needed").
 
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 // `aes::cipher::KeyInit` above is the same `crypto_common::KeyInit` trait
 // that `GHash::new` needs, so no separate universal-hash import.
 use ghash::{GHash, universal_hash::UniversalHash};
@@ -58,15 +58,16 @@ impl AesKey {
     /// Construct from a raw key. Returns `None` for unsupported lengths.
     pub fn new(key: &[u8]) -> Option<Self> {
         match key.len() {
-            16 => Some(AesKey::Aes128(aes::Aes128::new(GenericArray::from_slice(key)))),
-            24 => Some(AesKey::Aes192(aes::Aes192::new(GenericArray::from_slice(key)))),
-            32 => Some(AesKey::Aes256(aes::Aes256::new(GenericArray::from_slice(key)))),
+            16 => Some(AesKey::Aes128(aes::Aes128::new_from_slice(key).expect("key length matched above"))),
+            24 => Some(AesKey::Aes192(aes::Aes192::new_from_slice(key).expect("key length matched above"))),
+            32 => Some(AesKey::Aes256(aes::Aes256::new_from_slice(key).expect("key length matched above"))),
             _ => None,
         }
     }
 
     fn encrypt_block(&self, block: &mut [u8; BLOCK]) {
-        let ga = GenericArray::from_mut_slice(block);
+        // All three AES variants share one 16-byte block type.
+        let ga: &mut Block<aes::Aes128> = block.into();
         match self {
             AesKey::Aes128(c) => c.encrypt_block(ga),
             AesKey::Aes192(c) => c.encrypt_block(ga),
@@ -75,7 +76,8 @@ impl AesKey {
     }
 
     fn decrypt_block(&self, block: &mut [u8; BLOCK]) {
-        let ga = GenericArray::from_mut_slice(block);
+        // All three AES variants share one 16-byte block type.
+        let ga: &mut Block<aes::Aes128> = block.into();
         match self {
             AesKey::Aes128(c) => c.decrypt_block(ga),
             AesKey::Aes192(c) => c.decrypt_block(ga),
@@ -1012,8 +1014,8 @@ impl XtsState {
                     .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                 let xts = xts_mode::Xts128::<aes::Aes128>::new(k1, k2);
                 match self.dir {
-                    CipherDirection::Encrypt => xts.encrypt_sector(data, self.tweak),
-                    CipherDirection::Decrypt => xts.decrypt_sector(data, self.tweak),
+                    CipherDirection::Encrypt => xts.encrypt_sector(data, self.tweak.into()),
+                    CipherDirection::Decrypt => xts.decrypt_sector(data, self.tweak.into()),
                 }
             }
             64 => {
@@ -1023,8 +1025,8 @@ impl XtsState {
                     .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                 let xts = xts_mode::Xts128::<aes::Aes256>::new(k1, k2);
                 match self.dir {
-                    CipherDirection::Encrypt => xts.encrypt_sector(data, self.tweak),
-                    CipherDirection::Decrypt => xts.decrypt_sector(data, self.tweak),
+                    CipherDirection::Encrypt => xts.encrypt_sector(data, self.tweak.into()),
+                    CipherDirection::Decrypt => xts.decrypt_sector(data, self.tweak.into()),
                 }
             }
             _ => return Err(CKR_KEY_SIZE_RANGE),
@@ -1198,7 +1200,7 @@ impl GcmState {
         // H = E_K(0^128) keys GHASH (SP 800-38D §7.1 step 1).
         let mut h = [0u8; BLOCK];
         key.encrypt_block(&mut h);
-        let mut ghash = GHash::new(GenericArray::from_slice(&h));
+        let mut ghash = GHash::new_from_slice(&h).expect("H is one 16-byte block");
         ghash.update_padded(aad);
 
         // §7.1 step 2: J0 = IV || 0^31 || 1 when len(IV) = 96 bits;
@@ -1208,7 +1210,7 @@ impl GcmState {
             j0[..12].copy_from_slice(iv);
             j0[15] = 1;
         } else {
-            let mut g = GHash::new(GenericArray::from_slice(&h));
+            let mut g = GHash::new_from_slice(&h).expect("H is one 16-byte block");
             g.update_padded(iv);
             let mut len_block = [0u8; BLOCK];
             len_block[8..].copy_from_slice(&((iv.len() as u64) * 8).to_be_bytes());
@@ -1272,7 +1274,7 @@ impl GcmState {
     fn ghash_feed(&mut self, byte: u8) {
         self.ghash_buf.push(byte);
         if self.ghash_buf.len() == BLOCK {
-            self.ghash.update(&[*GenericArray::from_slice(&self.ghash_buf)]);
+            self.ghash.update(&[ghash::Block::try_from(self.ghash_buf.as_slice()).expect("ghash_buf holds one full block here")]);
             self.ghash_buf.clear();
         }
     }
@@ -1496,7 +1498,7 @@ mod tests {
     /// `cbc` crate ciphertext (the single-shot `C_Encrypt` path).
     #[test]
     fn cbc_pad_round_trip_matches_one_shot() {
-        use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
         let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
         let iv: [u8; 16] = hex("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
         for pt_len in [0usize, 1, 15, 16, 17, 31, 32, 100] {
@@ -1506,7 +1508,7 @@ mod tests {
             buf[..pt.len()].copy_from_slice(&pt);
             let one_shot = cbc::Encryptor::<aes::Aes128>::new_from_slices(&key, &iv)
                 .unwrap()
-                .encrypt_padded_mut::<Pkcs7>(&mut buf, pt.len())
+                .encrypt_padded::<Pkcs7>(&mut buf, pt.len())
                 .unwrap()
                 .to_vec();
             for sizes in CHUNKINGS {
