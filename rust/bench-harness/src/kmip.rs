@@ -586,6 +586,7 @@ pub fn encapsulate_and_get(
             uid: public_uid.to_string(),
             input_key_material: None,
             cryptographic_parameters: None,
+            attributes: Vec::new(),
         }),
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
@@ -609,6 +610,7 @@ pub fn decapsulate_and_get(
             uid: private_uid.to_string(),
             data: ciphertext.to_vec(),
             cryptographic_parameters: None,
+            attributes: Vec::new(),
         }),
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
@@ -1087,6 +1089,7 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                                             uid: kp_pub.clone(),
                                             input_key_material: None,
                                             cryptographic_parameters: None,
+                                            attributes: Vec::new(),
                                         }),
                                     })
                                     .collect();
