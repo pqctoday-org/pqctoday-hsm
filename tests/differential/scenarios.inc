@@ -1149,6 +1149,55 @@ add({"encoding.wrap_private_key_pkcs8", "encoding",
          record_attrs(e, r, "unwrapped_priv", s, hu);
      }});
 
+// 2026-09-27: the scenario above generates a RANDOM P-256 key, so about one run
+// in 256 (d's top byte 0x00) the two engines report CKA_VALUE with different
+// lengths — C++ the minimal 31-byte integer, Rust the 32-byte field-length
+// value — and a gate failed on luck alone. This is the same question with a
+// FIXED d whose top byte is 0x00, so it is observed on every run and covered
+// by an exact exceptions entry (LEGAL-EC-PRIVATE-VALUE-LEADING-ZERO) instead of
+// surfacing at random.
+static const CK_BYTE kEcP256DLeadingZero[32] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+};
+add({"encoding.ec_private_value_leading_zero", "encoding",
+     "EC private CKA_VALUE whose top byte is 0x00: create, read back, wrap as PKCS#8, unwrap, read back",
+     {CKM_AES_KEY_GEN, CKM_AES_KEY_WRAP_PAD}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_BBOOL sens = CK_FALSE;
+         CK_OBJECT_HANDLE kek = make_fixed_aes(e, s, true, &sens);
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+             ATTR(CKA_EC_PARAMS,   kOidP256,   sizeof kOidP256),
+             ATTR(CKA_VALUE,       (void*)kEcP256DLeadingZero, sizeof kEcP256DLeadingZero),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+         };
+         CK_OBJECT_HANDLE hPriv = CK_INVALID_HANDLE;
+         CK_RV rv = e.fl->C_CreateObject(s, priv, 8, &hPriv);
+         r.rv("create_private", rv);
+         if (rv != CKR_OK || kek == CK_INVALID_HANDLE) return;
+         record_attrs(e, r, "created_priv", s, hPriv);
+         CK_MECHANISM wm = { CKM_AES_KEY_WRAP_PAD, NULL_PTR, 0 };
+         CK_BYTE out[4096]; CK_ULONG olen = sizeof out;
+         rv = e.fl->C_WrapKey(s, &wm, kek, hPriv, out, &olen);
+         r.rv("wrap_private", rv);
+         if (rv != CKR_OK) return;
+         CK_ATTRIBUTE ut[] = {
+             ATTR(CKA_CLASS,     &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,  &ktEc,      sizeof ktEc),
+             ATTR(CKA_TOKEN,     &bFalse,    sizeof bFalse),
+             ATTR(CKA_SIGN,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE, &bFalse,    sizeof bFalse),
+         };
+         CK_OBJECT_HANDLE hu = CK_INVALID_HANDLE;
+         r.rv("unwrap_private", e.fl->C_UnwrapKey(s, &wm, kek, out, olen, ut, 5, &hu));
+         record_attrs(e, r, "unwrapped_priv", s, hu);
+     }});
+
 // ---------------------------------------------------------------------------
 // bytes — deterministic outputs. Fixed key + fixed IV + fixed plaintext, so
 // any difference at all is a real difference.
