@@ -174,6 +174,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Two gates can now run side by side in one container.** An audit of every
+  `local-gate.sh` step found three KMIP tests writing to temporary paths that
+  were the same in every run (`kmip_d1_reopen.db`, `pqc-admin-test-<tag>`,
+  `kem-interop-<tag>`), so a second gate running them at the same time shared
+  or deleted the first one's files: run in two processes at once, the SQLite
+  reopen test failed 43 times in 80 (0 in 40 alone). These paths now include
+  the process id (0 failures in 80). The wasm smoke step's build log moved
+  from a shared `/tmp` file into the worktree. Every other listener already
+  used an OS-assigned port and every other temporary path was already
+  unique.
+
+- **A gate could fail on a random EC key about one run in 256.** When a P-256
+  private value starts with a zero byte, the C++ engine reports `CKA_VALUE`
+  as 31 bytes and the Rust engine as 32. PKCS#11 v3.2 defines the attribute
+  as a "Big integer" of arbitrary size, so both are correct (confirmed by an
+  independent second reading). The cross-engine comparison now records this
+  as a permitted difference, and a new test uses a fixed key with a leading
+  zero byte so the case is checked on every run instead of by chance.
+
 - **The C++ engine now runs the NIST ACVP wasm harness in every `--cpp`
   gate.** Until now only the Rust engine did, because the C++ half needs an
   Emscripten toolchain that no gate machine had. The gate builds the C++

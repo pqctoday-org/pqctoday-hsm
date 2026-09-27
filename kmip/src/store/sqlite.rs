@@ -535,7 +535,9 @@ mod tests {
     /// original after a fresh-connection reopen.
     #[test]
     fn full_record_survives_reopen() {
-        let path = std::env::temp_dir().join("kmip_d1_reopen.db");
+        // Per-process name: two gates running this test at once in one container
+        // must not share (or delete) each other's database.
+        let path = std::env::temp_dir().join(format!("kmip_d1_reopen-{}.db", std::process::id()));
         let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
         let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
         let cleanup = || {
