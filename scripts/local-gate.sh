@@ -607,6 +607,19 @@ else
   bad "Rust PKCS#11 v3.2 conformance (report regenerated regardless — check it, or check_pkcs11_reports_fresh.py, for the real failure)"
 fi
 
+# Plan item 2.B (2026-09-27): the NIST ACVP wasm harness, Rust engine only,
+# on every gate run. Its scope is in its name on purpose — the C++ half needs
+# an Emscripten toolchain that exists nowhere here (plan 2.E), so a name that
+# claimed "the ACVP harness" would reassure about an engine it never loads.
+# It reuses the rust/pkg the conformance step above just built (8 MiB stack,
+# acvp feature — the configuration the bundle ships); if that build failed,
+# the step above is already red. wasm/rust/ is gitignored and nothing else
+# populates it, so the step stages the two files itself. The harness counts a
+# failure in its exit code; since 2.A it also FAILs, rather than SKIPs, a
+# mechanism missing from C_GetMechanismList and an HSS import error.
+run_step_host "ACVP wasm harness — Rust engine only (C++ WASM half not exercised)" \
+  "cd '$ROOT' && mkdir -p wasm/rust && cp rust/pkg/softhsmrustv3_bg.js rust/pkg/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
+
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
   # it shipped without cmake, ctest or cppunit — so this step failed during

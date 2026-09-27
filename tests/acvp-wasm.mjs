@@ -174,7 +174,9 @@ async function runSuite(engineName) {
     if (!jsonOut) {
       const icon = status === 'PASS' ? '\u2713' : status === 'FAIL' ? '\u2717' : '\u2298'
       console.log(`  ${icon}  ${algo} \u2014 ${testCase}: ${status}`)
-      if (verbose && details) console.log(`       ${details}`)
+      // A FAIL always shows its details: a failure without its reason
+      // (e.g. the rv) is what let the HSS import SKIPs hide (plan 2.A).
+      if ((verbose || status === 'FAIL') && details) console.log(`       ${details}`)
     }
   }
 
@@ -194,7 +196,7 @@ async function runSuite(engineName) {
     // aesDecrypt take aad/tagBits so this vector is exercised as-is
     // rather than silently ignoring its AAD and mismatching its tag size.
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_GCM)) {
-      addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+      addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tg = aesGcmVec.testGroups[0]
       const tv = tg.tests[0]
@@ -224,7 +226,7 @@ async function runSuite(engineName) {
     // exact-length-only CKM_SHA256_HMAC — see hmacVerifyGeneral / the hub's
     // matching hsm_hmacVerifyGeneral for the same reasoning.
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256_HMAC_GENERAL)) {
-      addResult('hmac256', 'HMAC-SHA256', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+      addResult('hmac256', 'HMAC-SHA256', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = hmacVec.testGroups[0].tests[0]
       try {
@@ -242,7 +244,7 @@ async function runSuite(engineName) {
     // rsaVerify's default, and pass the real message bytes (hex-decoded,
     // not TextEncoder'd — ACVP message bytes aren't necessarily valid text).
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256_RSA_PKCS_PSS)) {
-      addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', 'SKIP', 'mechanism not supported')
+      addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tg = rsaPssVec.testGroups[0]
       const tv = tg.tests[0]
@@ -287,7 +289,7 @@ async function runSuite(engineName) {
         continue
       }
       if (mechs.size > 0 && !mechs.has(mech)) {
-        addResult(`rsasig-tg${tg.tgId}`, label, 'SigVer KAT', 'SKIP', 'mechanism not supported')
+        addResult(`rsasig-tg${tg.tgId}`, label, 'SigVer KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
         continue
       }
       const tv = tg.tests[0]
@@ -304,7 +306,7 @@ async function runSuite(engineName) {
 
     // ── 4. ECDSA P-256 SigVer KAT (FIPS 186-5) ───────────────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_ECDSA_SHA256)) {
-      addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', 'SKIP', 'mechanism not supported')
+      addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = ecdsaVec.testGroups[0].tests[0]
       try {
@@ -444,7 +446,7 @@ async function runSuite(engineName) {
 
     // ── 6.5. HashML-DSA Pre-Hash Functional Sign+Verify (FIPS 204) ──────
     if (mechs.size > 0 && !mechs.has(CK.CKM_HASH_ML_DSA)) {
-      addResult(`hmldsa-f-44`, 'HashML-DSA-SHA256', 'Hash-then-Sign Functional', 'SKIP', 'mechanism not supported')
+      addResult(`hmldsa-f-44`, 'HashML-DSA-SHA256', 'Hash-then-Sign Functional', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const v of [44, 65, 87]) {
         let algo, mech
@@ -522,7 +524,7 @@ async function runSuite(engineName) {
 
     // ── 9.5. HashSLH-DSA Pre-Hash Functional Sign+Verify ─────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_HASH_SLH_DSA)) {
-      addResult(`hslhdsa-tgt`, 'HashSLH-DSA-SHA2', 'Hash-then-Sign Functional', 'SKIP', 'mechanism not supported')
+      addResult(`hslhdsa-tgt`, 'HashSLH-DSA-SHA2', 'Hash-then-Sign Functional', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const { ckp, name, mech } of [
         { ckp: CK.CKP_SLH_DSA_SHA2_128F, name: 'HashSLH-DSA-SHA2-128f-SHA256', mech: CK.CKM_HASH_SLH_DSA_SHA256 },
@@ -542,7 +544,7 @@ async function runSuite(engineName) {
 
     // ── 10. SHA-256 Digest KAT (FIPS 180-4) — 3 test cases ───────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256)) {
-      addResult('sha256', 'SHA-256', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha256', 'SHA-256', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha256Vec.testGroups[0].tests) {
         try {
@@ -562,7 +564,7 @@ async function runSuite(engineName) {
     // already carried 3 real, provenance-verified ACVP cases unused. Wired
     // in properly, matching the sha256Vec loop above.
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA3_256)) {
-      addResult('sha3_256', 'SHA3-256', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha3_256', 'SHA3-256', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha3_256Vec.testGroups[0].tests) {
         try {
@@ -580,7 +582,7 @@ async function runSuite(engineName) {
     // WS-5.4: previously had no test at all (sha3_512_test.json existed
     // with real provenance, orphaned — loaded by nothing).
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA3_512)) {
-      addResult('sha3_512', 'SHA3-512', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha3_512', 'SHA3-512', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha3_512Vec.testGroups[0].tests) {
         try {
@@ -599,7 +601,7 @@ async function runSuite(engineName) {
     // cases loaded by nothing — SHA-384/512 previously had zero digest
     // evidence in this harness at all (only HMAC-SHA384/512 were covered).
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA384)) {
-      addResult('sha384', 'SHA-384', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha384', 'SHA-384', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha384Vec.testGroups[0].tests) {
         try {
@@ -614,7 +616,7 @@ async function runSuite(engineName) {
     }
 
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512)) {
-      addResult('sha512', 'SHA-512', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha512', 'SHA-512', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha512Vec.testGroups[0].tests) {
         try {
@@ -634,7 +636,7 @@ async function runSuite(engineName) {
     // post-hoc (OpenSSL's EVP_sha512_224/256 already compute the correct
     // FIPS-defined IV).
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_224)) {
-      addResult('sha512-224', 'SHA-512/224', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha512-224', 'SHA-512/224', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha512_224Vec.testGroups[0].tests) {
         try {
@@ -649,7 +651,7 @@ async function runSuite(engineName) {
     }
 
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_256)) {
-      addResult('sha512-256', 'SHA-512/256', 'Digest KAT', 'SKIP', 'mechanism not supported')
+      addResult('sha512-256', 'SHA-512/256', 'Digest KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const test of sha512_256Vec.testGroups[0].tests) {
         try {
@@ -665,7 +667,7 @@ async function runSuite(engineName) {
 
     // ── 10.6.5c. HMAC-SHA512/224, HMAC-SHA512/256 Verify KAT (NIST ACVP) ───
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_224_HMAC_GENERAL)) {
-      addResult('hmac512-224', 'HMAC-SHA512/224', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+      addResult('hmac512-224', 'HMAC-SHA512/224', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = hmacSha512_224Vec.testGroups[0].tests[0]
       try {
@@ -678,7 +680,7 @@ async function runSuite(engineName) {
     }
 
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_256_HMAC_GENERAL)) {
-      addResult('hmac512-256', 'HMAC-SHA512/256', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+      addResult('hmac512-256', 'HMAC-SHA512/256', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = hmacSha512_256Vec.testGroups[0].tests[0]
       try {
@@ -704,7 +706,7 @@ async function runSuite(engineName) {
     // in the vendor range — PKCS#11 v3.2 defines no KMAC mechanism, so
     // this isn't a v3.2 compliance item, just documented honestly here).
     if (mechs.size > 0 && !mechs.has(CK.CKM_KMAC_128)) {
-      addResult('kmac128', 'KMAC-128', 'MVT KAT (negative)', 'SKIP', 'mechanism not supported')
+      addResult('kmac128', 'KMAC-128', 'MVT KAT (negative)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = kmacVec.testGroups[0].tests[0]
       try {
@@ -740,7 +742,7 @@ async function runSuite(engineName) {
     ]) {
       const mechDerive = CK[name]
       if (mechs.size > 0 && !mechs.has(mechDerive)) {
-        addResult(`shakd-${name}`, name, 'Derive vs Digest cross-check', 'SKIP', 'mechanism not supported')
+        addResult(`shakd-${name}`, name, 'Derive vs Digest cross-check', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
         continue
       }
       try {
@@ -793,7 +795,7 @@ async function runSuite(engineName) {
     // padded CKM_AES_CBC_PAD. See aesDecrypt's doc comment / the hub's
     // matching hsm_aesDecrypt('cbc-raw') for the same reasoning.
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_CBC)) {
-      addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT (NIST ACVP)', 'SKIP', 'mechanism not supported')
+      addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT (NIST ACVP)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = aesCbcVec.testGroups[0].tests[0]
       try {
@@ -808,7 +810,7 @@ async function runSuite(engineName) {
 
     // ── 12. AES-CTR-256 Decrypt KAT (SP 800-38A) ─────────────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_CTR)) {
-      addResult('aesctr', 'AES-CTR-256', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+      addResult('aesctr', 'AES-CTR-256', 'Decrypt KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = aesCtrVec.testGroups[0].tests[0]
       const counterBits = aesCtrVec.testGroups[0].counterBits
@@ -824,7 +826,7 @@ async function runSuite(engineName) {
 
     // ── 13. HMAC-SHA384 Verify KAT (NIST ACVP, truncated) ─────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA384_HMAC_GENERAL)) {
-      addResult('hmac384', 'HMAC-SHA384', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+      addResult('hmac384', 'HMAC-SHA384', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = hmac384Vec.testGroups[0].tests[0]
       try {
@@ -838,7 +840,7 @@ async function runSuite(engineName) {
 
     // ── 14. HMAC-SHA512 Verify KAT (NIST ACVP, truncated) ─────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_HMAC_GENERAL)) {
-      addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+      addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = hmac512Vec.testGroups[0].tests[0]
       try {
@@ -906,7 +908,7 @@ async function runSuite(engineName) {
 
     // ── 15. ECDSA P-384 SigVer KAT (FIPS 186-5) ─────────────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_ECDSA_SHA384)) {
-      addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', 'SKIP', 'mechanism not supported')
+      addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = ecdsaP384Vec.testGroups[0].tests[0]
       try {
@@ -928,7 +930,7 @@ async function runSuite(engineName) {
     // and loaded by nothing — P-521 previously had zero digital-signature
     // evidence in this harness (mechanism-list presence only).
     if (mechs.size > 0 && !mechs.has(CK.CKM_ECDSA_SHA512)) {
-      addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', 'SKIP', 'mechanism not supported')
+      addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = ecdsaP521Vec.testGroups[0].tests[0]
       try {
@@ -963,7 +965,7 @@ async function runSuite(engineName) {
     for (const [curve, mech, outLen] of [['X25519', CK.CKM_ECDH1_DERIVE, 32], ['X448', CK.CKM_ECDH1_DERIVE, 56]]) {
       const label = `${curve} derive (RFC 7748, CKM_ECDH1_DERIVE)`
       if (mechs.size > 0 && !mechs.has(mech)) {
-        addResult(`x-derive-${curve}`, label, 'Derive KAT', 'SKIP', 'mechanism not supported')
+        addResult(`x-derive-${curve}`, label, 'Derive KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
         continue
       }
       try {
@@ -980,7 +982,7 @@ async function runSuite(engineName) {
 
     // ── 16. EdDSA Ed25519 Functional Sign+Verify (RFC 8032) ───────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
-      addResult('eddsa', 'EdDSA Ed25519', 'Functional Sign+Verify', 'SKIP', 'mechanism not supported')
+      addResult('eddsa', 'EdDSA Ed25519', 'Functional Sign+Verify', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       try {
         const { pubHandle, privHandle } = generateEdDSAKeyPair(M, hSession, 'Ed25519')
@@ -1008,7 +1010,7 @@ async function runSuite(engineName) {
     for (const vecFile of [eddsaVec, eddsaEd448Vec]) {
       const curve = vecFile.curve
       if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
-        addResult('eddsa-params', curve, 'CK_EDDSA_PARAMS KAT', 'SKIP', 'CKM_EDDSA not supported')
+        addResult('eddsa-params', curve, 'CK_EDDSA_PARAMS KAT', 'FAIL', 'CKM_EDDSA not supported')
         continue
       }
       for (const vs of vecFile.vectorSets) {
@@ -1052,7 +1054,7 @@ async function runSuite(engineName) {
     // §16.6 case above still passing, so these assertions are what make that
     // suite mean something.
     if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
-      addResult('eddsa-params-bind', 'Ed25519', 'CK_EDDSA_PARAMS binding', 'SKIP',
+      addResult('eddsa-params-bind', 'Ed25519', 'CK_EDDSA_PARAMS binding', 'FAIL',
         'CKM_EDDSA not supported')
     } else {
       const ctxSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx')
@@ -1126,7 +1128,7 @@ async function runSuite(engineName) {
     // itself. Compared against the single-part RFC 8032 answer, not against
     // another multi-part call.
     if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
-      addResult('eddsa-params-multipart', 'Ed25519ctx', 'Multi-part context binding', 'SKIP',
+      addResult('eddsa-params-multipart', 'Ed25519ctx', 'Multi-part context binding', 'FAIL',
         'CKM_EDDSA not supported')
     } else {
       const tv = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx').tests[0]
@@ -1165,7 +1167,7 @@ async function runSuite(engineName) {
 
     // ── 17. PBKDF2 Functional Derivation (PKCS#5 v2.1) ───────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_PKCS5_PBKD2)) {
-      addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', 'SKIP', 'mechanism not supported')
+      addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       try {
         const password = new TextEncoder().encode('ACVP-PBKDF2-test-password')
@@ -1186,7 +1188,7 @@ async function runSuite(engineName) {
     // (rust/src/ffi.rs's CKM_PKCS5_PBKD2 match only covers SHA256/384/512);
     // that is a real, documented engine gap, not a harness bug.
     if (mechs.size > 0 && !mechs.has(CK.CKM_PKCS5_PBKD2)) {
-      addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', 'SKIP', 'mechanism not supported')
+      addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = pbkdf2Vec.testGroups[0].tests[0]
       try {
@@ -1349,7 +1351,7 @@ async function runSuite(engineName) {
       for (const [mode, vec, mech] of SIMPLE_AES_MODES) {
         const label = `AES-${mode.toUpperCase()}`
         if (mechs.size > 0 && !mechs.has(mech)) {
-          addResult(mode, label, 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+          addResult(mode, label, 'Decrypt KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
           continue
         }
         for (const c of vec.cases) {
@@ -1370,7 +1372,7 @@ async function runSuite(engineName) {
     // ── 18f. AES-CCM Real ACVP KAT — new mechanism, hand-built EVP CCM
     // sequencing (WS-8, 2026-08-30; see aes_ccm_test.json's _provenance) ──
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_CCM)) {
-      addResult('ccm', 'AES-CCM', 'KAT', 'SKIP', 'mechanism not supported')
+      addResult('ccm', 'AES-CCM', 'KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const c of aesCcmVec.cases) {
         try {
@@ -1405,7 +1407,7 @@ async function runSuite(engineName) {
     // ── 18g. AES-GMAC Real ACVP KAT — new mechanism, OpenSSL EVP_MAC
     // "GMAC" (WS-8, 2026-08-30; see aes_gmac_test.json's _provenance) ────
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_GMAC)) {
-      addResult('gmac', 'AES-GMAC', 'KAT', 'SKIP', 'mechanism not supported')
+      addResult('gmac', 'AES-GMAC', 'KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const c of aesGmacVec.cases) {
         try {
@@ -1433,7 +1435,7 @@ async function runSuite(engineName) {
     // ── 18h. AES-XTS Real ACVP KAT — new CKK_AES_XTS key type + mechanism
     // (WS-8, 2026-08-30; see aes_xts_test.json's _provenance) ────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_XTS)) {
-      addResult('xts', 'AES-XTS', 'KAT', 'SKIP', 'mechanism not supported')
+      addResult('xts', 'AES-XTS', 'KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       for (const c of aesXtsVec.cases) {
         try {
@@ -1456,7 +1458,7 @@ async function runSuite(engineName) {
 
     // ── 19. AES-KW Wrap KAT (RFC 3394) ───────────────────────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_KEY_WRAP)) {
-      addResult('aeskw', 'AES-KW-256', 'Wrap KAT', 'SKIP', 'mechanism not supported')
+      addResult('aeskw', 'AES-KW-256', 'Wrap KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       const tv = aesKwVec.testGroups[0].tests[0]
       try {
@@ -1477,7 +1479,7 @@ async function runSuite(engineName) {
 
     // ── 20. AES-KWP Wrap+Unwrap Round-Trip (RFC 5649) ────────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_KEY_WRAP_KWP)) {
-      addResult('aeskwp', 'AES-KWP-256', 'Wrap+Unwrap Round-Trip', 'SKIP', 'mechanism not supported')
+      addResult('aeskwp', 'AES-KWP-256', 'Wrap+Unwrap Round-Trip', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
     } else {
       try {
         const kekH = generateAESKey(M, hSession, 256, {
@@ -1528,7 +1530,7 @@ async function runSuite(engineName) {
           continue
         }
         if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_PKCS_OAEP)) {
-          addResult('rsaoaep-kat', label, 'Unwrap KAT', 'SKIP', 'mechanism not supported')
+          addResult('rsaoaep-kat', label, 'Unwrap KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
           continue
         }
         let pass = 0, failDetail = ''
@@ -1571,7 +1573,7 @@ async function runSuite(engineName) {
     // wrap path ignored hashAlg, both operations were really SHA-1 and this
     // cross-hash unwrap succeeded.
     if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_PKCS_OAEP)) {
-      addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (negative)', 'SKIP',
+      addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (negative)', 'FAIL',
         'mechanism not supported')
     } else {
       let p512 = null, p1 = null
@@ -1617,7 +1619,7 @@ async function runSuite(engineName) {
     // UnwrapKeyAsym helpers, and MechParamCheckRSAAESKEYWRAP used to validate
     // only mgf ∈ 1..5 — never hashAlg — so it carried the bug twice over.
     if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_AES_KEY_WRAP)) {
-      addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP', 'hashAlg binding + param validation', 'SKIP',
+      addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP', 'hashAlg binding + param validation', 'FAIL',
         'mechanism not supported')
     } else {
       let w512 = null, w1 = null, wBad = null
@@ -1752,25 +1754,23 @@ async function runSuite(engineName) {
       // signature using our engine's independent verify path.
       if (slhdsaCtxVec && slhdsaCtxVec.sigGen && slhdsaCtxVec.sigGen[name]) {
         const tv = slhdsaCtxVec.sigGen[name]
-        if (engineName === 'cpp') {
-          try {
-            const pk = hexToBytes(tv.pk)
-            const sk = hexToBytes(tv.sk)
-            const msg = hexToBytes(tv.message)
-            const ctx = hexToBytes(tv.context)
-            const pubHandle = importSLHDSAPublicKey(M, hSession, ckp, pk)
-            const privHandle = importSLHDSAPrivateKey(M, hSession, ckp, sk)
-            const sig = slhdsaSignBytesCtx(M, hSession, privHandle, msg, ctx, true)
-            const ok = slhdsaVerifyBytesCtx(M, hSession, pubHandle, msg, sig, ctx)
-            addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
-          } catch (e) {
-            addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', 'FAIL', e.message)
-          }
-        } else {
-          // Rust/fips205 engine: vector is Botan-specific (cross-validated: diverges at byte 0)
-          // SigVer KAT above provides the valid cross-implementation validation.
-          addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen KAT', 'SKIP',
-            'Vector is Botan-specific; fips205 is FIPS-205-compliant but produces different deterministic bytes')
+        // Both engines run the same sk-based round trip. The Rust engine used
+        // to be skipped here as "Vector is Botan-specific" — a rationale from
+        // 2026-04-07 that stopped being true when this file was replaced with
+        // NIST ACVP-Server SLH-DSA-sigGen-FIPS205 vectors (c54ea271,
+        // 2026-08-28), so 12 cases never ran on Rust (plan 2.A, L1772).
+        try {
+          const pk = hexToBytes(tv.pk)
+          const sk = hexToBytes(tv.sk)
+          const msg = hexToBytes(tv.message)
+          const ctx = hexToBytes(tv.context)
+          const pubHandle = importSLHDSAPublicKey(M, hSession, ckp, pk)
+          const privHandle = importSLHDSAPrivateKey(M, hSession, ckp, sk)
+          const sig = slhdsaSignBytesCtx(M, hSession, privHandle, msg, ctx, true)
+          const ok = slhdsaVerifyBytesCtx(M, hSession, pubHandle, msg, sig, ctx)
+          addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
+        } catch (e) {
+          addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', 'FAIL', e.message)
         }
       }
     }
@@ -1801,7 +1801,10 @@ async function runSuite(engineName) {
       'shake128': CK.CKM_HASH_SLH_DSA_SHAKE128,
       'shake256': CK.CKM_HASH_SLH_DSA_SHAKE256,
     }
-    if (engineName === 'cpp' && slhdsaCtxVec && slhdsaCtxVec.preHashSigGen) {
+    // Both engines (plan 2.A, L1804): this block used to run on C++ only,
+    // with no SKIP recorded for Rust, although Rust advertises every
+    // CKM_HASH_SLH_DSA_* it uses.
+    if (slhdsaCtxVec && slhdsaCtxVec.preHashSigGen) {
       const ckpByName = new Map(SLH_DSA_PARAM_SETS)
       for (const [variant, tv] of Object.entries(slhdsaCtxVec.preHashSigGen)) {
         const ckp = ckpByName.get(variant)
@@ -1883,9 +1886,15 @@ async function runSuite(engineName) {
       for (const et of eg.tests) expMap[eg.tgId][et.tcId] = et.testPassed
     }
     let katPass = 0, katFail = 0, katSkip = 0
+    // Every group runs (plan 2.A, L1888). This loop used to `continue` past
+    // any mode missing from LMS_MODE_TO_CKP — 60 of 80 groups, 240 cases,
+    // with no PASS/FAIL/SKIP record: the SHA-256 M24/M32 groups (left to a
+    // separate native Python script) and the SHAKE M24 groups (mentioned
+    // nowhere). Both engines implement all of them, and verification reads
+    // the LMS type from the public key itself, so no mapping is needed.
+    // LMS_MODE_TO_CKP stays for the modes a caller would generate.
+    void LMS_MODE_TO_CKP
     for (const grp of lmsSigverVec.testGroups) {
-      const lmsCkp = LMS_MODE_TO_CKP[grp.lmsMode]
-      if (lmsCkp === undefined) continue  // skip SHA-256 groups (tested by Python script)
       // Rust engine: hbs-lms-patched serializes/parses SP 800-208
       // family-specific type IDs, so SHAKE-256 external vectors verify
       // through the crate like any other family (was SKIP pre-patch).
@@ -1900,11 +1909,14 @@ async function runSuite(engineName) {
       try {
         hPub = hssImportPublicKey(M, hSession, pkBytes)
       } catch (e) {
-        // If C_CreateObject for CKK_HSS is not yet supported, mark all as SKIP
-        addResult(`hss-kat-${grp.lmsMode}`, grp.lmsMode,
+        // Both engines and the mechanism ledger claim CKK_HSS import, so a
+        // failure here is a defect or a stale build — FAIL, with the error
+        // (it used to be a SKIP labelled "unsupported", rv hidden; plan 2.A,
+        // L1904, the "80 SKIP" line).
+        addResult(`hss-kat-${grp.lmsMode}-${grp.tgId}`, grp.lmsMode,
           `ACVP SigVer KAT (tgId ${grp.tgId}) §12.3`,
-          'SKIP', `C_CreateObject unsupported: ${e.message}`)
-        katSkip += grp.tests.length
+          'FAIL', `C_CreateObject(CKK_HSS) failed: ${e.message}`)
+        katFail += grp.tests.length
         continue
       }
       for (const tc of grp.tests) {
@@ -1936,7 +1948,7 @@ async function runSuite(engineName) {
       }
     }
     if (!jsonOut && (katPass + katFail + katSkip > 0)) {
-      console.log(`  HSS SHAKE-256 ACVP KAT: ${katPass} PASS / ${katFail} FAIL / ${katSkip} SKIP`)
+      console.log(`  HSS/LMS ACVP SigVer KAT (all ${lmsSigverVec.testGroups.length} groups): ${katPass} PASS / ${katFail} FAIL / ${katSkip} SKIP`)
     }
 
   } finally {
@@ -2034,7 +2046,11 @@ if (engines.length > 1 && !jsonOut) {
         const vPub = hssImportPublicKey(Mverify, vSess, pubBytes)
         result = hssVerify(Mverify, vSess, vPub, CC_MSG, sig)
       } catch (e) {
-        console.log(`  ${label}: SKIP — C_CreateObject not supported: ${e.message}`)
+        // Both engines implement CKK_HSS import and verify, so an error here
+        // (from the import OR the verify, which share this try) is a
+        // cross-check failure, not a skip (plan 2.A, L2037).
+        ccFail++
+        console.log(`  ${label}: FAIL — ${e.message}`)
         finalizeEngine(Msign, sSess)
         finalizeEngine(Mverify, vSess)
         return
