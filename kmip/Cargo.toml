@@ -265,6 +265,10 @@ softhsmrustv3 = { path = "../rust", features = ["test-support"] }
 # coverage. `[patch]` does not propagate across workspaces / standalone crates,
 # so we duplicate it here. Same pattern as `openmls-provider/Cargo.toml`.
 [patch.crates-io]
+# aws-lc-sys 0.44.0 from crates.io (sha256 f09fae7b…, see rust/vendor/PROVENANCE-aws-lc-sys.md)
+# plus rust/vendor/aws-lc-sys-0.44.0-cortex-a5x.patch: Cortex-A53/A55 keep the scalar
+# armv8-mont Montgomery kernel (RSA private ops +21-69% on the boards).
+aws-lc-sys = { path = "../rust/vendor/aws-lc-sys-0.44.0" }
 fips204 = { path = "../rust/fips204-patched" }
 fips205 = { path = "../rust/fips205-patched" }
 hbs-lms = { path = "../rust/hbs-lms-patched" }
