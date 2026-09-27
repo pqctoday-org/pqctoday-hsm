@@ -230,6 +230,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
   published in SLIP-10 test vector 1.
 
+- **Rust engine: SP 800-108 key derivation accepted a repeated DKM length
+  field.** PKCS#11 v3.2 (Tables 199–201) allows at most one
+  `CK_SP800_108_DKM_LENGTH` entry in the data parameters. A request with two
+  was accepted in counter, feedback and double-pipeline mode, and the derived
+  key silently depended on both. `C_DeriveKey` now refuses it with
+  `CKR_MECHANISM_PARAM_INVALID` in all three modes.
+
+- **Rust engine: SP 800-108 feedback and double-pipeline derivation accepted
+  a repeated counter field.** PKCS#11 v3.2 (Tables 200–201) allows at most one
+  `CK_SP800_108_COUNTER` entry. Two were accepted and both were mixed into the
+  derivation. `C_DeriveKey` now refuses the request with
+  `CKR_MECHANISM_PARAM_INVALID`. A single counter field still works as before.
+
+- **Rust engine: unwrapping could create a key of the wrong length for its
+  type.** For example, unwrapping 16 bytes into a `CKK_CHACHA20` key returned
+  `CKR_OK` and made a 128-bit ChaCha20 key, though ChaCha20 keys are always
+  256 bits. PKCS#11 v3.2 §5.18.4 requires `CKR_WRAPPED_KEY_LEN_RANGE` for such
+  a length conflict. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply
+  the same length rules `C_DeriveKey` already uses (AES 16, 24 or 32 bytes;
+  AES-XTS 32 or 64; ChaCha20 exactly 32; a non-empty value for generic-secret,
+  HKDF and HMAC keys) and refuse anything else with that code. No key object is
+  created on refusal.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
