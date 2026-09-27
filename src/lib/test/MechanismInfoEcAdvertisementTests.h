@@ -19,6 +19,7 @@ class MechanismInfoEcAdvertisementTests : public TestsBase
 	CPPUNIT_TEST(testMontgomeryMechanismsAdvertiseTheirCurveSize);
 	CPPUNIT_TEST(testBip32ChildDeriveAdvertisesItsParentKeySize);
 	CPPUNIT_TEST(testBip32MasterKeyStartingWith0x30);
+	CPPUNIT_TEST(testBip32ChildCurveFollowsParentAndEd25519IsEdwards);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -26,6 +27,7 @@ public:
 	void testMontgomeryMechanismsAdvertiseTheirCurveSize();
 	void testBip32ChildDeriveAdvertisesItsParentKeySize();
 	void testBip32MasterKeyStartingWith0x30();
+	void testBip32ChildCurveFollowsParentAndEd25519IsEdwards();
 };
 
 #endif // !_SOFTHSM_V2_MECHANISMINFOECADVERTISEMENTTESTS_H
