@@ -111,6 +111,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Rust engine accepts a curve name for P-256 and the other Weierstrass curves)
   is recorded with its citation.
 
+- **The KMIP mechanism manifest listed 4 of the 16 vendor mechanisms.**
+  `kmip/pkcs11-mech-manifest.json` still showed the July FrodoKEM / Classic
+  McEliece entries and an authority checksum four revisions old, and claimed
+  a CI check that could not exist (the authority file is private). It now
+  lists every vendor mechanism and key type the engines define, pins the
+  current authority revision, and says plainly that the checksum is a
+  hand-kept record. `check_pkcs11_constants.py` now fails if the manifest's
+  vendor lists and the engines ever disagree.
+
 - **ChaCha20 kept its start block across a size query.** After a NULL-buffer
   length query or `CKR_BUFFER_TOO_SMALL`, one-shot `C_Encrypt` / `C_Decrypt`
   re-armed the operation with block counter 0, so the real call used the wrong
