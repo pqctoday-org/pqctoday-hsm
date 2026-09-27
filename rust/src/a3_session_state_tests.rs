@@ -498,7 +498,9 @@ fn secrets_never_enter_the_thread_cache() {
     assert_eq!(get_object_value(KEY_A), Some(vec![0x11; 16]), "the value still reads, under the lock");
     assert_eq!(get_object_attr_bytes(KEY_A, CKA_VALUE), Some(vec![0x11; 16]));
     assert!(crate::state::is_secret_attr(CKA_PRIVATE_EXPONENT) && crate::state::is_secret_attr(CKA_SEED));
-    assert!(crate::state::is_secret_attr(0x8000_1234), "vendor-defined attributes are treated as secret");
+    assert!(crate::state::is_secret_attr(CKA_BIP32_CHAIN_CODE));
+    assert!(crate::state::is_secret_attr(CKA_PRIV_STATEFUL_KEY_STATE));
+    assert!(!crate::state::is_secret_attr(CKA_PRIV_PARAM_SET), "public vendor attributes stay cacheable");
 }
 
 /// Login, logout and C_Finalize invalidate every epoch cache.

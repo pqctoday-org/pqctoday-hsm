@@ -200,10 +200,24 @@ impl ObjectTable {
 pub const OBJ_CACHE_MAX: usize = 256;
 
 /// Attributes that must never be copied into the per-thread cache.
+/// Explicit list, not a range: vendor attributes are NOT all secret (the
+/// parameter-set, family, owner and slot attributes are public and are read
+/// on every Init), so a blanket "vendor = secret" rule broke key lookups.
+/// Add any new attribute that holds key material or private key state here.
 pub fn is_secret_attr(t: u32) -> bool {
-    matches!(t, CKA_VALUE | CKA_PRIVATE_EXPONENT | CKA_PRIME_1 | CKA_PRIME_2 | CKA_EXPONENT_1
-        | CKA_EXPONENT_2 | CKA_COEFFICIENT | CKA_SEED)
-        || t & 0x8000_0000 != 0
+    matches!(
+        t,
+        CKA_VALUE
+            | CKA_PRIVATE_EXPONENT
+            | CKA_PRIME_1
+            | CKA_PRIME_2
+            | CKA_EXPONENT_1
+            | CKA_EXPONENT_2
+            | CKA_COEFFICIENT
+            | CKA_SEED
+            | CKA_BIP32_CHAIN_CODE
+            | CKA_PRIV_STATEFUL_KEY_STATE
+    )
 }
 
 /// Invalidate every per-thread object cache (and every Init-time key-schedule
