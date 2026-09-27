@@ -24,7 +24,7 @@ const SESSION: u32 = 0x4D50_4001;
 fn setup() {
     crate::state::set_initialized(true);
     SESSIONS.with(|s| {
-        s.borrow_mut()
+        s.shard(SESSION)
             .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
     });
     TOKEN_STORE.with(|ts| {

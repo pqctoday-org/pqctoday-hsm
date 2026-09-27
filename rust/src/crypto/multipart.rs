@@ -47,7 +47,9 @@ use crate::constants::{
 const BLOCK: usize = 16;
 
 /// AES variant — folds the three key-size types into one enum so the
-/// state machines stay monomorphic over key length.
+/// state machines stay monomorphic over key length. `Clone` lets an
+/// operation context hand out its cached key schedule (A3).
+#[derive(Clone)]
 pub enum AesKey {
     Aes128(aes::Aes128),
     Aes192(aes::Aes192),

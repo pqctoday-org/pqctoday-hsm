@@ -30,6 +30,147 @@ impl<T> GlobalState<T> {
     }
 }
 
+/// A per-session table split into `SHARDS` independently locked maps, chosen
+/// by session handle. A3 (AES plan, 2026-09-27): every per-session table used
+/// to be ONE `Mutex<HashMap>`, so every operation of every session on every
+/// thread serialised on the same few locks. Measured on the M4 Pro, small
+/// operations lost throughput as workers were added (SHA-256 64 B: 5.19M
+/// ops/s with one worker per tenant, 1.22M with two). Sessions are
+/// single-threaded by PKCS#11 rules (§5.6), so two sessions never need each
+/// other's entries; sharding by handle gives each session its own lock in
+/// practice, while the whole-table operations (C_CloseAllSessions,
+/// C_Finalize) still reach every entry through `for_each_shard`.
+///
+/// Lock-order rule for callers: hold at most ONE shard of a given table at a
+/// time. Two keys can map to the same shard and std `Mutex` is not
+/// re-entrant, so a second `shard()` call on the same table while holding a
+/// guard can self-deadlock. Different tables may still be nested exactly as
+/// the single-lock tables were.
+pub const SHARDS: usize = 64;
+
+pub struct Sharded<C> {
+    shards: Box<[Mutex<C>]>,
+}
+
+impl<C: Default> Sharded<C> {
+    pub fn new() -> Self {
+        Self { shards: (0..SHARDS).map(|_| Mutex::new(C::default())).collect() }
+    }
+}
+
+impl<C> Sharded<C> {
+    #[inline]
+    fn index(key: u32) -> usize {
+        (key as usize) % SHARDS
+    }
+    /// The shard holding `key`'s entry. Poisoning is ignored, as `GlobalState`
+    /// does.
+    #[track_caller]
+    #[inline]
+    pub fn shard(&self, key: u32) -> MutexGuard<'_, C> {
+        self.shards[Self::index(key)].lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Same entry-point shape as `GlobalState::with`, so a converted call
+    /// site reads `TABLE.with(|s| s.shard(h).…)`.
+    pub fn with<R, F: FnOnce(&Self) -> R>(&self, f: F) -> R {
+        f(self)
+    }
+    /// Run `f` on every shard in turn, one lock at a time (clear, retain,
+    /// counting). Never call `shard()` on the same table inside `f`.
+    pub fn for_each_shard(&self, mut f: impl FnMut(&mut C)) {
+        for m in self.shards.iter() {
+            f(&mut m.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+    }
+}
+
+impl<V> Sharded<HashMap<u32, V>> {
+    /// True if any entry satisfies `f`. Shards are visited one at a time, so
+    /// the answer is not a single atomic snapshot of the whole table; it
+    /// never was a guarantee past the call anyway, since the old single lock
+    /// was released before the caller acted on the answer.
+    pub fn any(&self, mut f: impl FnMut(&u32, &V) -> bool) -> bool {
+        let mut hit = false;
+        self.for_each_shard(|m| {
+            if !hit {
+                hit = m.iter().any(|(k, v)| f(k, v));
+            }
+        });
+        hit
+    }
+    /// Keys of the entries satisfying `f`.
+    pub fn keys_where(&self, mut f: impl FnMut(&u32, &V) -> bool) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.for_each_shard(|m| out.extend(m.iter().filter(|(k, v)| f(k, v)).map(|(k, _)| *k)));
+        out
+    }
+    /// Insert into `key`'s shard (one lock, released on return).
+    pub fn insert(&self, key: u32, v: V) -> Option<V> {
+        self.shard(key).insert(key, v)
+    }
+    /// Entries across all shards (tests and diagnostics).
+    pub fn len(&self) -> usize {
+        let mut n = 0;
+        self.for_each_shard(|m| n += m.len());
+        n
+    }
+}
+
+/// Bumped by every write access to `OBJECTS` (see `ObjectTable::borrow_mut`).
+/// A3: an operation context caches its expanded AES key schedule at Init
+/// together with the epoch it read; at operation time the cache is used only
+/// if the epoch is unchanged, so any object write since Init (a destroyed
+/// key, a changed attribute, a new object, anything) sends the operation back
+/// to re-reading the key from the object table exactly as before. It
+/// over-invalidates on purpose: correctness never depends on knowing which
+/// write touched which key.
+pub static OBJECT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+pub fn object_epoch() -> u64 {
+    OBJECT_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The object table, behind a read/write lock with the read and write paths
+/// split. `borrow()` hands out a shared read guard, so concurrent operations
+/// looking up their keys no longer queue behind each other (A3: with a
+/// single `Mutex` here, AES Init + op stopped scaling past two workers even
+/// after the per-session tables were sharded). Code that mutates must go
+/// through `borrow_mut()`, which takes the exclusive lock and bumps
+/// `OBJECT_EPOCH`; the compiler rejects a mutation through a read guard.
+pub struct ObjectTable(std::sync::RwLock<HashMap<u32, Attributes>>);
+
+pub struct ObjectsRead<'a>(std::sync::RwLockReadGuard<'a, HashMap<u32, Attributes>>);
+
+impl std::ops::Deref for ObjectsRead<'_> {
+    type Target = HashMap<u32, Attributes>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ObjectTable {
+    pub fn new() -> Self {
+        Self(std::sync::RwLock::new(HashMap::new()))
+    }
+    pub fn with<R, F: FnOnce(&Self) -> R>(&self, f: F) -> R {
+        f(self)
+    }
+    #[track_caller]
+    pub fn borrow(&self) -> ObjectsRead<'_> {
+        ObjectsRead(self.0.read().unwrap_or_else(|e| e.into_inner()))
+    }
+    /// Write access. The epoch moves before the guard is handed out, so an
+    /// operation that compares epochs after this point can never use a key
+    /// schedule cached before the write.
+    #[track_caller]
+    pub fn borrow_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<u32, Attributes>> {
+        let g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        OBJECT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        g
+    }
+}
+
 /// PKCS#11 v3.2 §5.6 — library initialization state. Set by C_Initialize,
 /// cleared by C_Finalize. Every Cryptoki function except C_Initialize and the
 /// function-list/interface getters must return CKR_CRYPTOKI_NOT_INITIALIZED
@@ -69,9 +210,9 @@ pub static UNIQUE_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::
 pub static NEXT_SESSION_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 lazy_static! {
-    pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
-    pub static ref SIGN_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
-    pub static ref VERIFY_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
+    pub static ref OBJECTS: ObjectTable = ObjectTable::new();
+    pub static ref SIGN_STATE: Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = Sharded::new();
+    pub static ref VERIFY_STATE: Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = Sharded::new();
     /// §5.13 sign/verify-WITH-RECOVERY state (2026-07-25 — RSA_PKCS/RSA_X_509
     /// only, single-part-only per spec; `(mech_type, h_key)`, no ctx/det
     /// fields needed since RSA sign-recover takes no additional params).
@@ -96,24 +237,24 @@ lazy_static! {
     /// removed in lockstep with SIGN_STATE/VERIFY_STATE (a deliberate,
     /// bounded simplification -- at most one u32 per session that has
     /// ever used the generic mechanism, not a per-operation leak).
-    pub static ref GENERIC_HASH_STATE: GlobalState<HashMap<u32, u32>> = GlobalState::new(HashMap::new());
-    pub static ref SIGN_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
-    pub static ref VERIFY_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
-    pub static ref VERIFY_SIG_STATE: GlobalState<HashMap<u32, VerifySigCtx>> = GlobalState::new(HashMap::new());
-    pub static ref ENCRYPT_STATE: GlobalState<HashMap<u32, EncryptCtx>> = GlobalState::new(HashMap::new());
-    pub static ref DECRYPT_STATE: GlobalState<HashMap<u32, EncryptCtx>> = GlobalState::new(HashMap::new());
-    pub static ref MESSAGE_ENCRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
-    pub static ref MESSAGE_DECRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
-    pub static ref DIGEST_STATE: GlobalState<HashMap<u32, DigestCtx>> = GlobalState::new(HashMap::new());
+    pub static ref GENERIC_HASH_STATE: Sharded<HashMap<u32, u32>> = Sharded::new();
+    pub static ref SIGN_RECOVER_STATE: Sharded<HashMap<u32, (u32, u32)>> = Sharded::new();
+    pub static ref VERIFY_RECOVER_STATE: Sharded<HashMap<u32, (u32, u32)>> = Sharded::new();
+    pub static ref VERIFY_SIG_STATE: Sharded<HashMap<u32, VerifySigCtx>> = Sharded::new();
+    pub static ref ENCRYPT_STATE: Sharded<HashMap<u32, EncryptCtx>> = Sharded::new();
+    pub static ref DECRYPT_STATE: Sharded<HashMap<u32, EncryptCtx>> = Sharded::new();
+    pub static ref MESSAGE_ENCRYPT_STATE: Sharded<HashMap<u32, MsgAeadCtx>> = Sharded::new();
+    pub static ref MESSAGE_DECRYPT_STATE: Sharded<HashMap<u32, MsgAeadCtx>> = Sharded::new();
+    pub static ref DIGEST_STATE: Sharded<HashMap<u32, DigestCtx>> = Sharded::new();
     /// Sessions whose digest op entered the multi-part phase (C_DigestUpdate
     /// called). PKCS#11 v3.2 §5.13 convention — the one-shot C_Digest is then
     /// CKR_OPERATION_ACTIVE until the op finishes. Maintained strictly in
     /// lockstep with DIGEST_STATE removal/clear sites.
-    pub static ref DIGEST_MULTIPART: GlobalState<std::collections::HashSet<u32>> = GlobalState::new(std::collections::HashSet::new());
+    pub static ref DIGEST_MULTIPART: Sharded<std::collections::HashSet<u32>> = Sharded::new();
     /// C_SignMessageBegin/Next accumulator (message parts between Begin and the final Next).
-    pub static ref MESSAGE_SIGN_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    pub static ref MESSAGE_SIGN_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// C_VerifyMessageBegin/Next accumulator.
-    pub static ref MESSAGE_VERIFY_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    pub static ref MESSAGE_VERIFY_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// T4 — C_SignUpdate accumulator. Presence of a session key marks the
     /// sign op as having entered its multi-part phase (the one-shot C_Sign is
     /// then CKR_OPERATION_ACTIVE until C_SignFinal — mirrors
@@ -122,17 +263,17 @@ lazy_static! {
     /// lockstep with SIGN_STATE removal/clear sites. Follow-up (NOT this
     /// slice): stream the hash-composite mechanisms into an incremental
     /// digest to bound memory instead of accumulating the whole message.
-    pub static ref SIGN_MULTIPART_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    pub static ref SIGN_MULTIPART_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// T4 — C_VerifyUpdate accumulator (see SIGN_MULTIPART_ACC).
-    pub static ref VERIFY_MULTIPART_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
-    pub static ref FIND_STATE: GlobalState<HashMap<u32, FindCtx>> = GlobalState::new(HashMap::new());
+    pub static ref VERIFY_MULTIPART_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
+    pub static ref FIND_STATE: Sharded<HashMap<u32, FindCtx>> = Sharded::new();
     /// Persistent ACVP deterministic RNG — created once in C_Initialize, advances
     /// across all operations, cleared in C_Finalize. Uses IETF ChaCha20 (RFC 8439)
     /// to match the C++ OpenSSL EVP_chacha20 implementation.
     pub static ref ACVP_RNG: GlobalState<Option<ChaCha20Rng>> = GlobalState::new(None);
 
     // PKCS#11 v3.2 token and session tracking
-    pub static ref SESSIONS: GlobalState<HashMap<u32, SessionState>> = GlobalState::new(HashMap::new());
+    pub static ref SESSIONS: Sharded<HashMap<u32, SessionState>> = Sharded::new();
     pub static ref TOKEN_STORE: GlobalState<HashMap<u32, TokenState>> = GlobalState::new(HashMap::new());
 }
 
@@ -319,6 +460,13 @@ pub struct EncryptCtx {
     /// any non-zero value, which defeated the field's entire purpose and made
     /// random-access ChaCha20 unusable. Zero for every other mechanism.
     pub block_counter: u64,
+    /// A3 — the expanded AES key schedule, built at Init for the
+    /// mechanisms that run on `AesKey`, with the `OBJECT_EPOCH` read before
+    /// the key bytes were. Used by the one-shot C_Encrypt / C_Decrypt only
+    /// while the epoch is unchanged (`cached_aes_key` in ffi.rs); any object
+    /// write since Init falls back to re-reading the key. `None` for every
+    /// other mechanism.
+    pub aes_key: Option<(u64, crate::crypto::multipart::AesKey)>,
 }
 
 /// PKCS#11 v3.2 §5.15 message-based AEAD state (C_MessageEncryptInit …
@@ -545,19 +693,19 @@ fn apply_object_defaults(attrs: &mut Attributes) {
 
 /// Return the slot id backing a session handle, if the session exists.
 pub fn session_slot(h_session: u32) -> Option<u32> {
-    SESSIONS.with(|s| s.borrow().get(&h_session).map(|ss| ss.slot_id))
+    SESSIONS.shard(h_session).get(&h_session).map(|ss| ss.slot_id)
 }
 
 /// True if a session handle refers to a live session.
 pub fn session_exists(h_session: u32) -> bool {
-    SESSIONS.with(|s| s.borrow().contains_key(&h_session))
+    SESSIONS.shard(h_session).contains_key(&h_session)
 }
 
 /// True if the session is read/write (CKF_RW_SESSION). Returns false for an
 /// unknown handle.
 pub fn session_is_rw(h_session: u32) -> bool {
     SESSIONS.with(|s| {
-        s.borrow()
+        s.shard(h_session)
             .get(&h_session)
             .map(|ss| ss.rw_session)
             .unwrap_or(false)
@@ -624,18 +772,17 @@ pub fn token_info_flags(token: &TokenState) -> u32 {
 /// Live (total, read-write) session counts for a slot, from the session
 /// table — backs CK_TOKEN_INFO.ulSessionCount / ulRwSessionCount.
 pub fn session_counts(slot_id: u32) -> (u32, u32) {
-    SESSIONS.with(|s| {
-        let store = s.borrow();
-        let mut total = 0u32;
-        let mut rw = 0u32;
+    let mut total = 0u32;
+    let mut rw = 0u32;
+    SESSIONS.for_each_shard(|store| {
         for ss in store.values().filter(|ss| ss.slot_id == slot_id) {
             total += 1;
             if ss.rw_session {
                 rw += 1;
             }
         }
-        (total, rw)
-    })
+    });
+    (total, rw)
 }
 
 /// True if the session's token is logged in (User or SO).
