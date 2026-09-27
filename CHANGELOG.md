@@ -133,6 +133,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Two KMIP conformance replays could not run in one container.** The
+  replay started each test's server on the same fixed sequence of ports in
+  every run, so a second gate (or a server left over from a stopped one)
+  made it fail with "Address already in use" — and its readiness check could
+  even connect to the other run's server. Each server now gets a free port
+  from the operating system, is retried once if that port is taken, and
+  only counts as started if it is still running once the port answers.
+  `kmip/conformance/harness/check_concurrent_replay.py` runs two replays at
+  once and requires both to pass.
+
 - **C++ engine: Edwards and Montgomery mechanisms advertised no EC
   capability flags.** `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EDDSA`,
   `CKM_EDDSA_PH`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN`, `CKM_X25519` and

@@ -68,7 +68,10 @@ from conformance.harness.oasis_codec import (  # noqa: E402
 
 KMIP_ROOT = HERE.parent.parent
 CORPUS_DIR = KMIP_ROOT / "conformance/oasis_corpus"
-REPORT_DIR = KMIP_ROOT / "conformance"
+# REPLAY_REPORT_DIR (2026-09-27) redirects the report so a second replay can
+# run beside the gate's without overwriting the committed REPLAY_REPORT.* —
+# check_concurrent_replay.py uses it.
+REPORT_DIR = Path(os.environ.get("REPLAY_REPORT_DIR") or (KMIP_ROOT / "conformance"))
 SERVER_BINARY = KMIP_ROOT / "target/release/pqctoday-kmip"
 
 # Phase 6 (6.1) — the transcript name of whichever test `run_test` is
@@ -1003,7 +1006,14 @@ class Server:
             self.proc.kill()
 
 
-def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Server:
+def free_port() -> int:
+    """A port the OS reports free right now (bind 127.0.0.1:0, read, close)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_server(port: int | None = None, extra_args: list[str] | None = None) -> Server:
     """Spawn ``pqctoday-kmip`` with volatile store + self-signed TLS.
 
     Caller is responsible for ``Server.stop()`` — even on test failures —
@@ -1011,6 +1021,16 @@ def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Serve
     pin a server-operator-choice flag for one run — e.g. ``--rng-seed-mode``
     (see ``_RNG_SEED_MODE_TESTS`` below) — without touching every other
     test's default config.
+
+    Port (2026-09-27): by default the OS picks a free one per server. This
+    used to be a fixed walk 10001, 10002, … identical in every run, so two
+    replays in one container (two gates in different worktrees, or a
+    leftover server from an aborted run) collided with "Address already in
+    use" — and worse, the readiness probe below could then connect to the
+    OTHER replay's server and report it as ours. So: an OS-assigned port,
+    one retry if it was taken in the gap before our bind, and the server
+    only counts as ready if OUR process is still alive once the port
+    answers.
     """
     if not SERVER_BINARY.exists():
         raise SystemExit(
@@ -1031,33 +1051,48 @@ def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Serve
         if _profile and not any(a == "--tls-profile" for a in (extra_args or []))
         else []
     )
-    # R6 (2026-09-07) — §6.1.32 says Interop "SHALL NOT be available in a
-    # production server", so the server now refuses it unless started with
-    # --enable-interop. THIS is the conformance harness, which is exactly the
-    # context the operation exists for, so it opts in. A deployed server does
-    # not, which is the point of the flag.
-    proc = subprocess.Popen(
-        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory",
-         "--enable-interop", *_profile_args, *(extra_args or [])],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-    )
-    # Poll port until it's accepting; bail after 5 s.
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                return Server(proc=proc, host="127.0.0.1", port=port)
-        except (ConnectionRefusedError, OSError):
+    attempts = 1 if port is not None else 2
+    for attempt in range(attempts):
+        p = port if port is not None else free_port()
+        # R6 (2026-09-07) — §6.1.32 says Interop "SHALL NOT be available in a
+        # production server", so the server now refuses it unless started with
+        # --enable-interop. THIS is the conformance harness, which is exactly the
+        # context the operation exists for, so it opts in. A deployed server does
+        # not, which is the point of the flag.
+        proc = subprocess.Popen(
+            [str(SERVER_BINARY), "--listen", f"127.0.0.1:{p}", "--store-memory",
+             "--enable-interop", *_profile_args, *(extra_args or [])],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        # Poll port until it's accepting; bail after 5 s. Ready means the
+        # port answers AND our process is still running a moment later — a
+        # server that lost the bind exits at once, while whatever else holds
+        # the port would still answer the probe.
+        deadline = time.time() + 5.0
+        while time.time() < deadline and proc.poll() is None:
+            try:
+                with socket.create_connection(("127.0.0.1", p), timeout=0.3):
+                    pass
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.1)
+                continue
             time.sleep(0.1)
-    proc.terminate()
-    out, err = proc.communicate(timeout=1)
-    raise SystemExit(
-        f"server didn't open port {port} within 5 s\n"
-        f"stdout: {out[:500]!r}\n"
-        f"stderr: {err[:500]!r}"
-    )
+            if proc.poll() is None:
+                return Server(proc=proc, host="127.0.0.1", port=p)
+            break
+        if proc.poll() is None:
+            proc.terminate()
+        out, err = proc.communicate(timeout=2)
+        if b"Address already in use" in err and attempt + 1 < attempts:
+            continue
+        raise SystemExit(
+            f"server didn't open port {p} within 5 s (attempt {attempt + 1}/{attempts})\n"
+            f"stdout: {out[:500]!r}\n"
+            f"stderr: {err[:500]!r}"
+        )
+    raise AssertionError("unreachable")
 
 
 def send_request(srv: Server, request_bytes: bytes, timeout: float = 5.0) -> bytes:
@@ -1348,14 +1383,6 @@ def main(argv: list[str]) -> int:
     by_name = {p.name: p for p in paths}
     results: list[TestResult] = []
     consumed: set[str] = set()  # chain members already scored, skip in the main loop
-    port_counter = 0
-
-    def next_port() -> int:
-        nonlocal port_counter
-        port_counter += 1
-        # See the per-test cycling comment above — same rationale.
-        return 10000 + (port_counter % 5000)
-
     for i, path in enumerate(paths, 1):
         name = path.name
         if name in consumed:
@@ -1367,7 +1394,7 @@ def main(argv: list[str]) -> int:
         # old standalone behavior — legitimately unresolvable without its
         # precondition, which is the correct debug-mode signal).
         if group is not None and all(g in by_name for g in group) and name == group[0]:
-            srv = start_server(port=next_port())
+            srv = start_server()
             shared_bindings = Bindings()
             try:
                 for member_name in group:
@@ -1379,15 +1406,15 @@ def main(argv: list[str]) -> int:
                 srv.stop()
             continue
 
-        # Cycle the listen port per test. Re-binding a single fixed port
-        # hundreds of times in quick succession exhausts TIME_WAIT slots on
-        # some platforms (macOS), making `start_server` time out mid-run.
-        # A rotating port over a wide range avoids the collision; the range
-        # is bounded so it stays inside the ephemeral space.
+        # A fresh port per test. Re-binding a single fixed port hundreds of
+        # times in quick succession exhausts TIME_WAIT slots on some
+        # platforms (macOS), making `start_server` time out mid-run. The
+        # port is now OS-assigned (see start_server), which keeps that
+        # property and no longer collides with a second replay.
         extra_args: list[str] = []
         if (mode := _RNG_SEED_MODE_TESTS.get(name)) is not None:
             extra_args = ["--rng-seed-mode", mode]
-        srv = start_server(port=next_port(), extra_args=extra_args)
+        srv = start_server(extra_args=extra_args)
         try:
             r = run_test(srv, path)
         finally:
