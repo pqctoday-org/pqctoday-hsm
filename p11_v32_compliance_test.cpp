@@ -9361,8 +9361,11 @@ void test_2f_hidden_coverage() {
             if (rv == CKR_OK) rv = dh(CKM_ECDH1_DERIVE, sa, qb, plain);
         }
         bool ok = rv == CKR_OK && !ab.empty() && ab == ba && ab == plain;
+        // Fresh keys each run: the details must not print the secret, or the
+        // committed report would differ on every run (report freshness guard).
         record_result(CAT, "CKM_ECDH1_COFACTOR_DERIVE_P256_agrees", ok ? "PASS" : "FAIL",
-                      "RV=" + std::to_string(rv) + " ab=" + v2hex(ab) + " ba=" + v2hex(ba) + " plain=" + v2hex(plain));
+                      "RV=" + std::to_string(rv) + " secret_len=" + std::to_string(ab.size()) +
+                      (ok ? " A·B == B·A == ECDH1_DERIVE" : " ab=" + v2hex(ab) + " ba=" + v2hex(ba) + " plain=" + v2hex(plain)));
     }
 
     // ── §6.15: CKM_AES_XTS_KEY_GEN makes a CKK_AES_XTS key of the requested
