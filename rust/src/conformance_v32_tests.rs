@@ -61,14 +61,14 @@ pub(crate) fn obj_exists(handle: u32) -> bool {
 /// avoids C_OpenSession's slot/flag plumbing where the test is not about it).
 pub(crate) fn put_session(h: u32, slot: u32, rw: bool) {
     SESSIONS.with(|s| {
-        s.borrow_mut()
+        s.shard(h)
             .insert(h, crate::state::SessionState { slot_id: slot, rw_session: rw });
     });
 }
 
 pub(crate) fn drop_session(h: u32) {
     SESSIONS.with(|s| {
-        s.borrow_mut().remove(&h);
+        s.shard(h).remove(&h);
     });
 }
 
@@ -561,7 +561,7 @@ fn s6_bring_up_token(slot: u32) {
     crate::state::ensure_slot(slot);
     // C_InitToken refuses while sessions are open on the slot; a sibling
     // test in this binary may have left one registered.
-    SESSIONS.with(|s| s.borrow_mut().retain(|_, ss| ss.slot_id != slot));
+    SESSIONS.for_each_shard(|m| m.retain(|_, ss| ss.slot_id != slot));
     let mut label = *b"s6-token                        ";
     let mut so = *b"1234";
     let mut user = *b"5678";

@@ -61,11 +61,8 @@ fn put_key(handle: u32, class: u32, key_type: u32, value_len: usize, usage: bool
 
 fn setup() {
     crate::state::set_initialized(true);
-    SESSIONS.with(|s| {
-        let mut s = s.borrow_mut();
-        s.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
-        s.insert(RO_SESSION, crate::state::SessionState { slot_id: 0, rw_session: false });
-    });
+    SESSIONS.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+    SESSIONS.insert(RO_SESSION, crate::state::SessionState { slot_id: 0, rw_session: false });
     TOKEN_STORE.with(|ts| {
         ts.borrow_mut()
             .entry(0)
@@ -82,14 +79,14 @@ fn setup() {
             .login_state = crate::state::LoginState::User;
     });
     for sess in [SESSION, RO_SESSION] {
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&sess));
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&sess));
-        ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&sess));
-        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&sess));
-        SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&sess));
-        VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&sess));
-        MESSAGE_ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&sess));
-        MESSAGE_DECRYPT_STATE.with(|s| s.borrow_mut().remove(&sess));
+        SIGN_STATE.shard(sess).remove(&sess);
+        VERIFY_STATE.shard(sess).remove(&sess);
+        ENCRYPT_STATE.shard(sess).remove(&sess);
+        DECRYPT_STATE.shard(sess).remove(&sess);
+        SIGN_RECOVER_STATE.shard(sess).remove(&sess);
+        VERIFY_RECOVER_STATE.shard(sess).remove(&sess);
+        MESSAGE_ENCRYPT_STATE.shard(sess).remove(&sess);
+        MESSAGE_DECRYPT_STATE.shard(sess).remove(&sess);
     }
     // The G-8 probe's wrong keys: AES-256 with every usage attribute set
     // (for asymmetric mechanisms) and an EC P-256 pair (for secret-key
@@ -171,8 +168,8 @@ fn e5_sign_verify_init_wrong_key_type_is_key_type_inconsistent() {
             "C_MessageVerifyInit mech {mech:#x}"
         );
     }
-    assert!(!SIGN_STATE.with(|s| s.borrow().contains_key(&SESSION)), "no sign op may start");
-    assert!(!VERIFY_STATE.with(|s| s.borrow().contains_key(&SESSION)), "no verify op may start");
+    assert!(!SIGN_STATE.shard(SESSION).contains_key(&SESSION), "no sign op may start");
+    assert!(!VERIFY_STATE.shard(SESSION).contains_key(&SESSION), "no verify op may start");
 }
 
 /// §5.8.1 / §5.10.1: C_EncryptInit / C_DecryptInit. The probe found CKR_OK
@@ -193,8 +190,8 @@ fn e5_encrypt_decrypt_init_wrong_key_type_is_key_type_inconsistent() {
         let rv = C_DecryptInit(SESSION, m.as_mut_ptr() as *mut u8, wrong_key_for(*mech, false));
         assert_eq!(rv, CKR_KEY_TYPE_INCONSISTENT, "C_DecryptInit mech {mech:#x}");
     }
-    assert!(!ENCRYPT_STATE.with(|s| s.borrow().contains_key(&SESSION)));
-    assert!(!DECRYPT_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+    assert!(!ENCRYPT_STATE.shard(SESSION).contains_key(&SESSION));
+    assert!(!DECRYPT_STATE.shard(SESSION).contains_key(&SESSION));
 }
 
 /// §5.13.5 / §5.15.5: C_SignRecoverInit / C_VerifyRecoverInit (CKM_RSA_PKCS,
@@ -528,8 +525,8 @@ fn e9_one_byte_symmetric_parameter_is_mechanism_param_invalid() {
             "C_EncryptInit mech {mech:#x}, no parameter"
         );
     }
-    assert!(!ENCRYPT_STATE.with(|s| s.borrow().contains_key(&SESSION)));
-    assert!(!DECRYPT_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+    assert!(!ENCRYPT_STATE.shard(SESSION).contains_key(&SESSION));
+    assert!(!DECRYPT_STATE.shard(SESSION).contains_key(&SESSION));
 }
 
 /// E18 — §6.11 (AES-CBC, CBC-PAD, OFB, CFB*) and §6.15 (XTS): the parameter

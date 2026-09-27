@@ -54,10 +54,10 @@ pub fn destroy_object(session: u32, handle: u32) -> Result<(), CkRv> {
     // destroyed key. Without this, a session that called native::sign +
     // then native::destroy_object would hold a stale key handle in the
     // sign-state map.
-    SIGN_STATE.with(|s| s.borrow_mut().retain(|_, v| v.1 != handle));
-    VERIFY_STATE.with(|s| s.borrow_mut().retain(|_, v| v.1 != handle));
-    ENCRYPT_STATE.with(|s| s.borrow_mut().retain(|_, ctx| ctx.key_handle != handle));
-    DECRYPT_STATE.with(|s| s.borrow_mut().retain(|_, ctx| ctx.key_handle != handle));
+    SIGN_STATE.for_each_shard(|m| m.retain(|_, v| v.1 != handle));
+    VERIFY_STATE.for_each_shard(|m| m.retain(|_, v| v.1 != handle));
+    ENCRYPT_STATE.for_each_shard(|m| m.retain(|_, ctx| ctx.key_handle != handle));
+    DECRYPT_STATE.for_each_shard(|m| m.retain(|_, ctx| ctx.key_handle != handle));
     Ok(())
 }
 
