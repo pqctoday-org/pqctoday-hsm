@@ -39,21 +39,18 @@ from pathlib import Path
 
 KMIP_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_DIR = KMIP_ROOT / "conformance/oasis_corpus"
-# `kat/oasis-kmip-3.0/` is the raw vendored extraction the profiles ZIP was
-# unpacked into (see `spec/README.md` §"Use" and `kat/README.md`'s
-# provenance table); `conformance/oasis_corpus/` is the replay harness's
-# working copy of the same 102 transcripts. They are supposed to be
-# byte-identical to each other AND to the ZIP — until 2026-08-23 this
-# script only ever checked the harness copy, so a `kat/` copy edited (or
-# left stale after a re-baseline) in place would go undetected.
-KAT_COPY_DIR = KMIP_ROOT / "kat/oasis-kmip-3.0"
+# `conformance/oasis_corpus/` is the ONE checked-in copy of the 102 OASIS
+# transcripts: the replay harness loads it, and this script proves it
+# byte-identical to the profiles ZIP. A second copy under
+# `kat/oasis-kmip-3.0/` was deleted 2026-09-27 (gap-closure plan 2.C): it was
+# byte-identical (sha256, all 102 files), and nothing ran it — this script's
+# hash check was its only consumer.
 PROVENANCE = KMIP_ROOT / "conformance/corpus_provenance.json"
 SPEC_DIR = KMIP_ROOT / "spec/oasis-kmip-3.0"
 
 # (base dir, human label) for every checked-in copy of the corpus.
 CHECKED_COPIES = [
     (CORPUS_DIR, "conformance/oasis_corpus"),
-    (KAT_COPY_DIR, "kat/oasis-kmip-3.0"),
 ]
 
 
@@ -193,15 +190,6 @@ def update() -> int:
     PROVENANCE.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     print(f"recorded {record['transcript_count']} transcripts from {zip_name}")
 
-    if KAT_COPY_DIR.exists():
-        kat_hashes = current_hashes(KAT_COPY_DIR)
-        if kat_hashes != record["transcripts"]:
-            print(
-                f"WARNING: {KAT_COPY_DIR} was NOT re-recorded (this script's --update "
-                f"only re-baselines conformance/oasis_corpus) and no longer matches it — "
-                f"re-vendor kat/oasis-kmip-3.0/ from the same zip before the next verify run",
-                file=sys.stderr,
-            )
     return 0
 
 

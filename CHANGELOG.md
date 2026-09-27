@@ -21,6 +21,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   path and its error codes. The answer depends on the key alone, so it
   carries no padding-oracle signal.
 
+- **AES-GCM processes whole blocks instead of single bytes.** `GcmState`
+  (one-shot, multipart and message-based GCM in the Rust engine) produced
+  the CTR keystream one AES block per call and fed GHASH one byte at a time,
+  so once hardware AES made the cipher cheap, that loop set GCM's speed: GCM
+  gained 3–6× from hardware AES on every CPU measured, against 7–13× for CBC.
+  Aligned data now goes through a whole-block path: up to 32 counter blocks
+  per AES call (the backend pipelines them) and one GHASH update per 512-byte
+  batch. Only the bytes before the stream is block-aligned and the final
+  partial block take the byte path. Output is byte-identical: checked against
+  the NIST GCM vectors (all IV lengths), the existing KATs, and a new test
+  comparing every length 0–100 plus multi-batch sizes, in seven chunkings,
+  both directions and both APIs, with the independent `aes-gcm` crate.
+
 - **Both engines (behaviour change): BIP32 output keys.**
   - A child derive now stays on its parent's curve. A template naming another
     curve (say P-256 on a secp256k1 parent) used to derive on the template's
@@ -232,6 +245,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   secp256k1 child now signs with `CKM_ECDSA`, and the SLIP-10 Ed25519 child
   m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
   published in SLIP-10 test vector 1.
+
+- **Rust engine: SP 800-108 key derivation accepted a repeated DKM length
+  field.** PKCS#11 v3.2 (Tables 199–201) allows at most one
+  `CK_SP800_108_DKM_LENGTH` entry in the data parameters. A request with two
+  was accepted in counter, feedback and double-pipeline mode, and the derived
+  key silently depended on both. `C_DeriveKey` now refuses it with
+  `CKR_MECHANISM_PARAM_INVALID` in all three modes.
+
+- **Rust engine: SP 800-108 feedback and double-pipeline derivation accepted
+  a repeated counter field.** PKCS#11 v3.2 (Tables 200–201) allows at most one
+  `CK_SP800_108_COUNTER` entry. Two were accepted and both were mixed into the
+  derivation. `C_DeriveKey` now refuses the request with
+  `CKR_MECHANISM_PARAM_INVALID`. A single counter field still works as before.
+
+- **Rust engine: unwrapping could create a key of the wrong length for its
+  type.** For example, unwrapping 16 bytes into a `CKK_CHACHA20` key returned
+  `CKR_OK` and made a 128-bit ChaCha20 key, though ChaCha20 keys are always
+  256 bits. PKCS#11 v3.2 §5.18.4 requires `CKR_WRAPPED_KEY_LEN_RANGE` for such
+  a length conflict. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply
+  the same length rules `C_DeriveKey` already uses (AES 16, 24 or 32 bytes;
+  AES-XTS 32 or 64; ChaCha20 exactly 32; a non-empty value for generic-secret,
+  HKDF and HMAC keys) and refuse anything else with that code. No key object is
+  created on refusal.
 
 ### Added
 
