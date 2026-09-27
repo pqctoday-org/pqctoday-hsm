@@ -10,6 +10,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine: operations on different sessions no longer queue behind each
+  other.** Every per-session table (operation state for sign, verify,
+  encrypt, decrypt, digest, find and the message APIs, plus the session
+  table itself) was one `Mutex<HashMap>`, so each call of every session on
+  every thread took the same few locks. Small operations lost throughput as
+  threads were added (M4 Pro: SHA-256 64 B fell from 5.2M ops/s with one
+  worker per tenant to 1.2M with two). The tables are now split into 64
+  independently locked shards keyed by session handle; whole-table work
+  (C_CloseAllSessions, C_Finalize, destroying a key in use) visits every
+  shard. The object table moved behind a read/write lock, so key lookups run
+  concurrently. One-shot AES C_Encrypt / C_Decrypt reuse the key schedule
+  expanded at Init instead of re-reading and re-expanding the key per call;
+  a global object-write epoch, bumped by every write to the object table,
+  invalidates that cache, so a key destroyed or changed after Init is
+  re-read exactly as before. Behaviour is unchanged: 11 new tests pin the
+  operation-state error codes, the §5.2 size query, cleanup on close,
+  close-all and finalize, isolation between sessions on different threads,
+  a stress run (8 threads × 4 sessions, interleaved one-shot, multipart,
+  digest and close/reopen, 50 rounds), and cache invalidation on key destroy
+  and key change.
+
 - **RSA C_Decrypt no longer decrypts twice for the two-call idiom.** A NULL
   `pData` length query on `CKM_RSA_PKCS_OAEP` / `CKM_RSA_PKCS` ran the full
   private-key operation just to learn the plaintext length, and the real call
