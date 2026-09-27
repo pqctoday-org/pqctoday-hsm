@@ -9252,6 +9252,8 @@ void test_2f_hidden_coverage() {
                 else if (mac == "HMAC-SHA2-256") prf = CKM_SHA256_HMAC;
                 else if (mac == "HMAC-SHA2-384") prf = CKM_SHA384_HMAC;
                 else if (mac == "HMAC-SHA2-512") prf = CKM_SHA512_HMAC;
+                else if (mac == "HMAC-SHA2-512/224") prf = CKM_SHA512_224_HMAC;
+                else if (mac == "HMAC-SHA2-512/256") prf = CKM_SHA512_256_HMAC;
                 else if (mac == "HMAC-SHA3-224") prf = CKM_SHA3_224_HMAC;
                 else if (mac == "HMAC-SHA3-256") prf = CKM_SHA3_256_HMAC;
                 else if (mac == "HMAC-SHA3-384") prf = CKM_SHA3_384_HMAC;

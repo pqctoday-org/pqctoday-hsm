@@ -164,12 +164,17 @@ function arrEq(a, b) {
 // ── Run full ACVP suite against one engine ──────────────────────────────────
 async function runSuite(engineName) {
   const results = []
-  let pass = 0, fail = 0, skip = 0
+  let pass = 0, fail = 0, skip = 0, xfail = 0
 
+  // XFAIL = a KNOWN engine defect, pinned by a register id (KNOWN_DEFECTS
+  // below). It is counted on its own line, never as a pass or a skip, and a
+  // pinned case that starts passing is a FAIL ("XPASS") so the pin cannot
+  // outlive the fix.
   function addResult(id, algo, testCase, status, details) {
     results.push({ id, algo, testCase, status, details })
     if (status === 'PASS') pass++
     else if (status === 'FAIL') fail++
+    else if (status === 'XFAIL') xfail++
     else skip++
     if (!jsonOut) {
       const icon = status === 'PASS' ? '\u2713' : status === 'FAIL' ? '\u2717' : '\u2298'
@@ -1533,9 +1538,29 @@ async function runSuite(engineName) {
           addResult('rsaoaep-kat', label, 'Unwrap KAT', 'FAIL', 'not in C_GetMechanismList, though both engines implement it (ledger) — the advertised list drifted')
           continue
         }
-        let pass = 0, failDetail = ''
+        let pass = 0, failDetail = '', refusedAsRuled = 0
         for (const tv of g.tests) {
           let p = null
+          // Ruling 2026-09-27 (gap-closure plan 0.D, "keep refused"): the Rust
+          // engine refuses RSA keys with a public exponent of 2^33 or more —
+          // both of its backends (the rsa crate and AWS-LC) do. For those keys
+          // the expected Rust outcome is that refusal, CKR_ATTRIBUTE_VALUE_
+          // INVALID (0x13) at C_CreateObject, and it is asserted, not skipped.
+          const wideE = engineName === 'rust' && BigInt('0x' + tv.e) >= (1n << 33n)
+          if (wideE) {
+            try {
+              importRSAPrivateKey(M, hSession, {
+                n: hexToBytes(tv.n), e: hexToBytes(tv.e), d: hexToBytes(tv.d),
+                p: hexToBytes(tv.p), q: hexToBytes(tv.q),
+                dp: hexToBytes(tv.dp), dq: hexToBytes(tv.dq), qi: hexToBytes(tv.qi),
+              })
+              if (!failDetail) failDetail = `tcId ${tv.tcId}: a key with e >= 2^33 was ACCEPTED; the ruling expects a refusal`
+            } catch (e) {
+              if (/0x13\b/.test(e.message)) { pass++; refusedAsRuled++ }
+              else if (!failDetail) failDetail = `tcId ${tv.tcId}: e >= 2^33 refused with the wrong error: ${e.message}`
+            }
+            continue
+          }
           try {
             p = buildOAEPParams(M, hashMech, mgf)
             const privH = importRSAPrivateKey(M, hSession, {
@@ -1562,7 +1587,10 @@ async function runSuite(engineName) {
         }
         const ok = pass === g.tests.length
         addResult('rsaoaep-kat', label, `Unwrap KAT (ACVP tgId ${g.tgId}, ${g.tests.length} cases)`,
-          ok ? 'PASS' : 'FAIL', ok ? `${pass}/${g.tests.length} recovered` : failDetail)
+          ok ? 'PASS' : 'FAIL',
+          ok ? `${pass - refusedAsRuled}/${g.tests.length} recovered` +
+               (refusedAsRuled ? `, ${refusedAsRuled} refused as ruled (e >= 2^33, plan 0.D)` : '')
+             : failDetail)
       }
     }
 
@@ -1932,13 +1960,25 @@ async function runSuite(engineName) {
           sigB.set(lmsSig, 4)
           const actual = hssVerify(M, hSession, hPub, msgB, sigB)
           const ok = (actual === expected)
-          if (ok) katPass++; else katFail++
+          // Pinned known defect (register row rust-lms-m24-verify-fails,
+          // 2026-09-27): in each of the 10 M24 groups (SHA-256/192 and
+          // SHAKE-256/192, H5..H25) the Rust engine rejects exactly ONE valid
+          // NIST signature — these tcIds — while the group's other valid
+          // signatures verify. Only these cases are pinned; a pinned case that
+          // verifies is a FAIL (XPASS), so the pin cannot outlive the fix.
+          const RUST_LMS_M24_PINNED = new Set([1, 19, 34, 50, 65, 164, 178, 195, 209, 225])
+          const pinned = engineName === 'rust' && RUST_LMS_M24_PINNED.has(tc.tcId)
+          let status = ok ? 'PASS' : 'FAIL'
+          let why = `expected=${expected} actual=${actual}`
+          if (pinned && !ok) { status = 'XFAIL'; why += ' — pinned: rust-lms-m24-verify-fails' }
+          else if (pinned && ok) { status = 'FAIL'; why += ' — XPASS: rust-lms-m24-verify-fails looks fixed; remove the pin' }
+          if (status === 'PASS') katPass++; else if (status === 'FAIL') katFail++; else katSkip++
           addResult(
             `hss-kat-${grp.tgId}-${tc.tcId}`,
             grp.lmsMode,
             `ACVP SigVer KAT tcId=${tc.tcId} (§12.3)`,
-            ok ? 'PASS' : 'FAIL',
-            `expected=${expected} actual=${actual}`
+            status,
+            why
           )
         } catch (e) {
           katFail++
@@ -1948,14 +1988,14 @@ async function runSuite(engineName) {
       }
     }
     if (!jsonOut && (katPass + katFail + katSkip > 0)) {
-      console.log(`  HSS/LMS ACVP SigVer KAT (all ${lmsSigverVec.testGroups.length} groups): ${katPass} PASS / ${katFail} FAIL / ${katSkip} SKIP`)
+      console.log(`  HSS/LMS ACVP SigVer KAT (all ${lmsSigverVec.testGroups.length} groups): ${katPass} PASS / ${katFail} FAIL / ${katSkip} XFAIL (pinned)`)
     }
 
   } finally {
     finalizeEngine(M, hSession)
   }
 
-  return { engine: engineName, pass, fail, skip, total: results.length, results }
+  return { engine: engineName, pass, fail, skip, xfail, total: results.length, results }
 }
 
 // ── Main: run engine(s) ─────────────────────────────────────────────────────
@@ -1975,7 +2015,7 @@ for (const eng of engines) {
 
   if (!jsonOut) {
     console.log(`\n${'='.repeat(42)}`)
-    console.log(`  ${eng.toUpperCase()} ACVP: ${run.pass} PASS, ${run.fail} FAIL, ${run.skip} SKIP (${run.total} total)`)
+    console.log(`  ${eng.toUpperCase()} ACVP: ${run.pass} PASS, ${run.fail} FAIL, ${run.skip} SKIP, ${run.xfail} XFAIL (known defects) (${run.total} total)`)
     console.log(`${'='.repeat(42)}\n`)
   }
 }

@@ -618,15 +618,21 @@ fi
 # on every gate run. Its scope is in its name on purpose — the C++ half needs
 # an Emscripten toolchain that exists nowhere here (plan 2.E), so a name that
 # claimed "the ACVP harness" would reassure about an engine it never loads.
-# It reuses the rust/pkg the conformance step above just built (8 MiB stack,
-# acvp feature — the configuration the bundle ships); if that build failed,
-# the step above is already red. wasm/rust/ is gitignored and nothing else
+# It runs against a RELEASE build with the 8 MiB stack and the acvp feature —
+# the configuration rust/build-wasm-bundle.sh ships — built here into the
+# gitignored rust/pkg-acvp/ (the conformance step's rust/pkg is a --dev build,
+# on which the SLH-DSA "s" sets take minutes each; release runs the whole
+# harness in about a minute). wasm/rust/ is gitignored and nothing else
 # populates it, so the step stages the two files itself, and installs the
-# harness's npm dependencies (asn1js) when a fresh worktree lacks them. The harness counts a
-# failure in its exit code; since 2.A it also FAILs, rather than SKIPs, a
-# mechanism missing from C_GetMechanismList and an HSS import error.
+# harness's npm dependencies (asn1js) when a fresh worktree lacks them.
+# The harness's exit code is the verdict: since 2.A it FAILs, rather than
+# SKIPs, a mechanism missing from C_GetMechanismList and an HSS import error;
+# known engine defects are pinned as XFAIL by register id and turn into a
+# FAIL if they start passing.
+run_step "ACVP harness wasm build (Rust, release, 8 MiB stack, acvp feature)" \
+  "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=8388608' /cargo-target/release/wasm-pack build --release --target bundler --out-dir pkg-acvp -- --features acvp >/dev/null 2>&1"
 run_step_host "ACVP wasm harness — Rust engine only (C++ WASM half not exercised)" \
-  "cd '$ROOT' && (test -d node_modules/asn1js || npm ci --silent --no-audit --no-fund) && mkdir -p wasm/rust && cp rust/pkg/softhsmrustv3_bg.js rust/pkg/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
+  "cd '$ROOT' && (test -d node_modules/asn1js || npm ci --silent --no-audit --no-fund) && mkdir -p wasm/rust && cp rust/pkg-acvp/softhsmrustv3_bg.js rust/pkg-acvp/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
 
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
