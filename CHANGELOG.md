@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Both engines (behaviour change): BIP32 output keys.**
+  - A child derive now stays on its parent's curve. A template naming another
+    curve (say P-256 on a secp256k1 parent) used to derive on the template's
+    curve and return `CKR_OK`; it is now `CKR_TEMPLATE_INCONSISTENT`.
+  - SLIP-10 Ed25519 nodes are now `CKK_EC_EDWARDS` keys that sign with
+    `CKM_EDDSA`. They used to be `CKK_EC`, which `CKM_EDDSA` refuses. The
+    hub's BIP32 wrapper already asked for `CKK_EC_EDWARDS`; the engines
+    overrode it.
+
 - **Rust engine (behaviour change): the bare BIP32 codes `0x105B`/`0x105C` are
   no longer accepted.** They were silent aliases of the vendor
   `CKM_BIP32_MASTER_DERIVE`/`CKM_BIP32_CHILD_DERIVE` (`0x8000105B`/`0x8000105C`),
@@ -200,6 +209,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   curve was guessed from the private key's length, so a secp256k1 key failed
   with `CKR_ARGUMENTS_BAD` over KMIP, although `C_DeriveKey` handled it. The
   key's stored curve is now used.
+
+- **C++ engine: no BIP32-derived key could sign.** Derived nodes stored
+  `CKA_EC_PARAMS` unencrypted while the signing path decrypts it for private
+  keys, so `C_SignInit` answered `CKR_GENERAL_ERROR` for every BIP32 key. A
+  secp256k1 child now signs with `CKM_ECDSA`, and the SLIP-10 Ed25519 child
+  m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
+  published in SLIP-10 test vector 1.
 
 ### Added
 

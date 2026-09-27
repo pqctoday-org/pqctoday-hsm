@@ -3355,7 +3355,23 @@ CK_RV SoftHSM::C_DeriveKey
 				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			CK_BIP32_CHILD_DERIVE_PARAMS* params = (CK_BIP32_CHILD_DERIVE_PARAMS*)pMechanism->pParameter;
-			
+
+			// 4.F (2026-09-27): a child lives on its parent's curve. The curve
+			// used to come from the template alone, so a P-256 template on a
+			// secp256k1 parent derived on the wrong curve and returned CKR_OK.
+			// A parent that records its curve must match the template's.
+			// A private parent stores CKA_EC_PARAMS encrypted, like every other
+			// private-key attribute here; compare the plaintext.
+			if (key->attributeExists(CKA_EC_PARAMS)) {
+				ByteString parentParams;
+				if (isKeyPrivate) {
+					if (!token->decrypt(key->getByteStringValue(CKA_EC_PARAMS), parentParams)) return CKR_GENERAL_ERROR;
+				} else {
+					parentParams = key->getByteStringValue(CKA_EC_PARAMS);
+				}
+				if (parentParams.size() > 0 && parentParams != rawOid) return CKR_TEMPLATE_INCONSISTENT;
+			}
+
 			ByteString parentPriv;
 			if (isKeyPrivate) {
 				if (!token->decrypt(key->getByteStringValue(CKA_VALUE), parentPriv)) return CKR_GENERAL_ERROR;
@@ -3377,7 +3393,10 @@ CK_RV SoftHSM::C_DeriveKey
 
 		// Save the object
 		CK_OBJECT_CLASS objCko = CKO_PRIVATE_KEY;
-		CK_KEY_TYPE objCkk = CKK_EC;
+		// 4.F (2026-09-27): a SLIP-10 Ed25519 node is an Edwards key — its
+		// 32-byte value is the RFC 8032 private key CKM_EDDSA signs with. It
+		// used to be stored as CKK_EC, which CKM_EDDSA refuses.
+		CK_KEY_TYPE objCkk = (rawOid == ByteString("06032b6570")) ? CKK_EC_EDWARDS : CKK_EC;
 		CK_BBOOL objFalse = CK_FALSE;
 		CK_BBOOL objTrue = CK_TRUE;
 		
@@ -3437,7 +3456,15 @@ CK_RV SoftHSM::C_DeriveKey
 		} else svOk = false;
 		
 		svOk = svOk && nObj->setAttribute(CKA_BIP32_CHAIN_CODE, chainCodeBytes);
-		svOk = svOk && nObj->setAttribute(CKA_EC_PARAMS, rawOid);
+		// The derived node is always CKA_PRIVATE (forced above), and
+		// getECPrivateKey / getEDPrivateKey DECRYPT CKA_EC_PARAMS of a private
+		// key. It used to be stored in plaintext here, so the decrypt failed
+		// and C_SignInit on ANY BIP32-derived key answered CKR_GENERAL_ERROR
+		// (found by testBip32ChildCurveFollowsParentAndEd25519IsEdwards).
+		ByteString encParams;
+		if (token->encrypt(rawOid, encParams)) {
+			svOk = svOk && nObj->setAttribute(CKA_EC_PARAMS, encParams);
+		} else svOk = false;
 		
 #ifdef WITH_ECC
 		// Set OpenSSL structural keys natively if CKK_EC. setECPrivateKey() returns
