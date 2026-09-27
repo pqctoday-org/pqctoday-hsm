@@ -621,11 +621,12 @@ fi
 # It reuses the rust/pkg the conformance step above just built (8 MiB stack,
 # acvp feature — the configuration the bundle ships); if that build failed,
 # the step above is already red. wasm/rust/ is gitignored and nothing else
-# populates it, so the step stages the two files itself. The harness counts a
+# populates it, so the step stages the two files itself, and installs the
+# harness's npm dependencies (asn1js) when a fresh worktree lacks them. The harness counts a
 # failure in its exit code; since 2.A it also FAILs, rather than SKIPs, a
 # mechanism missing from C_GetMechanismList and an HSS import error.
 run_step_host "ACVP wasm harness — Rust engine only (C++ WASM half not exercised)" \
-  "cd '$ROOT' && mkdir -p wasm/rust && cp rust/pkg/softhsmrustv3_bg.js rust/pkg/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
+  "cd '$ROOT' && (test -d node_modules/asn1js || npm ci --silent --no-audit --no-fund) && mkdir -p wasm/rust && cp rust/pkg/softhsmrustv3_bg.js rust/pkg/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
 
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
