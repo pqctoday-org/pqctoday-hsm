@@ -578,6 +578,10 @@ pub fn create_key_pair(
         original_creation_date: Some(now),
         supersedes: None,
             name: priv_x.name.clone(),
+            rotate_automatic: priv_x.rotate_automatic,
+            rotate_interval: priv_x.rotate_interval,
+            rotate_offset: priv_x.rotate_offset,
+            rotate_name: priv_x.rotate_name.clone(),
 
             // KMIP §11 `Public Key Link` — UID of the matching
             // public-key half on the private record (AKLC-O-1
@@ -658,6 +662,10 @@ pub fn create_key_pair(
         original_creation_date: Some(now),
         supersedes: None,
             name: pub_x.name.clone(),
+            rotate_automatic: pub_x.rotate_automatic,
+            rotate_interval: pub_x.rotate_interval,
+            rotate_offset: pub_x.rotate_offset,
+            rotate_name: pub_x.rotate_name.clone(),
 
             // KMIP §11 `Private Key Link` — UID of the matching
             // private-key half on the public record.

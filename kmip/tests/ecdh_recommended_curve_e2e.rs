@@ -31,6 +31,24 @@ const P_256: u32 = 0x07;
 
 // The softhsmrustv3 engine is global (lazy_static Mutex state); serialize these
 // tests so one test's finalize/init can't race another's session.
+
+/// Composite-key plan WP 0.4/0.5 — KEM shared secrets and derived keys are
+/// engine-resident (the KMIP store holds no material); read them the way a
+/// KMIP client would, via Get, never from the store.
+fn kmip_material(d: &Deps, uid: &str) -> Vec<u8> {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    get(
+        d,
+        GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
+        "get-material",
+    )
+    .expect("Get of engine-resident material")
+    .key_block
+    .key_value
+}
+
 fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
     static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     L.get_or_init(|| std::sync::Mutex::new(()))
@@ -147,7 +165,7 @@ fn derive_agree(d: &Deps, priv_uid: &str, peer_public: &[u8]) -> Vec<u8> {
         "derive",
     )
     .expect("derive_key ecdh agreement");
-    d.store.get(&resp.uid).unwrap().unwrap().key_material.expect("derived SS material")
+    kmip_material(&d, &resp.uid)
 }
 
 #[test]
