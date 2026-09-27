@@ -133,6 +133,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The C++ engine now runs the NIST ACVP wasm harness in every `--cpp`
+  gate.** Until now only the Rust engine did, because the C++ half needs an
+  Emscripten toolchain that no gate machine had. The gate builds the C++
+  engine to wasm with the existing `scripts/build-wasm.sh` inside the official
+  Emscripten image, pinned by digest (emsdk 6.0.10), and runs the harness for
+  both engines plus the cross-engine checks (one engine signs or
+  encapsulates, the other verifies or decapsulates). First result: C++ 625 of
+  625 cases pass, with no known-defect pins.
+
 - **Two KMIP conformance replays could not run in one container.** The
   replay started each test's server on the same fixed sequence of ports in
   every run, so a second gate (or a server left over from a stopped one)
