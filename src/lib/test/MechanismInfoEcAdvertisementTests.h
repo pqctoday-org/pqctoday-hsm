@@ -18,12 +18,14 @@ class MechanismInfoEcAdvertisementTests : public TestsBase
 	CPPUNIT_TEST(testEcdh1AdvertisesEcCapabilityFlags);
 	CPPUNIT_TEST(testMontgomeryMechanismsAdvertiseTheirCurveSize);
 	CPPUNIT_TEST(testBip32ChildDeriveAdvertisesItsParentKeySize);
+	CPPUNIT_TEST(testBip32MasterKeyStartingWith0x30);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
 	void testEcdh1AdvertisesEcCapabilityFlags();
 	void testMontgomeryMechanismsAdvertiseTheirCurveSize();
 	void testBip32ChildDeriveAdvertisesItsParentKeySize();
+	void testBip32MasterKeyStartingWith0x30();
 };
 
 #endif // !_SOFTHSM_V2_MECHANISMINFOECADVERTISEMENTTESTS_H

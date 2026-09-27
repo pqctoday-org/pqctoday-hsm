@@ -384,3 +384,63 @@ void MechanismInfoEcAdvertisementTests::testBip32ChildDeriveAdvertisesItsParentK
 
 	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
 }
+
+// A derived EC private key is a raw 32-byte scalar. setECPrivateKey used to
+// decide "raw scalar or PKCS#8 DER" by sniffing the first byte for 0x30 (the
+// DER SEQUENCE tag), so about 1 derived key in 256 was taken for DER, failed to
+// decode, and C_DeriveKey returned CKR_FUNCTION_FAILED -- which is how
+// testBip32ChildDeriveAdvertisesItsParentKeySize failed intermittently. This
+// seed (found by search) makes the secp256k1 master key begin with 0x30:
+//   HMAC-SHA512("Bitcoin seed", seed)[0:32] = 3052f3c9...4dab493a
+// computed with Python's hmac/hashlib; 0 < key < n.
+void MechanismInfoEcAdvertisementTests::testBip32MasterKeyStartingWith0x30()
+{
+	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_Initialize(NULL_PTR) ) == CKR_OK);
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(login(hSession, m_initializedTokenSlotID, m_userPin1, m_userPin1Length) == CKR_OK);
+
+	CK_BYTE seed[] = {
+		0xb9, 0x8e, 0xff, 0x65, 0xbc, 0x35, 0x83, 0x96, 0xfe, 0x1f, 0xd8, 0x90, 0xcf, 0x3e, 0xd5, 0x35,
+		0x03, 0xe3, 0x92, 0x72, 0xe8, 0xb3, 0xf3, 0x19, 0x01, 0x13, 0xdc, 0x21, 0x3b, 0x73, 0x86, 0x79 };
+	CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+	CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+	CK_ATTRIBUTE seedTmpl[] = {
+		{ CKA_CLASS, &secClass, sizeof(secClass) },
+		{ CKA_KEY_TYPE, &genType, sizeof(genType) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_DERIVE, &bTrue, sizeof(bTrue) },
+		{ CKA_VALUE, seed, sizeof(seed) }
+	};
+	CK_OBJECT_HANDLE hSeed = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_CreateObject(hSession, seedTmpl,
+		sizeof(seedTmpl)/sizeof(CK_ATTRIBUTE), &hSeed) ) == CKR_OK);
+
+	CK_BYTE oidSecp256k1[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a };
+	CK_OBJECT_CLASS prkClass = CKO_PRIVATE_KEY;
+	CK_ATTRIBUTE nodeTmpl[] = {
+		{ CKA_CLASS, &prkClass, sizeof(prkClass) },
+		{ CKA_EC_PARAMS, oidSecp256k1, sizeof(oidSecp256k1) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
+		{ CKA_EXTRACTABLE, &bFalse, sizeof(bFalse) },
+		{ CKA_DERIVE, &bTrue, sizeof(bTrue) }
+	};
+	CK_MECHANISM masterMech = { CKM_BIP32_MASTER_DERIVE, NULL_PTR, 0 };
+	CK_OBJECT_HANDLE hMaster = CK_INVALID_HANDLE;
+	CK_RV rv = CRYPTOKI_F_PTR( C_DeriveKey(hSession, &masterMech, hSeed,
+		nodeTmpl, sizeof(nodeTmpl)/sizeof(CK_ATTRIBUTE), &hMaster) );
+	CPPUNIT_ASSERT_MESSAGE("BIP32 master derive of a key starting 0x30 failed, rv=" + std::to_string(rv),
+		rv == CKR_OK);
+
+	// And the child derive consumes it as a 32-byte scalar.
+	CK_BIP32_CHILD_DERIVE_PARAMS childParams = { 0, 1 };
+	CK_MECHANISM childMech = { CKM_BIP32_CHILD_DERIVE, &childParams, sizeof(childParams) };
+	CK_OBJECT_HANDLE hChild = CK_INVALID_HANDLE;
+	rv = CRYPTOKI_F_PTR( C_DeriveKey(hSession, &childMech, hMaster,
+		nodeTmpl, sizeof(nodeTmpl)/sizeof(CK_ATTRIBUTE), &hChild) );
+	CPPUNIT_ASSERT_MESSAGE("BIP32 child derive from that master failed, rv=" + std::to_string(rv),
+		rv == CKR_OK);
+}
