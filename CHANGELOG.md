@@ -22,6 +22,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   engine; that gap is how the refusal went unnoticed (reported by a parallel
   review session).
 
+- **`bench-harness`: RSA-PSS now passes `CK_RSA_PKCS_PSS_PARAMS`, so the
+  benchmark runs again against the current engine.** The hash-specific PSS
+  mechanisms require that structure (PKCS#11 v3.2 §6.1.11), and since
+  conformance decision E9/D6 (2026-09-25) the engine enforces it — an absent
+  struct is `CKR_MECHANISM_PARAM_INVALID`. The harness had relied on the old
+  fallback to defaults, so every run that included RSA-PSS now died during
+  provisioning (`C_SignInit(RSA-PSS-2048)`, rv=0x71) — found by the first
+  benchmark run against engine `d1f74a52`. It now sends hashAlg/mgf matching
+  the mechanism's digest and sLen = digest length (what the old default used,
+  so the measured operation is unchanged). Verified by running the full
+  matrix against that engine: 262/262 rows, no zero-op points.
+
 ### Added
 
 - **`bench-harness`: AES and SHA-2/SHA-3 measurement cells.**
