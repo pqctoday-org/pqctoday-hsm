@@ -75,6 +75,19 @@ impl AesKey {
         }
     }
 
+    /// Encrypt `buf` in place as consecutive 16-byte blocks (`buf.len()`
+    /// must be a multiple of 16). One call lets the backend pipeline several
+    /// blocks, which a loop over `encrypt_block` cannot.
+    fn encrypt_blocks(&self, buf: &mut [u8]) {
+        let (blocks, tail) = Block::<aes::Aes128>::slice_as_chunks_mut(buf);
+        debug_assert!(tail.is_empty(), "encrypt_blocks takes whole blocks");
+        match self {
+            AesKey::Aes128(c) => c.encrypt_blocks(blocks),
+            AesKey::Aes192(c) => c.encrypt_blocks(blocks),
+            AesKey::Aes256(c) => c.encrypt_blocks(blocks),
+        }
+    }
+
     fn decrypt_block(&self, block: &mut [u8; BLOCK]) {
         // All three AES variants share one 16-byte block type.
         let ga: &mut Block<aes::Aes128> = block.into();
@@ -1145,6 +1158,10 @@ impl XtsState {
 
 // ── GCM (§6.27.7, NIST SP 800-38D) ───────────────────────────────────────────
 
+/// Counter blocks per AES call on GCM's whole-block path: 512 bytes of
+/// keystream on the stack, enough to fill every backend's pipeline.
+const GCM_BATCH: usize = 32;
+
 pub struct GcmState {
     key: AesKey,
     dir: CipherDirection,
@@ -1279,28 +1296,85 @@ impl GcmState {
         }
     }
 
+    /// Encrypt or decrypt `data` (by `self.dir`), feeding the ciphertext to
+    /// GHASH. Whole blocks go through `crypt_blocks`; only the bytes before
+    /// the stream is block-aligned and the final partial block take the
+    /// byte path. Alignment is one condition: the keystream position and
+    /// the GHASH buffer both advance once per payload byte from an aligned
+    /// start, so `ks_pos == BLOCK` exactly when `ghash_buf` is empty.
+    fn crypt(&mut self, data: &[u8], out: &mut Vec<u8>) {
+        let mut i = 0;
+        while i < data.len() && self.ks_pos != BLOCK {
+            self.crypt_byte(data[i], out);
+            i += 1;
+        }
+        // `whole` is 0 when the data ran out before reaching alignment.
+        let whole = (data.len() - i) / BLOCK * BLOCK;
+        if whole > 0 {
+            self.crypt_blocks(&data[i..i + whole], out);
+        }
+        for &b in &data[i + whole..] {
+            self.crypt_byte(b, out);
+        }
+        self.ct_len += data.len() as u64;
+    }
+
+    fn crypt_byte(&mut self, b: u8, out: &mut Vec<u8>) {
+        let ks = self.next_keystream_byte();
+        match self.dir {
+            CipherDirection::Encrypt => {
+                let ct = b ^ ks;
+                self.ghash_feed(ct);
+                out.push(ct);
+            }
+            CipherDirection::Decrypt => {
+                self.ghash_feed(b);
+                out.push(b ^ ks);
+            }
+        }
+    }
+
+    /// Whole-block path (`data.len()` a multiple of 16, stream aligned):
+    /// up to `GCM_BATCH` counter blocks encrypted per AES call, XORed in
+    /// bulk, and the ciphertext absorbed by GHASH in one update per batch.
+    fn crypt_blocks(&mut self, data: &[u8], out: &mut Vec<u8>) {
+        debug_assert!(self.ks_pos == BLOCK && self.ghash_buf.is_empty());
+        let mut ks = [0u8; GCM_BATCH * BLOCK];
+        for chunk in data.chunks(GCM_BATCH * BLOCK) {
+            let ks = &mut ks[..chunk.len()];
+            for ctr in ks.chunks_exact_mut(BLOCK) {
+                ctr.copy_from_slice(&self.counter);
+                inc_be(&mut self.counter, 4);
+            }
+            self.key.encrypt_blocks(ks);
+            self.ks_blocks += (chunk.len() / BLOCK) as u64;
+            let start = out.len();
+            out.extend(chunk.iter().zip(ks.iter()).map(|(d, k)| d ^ k));
+            let ct: &[u8] = match self.dir {
+                CipherDirection::Encrypt => &out[start..],
+                CipherDirection::Decrypt => chunk,
+            };
+            let (blocks, _) = ghash::Block::slice_as_chunks(ct);
+            self.ghash.update(blocks);
+        }
+        ks.zeroize();
+    }
+
     fn update(&mut self, part: &[u8]) -> Vec<u8> {
         match self.dir {
             CipherDirection::Encrypt => {
                 let mut out = Vec::with_capacity(part.len());
-                for &pt in part {
-                    let ct = pt ^ self.next_keystream_byte();
-                    self.ghash_feed(ct);
-                    out.push(ct);
-                }
-                self.ct_len += part.len() as u64;
+                self.crypt(part, &mut out);
                 out
             }
             CipherDirection::Decrypt => {
                 self.pending.extend_from_slice(part);
                 let take = self.pending.len().saturating_sub(self.tag_len);
-                let release: Vec<u8> = self.pending.drain(..take).collect();
+                let mut release = std::mem::take(&mut self.pending);
+                self.pending = release.split_off(take);
                 let mut out = Vec::with_capacity(release.len());
-                for &ct in &release {
-                    self.ghash_feed(ct);
-                    out.push(ct ^ self.next_keystream_byte());
-                }
-                self.ct_len += release.len() as u64;
+                self.crypt(&release, &mut out);
+                release.zeroize();
                 out
             }
         }
@@ -1316,22 +1390,7 @@ impl GcmState {
     /// absorbs the ciphertext incrementally via `ghash_buf`.
     pub fn msg_update(&mut self, part: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(part.len());
-        match self.dir {
-            CipherDirection::Encrypt => {
-                for &pt in part {
-                    let ct = pt ^ self.next_keystream_byte();
-                    self.ghash_feed(ct);
-                    out.push(ct);
-                }
-            }
-            CipherDirection::Decrypt => {
-                for &ct in part {
-                    self.ghash_feed(ct);
-                    out.push(ct ^ self.next_keystream_byte());
-                }
-            }
-        }
-        self.ct_len += part.len() as u64;
+        self.crypt(part, &mut out);
         out
     }
 
@@ -1675,6 +1734,52 @@ mod tests {
             CipherDirection::Encrypt,
         ));
         assert_eq!(drive(enc, &pt, &[13, 1, 40]).unwrap(), one_shot);
+    }
+
+    /// A2 — the whole-block path must be invisible: every length from 0 to
+    /// 100 bytes plus multi-batch sizes (the batch is 512 bytes), each fed
+    /// in chunkings that start, cross and end off a block boundary, must
+    /// match the independent one-shot `aes-gcm` crate in both directions
+    /// and through both the multipart and the message APIs.
+    #[test]
+    fn gcm_whole_block_path_matches_one_shot_crate_at_every_boundary() {
+        use aes_gcm::aead::{Aead, Payload};
+        use aes_gcm::{Aes128Gcm, KeyInit as GcmKeyInit};
+        let key = [0x17u8; 16];
+        let iv = [0x5Au8; 12];
+        let aad = b"a2";
+        let aead = Aes128Gcm::new_from_slice(&key).unwrap();
+        let chunkings: [&[usize]; 7] = [&[1], &[5], &[16], &[17], &[15, 33], &[512], &[600, 3]];
+        let lens: Vec<usize> = (0..=100).chain([511, 512, 513, 1024, 1500, 4099]).collect();
+        for len in lens {
+            let pt: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            let sealed = aead
+                .encrypt(aes_gcm::Nonce::from_slice(&iv), Payload { msg: &pt, aad })
+                .unwrap();
+            let (ct, tag) = sealed.split_at(len);
+            for sizes in chunkings {
+                let new = |dir| GcmState::new(AesKey::new(&key).unwrap(), &iv, aad, 128, dir);
+                let enc = MultipartCipher::Gcm(new(CipherDirection::Encrypt));
+                assert_eq!(drive(enc, &pt, sizes).unwrap(), sealed, "encrypt len={len} sizes={sizes:?}");
+                let dec = MultipartCipher::Gcm(new(CipherDirection::Decrypt));
+                assert_eq!(drive(dec, &sealed, sizes).unwrap(), pt, "decrypt len={len} sizes={sizes:?}");
+
+                let (mut e, mut d) = (new(CipherDirection::Encrypt), new(CipherDirection::Decrypt));
+                let (mut got_ct, mut got_pt) = (Vec::new(), Vec::new());
+                let (mut off, mut k) = (0, 0);
+                while off < len {
+                    let n = sizes[k % sizes.len()].min(len - off);
+                    got_ct.extend(e.msg_update(&pt[off..off + n]));
+                    got_pt.extend(d.msg_update(&ct[off..off + n]));
+                    off += n;
+                    k += 1;
+                }
+                assert_eq!(got_ct, ct, "msg encrypt len={len} sizes={sizes:?}");
+                assert_eq!(e.msg_compute_tag(), tag, "msg tag len={len} sizes={sizes:?}");
+                assert_eq!(got_pt, pt, "msg decrypt len={len} sizes={sizes:?}");
+                assert!(d.msg_verify_tag(tag).is_ok(), "msg verify len={len} sizes={sizes:?}");
+            }
+        }
     }
 
     #[test]
