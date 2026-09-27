@@ -10,6 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The local gate can run on another machine.** `bash scripts/local-gate.sh
+  --host=user@host --cpp` runs the same gate on a second host (today the
+  M4 Pro) and writes the pre-push marker here only if it passed there on
+  exactly this commit: the commit travels as a git bundle (no credentials on
+  the remote), and the remote's checkout must match this commit's tree hash
+  before and after the run. The marker records `host=<name>` in its flags.
+  The remote container is built from the new pinned
+  `scripts/gate-container/Dockerfile`, a reproducible recipe for the
+  previously hand-built `pqc-rust` container. Without `--host`, nothing
+  changes.
+
 - **Rust engine: operations on different sessions no longer queue behind each
   other.** Every per-session table (operation state for sign, verify,
   encrypt, decrypt, digest, find and the message APIs, plus the session

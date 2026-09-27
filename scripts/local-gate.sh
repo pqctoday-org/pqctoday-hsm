@@ -63,6 +63,7 @@
 #   bash scripts/local-gate.sh --javajce-remote  # + JavaJCE-remote suite (needs pqc-dev-sandbox + live pqc-grpc)
 #   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
+#   bash scripts/local-gate.sh --host=user@host --cpp  # run on another host (scripts/remote-gate.sh)
 #
 # Rust steps run inside the warm OrbStack container ($RUST_CONTAINER, default
 # pqc-rust) which mounts ~/Antigravity → /ag with a prebuilt cargo cache.
@@ -115,6 +116,23 @@ else
 fi
 JAVAJCE_DIR="$ROOT/JavaJCE"
 JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
+
+# --host=<user@host> (2026-09-27): run this gate for the current commit on
+# another machine and write the local marker only on a PASS there at the same
+# commit and tree. All of that logic, and why it is sound, is in
+# scripts/remote-gate.sh; this only dispatches. Without --host nothing below
+# changes: the local run is the default.
+GATE_HOST=""
+GATE_PASS=()
+for arg in "$@"; do
+  case "$arg" in
+    --host=*) GATE_HOST="${arg#--host=}" ;;
+    *) GATE_PASS+=("$arg") ;;
+  esac
+done
+if [[ -n "$GATE_HOST" ]]; then
+  exec bash "$ROOT/scripts/remote-gate.sh" "$GATE_HOST" "${GATE_PASS[@]+"${GATE_PASS[@]}"}"
+fi
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
