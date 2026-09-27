@@ -194,6 +194,29 @@ add({"env.mechanism_info_all", "env",
              for (const auto& f : mf)
                  if (mi.flags & f.v) { if (!set.empty()) set += "|"; set += f.n; }
              r.put(mp + ".flags", set.empty() ? "<none>" : set);
+             // 2026-09-27 (plan 1.4): the seven CKF_EC_* capability flags were
+             // missing as well — the same blind spot a second time. v3.2's
+             // CK_MECHANISM_INFO flag table: an EC-capable library "must set"
+             // F_P and/or F_2M, one or more of ECPARAMETERS / OID / CURVENAME,
+             // and UNCOMPRESS and/or COMPRESS "for each EC mechanism"
+             // (lowercase must: advisory, but an engine that omits them
+             // misdescribes what it accepts). Recorded under their OWN key so
+             // an exception for a legal EC-encoding difference (C++ does not
+             // take a curveName for Weierstrass curves; Rust does) can match
+             // exact values here without also absolving a capability
+             // difference in .flags above. Joined with '+', not '|': exception
+             // globs treat '|' as alternation, so a '|'-joined value could never
+             // be matched exactly.
+             static const NamePair ef[] = {
+                 {CKF_EC_F_P,"F_P"},{CKF_EC_F_2M,"F_2M"},
+                 {CKF_EC_ECPARAMETERS,"ECPARAMETERS"},{CKF_EC_OID,"OID"},
+                 {CKF_EC_CURVENAME,"CURVENAME"},
+                 {CKF_EC_UNCOMPRESS,"UNCOMPRESS"},{CKF_EC_COMPRESS,"COMPRESS"},
+             };
+             std::string ec;
+             for (const auto& f : ef)
+                 if (mi.flags & f.v) { if (!ec.empty()) ec += "+"; ec += f.n; }
+             r.put(mp + ".ec_flags", ec.empty() ? "<none>" : ec);
          }
      }});
 
