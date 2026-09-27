@@ -1960,18 +1960,17 @@ async function runSuite(engineName) {
           sigB.set(lmsSig, 4)
           const actual = hssVerify(M, hSession, hPub, msgB, sigB)
           const ok = (actual === expected)
-          // Pinned known defect (register row rust-lms-m24-verify-fails,
-          // 2026-09-27): in each of the 10 M24 groups (SHA-256/192 and
-          // SHAKE-256/192, H5..H25) the Rust engine rejects exactly ONE valid
-          // NIST signature — these tcIds — while the group's other valid
-          // signatures verify. Only these cases are pinned; a pinned case that
-          // verifies is a FAIL (XPASS), so the pin cannot outlive the fix.
-          const RUST_LMS_M24_PINNED = new Set([1, 19, 34, 50, 65, 164, 178, 195, 209, 225])
-          const pinned = engineName === 'rust' && RUST_LMS_M24_PINNED.has(tc.tcId)
+          // No pinned LMS cases. rust-lms-m24-verify-fails (every *_N24_W1
+          // group rejected its valid signature) was fixed 2026-09-27 in
+          // hbs-lms-patched's checksum left shift; its XFAIL pin is removed.
+          // To pin a future known defect, list its tcIds here with its
+          // register id; a pinned case that passes is a FAIL (XPASS).
+          const RUST_LMS_PINNED = new Set()
+          const pinned = engineName === 'rust' && RUST_LMS_PINNED.has(tc.tcId)
           let status = ok ? 'PASS' : 'FAIL'
           let why = `expected=${expected} actual=${actual}`
-          if (pinned && !ok) { status = 'XFAIL'; why += ' — pinned: rust-lms-m24-verify-fails' }
-          else if (pinned && ok) { status = 'FAIL'; why += ' — XPASS: rust-lms-m24-verify-fails looks fixed; remove the pin' }
+          if (pinned && !ok) { status = 'XFAIL'; why += ' — pinned known defect' }
+          else if (pinned && ok) { status = 'FAIL'; why += ' — XPASS: the pinned defect looks fixed; remove the pin' }
           if (status === 'PASS') katPass++; else if (status === 'FAIL') katFail++; else katSkip++
           addResult(
             `hss-kat-${grp.tgId}-${tc.tcId}`,
