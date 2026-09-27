@@ -143,7 +143,21 @@ struct AsymMech
 		HASH_SLHDSA_SHA3_384,// CKM_HASH_SLH_DSA_SHA3_384
 		HASH_SLHDSA_SHA3_512,// CKM_HASH_SLH_DSA_SHA3_512
 		HASH_SLHDSA_SHAKE128,// CKM_HASH_SLH_DSA_SHAKE128
-		HASH_SLHDSA_SHAKE256 // CKM_HASH_SLH_DSA_SHAKE256
+		HASH_SLHDSA_SHAKE256,// CKM_HASH_SLH_DSA_SHAKE256
+		ECDSA_EXPLICIT_K     // CKM_PQCTODAY_ECDSA_EXPLICIT_K (vendor; param = k)
+	};
+};
+
+// Outcome of AsymmetricAlgorithm::checkSignParameters. C_SignInit maps each
+// to the one return code §5.13.1 lists for it.
+struct SignParamCheck
+{
+	enum Type
+	{
+		OK,
+		PARAM_INVALID,        // CKR_MECHANISM_PARAM_INVALID
+		KEY_SIZE_RANGE,       // CKR_KEY_SIZE_RANGE
+		KEY_TYPE_INCONSISTENT // CKR_KEY_TYPE_INCONSISTENT
 	};
 };
 
@@ -239,6 +253,11 @@ public:
 	virtual bool signInit(PrivateKey* privateKey, const AsymMech::Type mechanism, const void* param = NULL, const size_t paramLen = 0);
 	virtual bool signUpdate(const ByteString& dataToSign);
 	virtual bool signFinal(ByteString& signature);
+	// Validate a mechanism parameter against the actual key at C_SignInit,
+	// for parameters whose validity depends on the key (e.g. an explicit
+	// ECDSA nonce must be below that key's group order). Default: nothing
+	// key-dependent to check.
+	virtual SignParamCheck::Type checkSignParameters(PrivateKey* /*privateKey*/, const AsymMech::Type /*mechanism*/, const void* /*param*/, const size_t /*paramLen*/) { return SignParamCheck::OK; }
 
 	// Verification functions
 	virtual bool verify(PublicKey* publicKey, const ByteString& originalData, const ByteString& signature, const AsymMech::Type mechanism, const void* param = NULL, const size_t paramLen = 0);

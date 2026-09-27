@@ -604,6 +604,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_EC_KEY_PAIR_GEN"]	= CKM_EC_KEY_PAIR_GEN;
 	t["CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS"]	= CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS;
 	t["CKM_ECDSA"]			= CKM_ECDSA;
+	// Vendor, deliberate key-recovery primitive (SECURITY.md).
+	t["CKM_PQCTODAY_ECDSA_EXPLICIT_K"]	= CKM_PQCTODAY_ECDSA_EXPLICIT_K;
 	t["CKM_ECDSA_SHA1"]		= CKM_ECDSA_SHA1;
 	t["CKM_ECDSA_SHA224"]		= CKM_ECDSA_SHA224;
 	t["CKM_ECDSA_SHA256"]		= CKM_ECDSA_SHA256;
@@ -1220,6 +1222,13 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_COMMOM |
 			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
 			               CKF_MULTI_MESSAGE;
+			break;
+		case CKM_PQCTODAY_ECDSA_EXPLICIT_K:
+			// Sign only (its signatures verify under CKM_ECDSA), no message
+			// flags (single-part), and only P-256 / P-384 / P-521.
+			pInfo->ulMinKeySize = 256;
+			pInfo->ulMaxKeySize = 521;
+			pInfo->flags = CKF_SIGN | CKF_EC_COMMOM;
 			break;
 #endif
 #if defined(WITH_ECC) || defined(WITH_EDDSA)
