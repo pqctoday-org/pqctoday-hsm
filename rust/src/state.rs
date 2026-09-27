@@ -166,9 +166,162 @@ impl ObjectTable {
     #[track_caller]
     pub fn borrow_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<u32, Attributes>> {
         let g = self.0.write().unwrap_or_else(|e| e.into_inner());
-        OBJECT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // Checked: saturates at u64::MAX, where every epoch cache turns off.
+        bump_object_epoch();
         g
     }
+}
+
+/// A3 part 2 — per-thread read cache of NON-SECRET object attributes,
+/// validated by `OBJECT_EPOCH`. Steady-state lookups take no lock and write no
+/// shared memory: the only shared access is an `Acquire` load of the epoch,
+/// whose cache line changes only on a write. Before this (M4 Pro), small AES
+/// stopped scaling past four workers because every worker's Init read the
+/// same key object through the shared read lock.
+///
+/// Rules (reviewed 2026-09-27, all mandatory):
+/// - It caches an attribute SNAPSHOT, never an authorization decision:
+///   callers re-run their session/login/access checks on every hit
+///   (`can_access_object` etc.). Login, logout, the last session closing and
+///   C_Finalize also bump the epoch (`bump_object_epoch`).
+/// - No secret material ever enters it: `is_secret_attr` attributes (key
+///   values, private-key components, seeds, vendor-defined attributes) are
+///   stripped from the snapshot, and the helpers that return them read under
+///   the lock as before.
+/// - Epoch protocol: a writer takes the exclusive lock, THEN increments the
+///   epoch, then mutates. A reader that sees a different epoch drops its
+///   whole cache; a miss re-reads under the shared lock and tags the refill
+///   with the epoch read under that lock. So a write on one thread is seen by
+///   every other thread's next lookup.
+/// - The epoch saturates at `u64::MAX`; there, caching is disabled for good.
+///   It is never reset, not even by C_Finalize.
+/// - Bounded: at most `OBJ_CACHE_MAX` entries per thread, least recently
+///   used evicted first.
+pub const OBJ_CACHE_MAX: usize = 256;
+
+/// Attributes that must never be copied into the per-thread cache.
+/// Explicit list, not a range: vendor attributes are NOT all secret (the
+/// parameter-set, family, owner and slot attributes are public and are read
+/// on every Init), so a blanket "vendor = secret" rule broke key lookups.
+/// Add any new attribute that holds key material or private key state here.
+pub fn is_secret_attr(t: u32) -> bool {
+    matches!(
+        t,
+        CKA_VALUE
+            | CKA_PRIVATE_EXPONENT
+            | CKA_PRIME_1
+            | CKA_PRIME_2
+            | CKA_EXPONENT_1
+            | CKA_EXPONENT_2
+            | CKA_COEFFICIENT
+            | CKA_SEED
+            | CKA_BIP32_CHAIN_CODE
+            | CKA_PRIV_STATEFUL_KEY_STATE
+    )
+}
+
+/// Invalidate every per-thread object cache (and every Init-time key-schedule
+/// cache) without writing an object — for login/logout/close/finalize.
+pub fn bump_object_epoch() {
+    let _ = OBJECT_EPOCH.fetch_update(
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+        |e| e.checked_add(1),
+    );
+}
+
+/// False once the epoch has saturated: no epoch-validated cache may be used.
+#[inline]
+pub fn object_caching_enabled(epoch: u64) -> bool {
+    epoch != u64::MAX
+}
+
+struct ObjCache {
+    epoch: Option<u64>,
+    tick: u64,
+    map: HashMap<u32, (u64, Option<std::sync::Arc<Attributes>>)>,
+}
+
+thread_local! {
+    static OBJ_CACHE: std::cell::RefCell<ObjCache> =
+        std::cell::RefCell::new(ObjCache { epoch: None, tick: 0, map: HashMap::new() });
+}
+
+fn public_snapshot(attrs: &Attributes) -> Attributes {
+    attrs.iter().filter(|(t, _)| !is_secret_attr(**t)).map(|(t, v)| (*t, v.clone())).collect()
+}
+
+/// Run `f` on object `handle`'s NON-SECRET attributes, from this thread's
+/// cache when it is current. `None` if the object does not exist. Never use
+/// it to read a secret attribute: they are not in the snapshot.
+pub fn with_object<R>(handle: u32, f: impl FnOnce(&Attributes) -> R) -> Option<R> {
+    let epoch = object_epoch();
+    if !object_caching_enabled(epoch) {
+        return OBJECTS.borrow().get(&handle).map(|a| f(&public_snapshot(a)));
+    }
+    let cached = OBJ_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.epoch != Some(epoch) {
+            c.map.clear();
+            c.epoch = Some(epoch);
+        }
+        c.tick += 1;
+        let tick = c.tick;
+        c.map.get_mut(&handle).map(|e| {
+            e.0 = tick;
+            e.1.clone()
+        })
+    });
+    let attrs = match cached {
+        Some(a) => a,
+        None => {
+            let (seen, attrs) = {
+                let objs = OBJECTS.borrow();
+                // No writer is active under the shared lock, so this epoch
+                // describes exactly the state being read.
+                (object_epoch(), objs.get(&handle).map(|a| std::sync::Arc::new(public_snapshot(a))))
+            };
+            if object_caching_enabled(seen) {
+                OBJ_CACHE.with(|c| {
+                    let mut c = c.borrow_mut();
+                    if c.epoch != Some(seen) {
+                        c.map.clear();
+                        c.epoch = Some(seen);
+                    }
+                    if c.map.len() >= OBJ_CACHE_MAX {
+                        if let Some(lru) = c.map.iter().min_by_key(|(_, e)| e.0).map(|(k, _)| *k) {
+                            c.map.remove(&lru);
+                        }
+                    }
+                    c.tick += 1;
+                    let tick = c.tick;
+                    c.map.insert(handle, (tick, attrs.clone()));
+                });
+            }
+            attrs
+        }
+    };
+    // This thread's own Arc (no shared refcount traffic); `f` runs outside
+    // the RefCell borrow and may itself call `with_object`.
+    attrs.map(|a| f(&a))
+}
+
+/// Test hook: force the epoch (near-wrap tests). Never available outside tests.
+#[cfg(test)]
+pub fn set_object_epoch_for_test(v: u64) {
+    OBJECT_EPOCH.store(v, std::sync::atomic::Ordering::Release);
+}
+
+/// Test hook: whether this thread's cached snapshot of `handle` holds `attr`
+/// (`None` if the handle is not cached).
+#[cfg(test)]
+pub fn object_cache_has_attr(handle: u32, attr: u32) -> Option<bool> {
+    OBJ_CACHE.with(|c| c.borrow().map.get(&handle).map(|e| e.1.as_ref().map_or(false, |a| a.contains_key(&attr))))
+}
+
+/// Entries in this thread's object cache (tests).
+pub fn object_cache_len() -> usize {
+    OBJ_CACHE.with(|c| c.borrow().map.len())
 }
 
 /// PKCS#11 v3.2 §5.6 — library initialization state. Set by C_Initialize,
@@ -1095,7 +1248,7 @@ pub fn parse_allowed_mechanisms(bytes: &[u8]) -> Vec<u32> {
 }
 
 pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
-    match OBJECTS.with(|o| o.borrow().get(&h_key).map(|attrs| check_mechanism_allowed_from(attrs, mech_type))) {
+    match with_object(h_key, |attrs| check_mechanism_allowed_from(attrs, mech_type)) {
         Some(result) => result,
         None => Ok(()), // unknown handle: preserve prior behavior (caller's later fetch fails closed)
     }
@@ -1679,18 +1832,18 @@ pub(crate) fn get_object_value(handle: u32) -> Option<Vec<u8>> {
 /// Some internal paths (C_GenerateKeyPair) store the raw SEC1 bytes directly
 /// without the DER header. This function handles both formats.
 pub fn get_ec_point_sec1(handle: u32) -> Option<Vec<u8>> {
-    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_ec_point_sec1_from))
+    with_object(handle, |attrs| get_ec_point_sec1_from(attrs)).flatten()
 }
 
 /// Return (modulus, public_exponent) bytes for an RSA public key object.
 /// PKCS#11 v3.2: RSA public key material is in CKA_MODULUS + CKA_PUBLIC_EXPONENT.
 /// CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
 pub fn get_rsa_public_components(handle: u32) -> Option<(Vec<u8>, Vec<u8>)> {
-    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_rsa_public_components_from))
+    with_object(handle, |attrs| get_rsa_public_components_from(attrs)).flatten()
 }
 
 pub fn get_object_param_set(handle: u32) -> u32 {
-    OBJECTS.with(|objs| objs.borrow().get(&handle).map(get_object_param_set_from).unwrap_or(0))
+    with_object(handle, |attrs| get_object_param_set_from(attrs)).unwrap_or(0)
 }
 
 pub fn get_object_algo_family(handle: u32) -> u32 {
@@ -1704,17 +1857,29 @@ pub fn get_object_algo_family(handle: u32) -> u32 {
 
 /// Read an arbitrary attribute from an existing object in the store.
 pub(crate) fn get_object_attr_bytes(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
-    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_bytes_from(attrs, attr_type)))
+    if is_secret_attr(attr_type) {
+        OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_bytes_from(attrs, attr_type)))
+    } else {
+        with_object(handle, |attrs| get_object_attr_bytes_from(attrs, attr_type)).flatten()
+    }
 }
 
 /// Read a u32 attribute (4-byte LE) from an existing object in the store.
 pub(crate) fn get_object_attr_u32(handle: u32, attr_type: u32) -> Option<u32> {
-    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_u32_from(attrs, attr_type)))
+    if is_secret_attr(attr_type) {
+        OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_u32_from(attrs, attr_type)))
+    } else {
+        with_object(handle, |attrs| get_object_attr_u32_from(attrs, attr_type)).flatten()
+    }
 }
 
 /// Read a u64 attribute (8-byte LE) from an existing object in the store.
 pub(crate) fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
-    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_u64_from(attrs, attr_type)))
+    if is_secret_attr(attr_type) {
+        OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_u64_from(attrs, attr_type)))
+    } else {
+        with_object(handle, |attrs| get_object_attr_u64_from(attrs, attr_type)).flatten()
+    }
 }
 
 /// Overwrite an attribute on an existing object in the store. Returns true on success.

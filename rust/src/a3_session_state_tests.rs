@@ -382,3 +382,218 @@ fn the_cache_is_used_when_nothing_changed() {
     assert_eq!(dec_init(S_A, KEY_A), CKR_OK);
     assert_eq!(decrypt(S_A, &ct), Ok(DATA.to_vec()));
 }
+
+// ── A3 part 2: the per-thread object read cache ─────────────────────────
+
+/// A write on thread A must be visible to thread B's next lookup, although B
+/// has the old attributes cached.
+#[test]
+fn a_write_on_one_thread_invalidates_another_threads_cached_attributes() {
+    let _guard = test_lock::acquire();
+    setup();
+    const K: u32 = 0xA300_1101;
+    put_aes_key(K, &[0x61; 16]);
+    let (to_b, b_rx) = std::sync::mpsc::channel::<()>();
+    let (to_main, main_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let b = std::thread::spawn(move || {
+        // Warm this thread's cache with the old value.
+        to_main.send(get_object_value(K).unwrap()).unwrap();
+        b_rx.recv().unwrap(); // wait for the write on the main thread
+        to_main.send(get_object_value(K).unwrap()).unwrap();
+    });
+    assert_eq!(main_rx.recv().unwrap(), vec![0x61; 16]);
+    put_aes_key(K, &[0x62; 16]); // write on this thread
+    to_b.send(()).unwrap();
+    assert_eq!(main_rx.recv().unwrap(), vec![0x62; 16], "B must not serve its cached old value");
+    b.join().unwrap();
+}
+
+/// An object destroyed while cached is gone on every thread's next lookup,
+/// and an operation using it fails exactly as before.
+#[test]
+fn an_object_destroyed_while_cached_is_gone_everywhere() {
+    let _guard = test_lock::acquire();
+    setup();
+    const K: u32 = 0xA300_1102;
+    put_aes_key(K, &[0x71; 16]);
+    assert!(get_object_value(K).is_some()); // cached on this thread
+    let other = std::thread::spawn(move || get_object_value(K).is_some());
+    assert!(other.join().unwrap(), "cached on the other thread too");
+    OBJECTS.with(|o| o.borrow_mut().remove(&K));
+    assert!(get_object_value(K).is_none(), "this thread's cache must not serve a destroyed key");
+    let other = std::thread::spawn(move || get_object_value(K).is_none());
+    assert!(other.join().unwrap());
+    assert_eq!(enc_init(S_A, K), CKR_KEY_HANDLE_INVALID);
+}
+
+/// The cache holds at most OBJ_CACHE_MAX entries per thread.
+#[test]
+fn the_object_cache_is_bounded_per_thread() {
+    let _guard = test_lock::acquire();
+    setup();
+    let base = 0xA310_5000u32;
+    let n = (crate::state::OBJ_CACHE_MAX * 3) as u32;
+    for i in 0..n {
+        put_aes_key(base + i, &[(i % 251) as u8; 16]);
+    }
+    std::thread::spawn(move || {
+        for i in 0..n {
+            assert_eq!(get_object_value(base + i).unwrap(), vec![(i % 251) as u8; 16]);
+            assert!(crate::state::object_cache_len() <= crate::state::OBJ_CACHE_MAX);
+        }
+    })
+    .join()
+    .unwrap();
+    OBJECTS.with(|o| {
+        let mut m = o.borrow_mut();
+        for i in 0..n {
+            m.remove(&(base + i));
+        }
+    });
+}
+
+/// Reads alone keep the cache warm: repeated lookups do not touch the lock
+/// (the epoch stays put) and return the same value.
+#[test]
+fn repeated_reads_are_served_without_a_write() {
+    let _guard = test_lock::acquire();
+    setup();
+    let e = crate::state::object_epoch();
+    for _ in 0..1000 {
+        assert_eq!(get_object_attr_u32(KEY_A, CKA_KEY_TYPE), Some(CKK_AES));
+    }
+    assert_eq!(crate::state::object_epoch(), e);
+    assert!(crate::state::object_cache_len() >= 1);
+}
+
+/// A handle looked up while missing is cached as missing; creating it on
+/// another thread (a write) makes it visible here on the next lookup.
+#[test]
+fn a_create_on_another_thread_is_seen_past_a_cached_miss() {
+    let _guard = test_lock::acquire();
+    setup();
+    const K: u32 = 0xA300_1103;
+    OBJECTS.with(|o| o.borrow_mut().remove(&K));
+    assert!(get_object_attr_u32(K, CKA_KEY_TYPE).is_none()); // cached miss
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let b2 = barrier.clone();
+    let t = std::thread::spawn(move || {
+        put_aes_key(K, &[0x81; 16]);
+        b2.wait();
+    });
+    barrier.wait();
+    t.join().unwrap();
+    assert_eq!(get_object_attr_u32(K, CKA_KEY_TYPE), Some(CKK_AES));
+}
+
+/// No secret attribute ever enters the per-thread cache, while the secret
+/// getters still return the value (read under the lock).
+#[test]
+fn secrets_never_enter_the_thread_cache() {
+    let _guard = test_lock::acquire();
+    setup();
+    assert_eq!(get_object_attr_u32(KEY_A, CKA_KEY_TYPE), Some(CKK_AES)); // populate
+    assert_eq!(crate::state::object_cache_has_attr(KEY_A, CKA_KEY_TYPE), Some(true));
+    assert_eq!(crate::state::object_cache_has_attr(KEY_A, CKA_VALUE), Some(false), "CKA_VALUE must be stripped");
+    assert_eq!(get_object_value(KEY_A), Some(vec![0x11; 16]), "the value still reads, under the lock");
+    assert_eq!(get_object_attr_bytes(KEY_A, CKA_VALUE), Some(vec![0x11; 16]));
+    assert!(crate::state::is_secret_attr(CKA_PRIVATE_EXPONENT) && crate::state::is_secret_attr(CKA_SEED));
+    assert!(crate::state::is_secret_attr(CKA_BIP32_CHAIN_CODE));
+    assert!(crate::state::is_secret_attr(CKA_PRIV_STATEFUL_KEY_STATE));
+    assert!(!crate::state::is_secret_attr(CKA_PRIV_PARAM_SET), "public vendor attributes stay cacheable");
+}
+
+/// Login, logout and C_Finalize invalidate every epoch cache.
+#[test]
+fn login_logout_and_finalize_bump_the_epoch() {
+    let _guard = test_lock::acquire();
+    setup();
+    let e = crate::state::object_epoch();
+    let mut pin = *b"000000";
+    let _ = C_Login(S_A, CKU_USER, pin.as_mut_ptr(), 6);
+    let e1 = crate::state::object_epoch();
+    assert!(e1 > e, "C_Login must bump");
+    let _ = C_Logout(S_A);
+    let e2 = crate::state::object_epoch();
+    assert!(e2 > e1, "C_Logout must bump");
+    assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+    assert!(crate::state::object_epoch() > e2, "C_Finalize must bump and never reset");
+    crate::state::set_initialized(true);
+}
+
+/// A long-lived worker thread keeps no stale view across C_Finalize and a
+/// re-initialised token that reuses the handle.
+#[test]
+fn finalize_and_reinit_are_seen_by_a_persistent_thread() {
+    let _guard = test_lock::acquire();
+    setup();
+    const K: u32 = 0xA300_1104;
+    put_aes_key(K, &[0x91; 16]);
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<Option<u32>>();
+    let worker = std::thread::spawn(move || {
+        res_tx.send(get_object_attr_u32(K, CKA_VALUE_LEN)).unwrap();
+        go_rx.recv().unwrap();
+        res_tx.send(get_object_attr_u32(K, CKA_VALUE_LEN)).unwrap();
+    });
+    assert_eq!(res_rx.recv().unwrap(), Some(16));
+    assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+    setup();
+    put_aes_key(K, &[0x92; 32]); // same handle, new object
+    go_tx.send(()).unwrap();
+    assert_eq!(res_rx.recv().unwrap(), Some(32), "the worker must see the re-created object");
+    worker.join().unwrap();
+}
+
+/// At a saturated epoch every epoch cache is off: nothing is cached and the
+/// Init-time key schedule is not used, so correctness can't depend on an
+/// epoch that no longer moves.
+#[test]
+fn a_saturated_epoch_disables_every_cache() {
+    let _guard = test_lock::acquire();
+    setup();
+    let before = crate::state::object_epoch();
+    crate::state::set_object_epoch_for_test(u64::MAX - 1);
+    put_aes_key(0xA300_1105, &[0xA1; 16]); // write → MAX
+    assert_eq!(crate::state::object_epoch(), u64::MAX);
+    put_aes_key(0xA300_1106, &[0xA2; 16]); // checked increment: stays at MAX
+    assert_eq!(crate::state::object_epoch(), u64::MAX);
+    assert_eq!(get_object_attr_u32(0xA300_1105, CKA_KEY_TYPE), Some(CKK_AES));
+    assert_eq!(crate::state::object_cache_has_attr(0xA300_1105, CKA_KEY_TYPE), None, "nothing cached at MAX");
+    assert_eq!(enc_init(S_A, KEY_A), CKR_OK);
+    let cached = ENCRYPT_STATE.shard(S_A).get(&S_A).map(|c| c.aes_key.is_some());
+    assert_eq!(cached, Some(false), "no Init-time key schedule at MAX");
+    assert!(encrypt(S_A, &DATA).is_ok());
+    // Leave a fresh epoch above everything used before for later tests.
+    crate::state::set_object_epoch_for_test(before + 1_000_000);
+}
+
+/// LRU: the most recently used entry survives eviction.
+#[test]
+fn the_object_cache_evicts_least_recently_used() {
+    let _guard = test_lock::acquire();
+    setup();
+    let base = 0xA310_6000u32;
+    let n = crate::state::OBJ_CACHE_MAX as u32;
+    for i in 0..=n {
+        put_aes_key(base + i, &[1; 16]);
+    }
+    std::thread::spawn(move || {
+        for i in 0..n {
+            assert!(get_object_attr_u32(base + i, CKA_KEY_TYPE).is_some()); // fill: base..base+n-1
+        }
+        assert!(get_object_attr_u32(base, CKA_KEY_TYPE).is_some()); // touch the oldest
+        assert!(get_object_attr_u32(base + n, CKA_KEY_TYPE).is_some()); // forces one eviction
+        assert_eq!(crate::state::object_cache_len(), crate::state::OBJ_CACHE_MAX);
+        assert!(crate::state::object_cache_has_attr(base, CKA_KEY_TYPE).is_some(), "recently used survives");
+        assert!(crate::state::object_cache_has_attr(base + 1, CKA_KEY_TYPE).is_none(), "least recently used evicted");
+    })
+    .join()
+    .unwrap();
+    OBJECTS.with(|o| {
+        let mut m = o.borrow_mut();
+        for i in 0..=n {
+            m.remove(&(base + i));
+        }
+    });
+}
