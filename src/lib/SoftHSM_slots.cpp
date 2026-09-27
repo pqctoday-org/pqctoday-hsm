@@ -799,6 +799,14 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 // an EdDSA-only configuration. A shared flag set does not belong inside one
 // case label either way.
 #define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_OID | CKF_EC_UNCOMPRESS)
+// Edwards / Montgomery curves (plan 1.4, 2026-09-27). These six mechanisms
+// advertised no CKF_EC_* flag at all, though v3.2's CK_MECHANISM_INFO flag
+// table says an EC-capable library "must set" the field, parameter-encoding
+// and point-form flags "for each EC mechanism". Unlike the Weierstrass arms,
+// CURVENAME is true here: OSSLUtil.cpp decodes CKA_EC_PARAMS for these curves
+// in both the oID and the curveName (PrintableString) forms, and the engine
+// itself emits the curveName form (exceptions.json LEGAL-EC-PARAMS-CURVE-NAME-VS-OID).
+#define CKF_EC_EDWARDS_MONTGOMERY	(CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME | CKF_EC_UNCOMPRESS)
 
 // Return more information about a mechanism for a given slot
 CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR pInfo)
@@ -1275,12 +1283,12 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_X25519:
 			pInfo->ulMinKeySize = 255;
 			pInfo->ulMaxKeySize = 255;
-			pInfo->flags = CKF_DERIVE;
+			pInfo->flags = CKF_DERIVE | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_X448:
 			pInfo->ulMinKeySize = 448;
 			pInfo->ulMaxKeySize = 448;
-			pInfo->flags = CKF_DERIVE;
+			pInfo->flags = CKF_DERIVE | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		// BIP32 child derivation takes the parent's private scalar as its base
 		// key, which HDWalletDerivation::deriveChildNode consumes as a 32-byte
@@ -1320,22 +1328,22 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_EC_EDWARDS_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = eddsaMinSize;
 			pInfo->ulMaxKeySize = eddsaMaxSize;
-			pInfo->flags = CKF_GENERATE_KEY_PAIR;
+			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_EC_MONTGOMERY_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = eddsaMinSize;
 			pInfo->ulMaxKeySize = eddsaMaxSize;
-			pInfo->flags = CKF_GENERATE_KEY_PAIR;
+			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_EDDSA:
 			pInfo->ulMinKeySize = eddsaMinSize;
 			pInfo->ulMaxKeySize = eddsaMaxSize;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 		case CKM_EDDSA_PH:
 			pInfo->ulMinKeySize = 255;
 			pInfo->ulMaxKeySize = 255;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_EDWARDS_MONTGOMERY;
 			break;
 #endif
 		// ML-DSA (FIPS 204) — ulMin/MaxKeySize are public-key BYTES per
