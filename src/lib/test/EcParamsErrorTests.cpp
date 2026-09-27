@@ -121,11 +121,9 @@ void EcParamsErrorTests::testEcKeyGenRefusesUnusableParams()
 		{ "implicitCA NULL", bytes({0x05,0x00}), CKR_DOMAIN_PARAMS_INVALID },
 		// P-256's OID with its last byte missing.
 		{ "truncated OID", bytes({0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01}), CKR_DOMAIN_PARAMS_INVALID },
-		// Not tested here: a valid OID followed by stray bytes. OpenSSL's
-		// d2i_ECPKParameters decodes the prefix and generates, and the Rust
-		// engine's decode_ec_params also ignores trailing bytes, so both
-		// engines accept it today. Tightening that is a separate, two-engine
-		// change (gap-closure plan item 3.B′), not part of this fix.
+		// P-256's OID followed by a stray byte: not ONE DER value (plan 3.B′;
+		// OpenSSL used to decode the prefix and generate).
+		{ "OID with trailing byte", bytes({0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x00}), CKR_DOMAIN_PARAMS_INVALID },
 		// curveName is not a representation this generator accepts.
 		{ "curveName P-256", printable("P-256"), CKR_DOMAIN_PARAMS_INVALID },
 	};
@@ -156,6 +154,7 @@ void EcParamsErrorTests::testEdKeyGenRefusesUnusableParams()
 		{ "malformed curveName", bytes({0x13,0x05,0x41}), CKR_DOMAIN_PARAMS_INVALID },
 		{ "implicitCA NULL", bytes({0x05,0x00}), CKR_DOMAIN_PARAMS_INVALID },
 		{ "truncated OID", bytes({0x06,0x03,0x2b,0x65}), CKR_DOMAIN_PARAMS_INVALID },
+		{ "Ed25519 OID with trailing byte", bytes({0x06,0x03,0x2b,0x65,0x70,0x00}), CKR_DOMAIN_PARAMS_INVALID },
 	};
 	for (const Case& c : cases)
 	{
