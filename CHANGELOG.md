@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **bench-harness compiles again, and the local gate now checks it.** The
+  composite-key work (#241) added a required `attributes` field to the KMIP
+  Encapsulate and Decapsulate requests, and the benchmark harness's three KMIP
+  KEM requests were not updated, so `bench-harness` stopped compiling on main.
+  They now send an empty list, which asks for the server defaults (extractable,
+  not sensitive): the same as before #241, so the harness can still read the
+  shared secret back. `scripts/local-gate.sh` gains a "bench-harness compiles"
+  step, because no existing step built the harness; the break was only caught
+  by the KV260 image build.
+
 ### Changed
 
 - **Rust engine: RSASSA-PSS signing uses AWS-LC for the default parameters.**

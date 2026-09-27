@@ -533,6 +533,16 @@ run_step_bg "wasm target still compiles (cargo check)" \
   "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  wasm32 type-check clean'" \
   wasm-check
 
+# bench-harness is a member of the rust/ workspace, but `-p softhsmrustv3`
+# tests never compile it, so nothing here built it. On 2026-09-27 hsm #241
+# added a required `attributes` field to the KMIP Encapsulate/Decapsulate
+# requests; bench-harness stopped compiling on main and only the KV260 image
+# build (cacp pqc-fpga-bench do_compile) noticed. Same PIPESTATUS verdict as
+# the wasm check above.
+run_step_bg "bench-harness compiles (cargo check)" \
+  "cd $AG_CONTAINER_ROOT/rust && cargo check --quiet --release --locked -p bench-harness --bin bench-harness 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  bench-harness type-check clean'" \
+  bench-check
+
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
 # Runs the STAGED bundle — see the check above for why that is not sufficient
 # on its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source
