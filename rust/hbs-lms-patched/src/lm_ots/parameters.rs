@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use tinyvec::ArrayVec;
 
-use crate::constants::get_hash_chain_count;
+use crate::constants::{checksum_left_shift, get_hash_chain_count};
 use crate::{
     constants::{FastVerifyCached, MAX_HASH_SIZE},
     hasher::HashChain,
@@ -56,25 +56,25 @@ impl LmotsAlgorithm {
                 H::LMOTS_TYPE_BASE,
                 1,
                 get_hash_chain_count(1, H::OUTPUT_SIZE as usize) as u16,
-                7,
+                checksum_left_shift(1, H::OUTPUT_SIZE as usize),
             )),
             LmotsAlgorithm::LmotsW2 => Some(LmotsParameter::new(
                 H::LMOTS_TYPE_BASE + 1,
                 2,
                 get_hash_chain_count(2, H::OUTPUT_SIZE as usize) as u16,
-                6,
+                checksum_left_shift(2, H::OUTPUT_SIZE as usize),
             )),
             LmotsAlgorithm::LmotsW4 => Some(LmotsParameter::new(
                 H::LMOTS_TYPE_BASE + 2,
                 4,
                 get_hash_chain_count(4, H::OUTPUT_SIZE as usize) as u16,
-                4,
+                checksum_left_shift(4, H::OUTPUT_SIZE as usize),
             )),
             LmotsAlgorithm::LmotsW8 => Some(LmotsParameter::new(
                 H::LMOTS_TYPE_BASE + 3,
                 8,
                 get_hash_chain_count(8, H::OUTPUT_SIZE as usize) as u16,
-                0,
+                checksum_left_shift(8, H::OUTPUT_SIZE as usize),
             )),
         }
     }
@@ -176,7 +176,8 @@ impl<H: HashChain> LmotsParameter<H> {
 
         for i in *max..self.get_hash_chain_count() {
             let (index, shift, mask) = coef[i as usize];
-            let hash_chain_length = ((checksum[index - 32] as u64 >> shift) & mask) as u16;
+            // The checksum bytes follow the n-byte hash; n is not always 32.
+            let hash_chain_length = ((checksum[index - Self::HASH_FUNCTION_OUTPUT_SIZE as usize] as u64 >> shift) & mask) as u16;
             total_hash_chain_iterations += hash_chain_length;
         }
 
