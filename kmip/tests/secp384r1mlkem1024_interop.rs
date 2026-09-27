@@ -156,18 +156,56 @@ fn openssl_client(bin: &str, port: u16, groups: &str) -> HandshakeOutcome {
         .spawn()
         .expect("spawn openssl s_client");
 
-    // s_client exits as soon as its stdin closes. Closing it immediately raced
-    // the server's post-handshake write: the handshake and group were correct
-    // but the application data sometimes never got read. Hold the pipe open
-    // briefly so the read can land, THEN close to let s_client exit.
+    // s_client exits as soon as its stdin closes, so stdin must stay open until
+    // the server's post-handshake write has been READ. This used to be a fixed
+    // 400 ms sleep, which raced: on a loaded machine (several gates sharing one
+    // container) a PQ-hybrid handshake plus that write sometimes took longer,
+    // and the run failed with established=true, the right group negotiated, but
+    // no HANDSHAKE-OK — seen 2026-09-26 on all_three_mandated_groups_..., which
+    // then passed 5/5 alone. Now: read stdout as it arrives and close stdin once
+    // HANDSHAKE-OK is seen, OR once s_client exits by itself (a refused
+    // handshake — the classical-only test — never sends it). The timeout is
+    // only a backstop against a hang, not a timing assumption.
     let stdin = child.stdin.take();
-    thread::sleep(Duration::from_millis(400));
+    let mut stdout = child.stdout.take().expect("s_client stdout");
+    // stderr is drained concurrently too, so s_client can never block on a
+    // full stderr pipe while this side waits for stdout.
+    let mut stderr = child.stderr.take().expect("s_client stderr");
+    let err_reader = thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel::<()>();
+    let reader = thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(12).any(|w| w == b"HANDSHAKE-OK") {
+                        let _ = seen_tx.send(());
+                    }
+                }
+            }
+        }
+        buf
+    });
+    // Returns on HANDSHAKE-OK, or at once when the reader ends (s_client exited
+    // and the sender was dropped), or after the backstop.
+    let _ = seen_rx.recv_timeout(Duration::from_secs(20));
     drop(stdin);
-    let out = child.wait_with_output().expect("s_client output");
+    let stdout_bytes = reader.join().expect("s_client stdout reader");
+    let stderr_bytes = err_reader.join().expect("s_client stderr reader");
+    child.wait().expect("s_client exit");
     let output = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&stdout_bytes),
+        String::from_utf8_lossy(&stderr_bytes)
     );
 
     // `-brief` prints "Negotiated TLS1.3 group: <name>" on success.

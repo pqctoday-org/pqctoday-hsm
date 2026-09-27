@@ -60,6 +60,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Both engines: imported EC public keys are now validated
+  (`CKR_PUBLIC_KEY_INVALID`).**
+  - **Rust:** no imported EC public key was checked before. Off-curve and
+    out-of-range points were accepted for P-224, P-256, P-384, P-521,
+    secp256k1, Ed25519 and Ed448.
+  - **C++:** it has checked the NIST curves since #274, but Edwards keys went
+    unchecked, because OpenSSL builds an Edwards key from any
+    correct-length bytes.
+  - **What is now checked:**
+    - NIST-curve keys must lie on the curve with in-range coordinates.
+    - Edwards keys must have a canonical encoding, lie on the curve, not be
+      the identity, and lie in the prime-order subgroup (L·Q = identity).
+    - That last check is not the same as rejecting small-order points: a
+      mixed-order point is not small-order, but still carries a torsion
+      component.
+  - **Evidence:**
+    - NIST ACVP KeyVer vectors (`tests/acvp/ec_keyver_test.json`), 20 cases,
+      now pass verdict-exact in both engines.
+    - NIST publishes no small-order or mixed-order case, so the identity,
+      order-8, mixed-order and non-canonical Edwards cases are
+      byte-identical constants in both engines' tests, computed
+      independently in Python.
+    - With the checks disabled, C++ accepted all of them, and so did the
+      Rust validator.
 - **C++ engine: about 1 in 256 BIP32 derivations failed with
   `CKR_FUNCTION_FAILED`.** `setECPrivateKey` decided whether a 32- or 48-byte
   key was a raw EC scalar or a PKCS#8 blob partly by checking whether its first

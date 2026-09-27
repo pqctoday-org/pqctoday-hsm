@@ -70,6 +70,13 @@ public:
 	// Retrieve the OpenSSL representation of the key
 	EVP_PKEY* getOSSLKey();
 
+	// Ed25519 / Ed448 only: true when the key's encoding is canonical, decodes
+	// to a curve point (RFC 8032 §5.1.3 / §5.2.3), is not the identity, and lies
+	// in the prime-order subgroup (L*Q = identity). OpenSSL checks none of this
+	// for Edwards keys. Costs a full scalar multiplication, so it is meant for
+	// import (C_CreateObject), not for every key load. False for other curves.
+	bool isInPrimeOrderSubgroup();
+
 private:
 	// The internal OpenSSL representation
 	int nid;
