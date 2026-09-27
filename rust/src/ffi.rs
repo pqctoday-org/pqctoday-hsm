@@ -359,6 +359,8 @@ pub(crate) fn drop_key_caches() {
 
 #[wasm_bindgen(js_name = _C_Finalize)]
 pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
+    // A3 part 2: invalidate every epoch-validated cache (login/visibility change).
+    crate::state::bump_object_epoch();
     require_init!();
     drop_key_caches();
     // PQC_HW_STAGE_PROFILE=1 diagnostics: the accelerator host-path stage
@@ -997,6 +999,8 @@ pub fn C_LoginUser(
 
 #[wasm_bindgen(js_name = _C_Login)]
 pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
+    // A3 part 2: invalidate every epoch-validated cache (login/visibility change).
+    crate::state::bump_object_epoch();
     require_init!();
     // §5.2 error priority (C2, 2026-08-13) — the session-handle class takes
     // MANDATORY precedence over argument codes.
@@ -1119,6 +1123,8 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
 
 #[wasm_bindgen(js_name = _C_Logout)]
 pub fn C_Logout(h_session: u32) -> u32 {
+    // A3 part 2: invalidate every epoch-validated cache (login/visibility change).
+    crate::state::bump_object_epoch();
     require_init!();
     drop_key_caches();
     let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
@@ -1158,6 +1164,8 @@ pub fn C_Logout(h_session: u32) -> u32 {
 /// invalidation C_Logout does, since the application's authenticated context
 /// is equally gone.
 fn reset_login_state_if_no_sessions(slot_id: u32) {
+    // A3 part 2: invalidate every epoch-validated cache (login/visibility change).
+    crate::state::bump_object_epoch();
     let still_open = SESSIONS.any(|_, ss| ss.slot_id == slot_id);
     if still_open {
         return;
@@ -6889,7 +6897,7 @@ fn check_key_usage_as(
     usage_attr: u32,
     handle_invalid_rv: u32,
 ) -> Result<(), u32> {
-    let attrs = match OBJECTS.with(|o| o.borrow().get(&h_key).cloned()) {
+    let attrs = match crate::state::with_object(h_key, |a| a.clone()) {
         Some(a) => a,
         None => return Err(handle_invalid_rv),
     };
@@ -7140,7 +7148,7 @@ fn check_key_for_mech_as(
     handle_invalid_rv: u32,
     type_rv: u32,
 ) -> Result<(), u32> {
-    let attrs = match OBJECTS.with(|o| o.borrow().get(&h_key).cloned()) {
+    let attrs = match crate::state::with_object(h_key, |a| a.clone()) {
         Some(a) => a,
         None => return Err(handle_invalid_rv),
     };
@@ -9339,6 +9347,9 @@ fn cache_aes_key(mech: u32, h_key: u32) -> Option<(u64, crate::crypto::multipart
         return None;
     }
     let epoch = crate::state::object_epoch();
+    if !crate::state::object_caching_enabled(epoch) {
+        return None;
+    }
     let value = get_object_value(h_key)?;
     crate::crypto::multipart::AesKey::new(&value).map(|k| (epoch, k))
 }
@@ -9348,7 +9359,11 @@ fn cached_aes_key(
     cache: &Option<(u64, crate::crypto::multipart::AesKey)>,
 ) -> Option<crate::crypto::multipart::AesKey> {
     match cache {
-        Some((epoch, key)) if *epoch == crate::state::object_epoch() => Some(key.clone()),
+        Some((epoch, key))
+            if crate::state::object_caching_enabled(*epoch) && *epoch == crate::state::object_epoch() =>
+        {
+            Some(key.clone())
+        }
         _ => None,
     }
 }
