@@ -101,6 +101,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The KMIP mechanism manifest listed 4 of the 16 vendor mechanisms.**
+  `kmip/pkcs11-mech-manifest.json` still showed the July FrodoKEM / Classic
+  McEliece entries and an authority checksum four revisions old, and claimed
+  a CI check that could not exist (the authority file is private). It now
+  lists every vendor mechanism and key type the engines define, pins the
+  current authority revision, and says plainly that the checksum is a
+  hand-kept record. `check_pkcs11_constants.py` now fails if the manifest's
+  vendor lists and the engines ever disagree.
+
 - **ChaCha20 kept its start block across a size query.** After a NULL-buffer
   length query or `CKR_BUFFER_TOO_SMALL`, one-shot `C_Encrypt` / `C_Decrypt`
   re-armed the operation with block counter 0, so the real call used the wrong
@@ -278,6 +287,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   AES-XTS 32 or 64; ChaCha20 exactly 32; a non-empty value for generic-secret,
   HKDF and HMAC keys) and refuse anything else with that code. No key object is
   created on refusal.
+
+- **Rust engine: an RSA key with a public exponent of 2^33 or more was
+  accepted by `C_UnwrapKey`.** `C_CreateObject` refuses such keys (a
+  deliberate limit: both Rust backends reject them). The unwrap path stored the
+  key without the same check, so it was accepted there and then failed on first
+  use. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply the import check
+  and return `CKR_WRAPPED_KEY_INVALID`.
+
+- **Both engines: `CKA_EC_PARAMS` with bytes after the DER value was
+  accepted.** An OID or curve name followed by trailing bytes was decoded as if
+  the extra bytes were not there. The Rust decoder and the C++ `C_CreateObject`
+  and `C_GenerateKeyPair` paths (EC, Edwards and Montgomery keys) now require
+  the attribute to be exactly one DER value and return
+  `CKR_DOMAIN_PARAMS_INVALID` otherwise (PKCS#11 v3.2 §6.3).
+
+- **Known deviation now measured: structure packing (PKCS#11 v3.2 §2.1).** The
+  spec says Cryptoki structures SHALL be packed with 1-byte alignment. Both
+  engines keep natural alignment on purpose, as OpenSC, p11-kit and
+  pkcs11-provider expect on non-Windows platforms; packing would break them.
+  The C++ compliance harness now records a cited XFAIL for each info structure
+  whose size differs from its packed size, and a Rust test pins the current
+  layout so any change is noticed.
 
 ### Added
 

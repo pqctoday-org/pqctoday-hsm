@@ -521,6 +521,11 @@
       "disposition": "N/A-local",
       "case_ids": [],
       "justification": "A structural check inside the C++ compliance harness itself (plan 2.F): every advertised mechanism without a forward operation must be named by a test that passed in the same run. It inspects the harness's own report, not engine behaviour, so it has no remoting counterpart."
+    },
+    "StructPacking": {
+      "disposition": "N/A-local",
+      "case_ids": [],
+      "justification": "Plan 3.C (ruling 2026-09-26): the harness measures sizeof vs the 1-byte-packed size of CK_INFO, CK_SLOT_INFO, CK_TOKEN_INFO, CK_SESSION_INFO and CK_MECHANISM_INFO and records a cited XFAIL against v3.2 \u00a72.1 where they differ. Structure layout is a property of the in-process C ABI; the remoting layer serialises each field explicitly, so there is no wire counterpart."
     }
   }
 }

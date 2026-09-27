@@ -89,7 +89,11 @@ pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
     let len = params[1] as usize;
     // Only short-form DER lengths occur for these values (the longest named
     // curve OID is well under 127 bytes).
-    if params[1] & 0x80 != 0 || params.len() < 2 + len {
+    // Exactly ONE complete DER value (plan 3.B′, 2026-09-27): a valid OID
+    // followed by stray bytes used to be accepted here (the tail ignored), as
+    // it was by the C++ engine's OpenSSL decoder. It is not a valid
+    // representation of the Parameters CHOICE.
+    if params[1] & 0x80 != 0 || params.len() != 2 + len {
         return Err(CKR_DOMAIN_PARAMS_INVALID);
     }
     let body = &params[2..2 + len];

@@ -2382,6 +2382,27 @@ pub unsafe extern "C" fn C_GetInterface(
 
 #[cfg(test)]
 mod tests {
+    /// Plan 3.C (ruling 2026-09-26: cited XFAIL, no ABI change). PKCS#11 v3.2
+    /// §2.1: "Cryptoki structures SHALL be packed with 1-byte alignment." This
+    /// ABI uses natural (repr(C)) alignment instead, like every Unix consumer
+    /// it must interoperate with: OpenSC's and p11-kit's pkcs11.h apply
+    /// `#pragma pack(push, cryptoki, 1)` only under `_WIN32` /
+    /// `CRYPTOKI_FORCE_WIN32`, and the vendored pkcs11-provider never packs.
+    /// Packing here would break the ABI with all of them. This test PINS the
+    /// known non-conformance: if the layout ever changes, it fails and the
+    /// decision has to be revisited, not drift silently.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn xfail_section_2_1_structure_packing_is_natural_not_1_byte() {
+        use std::mem::size_of;
+        let v = size_of::<CK_VERSION>();
+        let (ul, fl) = (size_of::<CK_ULONG>(), size_of::<CK_FLAGS>());
+        let packed_info = v + 32 + fl + 32 + v;
+        let packed_token = 32 + 32 + 16 + 16 + fl + 10 * ul + v + v + 16;
+        assert_eq!((size_of::<CK_INFO>(), packed_info), (88, 76), "CK_INFO natural vs packed");
+        assert_eq!((size_of::<CK_TOKEN_INFO>(), packed_token), (208, 204), "CK_TOKEN_INFO natural vs packed");
+    }
+
     use super::*;
     use std::mem::size_of;
 
