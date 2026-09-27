@@ -4730,10 +4730,86 @@ cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac956
                 "{name}: pure-Rust must verify AWS-LC's v1.5 signature");
             assert_eq!(fast.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
         }
-        // PSS is deliberately NOT routed to AWS-LC (salt-agnostic verify lives
-        // only in the pure-Rust path); confirm the fast path declines it.
-        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, None).is_none(),
-            "PSS must fall through to pure-Rust, not AWS-LC");
+        // PSS SIGN with the default salt is routed to AWS-LC; a non-default
+        // salt is not (the pure-Rust signer honours any sLen). Verify of both
+        // stays in the salt-agnostic pure-Rust path.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, None).is_some(),
+            "default-salt PSS sign takes the AWS-LC path");
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, Some(20)).is_none(),
+            "a non-default salt must fall through to pure-Rust");
+    }
+
+    /// PSS sign via AWS-LC (default salt) interoperates with the pure-Rust
+    /// path in BOTH directions, for every hash the engine routes and for 2048-
+    /// and 3072-bit keys; every other salt length still takes the pure-Rust
+    /// signer and verifies; and the salt-agnostic verifier's answers do not
+    /// change. PSS is randomized, so interop (not byte equality) is the check.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pss_sign_via_awslc_interoperates_both_ways_for_every_parameter_set() {
+        use crate::constants::*;
+        use aws_lc_rs::signature::{self as sig, RsaPublicKeyComponents};
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::signature::{RandomizedSigner, SignatureEncoding};
+        let msg = b"pss interop across AWS-LC and the rsa crate";
+        for bits in [2048u32, 3072] {
+            let (sk, n, e) = crate::crypto::awslc::rsa_generate(bits).unwrap().unwrap();
+            let k = n.len();
+            let rust_sk = rsa::RsaPrivateKey::from_pkcs8_der(&sk).unwrap();
+            macro_rules! case {
+                ($mech:expr, $hash:ty, $hlen:expr, $awslc_params:expr) => {{
+                    let mech = $mech;
+                    // 1. AWS-LC signs (default salt, both spellings) → pure-Rust verifies.
+                    for salt in [None, Some($hlen)] {
+                        let fast = crate::crypto::awslc::rsa_sign(mech, &sk, msg, salt)
+                            .expect("default-salt PSS routed to AWS-LC")
+                            .unwrap();
+                        assert_eq!(fast.len(), k);
+                        assert_eq!(verify_rsa(mech, &n, &e, msg, &fast, None), Ok(()),
+                            "{bits}-bit mech {mech:#x}: pure-Rust verifies AWS-LC PSS");
+                        assert_eq!(verify_rsa(mech, &n, &e, msg, &fast, Some($hlen)), Ok(()));
+                        // The engine's public entry point produces the same kind.
+                        let via_engine = sign_rsa(mech, &sk, msg, salt).unwrap();
+                        assert_eq!(verify_rsa(mech, &n, &e, msg, &via_engine, None), Ok(()));
+                        // Tampering is still rejected.
+                        let mut bad = fast.clone();
+                        bad[k / 2] ^= 1;
+                        assert!(verify_rsa(mech, &n, &e, msg, &bad, None).is_err());
+                    }
+                    // 2. pure-Rust signs with the default salt → AWS-LC verifies.
+                    let pure = rsa::pss::BlindedSigningKey::<$hash>::new_with_salt_len(rust_sk.clone(), $hlen)
+                        .try_sign_with_rng(&mut rand::rngs::OsRng, msg)
+                        .unwrap()
+                        .to_vec();
+                    RsaPublicKeyComponents { n: &n, e: &e }
+                        .verify($awslc_params, msg, &pure)
+                        .expect("AWS-LC verifies a pure-Rust default-salt PSS signature");
+                    // 3. every other salt length: not routed, pure-Rust signs, verifies.
+                    let max = k - $hlen - 2;
+                    for salt in [0usize, 20, $hlen + 1, max] {
+                        assert!(crate::crypto::awslc::rsa_sign(mech, &sk, msg, Some(salt)).is_none(),
+                            "salt {salt} must not be routed");
+                        let s = sign_rsa(mech, &sk, msg, Some(salt)).unwrap();
+                        // Verify with the matching sLen; with none given the
+                        // verifier tries hash length and the maximum only.
+                        assert_eq!(verify_rsa(mech, &n, &e, msg, &s, Some(salt)), Ok(()), "salt {salt}");
+                        if salt == max {
+                            assert_eq!(verify_rsa(mech, &n, &e, msg, &s, None), Ok(()), "max salt, sLen omitted");
+                        }
+                    }
+                    // An impossible salt fails the same way on the pure path as before.
+                    assert!(sign_rsa(mech, &sk, msg, Some(max + 1)).is_err());
+                }};
+            }
+            case!(CKM_SHA256_RSA_PKCS_PSS, sha2::Sha256, 32usize, &sig::RSA_PSS_2048_8192_SHA256);
+            case!(CKM_SHA384_RSA_PKCS_PSS, sha2::Sha384, 48usize, &sig::RSA_PSS_2048_8192_SHA384);
+            case!(CKM_SHA512_RSA_PKCS_PSS, sha2::Sha512, 64usize, &sig::RSA_PSS_2048_8192_SHA512);
+            // Mechanisms AWS-LC does not expose stay pure-Rust, unchanged.
+            for mech in [CKM_RSA_PKCS_PSS, CKM_SHA1_RSA_PKCS_PSS, CKM_SHA224_RSA_PKCS_PSS,
+                         CKM_SHA3_256_RSA_PKCS_PSS, CKM_SHA3_384_RSA_PKCS_PSS, CKM_SHA3_512_RSA_PKCS_PSS] {
+                assert!(crate::crypto::awslc::rsa_sign(mech, &sk, msg, None).is_none(), "{mech:#x} not routed");
+            }
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
