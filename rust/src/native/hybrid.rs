@@ -146,7 +146,8 @@ pub fn encapsulate(session: u32, hybrid: Hybrid, peer_public: &[u8]) -> Result<E
             let x_peer: [u8; 32] = x_pub_b.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
             let eph_pub = x25519_dalek::PublicKey::from(&eph);
-            let ss_x = eph.diffie_hellman(&x25519_dalek::PublicKey::from(x_peer));
+            let ss_x = crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&x25519_dalek::PublicKey::from(x_peer)))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
             Ok(Encapsulated {
                 ciphertext: [ct_mlkem.as_slice(), eph_pub.as_bytes().as_slice()].concat(),
                 shared_secret: combine(session, &[ss_mlkem.as_slice(), ss_x.as_bytes()])?,
@@ -223,7 +224,8 @@ pub fn decapsulate(
             let x_sec: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let eph_pub: [u8; 32] = eph_x_b.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             let secret = x25519_dalek::StaticSecret::from(x_sec);
-            let ss_x = secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub));
+            let ss_x = crate::crypto::handlers::x25519_contributory(secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub)))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
             combine(session, &[ss_mlkem.as_slice(), ss_x.as_bytes()])
         }
         Hybrid::SecP256r1MlKem768 => {

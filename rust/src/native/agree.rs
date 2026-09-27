@@ -76,7 +76,8 @@ pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<
             let sk: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let peer: [u8; 32] = peer_public.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             let secret = x25519_dalek::StaticSecret::from(sk);
-            let ss = secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+            let ss = crate::crypto::handlers::x25519_contributory(secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer)))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
             Ok(ss.as_bytes().to_vec())
         }
         // ── X448 (RFC 7748) ─────────────────────────────────────────────────
