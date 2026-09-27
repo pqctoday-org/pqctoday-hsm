@@ -145,6 +145,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with `CKR_SIGNATURE_INVALID`. Wycheproof tcId 5, a valid signature under the
   same key, still verifies.
 
+- **Rust engine: the generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA`
+  ignored their hedge variant and context.** Their `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  was read only for its `hash` field. So `CKH_DETERMINISTIC_REQUIRED` still
+  signed hedged: the hub measured two different SLH-DSA signatures for the
+  same digest on all 12 parameter sets, and the same happened for ML-DSA. A
+  caller's context was also dropped, so the signature was made with an empty
+  one. Both are now honoured, through `C_Sign` and `C_SignMessage`. The
+  hash-specific `CKM_HASH_*_<hash>` mechanisms were not affected.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a

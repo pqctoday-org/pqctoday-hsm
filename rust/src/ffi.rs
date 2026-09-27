@@ -7319,10 +7319,19 @@ unsafe fn remap_generic_hash_mech(
 /// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash),
 /// plus CKM_ML_DSA_EXTERNAL_MU (remediation R34, PQCTODAY-VENDOR-EXT-MU),
 /// which reuses the same struct for its hedgeVariant field.
+///
+/// The GENERIC pre-hash mechanisms are included: their
+/// CK_HASH_SIGN_ADDITIONAL_CONTEXT starts with the same three fields
+/// (hedgeVariant, pContext, ulContextLen) and parse_sign_additional_ctx reads
+/// only those. They were left out after R37 stopped remapping them onto the
+/// hash-specific mechanisms, so from then on their hedge variant and context
+/// were silently dropped (gap-closure plan item 4.G).
 fn takes_sign_additional_ctx(mech: u32) -> bool {
     mech == CKM_ML_DSA
         || mech == CKM_SLH_DSA
         || mech == CKM_ML_DSA_EXTERNAL_MU
+        || mech == CKM_HASH_ML_DSA
+        || mech == CKM_HASH_SLH_DSA
         || is_prehash_ml_dsa(mech)
         || is_prehash_slh_dsa(mech)
 }
@@ -23922,6 +23931,81 @@ mod generic_prehash_mech_ffi_tests {
         let usz = std::mem::size_of::<usize>();
         let m: [usize; 3] = [base as usize, 0, 4 * usz];
         (m, ctx)
+    }
+
+    /// 4.G (register row rust-hash-slh-dsa-deterministic-not-honoured). Since
+    /// R37 stopped remapping the GENERIC mechanisms onto the hash-specific
+    /// ones, takes_sign_additional_ctx no longer matched CKM_HASH_ML_DSA /
+    /// CKM_HASH_SLH_DSA, so parse_sign_mech_params dropped the WHOLE
+    /// CK_HASH_SIGN_ADDITIONAL_CONTEXT prefix: hedgeVariant (a
+    /// CKH_DETERMINISTIC_REQUIRED request signed hedged — the hub measured two
+    /// different SLH-DSA signatures for the same digest on all 12 sets) AND
+    /// the context (signed with an empty one). Both, both mechanisms, single
+    /// part and message-based.
+    fn hash_mech_with(base: u32, hash: u32, hedge: usize, ctx: &[u8]) -> ([usize; 3], [usize; 4]) {
+        let p: [usize; 4] = [hedge, ctx.as_ptr() as usize, ctx.len(), hash as usize];
+        let usz = std::mem::size_of::<usize>();
+        ([base as usize, 0, 4 * usz], p)
+    }
+
+    fn sign_generic(session: u32, key: u32, base: u32, hedge: usize, ctx: &[u8], phm: &[u8], message: bool) -> Vec<u8> {
+        let (mut m, p) = hash_mech_with(base, CKM_SHA256, hedge, ctx);
+        m[1] = p.as_ptr() as usize;
+        let mut sig = vec![0u8; 50_000];
+        let mut len = sig.len() as u32;
+        if message {
+            assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, key), CKR_OK);
+            assert_eq!(
+                C_SignMessage(session, std::ptr::null_mut(), 0, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_mut_ptr(), &mut len),
+                CKR_OK
+            );
+            assert_eq!(C_MessageSignFinal(session), CKR_OK);
+        } else {
+            assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, key), CKR_OK);
+            assert_eq!(
+                C_Sign(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_mut_ptr(), &mut len),
+                CKR_OK
+            );
+        }
+        sig.truncate(len as usize);
+        sig
+    }
+
+    fn verify_generic(session: u32, key: u32, base: u32, ctx: &[u8], phm: &[u8], sig: &[u8]) -> u32 {
+        let (mut m, p) = hash_mech_with(base, CKM_SHA256, 0, ctx);
+        m[1] = p.as_ptr() as usize;
+        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, key), CKR_OK);
+        C_Verify(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32)
+    }
+
+    #[test]
+    fn generic_hash_mechanisms_honour_hedge_variant_and_context() {
+        let _guard = test_lock::acquire();
+        let (session, ml_pub, ml_priv) = setup();
+        let (slh_pub, slh_priv) =
+            crate::native::keygen::generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHA2_128F, b"s", "s")
+                .expect("slh-dsa-sha2-128f keygen");
+        use sha2::Digest;
+        let phm = sha2::Sha256::digest(b"generic pre-hash, deterministic").to_vec();
+        let ctx = b"a context".as_slice();
+        for (name, base, pubk, privk) in [
+            ("CKM_HASH_ML_DSA", CKM_HASH_ML_DSA, ml_pub, ml_priv),
+            ("CKM_HASH_SLH_DSA", CKM_HASH_SLH_DSA, slh_pub, slh_priv),
+        ] {
+            for message in [false, true] {
+                let form = if message { "C_SignMessage" } else { "C_Sign" };
+                let a = sign_generic(session, privk, base, CKH_DETERMINISTIC_REQUIRED as usize, &[], &phm, message);
+                let b = sign_generic(session, privk, base, CKH_DETERMINISTIC_REQUIRED as usize, &[], &phm, message);
+                assert_eq!(a, b, "{name} via {form}: CKH_DETERMINISTIC_REQUIRED must give one signature");
+                let c = sign_generic(session, privk, base, CKH_DETERMINISTIC_REQUIRED as usize, ctx, &phm, message);
+                assert_eq!(verify_generic(session, pubk, base, ctx, &phm, &c), CKR_OK, "{name} via {form}: same context verifies");
+                assert_eq!(
+                    verify_generic(session, pubk, base, &[], &phm, &c),
+                    CKR_SIGNATURE_INVALID,
+                    "{name} via {form}: a signature made with a context must not verify without it"
+                );
+            }
+        }
     }
 
     #[test]
