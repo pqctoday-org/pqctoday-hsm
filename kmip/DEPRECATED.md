@@ -26,7 +26,7 @@ table in `src/kmip30/algos.rs` (the `KmipAlgorithm` enum) and have no shim path.
 
 ## Affected OASIS conformance tests
 
-5 mandatory tests in `kat/oasis-kmip-3.0/mandatory/` exercise the
+5 mandatory tests in `conformance/oasis_corpus/mandatory/` exercise the
 deprecated mechanisms. The harness reports them as `SKIP_DEPRECATED`:
 
 | Test | Mechanism | What the test does |

@@ -181,9 +181,14 @@ fn manifest_integrity_gate() {
 // No-orphan guard
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Every `*.json` vector file under `kat/`. (XML/bin protocol vectors under
-/// `oasis-kmip-3.0/` and `ttlv-wire/` belong to `tests/kat_replay.rs`, not
-/// this ACVP crypto file, so we scope to JSON.)
+/// Every `*.json` vector file under `kat/`. (The `ttlv-wire/` protocol
+/// vectors belong to `tests/kat_replay.rs`, not this ACVP crypto file, so we
+/// scope to JSON. The OASIS XML transcripts live in `conformance/oasis_corpus/`
+/// and are replayed by `conformance/harness/dispatcher_replay.py`; the
+/// duplicate `kat/oasis-kmip-3.0/` copy this comment used to credit to
+/// kat_replay.rs — which never loaded it — was removed 2026-09-27. Every
+/// vector file in the repo is also covered by
+/// `scripts/check_vector_reachability.py`.)
 fn all_json_vectors() -> BTreeSet<String> {
     fn walk(dir: &Path, root: &Path, out: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
