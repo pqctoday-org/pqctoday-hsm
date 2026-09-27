@@ -102,6 +102,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   commands now use 8 MiB, the value `rust/build-wasm-bundle.sh` ships. The
   `.wasm` file size is unchanged; initial memory grows from 2.6 to 8.6 MiB.
 
+- **Rust engine: `CKM_BIP32_MASTER_DERIVE` advertised a 32-byte seed but
+  accepted any length.** The advertised range was a constraint the engine did
+  not enforce, the same defect the C++ engine fixed in `b9cc607c`. The Rust
+  engine now matches it: it advertises 16 to 64 bytes (BIP-32 allows 128 to
+  512 bits, and 64 bytes is what BIP-39 produces), refuses any other length
+  with `CKR_KEY_SIZE_RANGE`, and wipes the seed on that path. Both ends of the
+  range are pinned with BIP-32's own test vectors 1 (16-byte seed) and 2
+  (64-byte seed). `CKM_BIP32_CHILD_DERIVE` stays at 32/32, the parent's
+  private scalar.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a

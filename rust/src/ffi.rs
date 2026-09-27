@@ -1741,8 +1741,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // 256-bit keys only. CKF_ENCRYPT | CKF_DECRYPT; no CKF_MESSAGE_*
         // (the message-based family does not dispatch these mechanisms).
         CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => (32, 32, 0x00000100 | 0x00000200),
-        // BIP32 HD derivation (C_DeriveKey) — 32-byte seeds/keys, CKF_DERIVE.
-        CKM_BIP32_MASTER_DERIVE | CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
+        // BIP32 HD derivation (C_DeriveKey), CKF_DERIVE. Master: a 16..64-byte
+        // seed (maintainer ruling 2026-09-26, the C++ engine's b9cc607c) —
+        // BIP-32 permits 128 to 512 bits of seed entropy, and 64 is the seed
+        // BIP-39 produces. Enforced at C_DeriveKey, not only advertised.
+        // Child: the parent's 32-byte private scalar, on every supported curve.
+        CKM_BIP32_MASTER_DERIVE => (16, 64, 0x00080000),
+        CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
         // Hybrid-KEM combiner building blocks (§6.43 concat, §6.22/§6.29
         // digest key-derivation) — arbitrary-length secret values, CKF_DERIVE.
         CKM_CONCATENATE_BASE_AND_KEY
@@ -1945,8 +1950,11 @@ mod mechanism_table_tests {
                 SUPPORTED_MECHS.contains(&mech),
                 "mech {mech:#06x} missing from SUPPORTED_MECHS"
             );
-            assert_eq!(mechanism_info(mech), Some((32, 32, 0x00080000)));
         }
+        // Master: 16..64-byte seed (matches the C++ engine, b9cc607c).
+        assert_eq!(mechanism_info(CKM_BIP32_MASTER_DERIVE), Some((16, 64, 0x00080000)));
+        // Child: the parent's 32-byte private scalar.
+        assert_eq!(mechanism_info(CKM_BIP32_CHILD_DERIVE), Some((32, 32, 0x00080000)));
     }
 
     /// F1 — canonical OASIS v3.2 re-sync: CKA_UNIQUE_ID is 0x4 (the local
@@ -11395,11 +11403,23 @@ pub fn C_DeriveKey(
             };
 
             let (priv_key, chain_code) = if mech_type == CKM_BIP32_MASTER_DERIVE {
-                let seed = match get_object_value(h_base_key) {
+                let mut seed = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_OBJECT_HANDLE_INVALID,
                 };
-                match crate::crypto::derive_master_node(&seed, curve) {
+                // Seed length contract: 16..64 bytes, which is what
+                // C_GetMechanismInfo advertises (the C++ engine enforces the
+                // same range, SoftHSM_keygen.cpp). derive_master_node
+                // HMAC-SHA512s the seed as the MAC message, so without this
+                // check any length derives and the advertised range would be
+                // a constraint the engine does not have (finding E20's class).
+                if !(16..=64).contains(&seed.len()) {
+                    seed.zeroize();
+                    return CKR_KEY_SIZE_RANGE;
+                }
+                let res = crate::crypto::derive_master_node(&seed, curve);
+                seed.zeroize();
+                match res {
                     Ok(res) => res,
                     Err(e) => return e,
                 }
@@ -19517,6 +19537,83 @@ mod return_code_ffi_tests {
                 ),
                 CKR_TEMPLATE_INCONSISTENT,
                 "mech {legacy:#010x} did not reach the BIP32 dispatch arm"
+            );
+        }
+    }
+
+    /// CKM_BIP32_MASTER_DERIVE seed length: 16..64 bytes, advertised AND
+    /// enforced (maintainer ruling 2026-09-26; the C++ engine's b9cc607c).
+    /// Before this, the engine advertised 32/32 but derived from a seed of any
+    /// length. Both ends are pinned with BIP-32's own published test vectors
+    /// (vector 1: 16-byte seed; vector 2: 64-byte seed — the BIP-39 length),
+    /// master keys checked independently with Python's hmac/hashlib. Lengths
+    /// outside the range are refused with CKR_KEY_SIZE_RANGE.
+    #[test]
+    fn bip32_master_seed_range_is_16_to_64_and_enforced() {
+        let _guard = test_lock::acquire();
+        setup();
+        const SECP256K1_OID: [u8; 7] = [0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A];
+        fn hex(s: &str) -> Vec<u8> {
+            (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        }
+        fn derive_master(h_seed: u32) -> (u32, u32) {
+            let oid = SECP256K1_OID;
+            let mut tmpl: [usize; 3] = [CKA_EC_PARAMS as usize, oid.as_ptr() as usize, oid.len()];
+            let mut mech: [usize; 3] = [CKM_BIP32_MASTER_DERIVE as usize, 0, 0];
+            let mut h_new: u32 = 0;
+            let rv = C_DeriveKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_seed,
+                tmpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_new,
+            );
+            (rv, h_new)
+        }
+        let install_seed = |h: u32, seed: &[u8]| {
+            install_key(h, seed.len(), &[(CKA_DERIVE, true)]);
+            OBJECTS.with(|o| {
+                o.borrow_mut().get_mut(&h).unwrap().insert(CKA_VALUE, seed.to_vec());
+            });
+        };
+
+        // BIP-32 test vectors 1 and 2: the two ends of the range.
+        let vectors = [
+            (
+                "000102030405060708090a0b0c0d0e0f",
+                "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35",
+            ),
+            (
+                "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a2\
+                 9f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
+                "4b03d6fc340455b363f51020ad3ecca4f0850280cf436c70c727923f6db46c3e",
+            ),
+        ];
+        for (i, (seed_hex, master_hex)) in vectors.iter().enumerate() {
+            let seed = hex(&seed_hex.split_whitespace().collect::<String>());
+            let h_seed = 0x5334_3010 + i as u32;
+            install_seed(h_seed, &seed);
+            let (rv, h_new) = derive_master(h_seed);
+            assert_eq!(rv, CKR_OK, "{}-byte seed (BIP-32 vector {}) must derive", seed.len(), i + 1);
+            let value = OBJECTS.with(|o| o.borrow().get(&h_new).and_then(|a| a.get(&CKA_VALUE).cloned()));
+            assert_eq!(
+                value,
+                Some(hex(master_hex)),
+                "{}-byte seed: wrong master key (BIP-32 vector {})",
+                seed.len(),
+                i + 1
+            );
+        }
+
+        // Outside the range: refused, whatever the content.
+        for (j, len) in [8usize, 15, 65, 128].into_iter().enumerate() {
+            let h_seed = 0x5334_3020 + j as u32;
+            install_seed(h_seed, &vec![0x5a; len]);
+            assert_eq!(
+                derive_master(h_seed).0,
+                CKR_KEY_SIZE_RANGE,
+                "a {len}-byte seed must be refused with CKR_KEY_SIZE_RANGE"
             );
         }
     }
