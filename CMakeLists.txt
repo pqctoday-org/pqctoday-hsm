@@ -197,6 +197,9 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     # SHA-1 digest in the HSM that happens to fail in the same direction.
     target_include_directories(p11_v32_compliance_test PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(p11_v32_compliance_test dl ${OPENSSL_LIBRARIES})
+    # NIST ACVP vector files the harness reads at run time (plan 2.F: the
+    # SP 800-108 double-pipeline KDF vectors). ctest runs from the build dir.
+    target_compile_definitions(p11_v32_compliance_test PRIVATE ACVP_VECTOR_DIR="${CMAKE_SOURCE_DIR}/tests/acvp")
 
     # Run the PKCS#11 v3.2 compliance suite under ctest against the freshly
     # built engine. Hermetic: token store + softhsm2.conf + reports all live
