@@ -33,6 +33,7 @@ set(SOURCES p11test.cpp
             KmacParamsTests.cpp
             HmacMinKeySizeTests.cpp
             MechanismInfoEcAdvertisementTests.cpp
+            EcParamsErrorTests.cpp
             Pbkdf2PolicyTests.cpp
             ErrorPathTests.cpp
             TestsBase.cpp
