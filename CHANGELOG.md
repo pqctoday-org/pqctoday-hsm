@@ -253,6 +253,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   HKDF and HMAC keys) and refuse anything else with that code. No key object is
   created on refusal.
 
+- **Rust engine: an RSA key with a public exponent of 2^33 or more was
+  accepted by `C_UnwrapKey`.** `C_CreateObject` refuses such keys (a
+  deliberate limit: both Rust backends reject them). The unwrap path stored the
+  key without the same check, so it was accepted there and then failed on first
+  use. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply the import check
+  and return `CKR_WRAPPED_KEY_INVALID`.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
