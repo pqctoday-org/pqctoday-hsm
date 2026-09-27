@@ -147,6 +147,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A gate could fail on a random EC key about one run in 256.** When a P-256
+  private value starts with a zero byte, the C++ engine reports `CKA_VALUE`
+  as 31 bytes and the Rust engine as 32. PKCS#11 v3.2 defines the attribute
+  as a "Big integer" of arbitrary size, so both are correct (confirmed by an
+  independent second reading). The cross-engine comparison now records this
+  as a permitted difference, and a new test uses a fixed key with a leading
+  zero byte so the case is checked on every run instead of by chance.
+
 - **The C++ engine now runs the NIST ACVP wasm harness in every `--cpp`
   gate.** Until now only the Rust engine did, because the C++ half needs an
   Emscripten toolchain that no gate machine had. The gate builds the C++
