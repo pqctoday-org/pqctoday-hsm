@@ -24,6 +24,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   M4 Pro: AES-CBC 64 B at 8 workers 1.85M → 5.06M ops/s (2.7×), AES-GCM
   64 B 2.1×, single worker unchanged.
 
+- **RSA private-key operations 1.2–1.7× faster on Cortex-A53/A55 (KV260,
+  i.MX 95).** AWS-LC sends every ARM core without a "wide multiplier" to
+  s2n-bignum's Montgomery kernels, which are tuned for Graviton2 and lose on
+  small in-order cores. A vendored aws-lc-sys 0.44.0 (crates.io, checksum
+  recorded) carries one reviewable patch that detects Cortex-A53/A55 by CPU ID
+  and keeps them on the scalar `armv8-mont` kernel; every other core is
+  unchanged. Same-board A-B-A-B, RSA-OAEP decrypt 2048/3072/4096: A55
+  1.27× / 1.60× / 1.21–1.26×, A53 1.28–1.39× / 1.64–1.69× / 1.22–1.25×. The
+  engine's RSA tests pass on both cores with the patched build. Applies to the
+  engine, the KMIP server and the remoting services (all three workspaces use
+  the vendored crate); `scripts/verify-vendored-aws-lc-sys.sh` re-derives the
+  tree from crates.io plus the patch. RSA-PSS signing is not affected yet (the
+  engine signs PSS in pure Rust); that is a separate change.
+
 - **The local gate can run on another machine.** `bash scripts/local-gate.sh
   --host=user@host --cpp` runs the same gate on a second host (today the
   M4 Pro) and writes the pre-push marker here only if it passed there on
