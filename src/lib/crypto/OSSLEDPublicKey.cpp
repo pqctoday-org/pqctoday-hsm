@@ -37,7 +37,12 @@
 #include "OSSLEDPublicKey.h"
 #include "OSSLUtil.h"
 #include <openssl/x509.h>
+#include <openssl/bn.h>
+#include <openssl/evp.h>
+#include <openssl/objects.h>
 #include <string.h>
+#include <vector>
+#include <openssl/err.h>
 
 #define X25519_KEYLEN	32
 #define X448_KEYLEN	56
@@ -213,6 +218,170 @@ EVP_PKEY* OSSLEDPublicKey::getOSSLKey()
 	if (pkey == NULL) createOSSLKey();
 
 	return pkey;
+}
+
+// ── Edwards public-key validation (RFC 8032) ────────────────────────────────
+// Twisted Edwards a*x^2 + y^2 = 1 + d*x^2*y^2 over GF(p). Ed25519: a = -1,
+// d = -121665/121666, p = 2^255 - 19. Ed448: a = 1, d = -39081,
+// p = 2^448 - 2^224 - 1. Both have a non-square d (and a square a), so the
+// unified addition below is complete: no exceptional inputs, the identity
+// included. Extended coordinates (X:Y:Z:T), x = X/Z, y = Y/Z, xy = T/Z
+// (Hisil-Wong-Carter-Dawson 2008, "add-2008-hwcd").
+namespace {
+
+struct EdCurve
+{
+	BIGNUM* p; BIGNUM* d; BIGNUM* order; bool aIsMinusOne;
+	size_t len;          // encoding length
+	int yBits;           // bits of y in the encoding
+};
+
+struct EdPoint { BIGNUM *X, *Y, *Z, *T; };
+
+bool edNew(EdPoint& P)
+{
+	P.X = BN_new(); P.Y = BN_new(); P.Z = BN_new(); P.T = BN_new();
+	return P.X && P.Y && P.Z && P.T;
+}
+void edFree(EdPoint& P) { BN_free(P.X); BN_free(P.Y); BN_free(P.Z); BN_free(P.T); }
+
+// R = P + Q (R may alias P or Q).
+bool edAdd(const EdCurve& c, EdPoint& R, const EdPoint& P, const EdPoint& Q, BN_CTX* ctx)
+{
+	BN_CTX_start(ctx);
+	BIGNUM *A = BN_CTX_get(ctx), *B = BN_CTX_get(ctx), *C = BN_CTX_get(ctx), *D = BN_CTX_get(ctx);
+	BIGNUM *E = BN_CTX_get(ctx), *F = BN_CTX_get(ctx), *G = BN_CTX_get(ctx), *H = BN_CTX_get(ctx);
+	BIGNUM *t1 = BN_CTX_get(ctx), *t2 = BN_CTX_get(ctx);
+	bool ok = t2 != NULL &&
+		BN_mod_mul(A, P.X, Q.X, c.p, ctx) &&
+		BN_mod_mul(B, P.Y, Q.Y, c.p, ctx) &&
+		BN_mod_mul(C, P.T, Q.T, c.p, ctx) && BN_mod_mul(C, C, c.d, c.p, ctx) &&
+		BN_mod_mul(D, P.Z, Q.Z, c.p, ctx) &&
+		BN_mod_add(t1, P.X, P.Y, c.p, ctx) && BN_mod_add(t2, Q.X, Q.Y, c.p, ctx) &&
+		BN_mod_mul(E, t1, t2, c.p, ctx) && BN_mod_sub(E, E, A, c.p, ctx) && BN_mod_sub(E, E, B, c.p, ctx) &&
+		BN_mod_sub(F, D, C, c.p, ctx) &&
+		BN_mod_add(G, D, C, c.p, ctx) &&
+		// H = B - a*A
+		(c.aIsMinusOne ? BN_mod_add(H, B, A, c.p, ctx) : BN_mod_sub(H, B, A, c.p, ctx)) &&
+		BN_mod_mul(R.X, E, F, c.p, ctx) &&
+		BN_mod_mul(R.Y, G, H, c.p, ctx) &&
+		BN_mod_mul(R.T, E, H, c.p, ctx) &&
+		BN_mod_mul(R.Z, F, G, c.p, ctx);
+	BN_CTX_end(ctx);
+	return ok;
+}
+
+bool edIsIdentity(const EdCurve& c, const EdPoint& P, BN_CTX* ctx)
+{
+	BN_CTX_start(ctx);
+	BIGNUM* t = BN_CTX_get(ctx);
+	bool id = t != NULL && BN_is_zero(P.X) && BN_mod_sub(t, P.Y, P.Z, c.p, ctx) && BN_is_zero(t);
+	BN_CTX_end(ctx);
+	return id;
+}
+
+// RFC 8032 §5.1.3 / §5.2.3 strict decoding to (x, y), then the subgroup test.
+bool edValidate(const EdCurve& c, const unsigned char* enc, BN_CTX* ctx)
+{
+	// Little-endian encoding: y in the low yBits, x's sign in the top bit.
+	std::vector<unsigned char> be(c.len);
+	for (size_t i = 0; i < c.len; i++) be[i] = enc[c.len - 1 - i];
+	const int sign = (enc[c.len - 1] >> 7) & 1;
+	be[0] &= 0x7f;
+	// Ed448: the last byte carries only the sign bit; its low 7 bits must be 0.
+	if (c.len == 57 && (enc[56] & 0x7f) != 0) return false;
+
+	BN_CTX_start(ctx);
+	BIGNUM *y = BN_CTX_get(ctx), *yy = BN_CTX_get(ctx), *u = BN_CTX_get(ctx), *v = BN_CTX_get(ctx);
+	BIGNUM *x2 = BN_CTX_get(ctx), *x = BN_CTX_get(ctx), *chk = BN_CTX_get(ctx);
+	EdPoint Q, R;
+	Q.X = Q.Y = Q.Z = Q.T = R.X = R.Y = R.Z = R.T = NULL;
+	bool ok = false;
+	do
+	{
+		if (chk == NULL || BN_bin2bn(be.data(), (int)c.len, y) == NULL) break;
+		if (BN_cmp(y, c.p) >= 0) break;                          // non-canonical y
+		// x^2 = (y^2 - 1) / (d*y^2 - a)
+		if (!BN_mod_sqr(yy, y, c.p, ctx) || !BN_sub(u, yy, BN_value_one()) ||
+		    !BN_nnmod(u, u, c.p, ctx) || !BN_mod_mul(v, c.d, yy, c.p, ctx)) break;
+		if (c.aIsMinusOne ? !BN_mod_add(v, v, BN_value_one(), c.p, ctx)
+		                  : !BN_mod_sub(v, v, BN_value_one(), c.p, ctx)) break;
+		if (BN_mod_inverse(v, v, c.p, ctx) == NULL || !BN_mod_mul(x2, u, v, c.p, ctx)) break;
+		if (BN_is_zero(x2))
+		{
+			if (sign) break;                                      // x = 0 with sign 1
+			BN_zero(x);
+		}
+		else
+		{
+			if (BN_mod_sqrt(x, x2, c.p, ctx) == NULL) { ERR_clear_error(); break; }
+			if (!BN_mod_sqr(chk, x, c.p, ctx) || BN_cmp(chk, x2) != 0) break;   // not on curve
+			if (BN_is_odd(x) != sign && !BN_sub(x, c.p, x)) break;
+		}
+		if (!edNew(Q) || !edNew(R)) break;
+		if (!BN_copy(Q.X, x) || !BN_copy(Q.Y, y) || !BN_one(Q.Z) || !BN_mod_mul(Q.T, x, y, c.p, ctx)) break;
+		if (edIsIdentity(c, Q, ctx)) break;                       // the identity itself
+		// R = L*Q, left-to-right double-and-add.
+		BN_zero(R.X); BN_one(R.Y); BN_one(R.Z); BN_zero(R.T);
+		bool step = true;
+		for (int i = BN_num_bits(c.order) - 1; i >= 0 && step; i--)
+		{
+			step = edAdd(c, R, R, R, ctx);
+			if (step && BN_is_bit_set(c.order, i)) step = edAdd(c, R, R, Q, ctx);
+		}
+		ok = step && edIsIdentity(c, R, ctx);
+	} while (false);
+	if (Q.X) edFree(Q);
+	if (R.X) edFree(R);
+	BN_CTX_end(ctx);
+	return ok;
+}
+
+} // namespace
+
+bool OSSLEDPublicKey::isInPrimeOrderSubgroup()
+{
+	EVP_PKEY* key = getOSSLKey();
+	if (key == NULL) return false;
+	const int id = EVP_PKEY_id(key);
+	if (id != NID_ED25519 && id != NID_ED448) return false;
+	unsigned char enc[57];
+	size_t encLen = sizeof(enc);
+	if (EVP_PKEY_get_raw_public_key(key, enc, &encLen) != 1) return false;
+
+	EdCurve c;
+	c.p = BN_new(); c.d = BN_new(); c.order = BN_new();
+	BN_CTX* ctx = BN_CTX_new();
+	bool ok = false;
+	if (c.p && c.d && c.order && ctx)
+	{
+		bool setup;
+		if (id == NID_ED25519)
+		{
+			c.aIsMinusOne = true; c.len = 32; c.yBits = 255;
+			// d = -121665 / 121666 mod p
+			BIGNUM* den = BN_new();
+			setup = den != NULL &&
+				BN_hex2bn(&c.p, "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed") &&
+				BN_hex2bn(&c.order, "1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed") &&
+				BN_set_word(c.d, 121665) && BN_sub(c.d, c.p, c.d) &&
+				BN_set_word(den, 121666) && BN_mod_inverse(den, den, c.p, ctx) != NULL &&
+				BN_mod_mul(c.d, c.d, den, c.p, ctx);
+			BN_free(den);
+		}
+		else
+		{
+			c.aIsMinusOne = false; c.len = 57; c.yBits = 448;
+			setup =
+				BN_hex2bn(&c.p, "fffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffffffffffffffffffffffffffffffffffffffffffffffffffff") &&
+				BN_hex2bn(&c.order, "3fffffffffffffffffffffffffffffffffffffffffffffffffffffff7cca23e9c44edb49aed63690216cc2728dc58f552378c292ab5844f3") &&
+				BN_set_word(c.d, 39081) && BN_sub(c.d, c.p, c.d);
+		}
+		ok = setup && encLen == c.len && edValidate(c, enc, ctx);
+	}
+	BN_free(c.p); BN_free(c.d); BN_free(c.order);
+	BN_CTX_free(ctx);
+	return ok;
 }
 
 // Create the OpenSSL representation of the key

@@ -27623,6 +27623,25 @@ mod ec_public_key_validation_tests {
         assert_eq!(verdict(&template(CKK_EC_EDWARDS, OID_ED25519, der_octet(&bytes))), Ok(()));
     }
 
+    /// The exact byte strings the C++ suite (AcvpEcKeyVerTests) asserts on,
+    /// computed with independent Python affine arithmetic, so both engines
+    /// are checked against identical inputs.
+    #[test]
+    fn edwards_cross_engine_constants() {
+        for (name, hex, want) in [
+            ("valid 7*B", "b862409fb5c4c4123df2abf7462b88f041ad36dd6864ce872fd5472be363c5b1", Ok(())),
+            ("valid 17*B, starts 0x04", "04be97ec9bfe6ccd01f9343b7288b117b79f91cc45c24af2f93e0060ca2b6d6f", Ok(())),
+            ("identity", "0100000000000000000000000000000000000000000000000000000000000000", Err(CKR_PUBLIC_KEY_INVALID)),
+            ("order-8 point T", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", Err(CKR_PUBLIC_KEY_INVALID)),
+            ("mixed order 7*B+T", "e9b2fe981587efae6478f48ba1fa60cec6126d0e26dde72a0a24f640dcd783e5", Err(CKR_PUBLIC_KEY_INVALID)),
+            ("non-canonical y = p+1", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", Err(CKR_PUBLIC_KEY_INVALID)),
+        ] {
+            let q = unhex(hex);
+            assert_eq!(verdict(&template(CKK_EC_EDWARDS, OID_ED25519, q.clone())), want, "{name} (bare)");
+            assert_eq!(verdict(&template(CKK_EC_EDWARDS, OID_ED25519, der_octet(&q))), want, "{name} (DER)");
+        }
+    }
+
     /// End to end through the real create path: a refused key leaves no
     /// object behind, and a valid one is created.
     #[test]

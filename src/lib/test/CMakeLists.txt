@@ -27,6 +27,7 @@ set(SOURCES p11test.cpp
             ClassicMcElieceTests.cpp
             BehaviourRingTests.cpp
             AcvpSlhDsaTests.cpp
+            AcvpEcKeyVerTests.cpp
             MlKemInputCheckTests.cpp
             KmacParamsTests.cpp
             HmacMinKeySizeTests.cpp
