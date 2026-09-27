@@ -10,6 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **RSA C_Decrypt no longer decrypts twice for the two-call idiom.** A NULL
+  `pData` length query on `CKM_RSA_PKCS_OAEP` / `CKM_RSA_PKCS` ran the full
+  private-key operation just to learn the plaintext length, and the real call
+  then ran it again: two private-key operations per decrypt for every caller
+  that follows the §5.2 convention. The query now answers with the modulus length k (§5.2
+  allows an upper bound; the C++ engine already reports k) without touching
+  the private key. Only a well-formed request takes this path (ciphertext of
+  exactly k bytes, key carrying `CKA_MODULUS`); anything else keeps the full
+  path and its error codes. The answer depends on the key alone, so it
+  carries no padding-oracle signal.
+
 - **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
   the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
   flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
@@ -59,6 +70,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pins an engine that includes this change.
 
 ### Fixed
+
+- **ChaCha20 kept its start block across a size query.** After a NULL-buffer
+  length query or `CKR_BUFFER_TOO_SMALL`, one-shot `C_Encrypt` / `C_Decrypt`
+  re-armed the operation with block counter 0, so the real call used the wrong
+  keystream block for a `CK_CHACHA20_PARAMS` start counter other than 0.
 
 - **Both engines: imported EC public keys are now validated
   (`CKR_PUBLIC_KEY_INVALID`).**
