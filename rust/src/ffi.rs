@@ -139,38 +139,38 @@ fn cancel_active_operation(
     }
     let cancelled = match op {
         OpFamily::Encrypt => {
-            ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            ENCRYPT_STATE.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::Decrypt => {
-            DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            DECRYPT_STATE.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::Sign => {
-            SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
-            SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+            SIGN_STATE.shard(h_session).remove(&h_session);
+            SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::Verify => {
-            VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
-            VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+            VERIFY_STATE.shard(h_session).remove(&h_session);
+            VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::Digest => {
-            DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
-            DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
+            DIGEST_STATE.shard(h_session).remove(&h_session);
+            DIGEST_MULTIPART.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::SignRecover => {
-            SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            SIGN_RECOVER_STATE.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::VerifyRecover => {
-            VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            VERIFY_RECOVER_STATE.shard(h_session).remove(&h_session);
             true
         }
         OpFamily::VerifySignature => {
-            VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
             true
         }
     };
@@ -465,36 +465,34 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // a surviving object's handle. Handles keep counting up monotonically
     // across Finalize/Initialize cycles instead — matching a real token,
     // whose object handles don't reset just because the library reloaded.
-    SIGN_STATE.with(|s| s.borrow_mut().clear());
-    VERIFY_STATE.with(|s| s.borrow_mut().clear());
-    VERIFY_SIG_STATE.with(|s| s.borrow_mut().clear());
-    ENCRYPT_STATE.with(|s| s.borrow_mut().clear());
-    DECRYPT_STATE.with(|s| s.borrow_mut().clear());
+    SIGN_STATE.for_each_shard(|m| m.clear());
+    VERIFY_STATE.for_each_shard(|m| m.clear());
+    VERIFY_SIG_STATE.for_each_shard(|m| m.clear());
+    ENCRYPT_STATE.for_each_shard(|m| m.clear());
+    DECRYPT_STATE.for_each_shard(|m| m.clear());
     // Message-based AEAD state holds raw key bytes, an armed GCM stream and
     // (decrypt) withheld plaintext — zeroize all of it before drop.
-    MESSAGE_ENCRYPT_STATE.with(|s| {
-        let mut m = s.borrow_mut();
+    MESSAGE_ENCRYPT_STATE.for_each_shard(|m| {
         for ctx in m.values_mut() {
             ctx.wipe();
         }
         m.clear();
     });
-    MESSAGE_DECRYPT_STATE.with(|s| {
-        let mut m = s.borrow_mut();
+    MESSAGE_DECRYPT_STATE.for_each_shard(|m| {
         for ctx in m.values_mut() {
             ctx.wipe();
         }
         m.clear();
     });
-    DIGEST_STATE.with(|s| s.borrow_mut().clear());
-    DIGEST_MULTIPART.with(|s| s.borrow_mut().clear());
-    FIND_STATE.with(|s| s.borrow_mut().clear());
-    MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().clear());
-    MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().clear());
-    SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
-    VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
+    DIGEST_STATE.for_each_shard(|m| m.clear());
+    DIGEST_MULTIPART.for_each_shard(|m| m.clear());
+    FIND_STATE.for_each_shard(|m| m.clear());
+    MESSAGE_SIGN_ACC.for_each_shard(|m| m.clear());
+    MESSAGE_VERIFY_ACC.for_each_shard(|m| m.clear());
+    SIGN_MULTIPART_ACC.for_each_shard(|m| m.clear());
+    VERIFY_MULTIPART_ACC.for_each_shard(|m| m.clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
-    SESSIONS.with(|s| s.borrow_mut().clear());
+    SESSIONS.for_each_shard(|m| m.clear());
     // §5.4.2/§5.4.1 (checked directly against the OASIS spec text, 2026-08-28,
     // not assumed): C_Initialize/C_Finalize govern the application's
     // relationship with the *library* ("initialize its internal memory
@@ -566,34 +564,32 @@ pub fn reset_all_engine_state_for_test() {
         store.clear();
     });
     NEXT_HANDLE.store(100, std::sync::atomic::Ordering::Relaxed);
-    SIGN_STATE.with(|s| s.borrow_mut().clear());
-    VERIFY_STATE.with(|s| s.borrow_mut().clear());
-    VERIFY_SIG_STATE.with(|s| s.borrow_mut().clear());
-    ENCRYPT_STATE.with(|s| s.borrow_mut().clear());
-    DECRYPT_STATE.with(|s| s.borrow_mut().clear());
-    MESSAGE_ENCRYPT_STATE.with(|s| {
-        let mut m = s.borrow_mut();
+    SIGN_STATE.for_each_shard(|m| m.clear());
+    VERIFY_STATE.for_each_shard(|m| m.clear());
+    VERIFY_SIG_STATE.for_each_shard(|m| m.clear());
+    ENCRYPT_STATE.for_each_shard(|m| m.clear());
+    DECRYPT_STATE.for_each_shard(|m| m.clear());
+    MESSAGE_ENCRYPT_STATE.for_each_shard(|m| {
         for ctx in m.values_mut() {
             ctx.wipe();
         }
         m.clear();
     });
-    MESSAGE_DECRYPT_STATE.with(|s| {
-        let mut m = s.borrow_mut();
+    MESSAGE_DECRYPT_STATE.for_each_shard(|m| {
         for ctx in m.values_mut() {
             ctx.wipe();
         }
         m.clear();
     });
-    DIGEST_STATE.with(|s| s.borrow_mut().clear());
-    DIGEST_MULTIPART.with(|s| s.borrow_mut().clear());
-    FIND_STATE.with(|s| s.borrow_mut().clear());
-    MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().clear());
-    MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().clear());
-    SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
-    VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
+    DIGEST_STATE.for_each_shard(|m| m.clear());
+    DIGEST_MULTIPART.for_each_shard(|m| m.clear());
+    FIND_STATE.for_each_shard(|m| m.clear());
+    MESSAGE_SIGN_ACC.for_each_shard(|m| m.clear());
+    MESSAGE_VERIFY_ACC.for_each_shard(|m| m.clear());
+    SIGN_MULTIPART_ACC.for_each_shard(|m| m.clear());
+    VERIFY_MULTIPART_ACC.for_each_shard(|m| m.clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
-    SESSIONS.with(|s| s.borrow_mut().clear());
+    SESSIONS.for_each_shard(|m| m.clear());
     TOKEN_STORE.with(|ts| ts.borrow_mut().clear());
     crate::state::set_initialized(false);
 }
@@ -695,7 +691,7 @@ pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut 
     }
 
     // In PKCS#11, you generally shouldn't call C_InitToken when sessions are open on that slot.
-    let has_sessions = SESSIONS.with(|s| s.borrow().values().any(|sess| sess.slot_id == slot_id));
+    let has_sessions = SESSIONS.any(|_, sess| sess.slot_id == slot_id);
     if has_sessions {
         return CKR_SESSION_EXISTS;
     }
@@ -836,7 +832,7 @@ pub fn C_OpenSession(
         let handle = NEXT_SESSION_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         *ph_session = handle;
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(handle).insert(
                 handle,
                 SessionState {
                     slot_id,
@@ -852,7 +848,7 @@ pub fn C_OpenSession(
 pub fn C_CloseSession(h_session: u32) -> u32 {
     require_init!();
     let slot = crate::state::session_slot(h_session);
-    let existed = SESSIONS.with(|s| s.borrow_mut().remove(&h_session).is_some());
+    let existed = SESSIONS.shard(h_session).remove(&h_session).is_some();
     if !existed {
         return CKR_SESSION_HANDLE_INVALID;
     }
@@ -862,28 +858,28 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     // PKCS#11 v3.2 §5.6 — closing a session terminates all of its active
     // operations. Clear every per-session state map, zeroizing any that hold
     // raw key material (the message-based AEAD contexts).
-    SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    SIGN_STATE.shard(h_session).remove(&h_session);
+    VERIFY_STATE.shard(h_session).remove(&h_session);
+    VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
+    ENCRYPT_STATE.shard(h_session).remove(&h_session);
+    DECRYPT_STATE.shard(h_session).remove(&h_session);
     MESSAGE_ENCRYPT_STATE.with(|s| {
-        if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+        if let Some(mut ctx) = s.shard(h_session).remove(&h_session) {
             ctx.wipe();
         }
     });
     MESSAGE_DECRYPT_STATE.with(|s| {
-        if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+        if let Some(mut ctx) = s.shard(h_session).remove(&h_session) {
             ctx.wipe();
         }
     });
-    DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
-    FIND_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().remove(&h_session));
-    MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().remove(&h_session));
-    SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
-    VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+    DIGEST_STATE.shard(h_session).remove(&h_session);
+    DIGEST_MULTIPART.shard(h_session).remove(&h_session);
+    FIND_STATE.shard(h_session).remove(&h_session);
+    MESSAGE_SIGN_ACC.shard(h_session).remove(&h_session);
+    MESSAGE_VERIFY_ACC.shard(h_session).remove(&h_session);
+    SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
+    VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
     // S6 — §5.6.2: when the LAST session on the slot closes, the login state
     // returns to public.
     if let Some(slot) = slot {
@@ -902,13 +898,7 @@ pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     if !valid {
         return CKR_SLOT_ID_INVALID;
     }
-    let handles: Vec<u32> = SESSIONS.with(|s| {
-        s.borrow()
-            .iter()
-            .filter(|(_, ss)| ss.slot_id == slot_id)
-            .map(|(h, _)| *h)
-            .collect()
-    });
+    let handles: Vec<u32> = SESSIONS.keys_where(|_, ss| ss.slot_id == slot_id);
     for h in handles {
         let _ = C_CloseSession(h);
     }
@@ -929,33 +919,33 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
     require_init!();
     require_session!(h_session);
     if flags & 0x100 != 0 {
-        ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        ENCRYPT_STATE.shard(h_session).remove(&h_session);
     }
     if flags & 0x200 != 0 {
-        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        DECRYPT_STATE.shard(h_session).remove(&h_session);
     }
     if flags & 0x400 != 0 {
-        DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
-        DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
+        DIGEST_STATE.shard(h_session).remove(&h_session);
+        DIGEST_MULTIPART.shard(h_session).remove(&h_session);
     }
     if flags & 0x800 != 0 {
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        SIGN_STATE.shard(h_session).remove(&h_session);
         // T4 — the multi-part accumulator dies with the sign op.
-        SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+        SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
     }
     if flags & 0x2000 != 0 {
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
-        VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        VERIFY_STATE.shard(h_session).remove(&h_session);
+        VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
         // T4 — the multi-part accumulator dies with the verify op.
-        VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+        VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
     }
     if flags & 0x40 != 0 {
-        FIND_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        FIND_STATE.shard(h_session).remove(&h_session);
     }
     if flags & 0x2 != 0 {
         // CKF_MESSAGE_ENCRYPT — wipe key, armed GCM stream and buffers.
         MESSAGE_ENCRYPT_STATE.with(|s| {
-            if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+            if let Some(mut ctx) = s.shard(h_session).remove(&h_session) {
                 ctx.wipe();
             }
         });
@@ -963,7 +953,7 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
     if flags & 0x4 != 0 {
         // CKF_MESSAGE_DECRYPT — also zeroizes any withheld plaintext.
         MESSAGE_DECRYPT_STATE.with(|s| {
-            if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+            if let Some(mut ctx) = s.shard(h_session).remove(&h_session) {
                 ctx.wipe();
             }
         });
@@ -972,13 +962,13 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
         // CKF_MESSAGE_SIGN — terminate the message-based sign op (the
         // C_MessageSignInit state lives in SIGN_STATE; the per-message
         // accumulator in MESSAGE_SIGN_ACC), mirroring C_CloseSession.
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
-        MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().remove(&h_session));
+        SIGN_STATE.shard(h_session).remove(&h_session);
+        MESSAGE_SIGN_ACC.shard(h_session).remove(&h_session);
     }
     if flags & 0x10 != 0 {
         // CKF_MESSAGE_VERIFY — terminate the message-based verify op.
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
-        MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().remove(&h_session));
+        VERIFY_STATE.shard(h_session).remove(&h_session);
+        MESSAGE_VERIFY_ACC.shard(h_session).remove(&h_session);
     }
     CKR_OK
 }
@@ -1010,7 +1000,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
     require_init!();
     // §5.2 error priority (C2, 2026-08-13) — the session-handle class takes
     // MANDATORY precedence over argument codes.
-    let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
+    let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
@@ -1048,11 +1038,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
     // pattern C_Logout already used correctly). `has_ro` still reads
     // SESSIONS before entering the TOKEN_STORE closure, preserving the
     // existing lock-acquisition order used throughout this file.
-    let has_ro = SESSIONS.with(|s| {
-        s.borrow()
-            .values()
-            .any(|sess| sess.slot_id == slot_id && !sess.rw_session)
-    });
+    let has_ro = SESSIONS.any(|_, sess| sess.slot_id == slot_id && !sess.rw_session);
     let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
 
     let rv = TOKEN_STORE.with(|ts| {
@@ -1135,7 +1121,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
 pub fn C_Logout(h_session: u32) -> u32 {
     require_init!();
     drop_key_caches();
-    let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
+    let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
@@ -1172,7 +1158,7 @@ pub fn C_Logout(h_session: u32) -> u32 {
 /// invalidation C_Logout does, since the application's authenticated context
 /// is equally gone.
 fn reset_login_state_if_no_sessions(slot_id: u32) {
-    let still_open = SESSIONS.with(|s| s.borrow().values().any(|ss| ss.slot_id == slot_id));
+    let still_open = SESSIONS.any(|_, ss| ss.slot_id == slot_id);
     if still_open {
         return;
     }
@@ -1209,7 +1195,7 @@ pub fn C_InitPIN(h_session: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
     if !(PIN_MIN_LEN..=PIN_MAX_LEN).contains(&ul_pin_len) {
         return CKR_PIN_LEN_RANGE;
     }
-    let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
+    let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
@@ -1283,7 +1269,7 @@ pub fn C_GetSessionInfo(h_session: u32, p_info: *mut u8) -> u32 {
     if p_info.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
+    let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
@@ -6872,10 +6858,10 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
         // PKCS#11 v3.2: clean up any active operation state referencing the destroyed key.
         // Without this, a session that called C_SignInit then C_DestroyObject would hold a
         // stale key handle, causing undefined behaviour on the subsequent C_Sign call.
-        SIGN_STATE.with(|s| s.borrow_mut().retain(|_, v| v.1 != h_object));
-        VERIFY_STATE.with(|s| s.borrow_mut().retain(|_, v| v.1 != h_object));
-        ENCRYPT_STATE.with(|s| s.borrow_mut().retain(|_, ctx| ctx.key_handle != h_object));
-        DECRYPT_STATE.with(|s| s.borrow_mut().retain(|_, ctx| ctx.key_handle != h_object));
+        SIGN_STATE.for_each_shard(|m| m.retain(|_, v| v.1 != h_object));
+        VERIFY_STATE.for_each_shard(|m| m.retain(|_, v| v.1 != h_object));
+        ENCRYPT_STATE.for_each_shard(|m| m.retain(|_, ctx| ctx.key_handle != h_object));
+        DECRYPT_STATE.for_each_shard(|m| m.retain(|_, ctx| ctx.key_handle != h_object));
         CKR_OK
     } else {
         CKR_OBJECT_HANDLE_INVALID
@@ -7267,7 +7253,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         return rv;
     }
     // PKCS#11 v3.2 §5.12 — a sign operation is already active on this session.
-    if SIGN_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     unsafe {
@@ -7315,7 +7301,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Err(rv) => return rv,
         };
         SIGN_STATE.with(|s| {
-            s.borrow_mut()
+            s.shard(h_session)
                 .insert(h_session, (mech_type, h_key, slh_ctx, slh_det));
         });
     }
@@ -7369,7 +7355,7 @@ unsafe fn remap_generic_hash_mech(
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     GENERIC_HASH_STATE.with(|s| {
-        s.borrow_mut().insert(h_session, hash);
+        s.shard(h_session).insert(h_session, hash);
     });
     Ok(mech_type)
 }
@@ -7684,14 +7670,14 @@ fn C_Sign_impl(
     // intervening C_SignUpdate calls". A sign op already in its multi-part
     // phase is a sequencing error (mirror C_Digest-after-Update, round-1
     // S4/M-2); the accumulated parts MUST NOT be consumed by this error.
-    if SIGN_MULTIPART_ACC.with(|s| s.borrow().contains_key(&h_session)) {
+    if SIGN_MULTIPART_ACC.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     if pul_signature_len.is_null() || (p_data.is_null() && ul_data_len > 0) {
         return CKR_ARGUMENTS_BAD;
     }
     // Peek first to support the size-query path (p_signature == null) without consuming state.
-    let state = SIGN_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let state = SIGN_STATE.shard(h_session).get(&h_session).cloned();
     let (mech, hkey, ctx_bytes, deterministic) = match state {
         Some(s) => s,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -7744,7 +7730,7 @@ fn C_Sign_impl(
                 }
                 Err(e) => e,
             };
-            SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            SIGN_STATE.shard(h_session).remove(&h_session);
             return rv;
         }
 
@@ -7853,7 +7839,7 @@ fn C_Sign_impl(
                 }
                 Err(e) => e,
             };
-            SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            SIGN_STATE.shard(h_session).remove(&h_session);
             return rv;
         }
 
@@ -7877,13 +7863,13 @@ fn C_Sign_impl(
             // GENERIC_HASH_STATE at Init time since mech_type alone can no
             // longer carry it.
             CKM_HASH_ML_DSA => {
-                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
                     Some(hash) => sign_ml_dsa_phm(ps, &sk_bytes, msg, &ctx_bytes, hash, deterministic),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
             CKM_HASH_SLH_DSA => {
-                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
                     Some(hash) => sign_slh_dsa_phm(ps, hash, &sk_bytes, msg, &ctx_bytes, deterministic),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
@@ -8044,7 +8030,7 @@ fn C_Sign_impl(
             Err(e) => e,
         };
         // Consume sign state after the actual sign (not the size-query path above)
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        SIGN_STATE.shard(h_session).remove(&h_session);
         rv
     }
 }
@@ -8057,7 +8043,7 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         return rv;
     }
     // PKCS#11 v3.2 §5.12 — a verify operation is already active on this session.
-    if VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     unsafe {
@@ -8101,7 +8087,7 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Err(rv) => return rv,
         };
         VERIFY_STATE.with(|s| {
-            s.borrow_mut()
+            s.shard(h_session)
                 .insert(h_session, (mech_type, h_key, slh_ctx, slh_det));
         });
     }
@@ -8123,13 +8109,13 @@ fn C_Verify_impl(
     // §5.15.2 — "C_Verify ... MUST be called after C_VerifyInit without
     // intervening C_VerifyUpdate calls" (mirror the C_Sign guard above); the
     // accumulated parts MUST NOT be consumed by this error.
-    if VERIFY_MULTIPART_ACC.with(|s| s.borrow().contains_key(&h_session)) {
+    if VERIFY_MULTIPART_ACC.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     if (p_data.is_null() && ul_data_len > 0) || p_signature.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    let state = VERIFY_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let state = VERIFY_STATE.shard(h_session).get(&h_session).cloned();
     let (mech, hkey, ctx_bytes, _deterministic) = match state {
         Some(s) => s,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -8183,7 +8169,7 @@ fn C_Verify_impl(
     if let Some(expected) = fixed_len {
         if ul_signature_len != expected {
             // op terminates like any failed verify
-            VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            VERIFY_STATE.shard(h_session).remove(&h_session);
             return CKR_SIGNATURE_LEN_RANGE;
         }
     }
@@ -8221,7 +8207,7 @@ fn C_Verify_impl(
                     .unwrap_or(0x05);
                 crate::crypto::lms::hss_verify(&pub_bytes, msg, sig_bytes, lms_param)
             };
-            VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            VERIFY_STATE.shard(h_session).remove(&h_session);
             return if ok { CKR_OK } else { CKR_SIGNATURE_INVALID };
         }
 
@@ -8244,13 +8230,13 @@ fn C_Verify_impl(
         let rv = match match eff_mech {
             // Remediation R37 (phase 8): see C_Sign's identical comment.
             CKM_HASH_ML_DSA => {
-                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
                     Some(hash) => verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
             CKM_HASH_SLH_DSA => {
-                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
                     Some(hash) => verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
@@ -8417,7 +8403,7 @@ fn C_Verify_impl(
             Err(e) => e,
         };
         // Consume verify state after the actual verify operation
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        VERIFY_STATE.shard(h_session).remove(&h_session);
         rv
     }
 }
@@ -8449,7 +8435,7 @@ pub fn C_SignMessage(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
-    let saved = SIGN_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let saved = SIGN_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Sign(
         h_session,
         p_data,
@@ -8459,7 +8445,7 @@ pub fn C_SignMessage(
     );
     if let Some(st) = saved {
         SIGN_STATE.with(|s| {
-            s.borrow_mut().insert(h_session, st);
+            s.shard(h_session).insert(h_session, st);
         });
     }
     rv
@@ -8471,9 +8457,9 @@ pub fn C_MessageSignFinal(h_session: u32) -> u32 {
     // active message-based sign operation.
     require_init!();
     MESSAGE_SIGN_ACC.with(|s| {
-        s.borrow_mut().remove(&h_session);
+        s.shard(h_session).remove(&h_session);
     });
-    let had = SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session).is_some());
+    let had = SIGN_STATE.shard(h_session).remove(&h_session).is_some();
     if had {
         CKR_OK
     } else {
@@ -8485,11 +8471,11 @@ pub fn C_MessageSignFinal(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_SignMessageBegin)]
 pub fn C_SignMessageBegin(h_session: u32, _p_param: *mut u8, _ul_param_len: u32) -> u32 {
     require_init!();
-    if !SIGN_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if !SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
     MESSAGE_SIGN_ACC.with(|s| {
-        s.borrow_mut().insert(h_session, Vec::new());
+        s.shard(h_session).insert(h_session, Vec::new());
     });
     CKR_OK
 }
@@ -8508,10 +8494,10 @@ pub fn C_SignMessageNext(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
-    if !SIGN_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if !SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
-    let in_msg = MESSAGE_SIGN_ACC.with(|s| s.borrow().contains_key(&h_session));
+    let in_msg = MESSAGE_SIGN_ACC.shard(h_session).contains_key(&h_session);
     if !in_msg {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -8526,7 +8512,7 @@ pub fn C_SignMessageNext(
     if pul_signature_len.is_null() {
         // non-final part — accumulate
         MESSAGE_SIGN_ACC.with(|s| {
-            if let Some(acc) = s.borrow_mut().get_mut(&h_session) {
+            if let Some(acc) = s.shard(h_session).get_mut(&h_session) {
                 acc.extend_from_slice(&part);
             }
         });
@@ -8535,27 +8521,27 @@ pub fn C_SignMessageNext(
     // final part — assemble full message; sign via the C_Sign machinery,
     // preserving SIGN_STATE so further messages can follow (§5.14).
     let mut full = MESSAGE_SIGN_ACC
-        .with(|s| s.borrow().get(&h_session).cloned())
+        .with(|s| s.shard(h_session).get(&h_session).cloned())
         .unwrap_or_default();
     full.extend_from_slice(&part);
     if full.is_empty() {
         full.push(0); // keep the pointer valid; len passed separately
-        let saved = SIGN_STATE.with(|s| s.borrow().get(&h_session).cloned());
+        let saved = SIGN_STATE.shard(h_session).get(&h_session).cloned();
         let rv = C_Sign(h_session, full.as_mut_ptr(), 0, p_signature, pul_signature_len);
         if let Some(st) = saved {
             SIGN_STATE.with(|s| {
-                s.borrow_mut().insert(h_session, st);
+                s.shard(h_session).insert(h_session, st);
             });
         }
         if rv == CKR_OK && !p_signature.is_null() {
             MESSAGE_SIGN_ACC.with(|s| {
-                s.borrow_mut().insert(h_session, Vec::new());
+                s.shard(h_session).insert(h_session, Vec::new());
             });
         }
         return rv;
     }
     let full_len = full.len() as u32;
-    let saved = SIGN_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let saved = SIGN_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Sign(
         h_session,
         full.as_mut_ptr(),
@@ -8565,13 +8551,13 @@ pub fn C_SignMessageNext(
     );
     if let Some(st) = saved {
         SIGN_STATE.with(|s| {
-            s.borrow_mut().insert(h_session, st);
+            s.shard(h_session).insert(h_session, st);
         });
     }
     // length query / BUFFER_TOO_SMALL keep the accumulated message intact
     if rv == CKR_OK && !p_signature.is_null() {
         MESSAGE_SIGN_ACC.with(|s| {
-            s.borrow_mut().insert(h_session, Vec::new());
+            s.shard(h_session).insert(h_session, Vec::new());
         });
     }
     rv
@@ -8595,7 +8581,7 @@ pub fn C_VerifyMessage(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
-    let saved = VERIFY_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let saved = VERIFY_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Verify(
         h_session,
         p_data,
@@ -8605,7 +8591,7 @@ pub fn C_VerifyMessage(
     );
     if let Some(st) = saved {
         VERIFY_STATE.with(|s| {
-            s.borrow_mut().insert(h_session, st);
+            s.shard(h_session).insert(h_session, st);
         });
     }
     rv
@@ -8615,9 +8601,9 @@ pub fn C_VerifyMessage(
 pub fn C_MessageVerifyFinal(h_session: u32) -> u32 {
     require_init!();
     MESSAGE_VERIFY_ACC.with(|s| {
-        s.borrow_mut().remove(&h_session);
+        s.shard(h_session).remove(&h_session);
     });
-    let had = VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session).is_some());
+    let had = VERIFY_STATE.shard(h_session).remove(&h_session).is_some();
     if had {
         CKR_OK
     } else {
@@ -8629,11 +8615,11 @@ pub fn C_MessageVerifyFinal(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_VerifyMessageBegin)]
 pub fn C_VerifyMessageBegin(h_session: u32, _p_param: *mut u8, _ul_param_len: u32) -> u32 {
     require_init!();
-    if !VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if !VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
     MESSAGE_VERIFY_ACC.with(|s| {
-        s.borrow_mut().insert(h_session, Vec::new());
+        s.shard(h_session).insert(h_session, Vec::new());
     });
     CKR_OK
 }
@@ -8651,10 +8637,10 @@ pub fn C_VerifyMessageNext(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
-    if !VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if !VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
-    if !MESSAGE_VERIFY_ACC.with(|s| s.borrow().contains_key(&h_session)) {
+    if !MESSAGE_VERIFY_ACC.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
     if p_part.is_null() && ul_part_len > 0 {
@@ -8667,29 +8653,29 @@ pub fn C_VerifyMessageNext(
     };
     if p_signature.is_null() {
         MESSAGE_VERIFY_ACC.with(|s| {
-            if let Some(acc) = s.borrow_mut().get_mut(&h_session) {
+            if let Some(acc) = s.shard(h_session).get_mut(&h_session) {
                 acc.extend_from_slice(&part);
             }
         });
         return CKR_OK;
     }
     let mut full = MESSAGE_VERIFY_ACC
-        .with(|s| s.borrow().get(&h_session).cloned())
+        .with(|s| s.shard(h_session).get(&h_session).cloned())
         .unwrap_or_default();
     full.extend_from_slice(&part);
     let full_len = full.len() as u32;
     if full.is_empty() {
         full.push(0);
     }
-    let saved = VERIFY_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let saved = VERIFY_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Verify(h_session, full.as_mut_ptr(), full_len, p_signature, ul_signature_len);
     if let Some(st) = saved {
         VERIFY_STATE.with(|s| {
-            s.borrow_mut().insert(h_session, st);
+            s.shard(h_session).insert(h_session, st);
         });
     }
     MESSAGE_VERIFY_ACC.with(|s| {
-        s.borrow_mut().insert(h_session, Vec::new());
+        s.shard(h_session).insert(h_session, Vec::new());
     });
     rv
 }
@@ -8747,7 +8733,7 @@ pub fn C_VerifySignatureInit(
         let signature = std::slice::from_raw_parts(p_signature, ul_signature_len as usize).to_vec();
 
         VERIFY_SIG_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(h_session).insert(
                 h_session,
                 VerifySigCtx {
                     mech_type,
@@ -8766,10 +8752,10 @@ pub fn C_VerifySignatureInit(
 #[wasm_bindgen(js_name = _C_VerifySignature)]
 pub fn C_VerifySignature(h_session: u32, p_data: *mut u8, ul_data_len: u32) -> u32 {
     require_init!();
-    let state = VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
         VERIFY_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(h_session).insert(
                 h_session,
                 (ctx.mech_type, ctx.key_handle, ctx.slh_ctx, ctx.slh_det),
             );
@@ -8792,7 +8778,7 @@ pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32
     require_init!();
     let mut ok = false;
     VERIFY_SIG_STATE.with(|s| {
-        if let Some(ctx) = s.borrow_mut().get_mut(&h_session) {
+        if let Some(ctx) = s.shard(h_session).get_mut(&h_session) {
             if ul_part_len > 0 {
                 unsafe {
                     let part = std::slice::from_raw_parts(p_part, ul_part_len as usize);
@@ -8812,10 +8798,10 @@ pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32
 #[wasm_bindgen(js_name = _C_VerifySignatureFinal)]
 pub fn C_VerifySignatureFinal(h_session: u32) -> u32 {
     require_init!();
-    let state = VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
         VERIFY_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(h_session).insert(
                 h_session,
                 (ctx.mech_type, ctx.key_handle, ctx.slh_ctx, ctx.slh_det),
             );
@@ -8981,7 +8967,7 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         }
         // PKCS#11 v3.2 §5.2.5 — at most one active encryption operation
         // per session.
-        if ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+        if ENCRYPT_STATE.shard(h_session).contains_key(&h_session) {
             return CKR_OPERATION_ACTIVE;
         }
         // PKCS#11 v3.2 §5.8.1 — key handle, visibility, key type (E5/E6),
@@ -9208,7 +9194,7 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         };
 
         ENCRYPT_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(h_session).insert(
                 h_session,
                 EncryptCtx {
                     mech_type,
@@ -9218,6 +9204,7 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     tag_bits,
                     multipart: None,
                     block_counter: chacha_block_counter,
+                    aes_key: cache_aes_key(mech_type, h_key),
                 },
             );
         });
@@ -9334,6 +9321,38 @@ unsafe fn parse_chacha20_params(
     ))
 }
 
+/// A3 — mechanisms whose one-shot path runs on `AesKey`, so their expanded
+/// key schedule can be cached in the operation context at Init. CBC-PAD and
+/// XTS build their ciphers from the raw key bytes and are not included.
+fn uses_cached_aes_key(mech: u32) -> bool {
+    matches!(
+        mech,
+        CKM_AES_ECB | CKM_AES_CBC | CKM_AES_CTR | CKM_AES_GCM | CKM_AES_OFB
+            | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1
+    )
+}
+
+/// Build the Init-time cache: the epoch is read BEFORE the key bytes, so a
+/// write that lands in between leaves the cache already stale.
+fn cache_aes_key(mech: u32, h_key: u32) -> Option<(u64, crate::crypto::multipart::AesKey)> {
+    if !uses_cached_aes_key(mech) {
+        return None;
+    }
+    let epoch = crate::state::object_epoch();
+    let value = get_object_value(h_key)?;
+    crate::crypto::multipart::AesKey::new(&value).map(|k| (epoch, k))
+}
+
+/// The cached key schedule, only if no object write happened since Init.
+fn cached_aes_key(
+    cache: &Option<(u64, crate::crypto::multipart::AesKey)>,
+) -> Option<crate::crypto::multipart::AesKey> {
+    match cache {
+        Some((epoch, key)) if *epoch == crate::state::object_epoch() => Some(key.clone()),
+        _ => None,
+    }
+}
+
 #[wasm_bindgen(js_name = _C_Encrypt)]
 pub fn C_Encrypt(
     h_session: u32,
@@ -9348,7 +9367,7 @@ pub fn C_Encrypt(
     // this must precede every other check in the function.
     require_session!(h_session);
     // Remove state on entry — consumed on all paths except null-buffer size query
-    let ctx = ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    let ctx = ENCRYPT_STATE.shard(h_session).remove(&h_session);
     let ctx = match ctx {
         Some(c) => c,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -9357,10 +9376,10 @@ pub fn C_Encrypt(
     // sequencing error; the streaming op must be completed with C_EncryptFinal.
     // Preserve the in-flight multipart op and reject the misuse.
     if ctx.multipart.is_some() {
-        ENCRYPT_STATE.with(|s| s.borrow_mut().insert(h_session, ctx));
+        ENCRYPT_STATE.shard(h_session).insert(h_session, ctx);
         return CKR_OPERATION_ACTIVE;
     }
-    let (mech_type, key_handle, iv, aad, tag_bits, block_counter) = (
+    let (mech_type, key_handle, iv, aad, tag_bits, block_counter, aes_key) = (
         ctx.mech_type,
         ctx.key_handle,
         ctx.iv,
@@ -9368,10 +9387,19 @@ pub fn C_Encrypt(
         ctx.tag_bits,
         // W7 — CKM_CHACHA20's starting keystream block; 0 elsewhere.
         ctx.block_counter,
+        // A3 — Init-time key schedule, valid only while no object write happened.
+        ctx.aes_key,
     );
-    let key_bytes = match get_object_value(key_handle) {
-        Some(v) => v,
-        None => return CKR_ARGUMENTS_BAD,
+    let cached_key = cached_aes_key(&aes_key);
+    // With a valid cached schedule the object table is not touched at all:
+    // no object write since Init means the key still exists unchanged.
+    let key_bytes = if cached_key.is_some() {
+        Vec::new()
+    } else {
+        match get_object_value(key_handle) {
+            Some(v) => v,
+            None => return CKR_ARGUMENTS_BAD,
+        }
     };
 
     // §5.2 — pData is the INPUT; NULL with a nonzero length is
@@ -9392,7 +9420,7 @@ pub fn C_Encrypt(
                 // GcmState honours ulTagBits (truncated tags) and keeps the
                 // single-shot path byte-identical to multipart (§6.27.7).
                 use crate::crypto::multipart::{AesKey, CipherDirection, GcmState, MultipartCipher};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9451,7 +9479,7 @@ pub fn C_Encrypt(
                 // CTR is its own inverse. Width-aware keystream honours
                 // ulCounterBits (stored in tag_bits) — §6.27.6.
                 use crate::crypto::multipart::{AesKey, CtrState};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9465,7 +9493,7 @@ pub fn C_Encrypt(
             }
             CKM_AES_OFB => {
                 use crate::crypto::multipart::{AesKey, OfbState};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9478,7 +9506,7 @@ pub fn C_Encrypt(
             }
             CKM_AES_CFB128 => {
                 use crate::crypto::multipart::{AesKey, Cfb128State, CipherDirection};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9491,7 +9519,7 @@ pub fn C_Encrypt(
             }
             CKM_AES_CFB8 => {
                 use crate::crypto::multipart::{AesKey, Cfb8State, CipherDirection};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9504,7 +9532,7 @@ pub fn C_Encrypt(
             }
             CKM_AES_CFB1 => {
                 use crate::crypto::multipart::{AesKey, Cfb1State, CipherDirection};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9519,7 +9547,7 @@ pub fn C_Encrypt(
                 // iv/aad/tag_bits here are (nonce, aad, mac_len_bytes) — see
                 // this mechanism's CK_CCM_PARAMS parsing arm above.
                 use crate::crypto::multipart::{AesKey, ccm_encrypt};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9684,7 +9712,7 @@ pub fn C_Encrypt(
                 // §6.27.2/§6.27.3 — raw block modes; reuse the streaming
                 // state machines as update-then-finalize in one go.
                 use crate::crypto::multipart::*;
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -9719,7 +9747,7 @@ pub fn C_Encrypt(
         if p_encrypted_data.is_null() || too_small {
             *pul_encrypted_data_len = need as u32;
             ENCRYPT_STATE.with(|s| {
-                s.borrow_mut().insert(
+                s.shard(h_session).insert(
                     h_session,
                     EncryptCtx {
                         mech_type,
@@ -9732,6 +9760,7 @@ pub fn C_Encrypt(
                         // resetting it to 0 made the real call encrypt from the
                         // wrong keystream block.
                         block_counter,
+                        aes_key: aes_key.clone(),
                     },
                 );
             });
@@ -9757,7 +9786,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         }
         // PKCS#11 v3.2 §5.2.9 — at most one active decryption operation
         // per session.
-        if DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+        if DECRYPT_STATE.shard(h_session).contains_key(&h_session) {
             return CKR_OPERATION_ACTIVE;
         }
         // PKCS#11 v3.2 §5.10.1 — key handle, visibility, key type (E5/E6),
@@ -9983,7 +10012,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         };
 
         DECRYPT_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(h_session).insert(
                 h_session,
                 EncryptCtx {
                     mech_type,
@@ -9993,6 +10022,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     tag_bits,
                     multipart: None,
                     block_counter: chacha_block_counter,
+                    aes_key: cache_aes_key(mech_type, h_key),
                 },
             );
         });
@@ -10023,7 +10053,7 @@ pub fn C_Decrypt(
     // this must precede every other check in the function.
     require_session!(h_session);
     // Remove state on entry — consumed on all paths except null-buffer size query
-    let ctx = DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    let ctx = DECRYPT_STATE.shard(h_session).remove(&h_session);
     let ctx = match ctx {
         Some(c) => c,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -10031,10 +10061,10 @@ pub fn C_Decrypt(
     // PKCS#11 v3.2 §5.2 — a one-shot C_Decrypt after C_DecryptUpdate is a
     // sequencing error; the streaming op must be completed with C_DecryptFinal.
     if ctx.multipart.is_some() {
-        DECRYPT_STATE.with(|s| s.borrow_mut().insert(h_session, ctx));
+        DECRYPT_STATE.shard(h_session).insert(h_session, ctx);
         return CKR_OPERATION_ACTIVE;
     }
-    let (mech_type, key_handle, iv, aad, tag_bits, block_counter) = (
+    let (mech_type, key_handle, iv, aad, tag_bits, block_counter, aes_key) = (
         ctx.mech_type,
         ctx.key_handle,
         ctx.iv,
@@ -10042,10 +10072,19 @@ pub fn C_Decrypt(
         ctx.tag_bits,
         // W7 — CKM_CHACHA20's starting keystream block; 0 elsewhere.
         ctx.block_counter,
+        // A3 — Init-time key schedule, valid only while no object write happened.
+        ctx.aes_key,
     );
-    let key_bytes = match get_object_value(key_handle) {
-        Some(v) => v,
-        None => return CKR_ARGUMENTS_BAD,
+    let cached_key = cached_aes_key(&aes_key);
+    // With a valid cached schedule the object table is not touched at all:
+    // no object write since Init means the key still exists unchanged.
+    let key_bytes = if cached_key.is_some() {
+        Vec::new()
+    } else {
+        match get_object_value(key_handle) {
+            Some(v) => v,
+            None => return CKR_ARGUMENTS_BAD,
+        }
     };
 
     // §5.2 — pEncryptedData is the INPUT; NULL with a nonzero length is
@@ -10072,7 +10111,7 @@ pub fn C_Decrypt(
             if k > 0 && ul_encrypted_data_len as usize == k {
                 unsafe { *pul_data_len = k as u32 };
                 DECRYPT_STATE.with(|s| {
-                    s.borrow_mut().insert(
+                    s.shard(h_session).insert(
                         h_session,
                         EncryptCtx {
                             mech_type,
@@ -10082,6 +10121,7 @@ pub fn C_Decrypt(
                             tag_bits,
                             multipart: None,
                             block_counter,
+                            aes_key: aes_key.clone(),
                         },
                     );
                 });
@@ -10100,7 +10140,7 @@ pub fn C_Decrypt(
                 // GcmState verifies the (possibly truncated) tag before any
                 // plaintext is released — §6.27.7 / SP 800-38D.
                 use crate::crypto::multipart::{AesKey, CipherDirection, GcmState, MultipartCipher};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10158,7 +10198,7 @@ pub fn C_Decrypt(
                 // CTR is its own inverse. Width-aware keystream honours
                 // ulCounterBits (stored in tag_bits) — §6.27.6.
                 use crate::crypto::multipart::{AesKey, CtrState};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10172,7 +10212,7 @@ pub fn C_Decrypt(
             }
             CKM_AES_OFB => {
                 use crate::crypto::multipart::{AesKey, OfbState};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10185,7 +10225,7 @@ pub fn C_Decrypt(
             }
             CKM_AES_CFB128 => {
                 use crate::crypto::multipart::{AesKey, Cfb128State, CipherDirection};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10198,7 +10238,7 @@ pub fn C_Decrypt(
             }
             CKM_AES_CFB8 => {
                 use crate::crypto::multipart::{AesKey, Cfb8State, CipherDirection};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10211,7 +10251,7 @@ pub fn C_Decrypt(
             }
             CKM_AES_CFB1 => {
                 use crate::crypto::multipart::{AesKey, Cfb1State, CipherDirection};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10224,7 +10264,7 @@ pub fn C_Decrypt(
             }
             CKM_AES_CCM => {
                 use crate::crypto::multipart::{AesKey, ccm_decrypt};
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10427,7 +10467,7 @@ pub fn C_Decrypt(
                 // §6.27.2/§6.27.3 — raw block modes; reuse the streaming
                 // state machines as update-then-finalize in one go.
                 use crate::crypto::multipart::*;
-                let key = match AesKey::new(&key_bytes) {
+                let key = match cached_key.clone().or_else(|| AesKey::new(&key_bytes)) {
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
@@ -10463,7 +10503,7 @@ pub fn C_Decrypt(
         if p_data.is_null() || too_small {
             *pul_data_len = need as u32;
             DECRYPT_STATE.with(|s| {
-                s.borrow_mut().insert(
+                s.shard(h_session).insert(
                     h_session,
                     EncryptCtx {
                         mech_type,
@@ -10476,6 +10516,7 @@ pub fn C_Decrypt(
                         // retry; resetting it to 0 made the real call decrypt
                         // from the wrong keystream block.
                         block_counter,
+                        aes_key: aes_key.clone(),
                     },
                 );
             });
@@ -10498,7 +10539,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
         return rv;
     }
     // PKCS#11 v3.2 §5.12 — a digest operation is already active on this session.
-    if DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if DIGEST_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     unsafe {
@@ -10529,7 +10570,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             _ => return CKR_MECHANISM_INVALID,
         };
         DIGEST_STATE.with(|s| {
-            s.borrow_mut().insert(h_session, ctx);
+            s.shard(h_session).insert(h_session, ctx);
         });
     }
     CKR_OK
@@ -10597,17 +10638,17 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
     // this must precede every other check in the function.
     require_session!(h_session);
     use sha2::Digest;
-    let has_state = DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session));
+    let has_state = DIGEST_STATE.shard(h_session).contains_key(&h_session);
     if !has_state {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
     // §5.13 — the op is now multi-part; a one-shot C_Digest on this session
     // is CKR_OPERATION_ACTIVE until C_DigestFinal completes it.
-    DIGEST_MULTIPART.with(|s| s.borrow_mut().insert(h_session));
+    DIGEST_MULTIPART.shard(h_session).insert(h_session);
     unsafe {
         let data = std::slice::from_raw_parts(p_part, ul_part_len as usize);
         DIGEST_STATE.with(|s| {
-            let mut map = s.borrow_mut();
+            let mut map = s.shard(h_session);
             if let Some(ctx) = map.get_mut(&h_session) {
                 match ctx {
                     DigestCtx::Sha256(h) => h.update(data),
@@ -10644,7 +10685,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
         // Per PKCS#11 v3.2 §5.7.2, a null pDigest must not terminate the operation.
         if p_digest.is_null() {
             let len = DIGEST_STATE.with(|s| {
-                s.borrow().get(&h_session).map(|ctx| match ctx {
+                s.shard(h_session).get(&h_session).map(|ctx| match ctx {
                     DigestCtx::Sha256(_) => 32u32,
                     DigestCtx::Sha384(_) => 48,
                     DigestCtx::Sha512(_) => 64,
@@ -10674,7 +10715,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
         // PKCS#11 v3.2 §5.2 — determine the digest length WITHOUT consuming the
         // operation, so a too-small buffer leaves the op active for retry.
         let expected_len = DIGEST_STATE.with(|s| {
-            s.borrow().get(&h_session).map(|ctx| match ctx {
+            s.shard(h_session).get(&h_session).map(|ctx| match ctx {
                 DigestCtx::Sha256(_) => 32usize,
                 DigestCtx::Sha384(_) => 48,
                 DigestCtx::Sha512(_) => 64,
@@ -10702,9 +10743,9 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
         }
         // Buffer is adequate — now consume the operation and finalize.
         let ctx = DIGEST_STATE
-            .with(|s| s.borrow_mut().remove(&h_session))
+            .with(|s| s.shard(h_session).remove(&h_session))
             .expect("digest state present (checked above)");
-        DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
+        DIGEST_MULTIPART.shard(h_session).remove(&h_session);
         let hash = match ctx {
             DigestCtx::Sha256(h) => h.finalize().to_vec(),
             DigestCtx::Sha384(h) => h.finalize().to_vec(),
@@ -10749,7 +10790,7 @@ pub fn C_Digest(
     // §5.13 convention — a digest op already in its multi-part phase
     // (C_DigestUpdate called) must be completed with C_DigestFinal; the
     // one-shot API is a sequencing error, not a silent append.
-    if DIGEST_MULTIPART.with(|s| s.borrow().contains(&h_session)) {
+    if DIGEST_MULTIPART.shard(h_session).contains(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     unsafe {
@@ -10757,7 +10798,7 @@ pub fn C_Digest(
         // Per PKCS#11 v3.2 §5.7.2, data must not be processed on a null-pDigest call.
         if p_digest.is_null() {
             let len = DIGEST_STATE.with(|s| {
-                s.borrow().get(&h_session).map(|ctx| match ctx {
+                s.shard(h_session).get(&h_session).map(|ctx| match ctx {
                     DigestCtx::Sha256(_) => 32u32,
                     DigestCtx::Sha384(_) => 48,
                     DigestCtx::Sha512(_) => 64,
@@ -10790,7 +10831,7 @@ pub fn C_Digest(
         // The internal Update marked the op multi-part; the one-shot path is
         // not — clear the marker so a §5.2 BUFFER_TOO_SMALL retry of C_Digest
         // is not misreported as CKR_OPERATION_ACTIVE.
-        DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
+        DIGEST_MULTIPART.shard(h_session).remove(&h_session);
         C_DigestFinal(h_session, p_digest, pul_digest_len)
     }
 }
@@ -10802,7 +10843,7 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
     require_init!();
     require_session!(h_session);
     // PKCS#11 v3.2 §5.10.1 — a find operation is already active on this session.
-    if FIND_STATE.with(|s| s.borrow().contains_key(&h_session)) {
+    if FIND_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_ACTIVE;
     }
     // W5 (2026-08-13) — §5.7.7: "The matching criterion is an exact
@@ -10869,7 +10910,7 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
     matching.sort_unstable_by_key(|(handle, class)| (*class == Some(CKO_PROFILE), *handle));
     let matching: Vec<u32> = matching.into_iter().map(|(handle, _)| handle).collect();
     FIND_STATE.with(|s| {
-        s.borrow_mut().insert(
+        s.shard(h_session).insert(
             h_session,
             FindCtx {
                 handles: matching,
@@ -10895,7 +10936,7 @@ pub fn C_FindObjects(
     // §5.10.2 — phObject and pulObjectCount are required pointers.
     nonnull!(ph_object, pul_object_count);
     FIND_STATE.with(|s| {
-        let mut map = s.borrow_mut();
+        let mut map = s.shard(h_session);
         if let Some(ctx) = map.get_mut(&h_session) {
             let remaining = ctx.handles.len() - ctx.cursor;
             let count = remaining.min(ul_max_object_count as usize);
@@ -10918,7 +10959,7 @@ pub fn C_FindObjectsFinal(h_session: u32) -> u32 {
     require_init!();
     require_session!(h_session);
     // PKCS#11 v3.2 §5.10.3 — must follow an active C_FindObjectsInit.
-    let had = FIND_STATE.with(|s| s.borrow_mut().remove(&h_session).is_some());
+    let had = FIND_STATE.shard(h_session).remove(&h_session).is_some();
     if had {
         CKR_OK
     } else {
@@ -14335,16 +14376,16 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
 /// current signature operation") the active op is terminated.
 fn multipart_op_mech(
     h_session: u32,
-    op_state: &crate::state::GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>>,
-    acc: &crate::state::GlobalState<HashMap<u32, Vec<u8>>>,
+    op_state: &crate::state::Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>>,
+    acc: &crate::state::Sharded<HashMap<u32, Vec<u8>>>,
 ) -> Result<u32, u32> {
-    let mech = match op_state.with(|s| s.borrow().get(&h_session).map(|st| st.0)) {
+    let mech = match op_state.with(|s| s.shard(h_session).get(&h_session).map(|st| st.0)) {
         Some(m) => m,
         None => return Err(CKR_OPERATION_NOT_INITIALIZED),
     };
     if !sign_mech_supports_multipart(mech) {
-        op_state.with(|s| s.borrow_mut().remove(&h_session));
-        acc.with(|s| s.borrow_mut().remove(&h_session));
+        op_state.with(|s| s.shard(h_session).remove(&h_session));
+        acc.with(|s| s.shard(h_session).remove(&h_session));
         return Err(CKR_OPERATION_NOT_INITIALIZED);
     }
     Ok(mech)
@@ -14371,7 +14412,7 @@ pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     // one-shot C_Sign is CKR_OPERATION_ACTIVE until C_SignFinal (mirror
     // DIGEST_MULTIPART).
     SIGN_MULTIPART_ACC.with(|s| {
-        let mut m = s.borrow_mut();
+        let mut m = s.shard(h_session);
         let acc = m.entry(h_session).or_default();
         if ul_part_len > 0 {
             unsafe {
@@ -14395,7 +14436,7 @@ fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mu
     // §5.13.4 — C_SignFinal with no preceding C_SignUpdate signs the empty
     // message (legal); the accumulator entry is simply absent.
     let msg = SIGN_MULTIPART_ACC
-        .with(|s| s.borrow_mut().remove(&h_session))
+        .with(|s| s.shard(h_session).remove(&h_session))
         .unwrap_or_default();
     // Delegate to the one-shot handler over the accumulated message (the
     // accumulator entry was taken out above, so C_Sign's OPERATION_ACTIVE
@@ -14411,7 +14452,7 @@ fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mu
         pul_signature_len,
     );
     if rv == CKR_BUFFER_TOO_SMALL || (rv == CKR_OK && p_signature.is_null()) {
-        SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().insert(h_session, msg));
+        SIGN_MULTIPART_ACC.shard(h_session).insert(h_session, msg);
     }
     rv
 }
@@ -14430,7 +14471,7 @@ pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
         return rv;
     }
     VERIFY_MULTIPART_ACC.with(|s| {
-        let mut m = s.borrow_mut();
+        let mut m = s.shard(h_session);
         let acc = m.entry(h_session).or_default();
         if ul_part_len > 0 {
             unsafe {
@@ -14458,7 +14499,7 @@ fn C_VerifyFinal_impl(h_session: u32, p_signature: *mut u8, ul_signature_len: u3
     // CKR_SIGNATURE_LEN_RANGE exactly as the one-shot does. No Updates ⇒
     // verify against the empty message (legal).
     let msg = VERIFY_MULTIPART_ACC
-        .with(|s| s.borrow_mut().remove(&h_session))
+        .with(|s| s.shard(h_session).remove(&h_session))
         .unwrap_or_default();
     C_Verify(
         h_session,
@@ -14590,7 +14631,7 @@ fn build_multipart_cipher(
 }
 
 fn multipart_update(
-    state: &GlobalState<HashMap<u32, EncryptCtx>>,
+    state: &Sharded<HashMap<u32, EncryptCtx>>,
     dir: crate::crypto::multipart::CipherDirection,
     h_session: u32,
     p_in: *mut u8,
@@ -14601,7 +14642,7 @@ fn multipart_update(
     if pul_out_len.is_null() || (p_in.is_null() && in_len > 0) {
         return CKR_ARGUMENTS_BAD;
     }
-    let mut map = state.borrow_mut();
+    let mut map = state.shard(h_session);
     let Some(ctx) = map.get_mut(&h_session) else {
         return CKR_OPERATION_NOT_INITIALIZED;
     };
@@ -14645,7 +14686,7 @@ fn multipart_update(
 }
 
 fn multipart_final(
-    state: &GlobalState<HashMap<u32, EncryptCtx>>,
+    state: &Sharded<HashMap<u32, EncryptCtx>>,
     dir: crate::crypto::multipart::CipherDirection,
     h_session: u32,
     p_out: *mut u8,
@@ -14654,7 +14695,7 @@ fn multipart_final(
     if pul_out_len.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    let mut map = state.borrow_mut();
+    let mut map = state.shard(h_session);
     let Some(ctx) = map.get_mut(&h_session) else {
         return CKR_OPERATION_NOT_INITIALIZED;
     };
@@ -15053,8 +15094,8 @@ pub fn C_SignRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u3
     }
     // A regular Sign and a Sign-Recover op are mutually exclusive on one
     // session (both are "the signing category" per §5.13's own grouping).
-    if SIGN_STATE.with(|s| s.borrow().contains_key(&h_session))
-        || SIGN_RECOVER_STATE.with(|s| s.borrow().contains_key(&h_session))
+    if SIGN_STATE.shard(h_session).contains_key(&h_session)
+        || SIGN_RECOVER_STATE.shard(h_session).contains_key(&h_session)
     {
         return CKR_OPERATION_ACTIVE;
     }
@@ -15073,7 +15114,7 @@ pub fn C_SignRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u3
         return rv;
     }
     SIGN_RECOVER_STATE.with(|s| {
-        s.borrow_mut().insert(h_session, (mech_type, h_key));
+        s.shard(h_session).insert(h_session, (mech_type, h_key));
     });
     CKR_OK
 }
@@ -15091,7 +15132,7 @@ pub fn C_SignRecover(
     if pul_signature_len.is_null() || (p_data.is_null() && ul_data_len > 0) {
         return CKR_ARGUMENTS_BAD;
     }
-    let state = SIGN_RECOVER_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let state = SIGN_RECOVER_STATE.shard(h_session).get(&h_session).cloned();
     let (mech, hkey) = match state {
         Some(s) => s,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -15119,11 +15160,11 @@ pub fn C_SignRecover(
                 }
                 std::ptr::copy_nonoverlapping(sig.as_ptr(), p_signature, sig.len());
                 *pul_signature_len = sig.len() as u32;
-                SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                SIGN_RECOVER_STATE.shard(h_session).remove(&h_session);
                 CKR_OK
             }
             Err(rv) => {
-                SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                SIGN_RECOVER_STATE.shard(h_session).remove(&h_session);
                 rv
             }
         }
@@ -15138,8 +15179,8 @@ pub fn C_VerifyRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> 
     if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::VerifyRecover) {
         return rv;
     }
-    if VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session))
-        || VERIFY_RECOVER_STATE.with(|s| s.borrow().contains_key(&h_session))
+    if VERIFY_STATE.shard(h_session).contains_key(&h_session)
+        || VERIFY_RECOVER_STATE.shard(h_session).contains_key(&h_session)
     {
         return CKR_OPERATION_ACTIVE;
     }
@@ -15158,7 +15199,7 @@ pub fn C_VerifyRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> 
         return rv;
     }
     VERIFY_RECOVER_STATE.with(|s| {
-        s.borrow_mut().insert(h_session, (mech_type, h_key));
+        s.shard(h_session).insert(h_session, (mech_type, h_key));
     });
     CKR_OK
 }
@@ -15176,7 +15217,7 @@ pub fn C_VerifyRecover(
     if pul_data_len.is_null() || (p_signature.is_null() && ul_signature_len > 0) {
         return CKR_ARGUMENTS_BAD;
     }
-    let state = VERIFY_RECOVER_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let state = VERIFY_RECOVER_STATE.shard(h_session).get(&h_session).cloned();
     let (mech, hkey) = match state {
         Some(s) => s,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -15204,11 +15245,11 @@ pub fn C_VerifyRecover(
                 }
                 std::ptr::copy_nonoverlapping(data.as_ptr(), p_data, data.len());
                 *pul_data_len = data.len() as u32;
-                VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                VERIFY_RECOVER_STATE.shard(h_session).remove(&h_session);
                 CKR_OK
             }
             Err(rv) => {
-                VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                VERIFY_RECOVER_STATE.shard(h_session).remove(&h_session);
                 rv
             }
         }
@@ -15326,8 +15367,8 @@ pub fn C_DigestEncryptUpdate(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
-    if !DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session))
-        || !ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+    if !DIGEST_STATE.shard(h_session).contains_key(&h_session)
+        || !ENCRYPT_STATE.shard(h_session).contains_key(&h_session)
     {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -15353,8 +15394,8 @@ pub fn C_DecryptDigestUpdate(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
-    if !DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
-        || !DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session))
+    if !DECRYPT_STATE.shard(h_session).contains_key(&h_session)
+        || !DIGEST_STATE.shard(h_session).contains_key(&h_session)
     {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -15380,8 +15421,8 @@ pub fn C_SignEncryptUpdate(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
-    if !SIGN_STATE.with(|s| s.borrow().contains_key(&h_session))
-        || !ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+    if !SIGN_STATE.shard(h_session).contains_key(&h_session)
+        || !ENCRYPT_STATE.shard(h_session).contains_key(&h_session)
     {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -15405,8 +15446,8 @@ pub fn C_DecryptVerifyUpdate(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
-    if !DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
-        || !VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session))
+    if !DECRYPT_STATE.shard(h_session).contains_key(&h_session)
+        || !VERIFY_STATE.shard(h_session).contains_key(&h_session)
     {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -15440,7 +15481,7 @@ pub fn C_SetPIN(
     // No protected authentication path on this token — both PINs must be
     // supplied through the API.
     nonnull!(p_old_pin, p_new_pin);
-    let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
+    let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
@@ -15943,9 +15984,9 @@ pub fn msg_encrypt_init_internal(
     // init used to overwrite the active context and return CKR_OK;
     // C_MessageEncryptFinal / C_MessageDecryptFinal end the operation.
     let active = if is_encrypt {
-        MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+        MESSAGE_ENCRYPT_STATE.shard(h_session).contains_key(&h_session)
     } else {
-        MESSAGE_DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+        MESSAGE_DECRYPT_STATE.shard(h_session).contains_key(&h_session)
     };
     if active {
         return CKR_OPERATION_ACTIVE;
@@ -15997,9 +16038,9 @@ pub fn msg_encrypt_init_internal(
         };
 
         if is_encrypt {
-            MESSAGE_ENCRYPT_STATE.with(|s| s.borrow_mut().insert(h_session, ctx));
+            MESSAGE_ENCRYPT_STATE.shard(h_session).insert(h_session, ctx);
         } else {
-            MESSAGE_DECRYPT_STATE.with(|s| s.borrow_mut().insert(h_session, ctx));
+            MESSAGE_DECRYPT_STATE.shard(h_session).insert(h_session, ctx);
         }
 
         CKR_OK
@@ -16026,7 +16067,7 @@ fn message_begin_core(
     use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
     let state = if is_encrypt { &*MESSAGE_ENCRYPT_STATE } else { &*MESSAGE_DECRYPT_STATE };
     state.with(|s| {
-        let mut store = s.borrow_mut();
+        let mut store = s.shard(h_session);
         let Some(c) = store.get_mut(&h_session) else {
             return CKR_OPERATION_NOT_INITIALIZED;
         };
@@ -16065,7 +16106,7 @@ unsafe fn encrypt_message_next_core(
     p_tag: *mut u8,
 ) -> u32 {
     match MESSAGE_ENCRYPT_STATE
-        .with(|s| s.borrow().get(&h_session).map(|c| c.in_message && c.stream.is_some()))
+        .with(|s| s.shard(h_session).get(&h_session).map(|c| c.in_message && c.stream.is_some()))
     {
         None | Some(false) => return CKR_OPERATION_NOT_INITIALIZED,
         Some(true) => {}
@@ -16092,7 +16133,7 @@ unsafe fn encrypt_message_next_core(
             if part_len == 0 { &[] } else { std::slice::from_raw_parts(p_part, part_len as usize) };
 
         MESSAGE_ENCRYPT_STATE.with(|s| {
-            let mut store = s.borrow_mut();
+            let mut store = s.shard(h_session);
             let Some(c) = store.get_mut(&h_session) else {
                 return CKR_OPERATION_NOT_INITIALIZED;
             };
@@ -16134,7 +16175,7 @@ unsafe fn decrypt_message_next_core(
     p_tag: *const u8,
 ) -> u32 {
     let acc_len = match MESSAGE_DECRYPT_STATE.with(|s| {
-        s.borrow()
+        s.shard(h_session)
             .get(&h_session)
             .filter(|c| c.in_message && c.stream.is_some())
             .map(|c| c.plaintext_acc.len())
@@ -16170,7 +16211,7 @@ unsafe fn decrypt_message_next_core(
             if part_len == 0 { &[] } else { std::slice::from_raw_parts(p_part, part_len as usize) };
 
         MESSAGE_DECRYPT_STATE.with(|s| {
-            let mut store = s.borrow_mut();
+            let mut store = s.shard(h_session);
             let Some(c) = store.get_mut(&h_session) else {
                 return CKR_OPERATION_NOT_INITIALIZED;
             };
@@ -16297,7 +16338,7 @@ pub fn C_EncryptMessage(
 ) -> u32 {
     require_init!();
     let (mut key, in_message) = match MESSAGE_ENCRYPT_STATE
-        .with(|s| s.borrow().get(&h_session).map(|c| (c.key.clone(), c.in_message)))
+        .with(|s| s.shard(h_session).get(&h_session).map(|c| (c.key.clone(), c.in_message)))
     {
         Some(v) => v,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -16368,7 +16409,7 @@ pub fn C_EncryptMessageBegin(
 ) -> u32 {
     require_init!();
     // Error priority: operation state outranks argument validation.
-    match MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().get(&h_session).map(|c| c.in_message)) {
+    match MESSAGE_ENCRYPT_STATE.shard(h_session).get(&h_session).map(|c| c.in_message) {
         None => return CKR_OPERATION_NOT_INITIALIZED,
         Some(true) => return CKR_OPERATION_ACTIVE,
         Some(false) => {}
@@ -16430,7 +16471,7 @@ pub fn C_EncryptMessageNext(
 pub fn C_MessageEncryptFinal(h_session: u32) -> u32 {
     require_init!();
     MESSAGE_ENCRYPT_STATE.with(|s| {
-        if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+        if let Some(mut ctx) = s.shard(h_session).remove(&h_session) {
             ctx.wipe();
         }
     });
@@ -16458,7 +16499,7 @@ pub fn C_DecryptMessage(
 ) -> u32 {
     require_init!();
     let (mut key, in_message) = match MESSAGE_DECRYPT_STATE
-        .with(|s| s.borrow().get(&h_session).map(|c| (c.key.clone(), c.in_message)))
+        .with(|s| s.shard(h_session).get(&h_session).map(|c| (c.key.clone(), c.in_message)))
     {
         Some(v) => v,
         None => return CKR_OPERATION_NOT_INITIALIZED,
@@ -16530,7 +16571,7 @@ pub fn C_DecryptMessageBegin(
 ) -> u32 {
     require_init!();
     // Error priority: operation state outranks argument validation.
-    match MESSAGE_DECRYPT_STATE.with(|s| s.borrow().get(&h_session).map(|c| c.in_message)) {
+    match MESSAGE_DECRYPT_STATE.shard(h_session).get(&h_session).map(|c| c.in_message) {
         None => return CKR_OPERATION_NOT_INITIALIZED,
         Some(true) => return CKR_OPERATION_ACTIVE,
         Some(false) => {}
@@ -16592,7 +16633,7 @@ pub fn C_DecryptMessageNext(
 pub fn C_MessageDecryptFinal(h_session: u32) -> u32 {
     require_init!();
     MESSAGE_DECRYPT_STATE.with(|s| {
-        if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+        if let Some(mut ctx) = s.shard(h_session).remove(&h_session) {
             ctx.wipe();
         }
     });
@@ -16828,22 +16869,22 @@ mod multipart_ffi_tests {
     /// register the test session so the seeded ctx is reachable.
     fn install_session(h: u32) {
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(h)
                 .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
     }
 
     fn seed_ctx(
-        state: &GlobalState<HashMap<u32, EncryptCtx>>,
+        state: &Sharded<HashMap<u32, EncryptCtx>>,
         session: u32,
         mech_type: u32,
         iv: Vec<u8>,
         aad: Vec<u8>,
         tag_bits: u32,
     ) {
-        state.borrow_mut().insert(
+        state.shard(session).insert(
             session,
-            EncryptCtx { mech_type, key_handle: KEY_HANDLE, iv, aad, tag_bits, multipart: None, block_counter: 0 },
+            EncryptCtx { mech_type, key_handle: KEY_HANDLE, iv, aad, tag_bits, multipart: None, block_counter: 0 , aes_key: None},
         );
     }
 
@@ -16988,7 +17029,7 @@ mod multipart_ffi_tests {
             C_EncryptUpdate(session, part.as_ptr() as *mut u8, 20, buf.as_mut_ptr(), &mut len),
             CKR_OK,
         );
-        ENCRYPT_STATE.borrow_mut().remove(&session); // cleanup
+        ENCRYPT_STATE.shard(session).remove(&session); // cleanup
     }
 
     #[test]
@@ -17014,7 +17055,7 @@ mod multipart_ffi_tests {
         let mut len = 16u32;
         assert_eq!(C_EncryptFinal(session, buf.as_mut_ptr(), &mut len), CKR_DATA_LEN_RANGE);
         // Failed Final terminates the operation.
-        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+        assert!(!ENCRYPT_STATE.shard(session).contains_key(&session));
     }
 
     // ── T33b root-cause fix: CKM_AES_XTS streaming (§6.15) ───────────────
@@ -17233,7 +17274,7 @@ mod multipart_ffi_tests {
             C_EncryptUpdate(session, part.as_ptr() as *mut u8, 32, std::ptr::null_mut(), &mut len),
             CKR_KEY_TYPE_INCONSISTENT,
         );
-        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+        assert!(!ENCRYPT_STATE.shard(session).contains_key(&session));
     }
 
     /// XTS ciphertext stealing needs at least one full AES block — same
@@ -17272,7 +17313,7 @@ mod multipart_ffi_tests {
             C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len),
             CKR_DATA_LEN_RANGE,
         );
-        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+        assert!(!ENCRYPT_STATE.shard(session).contains_key(&session));
     }
 
     /// T33b real-provider-.so confirmation (2026-09-02) found `C_EncryptFinal`
@@ -17424,7 +17465,7 @@ mod multipart_ffi_tests {
         assert_ne!(rv, CKR_OK, "data arriving after the commit point must be rejected, not silently accepted");
 
         // §5.2 — a failed Update terminates the operation.
-        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+        assert!(!ENCRYPT_STATE.shard(session).contains_key(&session));
 
         // The empty size-query shape (a caller innocently probing after
         // commit with zero-length input) must stay harmless rather than
@@ -17537,14 +17578,14 @@ mod multipart_ffi_tests {
         let mut ct = pk.encrypt(&mut rand::rngs::OsRng, rsa::Pkcs1v15Encrypt, pt).unwrap();
         seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
         assert_eq!(decrypt_size_query(session, &mut ct), (CKR_OK, pt.len() as u32));
-        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&session));
+        DECRYPT_STATE.shard(session).remove(&session);
 
         let pk = install_rsa_key(true);
         let mut short = pk.encrypt(&mut rand::rngs::OsRng, rsa::Pkcs1v15Encrypt, pt).unwrap();
         short.pop();
         seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
         assert_ne!(decrypt_size_query(session, &mut short).0, CKR_OK);
-        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&session));
+        DECRYPT_STATE.shard(session).remove(&session);
     }
 
     // ── W7 — the ChaCha20 start block survives the §5.2 size query ────────────
@@ -17563,9 +17604,9 @@ mod multipart_ffi_tests {
         let pt: Vec<u8> = (0..100u8).collect();
         let want = crate::native::encrypt::chacha20_encrypt_at(&key, &nonce, &pt, 3).unwrap();
         for encrypt in [true, false] {
-            let state: &GlobalState<HashMap<u32, EncryptCtx>> =
+            let state: &Sharded<HashMap<u32, EncryptCtx>> =
                 if encrypt { &ENCRYPT_STATE } else { &DECRYPT_STATE };
-            state.borrow_mut().insert(
+            state.shard(session).insert(
                 session,
                 EncryptCtx {
                     mech_type: CKM_CHACHA20,
@@ -17575,6 +17616,7 @@ mod multipart_ffi_tests {
                     tag_bits: 0,
                     multipart: None,
                     block_counter: 3,
+                    aes_key: None,
                 },
             );
             let mut input = if encrypt { pt.clone() } else { want.clone() };
@@ -17610,7 +17652,7 @@ mod abi_hygiene_ffi_tests {
 
     fn install_session(h: u32) {
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(h)
                 .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
     }
@@ -17707,7 +17749,7 @@ mod abi_hygiene_ffi_tests {
         install_aes_key(&[0x11u8; 32]);
 
         ENCRYPT_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION).insert(
                 SESSION,
                 EncryptCtx {
                     mech_type: CKM_AES_GCM,
@@ -17717,6 +17759,7 @@ mod abi_hygiene_ffi_tests {
                     tag_bits: 128,
                     multipart: None,
                     block_counter: 0,
+                    aes_key: None,
                 },
             );
         });
@@ -17727,7 +17770,7 @@ mod abi_hygiene_ffi_tests {
         );
 
         DECRYPT_STATE.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION).insert(
                 SESSION,
                 EncryptCtx {
                     mech_type: CKM_AES_GCM,
@@ -17737,6 +17780,7 @@ mod abi_hygiene_ffi_tests {
                     tag_bits: 128,
                     multipart: None,
                     block_counter: 0,
+                    aes_key: None,
                 },
             );
         });
@@ -17745,7 +17789,7 @@ mod abi_hygiene_ffi_tests {
             C_Decrypt(SESSION, std::ptr::null_mut(), 16, std::ptr::null_mut(), &mut out_len),
             CKR_ARGUMENTS_BAD,
         );
-        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&SESSION));
+        DECRYPT_STATE.shard(SESSION).remove(&SESSION);
     }
 
     #[test]
@@ -17868,11 +17912,10 @@ mod abi_hygiene_ffi_tests {
 
         // Seed an in-flight message-sign op (C_MessageSignInit state lives in
         // SIGN_STATE; the per-message accumulator in MESSAGE_SIGN_ACC).
-        SIGN_STATE
-            .with(|s| s.borrow_mut().insert(SESSION, (CKM_EDDSA, KEY_HANDLE, Vec::new(), false)));
-        MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().insert(SESSION, vec![1, 2, 3]));
+        SIGN_STATE.insert(SESSION, (CKM_EDDSA, KEY_HANDLE, Vec::new(), false));
+        MESSAGE_SIGN_ACC.shard(SESSION).insert(SESSION, vec![1, 2, 3]);
         assert_eq!(C_SessionCancel(SESSION, 0x8), CKR_OK);
-        assert!(!MESSAGE_SIGN_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        assert!(!MESSAGE_SIGN_ACC.shard(SESSION).contains_key(&SESSION));
         let part = [0u8; 4];
         let mut sig_len: u32 = 0;
         assert_eq!(
@@ -17889,11 +17932,10 @@ mod abi_hygiene_ffi_tests {
         );
 
         // Same for the message-verify op.
-        VERIFY_STATE
-            .with(|s| s.borrow_mut().insert(SESSION, (CKM_EDDSA, KEY_HANDLE, Vec::new(), false)));
-        MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().insert(SESSION, vec![4, 5]));
+        VERIFY_STATE.insert(SESSION, (CKM_EDDSA, KEY_HANDLE, Vec::new(), false));
+        MESSAGE_VERIFY_ACC.shard(SESSION).insert(SESSION, vec![4, 5]);
         assert_eq!(C_SessionCancel(SESSION, 0x10), CKR_OK);
-        assert!(!MESSAGE_VERIFY_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        assert!(!MESSAGE_VERIFY_ACC.shard(SESSION).contains_key(&SESSION));
         let sig = [0u8; 64];
         assert_eq!(
             C_VerifyMessageNext(
@@ -18034,7 +18076,7 @@ mod attr_integrity_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION).insert(
                 SESSION,
                 crate::state::SessionState { slot_id: 0, rw_session: true },
             );
@@ -18600,12 +18642,11 @@ mod object_mgmt_ffi_tests {
         crate::state::set_initialized(true);
         crate::state::ensure_slot(0);
         SESSIONS.with(|s| {
-            let mut store = s.borrow_mut();
-            store.insert(
+                        s.insert(
                 SESSION_RW,
                 crate::state::SessionState { slot_id: 0, rw_session: true },
             );
-            store.insert(
+            s.insert(
                 SESSION_RO,
                 crate::state::SessionState { slot_id: 0, rw_session: false },
             );
@@ -18822,7 +18863,7 @@ mod object_mgmt_ffi_tests {
         setup();
         crate::state::ensure_slot(9);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION_SLOT9).insert(
                 SESSION_SLOT9,
                 crate::state::SessionState { slot_id: 9, rw_session: true },
             );
@@ -19048,7 +19089,7 @@ mod object_mgmt_ffi_tests {
         setup();
         crate::state::ensure_slot(9);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION_SLOT9).insert(
                 SESSION_SLOT9,
                 crate::state::SessionState { slot_id: 9, rw_session: true },
             );
@@ -19123,9 +19164,7 @@ mod object_mgmt_ffi_tests {
         crate::state::set_initialized(true);
         crate::state::ensure_slot(PIN_SLOT);
         // Fresh token (C_InitToken refuses while sessions are open on the slot).
-        SESSIONS.with(|s| {
-            s.borrow_mut().retain(|_, ss| ss.slot_id != PIN_SLOT);
-        });
+        SESSIONS.for_each_shard(|m| m.retain(|_, ss| ss.slot_id != PIN_SLOT));
         let mut so_pin = b"so-pin-77".to_vec();
         let mut label = b"t6-setpin".to_vec();
         label.resize(32, b' ');
@@ -19134,12 +19173,11 @@ mod object_mgmt_ffi_tests {
             CKR_OK
         );
         SESSIONS.with(|s| {
-            let mut store = s.borrow_mut();
-            store.insert(
+                        s.insert(
                 PIN_SESSION_RW,
                 crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true },
             );
-            store.insert(
+            s.insert(
                 PIN_SESSION_RO,
                 crate::state::SessionState { slot_id: PIN_SLOT, rw_session: false },
             );
@@ -19153,7 +19191,7 @@ mod object_mgmt_ffi_tests {
         // Drop the R/O session so CKU_SO login is not blocked by
         // CKR_SESSION_READ_ONLY_EXISTS (§5.6 SO-login exclusivity).
         SESSIONS.with(|s| {
-            s.borrow_mut().remove(&PIN_SESSION_RO);
+            s.shard(PIN_SESSION_RO).remove(&PIN_SESSION_RO);
         });
 
         // SO session: rotate the SO PIN.
@@ -19211,7 +19249,7 @@ mod object_mgmt_ffi_tests {
         // Bounds are checked before session/login state, so a R/W session
         // suffices to observe the code.
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(PIN_SESSION_RW).insert(
                 PIN_SESSION_RW,
                 crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true },
             );
@@ -19257,9 +19295,8 @@ mod return_code_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            let mut m = s.borrow_mut();
-            m.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
-            m.insert(
+                        s.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            s.insert(
                 LOGGED_OUT_SESSION,
                 crate::state::SessionState { slot_id: 77, rw_session: true },
             );
@@ -20792,7 +20829,7 @@ mod pqc_vendor_kem_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            s.shard(SESSION).insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
         TOKEN_STORE.with(|ts| {
             ts.borrow_mut()
@@ -21438,7 +21475,7 @@ mod hpke_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            s.shard(SESSION).insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
         TOKEN_STORE.with(|ts| {
             ts.borrow_mut()
@@ -22477,16 +22514,16 @@ mod multipart_sign_verify_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION).insert(
                 SESSION,
                 crate::state::SessionState { slot_id: 0, rw_session: true },
             );
         });
         // Clean slate for the op state under test.
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&SESSION));
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&SESSION));
-        SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&SESSION));
-        VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&SESSION));
+        SIGN_STATE.shard(SESSION).remove(&SESSION);
+        VERIFY_STATE.shard(SESSION).remove(&SESSION);
+        SIGN_MULTIPART_ACC.shard(SESSION).remove(&SESSION);
+        VERIFY_MULTIPART_ACC.shard(SESSION).remove(&SESSION);
         // Public generic-secret HMAC key (no login gate).
         OBJECTS.with(|o| {
             let mut attrs = Attributes::new();
@@ -23026,7 +23063,7 @@ mod multipart_sign_verify_ffi_tests {
                 CKR_OPERATION_NOT_INITIALIZED,
                 "SignFinal mech 0x{mech:x}"
             );
-            assert!(!SIGN_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+            assert!(!SIGN_STATE.shard(SESSION).contains_key(&SESSION));
 
             // Verify side.
             assert_eq!(verify_init(SESSION, mech, HMAC_KEY), CKR_OK);
@@ -23041,7 +23078,7 @@ mod multipart_sign_verify_ffi_tests {
                 CKR_OPERATION_NOT_INITIALIZED,
                 "VerifyFinal mech 0x{mech:x}"
             );
-            assert!(!VERIFY_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+            assert!(!VERIFY_STATE.shard(SESSION).contains_key(&SESSION));
         }
     }
 
@@ -23056,7 +23093,7 @@ mod multipart_sign_verify_ffi_tests {
         assert_eq!(sign_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
         assert_eq!(s_update(SESSION, b"doomed"), CKR_OK);
         assert_eq!(C_SessionCancel(SESSION, 0x800), CKR_OK);
-        assert!(!SIGN_MULTIPART_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        assert!(!SIGN_MULTIPART_ACC.shard(SESSION).contains_key(&SESSION));
         let mut buf = [0u8; 64];
         let mut len: u32 = 64;
         assert_eq!(
@@ -23067,7 +23104,7 @@ mod multipart_sign_verify_ffi_tests {
         assert_eq!(verify_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
         assert_eq!(v_update(SESSION, b"doomed"), CKR_OK);
         assert_eq!(C_SessionCancel(SESSION, 0x2000), CKR_OK);
-        assert!(!VERIFY_MULTIPART_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        assert!(!VERIFY_MULTIPART_ACC.shard(SESSION).contains_key(&SESSION));
         assert_eq!(
             C_VerifyFinal(SESSION, buf.as_mut_ptr(), 32),
             CKR_OPERATION_NOT_INITIALIZED,
@@ -23082,7 +23119,7 @@ mod multipart_sign_verify_ffi_tests {
         setup();
         let doomed: u32 = 0x5434_1002;
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(doomed).insert(
                 doomed,
                 crate::state::SessionState { slot_id: 0, rw_session: true },
             );
@@ -23093,10 +23130,10 @@ mod multipart_sign_verify_ffi_tests {
         assert_eq!(v_update(doomed, b"bye"), CKR_OK);
 
         assert_eq!(C_CloseSession(doomed), CKR_OK);
-        assert!(!SIGN_STATE.with(|s| s.borrow().contains_key(&doomed)));
-        assert!(!VERIFY_STATE.with(|s| s.borrow().contains_key(&doomed)));
-        assert!(!SIGN_MULTIPART_ACC.with(|s| s.borrow().contains_key(&doomed)));
-        assert!(!VERIFY_MULTIPART_ACC.with(|s| s.borrow().contains_key(&doomed)));
+        assert!(!SIGN_STATE.shard(doomed).contains_key(&doomed));
+        assert!(!VERIFY_STATE.shard(doomed).contains_key(&doomed));
+        assert!(!SIGN_MULTIPART_ACC.shard(doomed).contains_key(&doomed));
+        assert!(!VERIFY_MULTIPART_ACC.shard(doomed).contains_key(&doomed));
     }
 
     // ── VerifyFinal failure codes (same as one-shot) ────────────────────────
@@ -23233,7 +23270,7 @@ mod message_stream_ffi_tests {
 
     fn install_session(h: u32) {
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(h)
                 .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
     }
@@ -23545,7 +23582,7 @@ mod message_stream_ffi_tests {
         assert!(buf.iter().all(|&x| x == 0xAA), "caller buffer must stay untouched");
         // The withheld plaintext was zeroized and the message terminated.
         MESSAGE_DECRYPT_STATE.with(|s| {
-            let m = s.borrow();
+            let m = s.shard(session);
             let c = m.get(&session).unwrap();
             assert!(!c.in_message);
             assert!(c.plaintext_acc.is_empty());
@@ -23652,7 +23689,7 @@ mod message_stream_ffi_tests {
         };
         assert_eq!(rv, CKR_OK);
         assert_eq!(C_SessionCancel(session, 0x2), CKR_OK);
-        assert!(MESSAGE_ENCRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        assert!(MESSAGE_ENCRYPT_STATE.with(|s| !s.shard(session).contains_key(&session)));
         let rv = unsafe {
             encrypt_message_next_core(
                 session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, true,
@@ -23672,7 +23709,7 @@ mod message_stream_ffi_tests {
         };
         assert_eq!(rv, CKR_OK);
         assert_eq!(C_SessionCancel(session, 0x4), CKR_OK);
-        assert!(MESSAGE_DECRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        assert!(MESSAGE_DECRYPT_STATE.with(|s| !s.shard(session).contains_key(&session)));
         let rv = unsafe {
             decrypt_message_next_core(
                 session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, true,
@@ -23688,8 +23725,8 @@ mod message_stream_ffi_tests {
         assert_eq!(message_begin_core(session, &iv, &[], 128, true), CKR_OK);
         assert_eq!(message_begin_core(session, &iv, &[], 128, false), CKR_OK);
         assert_eq!(C_CloseSession(session), CKR_OK);
-        assert!(MESSAGE_ENCRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
-        assert!(MESSAGE_DECRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        assert!(MESSAGE_ENCRYPT_STATE.with(|s| !s.shard(session).contains_key(&session)));
+        assert!(MESSAGE_DECRYPT_STATE.with(|s| !s.shard(session).contains_key(&session)));
         let rv = unsafe {
             encrypt_message_next_core(
                 session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, false,
@@ -23714,7 +23751,7 @@ mod profile_object_ffi_tests {
         crate::state::set_initialized(true);
         crate::state::ensure_slot(0);
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(SESSION).insert(
                 SESSION,
                 crate::state::SessionState { slot_id: 0, rw_session: true },
             );
@@ -24218,7 +24255,7 @@ mod find_objects_ordering_ffi_tests {
         crate::state::ensure_slot(0);
         let session = 0x5439_3001;
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
+            s.shard(session).insert(
                 session,
                 crate::state::SessionState { slot_id: 0, rw_session: true },
             );
@@ -24295,8 +24332,8 @@ mod generic_prehash_mech_ffi_tests {
         let session =
             crate::native::session::bootstrap_default_token(0, "so", "user", "prehash-test")
                 .unwrap();
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        SIGN_STATE.shard(session).remove(&session);
+        VERIFY_STATE.shard(session).remove(&session);
         let (pub_h, priv_h) = crate::native::generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"t", "t")
             .expect("ml-dsa-65 keygen");
         (session, pub_h, priv_h)
@@ -25674,7 +25711,7 @@ mod ecdh_kem_ffi_tests {
         // race the lifecycle dance of the `native::*` tests).
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(SESSION)
                 .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
     }
@@ -26120,7 +26157,7 @@ mod mlkem_value_len_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(SESSION)
                 .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
         TOKEN_STORE.with(|ts| {
@@ -27985,6 +28022,11 @@ mod pkcs8_encoding_fixture_tests {
 #[path = "p11_behaviour_tests.rs"]
 mod p11_behaviour_tests;
 
+/// A3 — per-session operation state and the Init-time AES key-schedule cache.
+#[cfg(test)]
+#[path = "a3_session_state_tests.rs"]
+mod a3_session_state_tests;
+
 #[cfg(test)]
 mod ecdsa_explicit_k_ffi_tests {
     //! CKM_PQCTODAY_ECDSA_EXPLICIT_K end-to-end through C_CreateObject /
@@ -28012,8 +28054,8 @@ mod ecdsa_explicit_k_ffi_tests {
         let session =
             crate::native::session::bootstrap_default_token(0, "so", "user", "explicit-k-test")
                 .unwrap();
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        SIGN_STATE.shard(session).remove(&session);
+        VERIFY_STATE.shard(session).remove(&session);
         session
     }
 
@@ -28240,7 +28282,7 @@ mod ecdsa_explicit_k_ffi_tests {
         let mut n_minus_1 = unhex(N_P256);
         *n_minus_1.last_mut().unwrap() -= 1;
         assert_eq!(init(session, priv_h, Some(&n_minus_1)), CKR_OK);
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+        SIGN_STATE.shard(session).remove(&session);
 
         // Curves outside P-256/384/521: the two key codes §5.13.1 allows.
         let p224 = ec_private(session, OID_P224, &unhex("3f0c488e987c80be0fee521f8d90be6034ec69ae11ca72aa777481e8"));
@@ -28475,7 +28517,7 @@ mod rsa_private_component_import_tests {
         const S: u32 = 0x5434_1002;
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(S)
                 .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
         let v: serde_json::Value =
@@ -28563,7 +28605,7 @@ mod rsa_private_component_import_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(SESSION)
                 .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
     }
@@ -28884,7 +28926,7 @@ mod ec_public_key_validation_tests {
         const S: u32 = 0x5434_2001;
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.borrow_mut()
+            s.shard(S)
                 .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true });
         });
         let v: serde_json::Value =
@@ -28962,8 +29004,8 @@ mod eddsa_ph_context_ffi_tests {
         let session =
             crate::native::session::bootstrap_default_token(0, "so", "user", "eddsa-ph-ctx-test")
                 .unwrap();
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        SIGN_STATE.shard(session).remove(&session);
+        VERIFY_STATE.shard(session).remove(&session);
         session
     }
 
@@ -29094,8 +29136,8 @@ mod negative_rule_probes_2d {
         let session =
             crate::native::session::bootstrap_default_token(0, "so-pin", "user-pin", "probes-2d")
                 .unwrap();
-        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
-        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        SIGN_STATE.shard(session).remove(&session);
+        VERIFY_STATE.shard(session).remove(&session);
         session
     }
 
