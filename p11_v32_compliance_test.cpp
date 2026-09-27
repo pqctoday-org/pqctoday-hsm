@@ -5004,9 +5004,14 @@ void test_authenticated_wrap() {
         CK_MECHANISM nistMech = { 0x00001087UL /* CKM_AES_GCM */, &nistGcmParams, sizeof(nistGcmParams) };
         
         CK_OBJECT_HANDLE hNistTarget = 0;
+        // The payload is Test Case 4's 60-byte plaintext, so the target is a
+        // GENERIC secret: 60 bytes is not an AES key length, and since plan
+        // 2.D the engine refuses that (§5.18.4, CKR_WRAPPED_KEY_LEN_RANGE) —
+        // this template used to ask for CKK_AES and got a 60-byte "AES key".
+        CK_KEY_TYPE nistTargetKt = CKK_GENERIC_SECRET;
         CK_ATTRIBUTE unwrapTmplNist[] = { 
             { CKA_CLASS, &secClass, sizeof(secClass) },
-            { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
+            { CKA_KEY_TYPE, &nistTargetKt, sizeof(nistTargetKt) },
             { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) }
         };
         CK_RV rvKat = UnwrapAuth(hSess, &nistMech, hNistWrapKey, nistCTandTag, sizeof(nistCTandTag), unwrapTmplNist, 3, nistAAD, sizeof(nistAAD), &hNistTarget);
