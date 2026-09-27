@@ -10,6 +10,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **AES-GCM processes whole blocks instead of single bytes.** `GcmState`
+  (one-shot, multipart and message-based GCM in the Rust engine) produced
+  the CTR keystream one AES block per call and fed GHASH one byte at a time,
+  so once hardware AES made the cipher cheap, that loop set GCM's speed: GCM
+  gained 3–6× from hardware AES on every CPU measured, against 7–13× for CBC.
+  Aligned data now goes through a whole-block path: up to 32 counter blocks
+  per AES call (the backend pipelines them) and one GHASH update per 512-byte
+  batch. Only the bytes before the stream is block-aligned and the final
+  partial block take the byte path. Output is byte-identical: checked against
+  the NIST GCM vectors (all IV lengths), the existing KATs, and a new test
+  comparing every length 0–100 plus multi-batch sizes, in seven chunkings,
+  both directions and both APIs, with the independent `aes-gcm` crate.
+
 - **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
   the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
   flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
