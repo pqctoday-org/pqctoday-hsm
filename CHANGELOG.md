@@ -260,6 +260,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   use. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply the import check
   and return `CKR_WRAPPED_KEY_INVALID`.
 
+- **Both engines: `CKA_EC_PARAMS` with bytes after the DER value was
+  accepted.** An OID or curve name followed by trailing bytes was decoded as if
+  the extra bytes were not there. The Rust decoder and the C++ `C_CreateObject`
+  and `C_GenerateKeyPair` paths (EC, Edwards and Montgomery keys) now require
+  the attribute to be exactly one DER value and return
+  `CKR_DOMAIN_PARAMS_INVALID` otherwise (PKCS#11 v3.2 §6.3).
+
+- **Known deviation now measured: structure packing (PKCS#11 v3.2 §2.1).** The
+  spec says Cryptoki structures SHALL be packed with 1-byte alignment. Both
+  engines keep natural alignment on purpose, as OpenSC, p11-kit and
+  pkcs11-provider expect on non-Windows platforms; packing would break them.
+  The C++ compliance harness now records a cited XFAIL for each info structure
+  whose size differs from its packed size, and a Rust test pins the current
+  layout so any change is noticed.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
