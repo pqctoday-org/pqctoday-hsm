@@ -556,7 +556,7 @@ run_step_bg "bench-harness compiles (cargo check)" \
 # worktree quietly restaged the hub from an unmerged branch (observed
 # 2026-09-25). A gate must not modify a different repository.
 run_step_bg_host "wasm CACP smoke" \
-  "cd '$ROOT/wasm' && { [ -f pkg_node/pqctoday_kmip_wasm.js ] || NO_STAGE=1 bash '$ROOT/scripts/build-kmip-wasm.sh' --no-stage >/tmp/gate-wasm-pkgnode.log 2>&1; } && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
+  "cd '$ROOT/wasm' && { [ -f pkg_node/pqctoday_kmip_wasm.js ] || NO_STAGE=1 bash '$ROOT/scripts/build-kmip-wasm.sh' --no-stage >'$ROOT/.gate-wasm-pkgnode.log' 2>&1; } && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
 
 # Was a manual-only tool until 2026-08-23 — never wired into any gate,
 # despite being the instrument the 2026-08 remediation added specifically

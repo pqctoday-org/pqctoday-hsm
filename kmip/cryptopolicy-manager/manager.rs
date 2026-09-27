@@ -781,7 +781,7 @@ mod tests {
         "schema_version: 1\nmetadata:\n  name: p\n  description: d\n  authority: a\n  effective: always\nrules: []\n";
 
     fn store_with(tag: &str) -> (PathBuf, PolicyStore) {
-        let dir = std::env::temp_dir().join(format!("pqc-admin-test-{tag}"));
+        let dir = std::env::temp_dir().join(format!("pqc-admin-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("p.yaml"), VALID).unwrap();
@@ -899,7 +899,7 @@ mod tests {
     const SIGNING_MODULE: &str = "schema_version: 3\nmetadata:\n  name: sig\n  description: d\n  authority: a\n  effective: always\n  scopes: [signing]\nrules: []\n";
 
     fn store_with_module(tag: &str) -> (PathBuf, PolicyStore) {
-        let dir = std::env::temp_dir().join(format!("pqc-admin-test-{tag}"));
+        let dir = std::env::temp_dir().join(format!("pqc-admin-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sig.yaml"), SIGNING_MODULE).unwrap();
