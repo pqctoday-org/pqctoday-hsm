@@ -1290,35 +1290,25 @@ fn aes_gcm_decrypt(
 /// `NISTKeyWrap`) wrap the TTLV-encoded KeyValue, which is 8-aligned
 /// by construction (TTLV §9.6 pads every frame to 8 bytes).
 pub fn aes_key_wrap(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if plaintext.len() % 8 != 0 || plaintext.len() < 16 {
         return Err(CKR_DATA_LEN_RANGE);
     }
-    let mut buf = vec![0u8; plaintext.len() + 8];
-    let ok = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    if ok { Ok(buf) } else { Err(CKR_FUNCTION_FAILED) }
+    crate::crypto::aeskw::kw_wrap(kek, plaintext).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_FUNCTION_FAILED,
+    })
 }
 
 /// AES Key Unwrap (RFC 3394 §2.2.2) — inverse of [`aes_key_wrap`].
 /// Integrity-check failure → `CKR_ENCRYPTED_DATA_INVALID`.
 pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if wrapped.len() % 8 != 0 || wrapped.len() < 24 {
         return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
     }
-    let mut buf = vec![0u8; wrapped.len() - 8];
-    let ok = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    if ok { Ok(buf) } else { Err(CKR_ENCRYPTED_DATA_INVALID) }
+    crate::crypto::aeskw::kw_unwrap(kek, wrapped).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_ENCRYPTED_DATA_INVALID,
+    })
 }
 
 /// AES Key Wrap with Padding (RFC 5649 / `CKM_AES_KEY_WRAP_KWP`) — the
@@ -1330,17 +1320,13 @@ pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
 /// it, hard-rejecting `BlockCipherMode::AESKeyWrapPadding` before ever
 /// reaching the engine.
 pub fn aes_key_wrap_kwp(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if plaintext.is_empty() {
         return Err(CKR_DATA_INVALID);
     }
-    let result = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    result.map_err(|_| CKR_FUNCTION_FAILED)
+    crate::crypto::aeskw::kwp_wrap(kek, plaintext).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_FUNCTION_FAILED,
+    })
 }
 
 /// AES Key Unwrap with Padding (RFC 5649) — inverse of
@@ -1348,17 +1334,13 @@ pub fn aes_key_wrap_kwp(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
 /// the 8-byte semiblock (RFC 5649 §5.18.4); integrity/padding-check
 /// failure → `CKR_WRAPPED_KEY_INVALID`, matching the FFI path exactly.
 pub fn aes_key_unwrap_kwp(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::generic_array::GenericArray;
     if wrapped.len() < 16 || wrapped.len() % 8 != 0 {
         return Err(CKR_WRAPPED_KEY_LEN_RANGE);
     }
-    let result = match kek.len() {
-        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
-        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
-        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
-    };
-    result.map_err(|_| CKR_WRAPPED_KEY_INVALID)
+    crate::crypto::aeskw::kwp_unwrap(kek, wrapped).map_err(|e| match e {
+        crate::crypto::aeskw::KwError::KekLen => CKR_KEY_TYPE_INCONSISTENT,
+        crate::crypto::aeskw::KwError::Failed => CKR_WRAPPED_KEY_INVALID,
+    })
 }
 
 // ── AES-ECB ────────────────────────────────────────────────────────────────
@@ -1369,15 +1351,15 @@ pub fn aes_key_unwrap_kwp(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
 // with `CKR_DATA_LEN_RANGE` to match the spec.
 
 fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{BlockCipherEncrypt, KeyInit};
     if plaintext.is_empty() || plaintext.len() % 16 != 0 {
         return Err(CKR_DATA_LEN_RANGE);
     }
     let mut out = plaintext.to_vec();
-    fn enc<C: BlockEncrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
+    fn enc<C: BlockCipherEncrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
         let cipher = C::new_from_slice(k).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         for block in buf.chunks_exact_mut(16) {
-            cipher.encrypt_block(GenericArray::from_mut_slice(block));
+            cipher.encrypt_block(block.try_into().expect("chunks_exact_mut(16) yields 16-byte blocks"));
         }
         Ok(())
     }
@@ -1390,15 +1372,15 @@ fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
 }
 
 fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{BlockCipherDecrypt, KeyInit};
     if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
         return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
     }
     let mut out = ciphertext.to_vec();
-    fn dec<C: BlockDecrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
+    fn dec<C: BlockCipherDecrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
         let cipher = C::new_from_slice(k).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         for block in buf.chunks_exact_mut(16) {
-            cipher.decrypt_block(GenericArray::from_mut_slice(block));
+            cipher.decrypt_block(block.try_into().expect("chunks_exact_mut(16) yields 16-byte blocks"));
         }
         Ok(())
     }
@@ -1417,7 +1399,7 @@ fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
 // implemented here) for PKCS#7 padding.
 
 fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1430,14 +1412,14 @@ fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, C
             let cipher = cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         32 => {
             let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -1454,7 +1436,7 @@ fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, C
 // layer.
 
 fn aes_cbc_pad_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1467,14 +1449,14 @@ fn aes_cbc_pad_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
             let cipher = cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         32 => {
             let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
+                .encrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(plaintext, &mut out)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
         }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -1483,7 +1465,7 @@ fn aes_cbc_pad_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8
 }
 
 fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1496,7 +1478,7 @@ fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
             let cipher = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?
                 .len()
         }
@@ -1504,7 +1486,7 @@ fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
             let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::Pkcs7>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?
                 .len()
         }
@@ -1571,7 +1553,8 @@ pub(crate) fn chacha20_encrypt_at(
         .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
     match nonce.len() {
         8 => {
-            let mut cipher = chacha20::ChaCha20Legacy::new(key.into(), nonce.into());
+            // Lengths are checked above (key 32, nonce 8), so this cannot fail.
+            let mut cipher = chacha20::ChaCha20Legacy::new_from_slices(key, nonce).map_err(|_| CKR_ARGUMENTS_BAD)?;
             if offset != 0 {
                 cipher.try_seek(offset).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
             }
@@ -1581,7 +1564,8 @@ pub(crate) fn chacha20_encrypt_at(
             // The IETF variant's counter is 32 bits, so the reachable
             // keystream ends at 2^32 blocks; `try_seek` reports the overflow
             // rather than wrapping into another block's keystream.
-            let mut cipher = chacha20::ChaCha20::new(key.into(), nonce.into());
+            // Lengths are checked above (key 32, nonce 12), so this cannot fail.
+            let mut cipher = chacha20::ChaCha20::new_from_slices(key, nonce).map_err(|_| CKR_ARGUMENTS_BAD)?;
             if offset != 0 {
                 cipher.try_seek(offset).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
             }
@@ -1599,13 +1583,13 @@ pub(crate) fn chacha20_poly1305_encrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
     if key.len() != 32 || nonce.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CKR_ARGUMENTS_BAD)?;
     cipher
-        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(&Nonce::try_from(nonce).map_err(|_| CKR_ARGUMENTS_BAD)?, Payload { msg: plaintext, aad })
         .map_err(|_| CKR_FUNCTION_FAILED)
 }
 
@@ -1616,18 +1600,18 @@ pub(crate) fn chacha20_poly1305_decrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
     if key.len() != 32 || nonce.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| CKR_ARGUMENTS_BAD)?;
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(&Nonce::try_from(nonce).map_err(|_| CKR_ARGUMENTS_BAD)?, Payload { msg: ciphertext, aad })
         .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
 }
 
 fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
     if iv.len() != 16 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1640,14 +1624,14 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
             let cipher = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
         }
         32 => {
             let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
                 .map_err(|_| CKR_ARGUMENTS_BAD)?;
             cipher
-                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
+                .decrypt_padded_b2b::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
                 .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
         }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),

@@ -315,6 +315,10 @@ PINNED = {
     "CKM_HPKE_KEM_KEY_PAIR_GEN": (0x80000013, "vendor"),
     "CKM_HPKE": (0x80000014, "vendor"),
     "CKK_HPKE_KEM": (0x80000003, "vendor"),
+    # ECDSA with a caller-supplied nonce k — a deliberate key-recovery
+    # teaching primitive (SECURITY.md). Next free mechanism codepoint after
+    # CKM_HPKE in the priv allocation ledger.
+    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": (0x80000015, "vendor"),
     # CK_HPKE_KDF_TYPE (RFC 9180 §7.2 kdf_id), CK_HPKE_AEAD_TYPE (§7.3
     # aead_id), CK_HPKE_MODE_TYPE (§5.1 mode byte) — small-integer selector
     # enums, not object attributes or standalone codepoints, same category
@@ -725,6 +729,7 @@ VENDOR_PRESENCE = {
     "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": "both",
     "CKM_HPKE_KEM_KEY_PAIR_GEN": "both",
     "CKM_HPKE": "both",
+    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": "both",
 
     # Engine-internal storage. These never cross the PKCS#11 boundary — the
     # Rust engine labels them so in its own source ("Private attribute: stores

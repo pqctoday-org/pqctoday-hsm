@@ -39,6 +39,11 @@ pub const CKR_DOMAIN_PARAMS_INVALID: u32 = 0x0000_0130;
 /// PKCS#11 v3.2 §6.3 — the CKA_EC_PARAMS decoded cleanly and names a curve
 /// this token does not implement (W1/W2/C2, 2026-08-13).
 pub const CKR_CURVE_NOT_SUPPORTED: u32 = 0x0000_0140;
+/// PKCS#11 v3.2 §5.1.6 — "The public key fails a public key validation. For
+/// example, an EC public key fails the public key validation specified in
+/// Section 5.2.2 of [ANSI X9.62]. This error code may be returned by
+/// C_CreateObject, when the public key is created ...".
+pub const CKR_PUBLIC_KEY_INVALID: u32 = 0x0000_01b9;
 /// PKCS#11 v3.2 §5.2 — returned by the NULL-mechanism cancel form of a
 /// `C_*Init` function when the active operation cannot be cancelled (C2).
 pub const CKR_OPERATION_CANCEL_FAILED: u32 = 0x0000_0202;
@@ -764,6 +769,15 @@ pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
 // ck_param::hpke_params.
 pub const CKM_HPKE_KEM_KEY_PAIR_GEN: u32 = 0x8000_0013;
 pub const CKM_HPKE: u32 = 0x8000_0014;
+// ECDSA with a CALLER-SUPPLIED nonce k — a deliberate key-recovery primitive
+// for teaching (SECURITY.md, "Deliberate key-recovery primitive"). Same input
+// as CKM_ECDSA (the caller's digest); pParameter is k itself, big-endian,
+// exactly the curve's order length, 1 <= k < n. Anyone who knows k and one
+// signature recovers the private key: d = r^-1 (s*k - z) mod n. Sign only,
+// single-part, P-256/P-384/P-521. Allocated in the priv vendor ledger
+// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in
+// src/lib/vendor_mechanisms.h.
+pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
 // ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
 // draft's own name and codepoint — no longer a vendor-range stopgap. See
@@ -1170,6 +1184,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // discover them (gap-closure finding E19, 2026-09-25).
     CKM_HPKE_KEM_KEY_PAIR_GEN,
     CKM_HPKE,
+    // Explicit-nonce ECDSA — deliberate key-recovery teaching primitive
+    // (see the constant's comment). Both engines.
+    CKM_PQCTODAY_ECDSA_EXPLICIT_K,
 ];
 
 /// PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization
