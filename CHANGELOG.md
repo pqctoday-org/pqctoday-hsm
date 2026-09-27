@@ -118,6 +118,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so the measured operation is unchanged). Verified by running the full
   matrix against that engine: 262/262 rows, no zero-op points.
 
+- **Rust engine: Ed25519ph and Ed448ph still dropped the context through
+  `C_Sign` and `C_Verify`.** #276 fixed the signing and verifying functions,
+  but the PKCS#11 entry points never passed them the context. The parameter
+  parser read `CK_EDDSA_PARAMS`' context only for `CKM_EDDSA`, and a
+  `phFlag = TRUE` call has already become `CKM_EDDSA_PH` by then. So every
+  pre-hash call signed with an empty context and returned `CKR_OK`. The hub's
+  ACVP harness measured 8 NIST pre-hash cases producing the wrong signature on
+  the wasm engine. Every NIST pre-hash vector in the repository now
+  byte-matches through `C_Sign` and verifies through `C_Verify`, for both
+  `phFlag = TRUE` and `CKM_EDDSA_PH`.
+- **Rust engine: X25519 accepted low-order peer points.** Such a point makes
+  the shared secret all zeros whatever the private key is. RFC 7748 §6.1 says
+  to check for that, and RFC 9180 (HPKE) requires it. X448 already refused
+  these points; X25519 did not, in `C_DeriveKey`, `C_EncapsulateKey`,
+  `C_DecapsulateKey`, HPKE, the X25519MLKEM768 hybrid, or the KMIP key
+  agreement. All ten call sites now refuse a non-contributory result with the
+  code their X448 counterpart already returns.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a

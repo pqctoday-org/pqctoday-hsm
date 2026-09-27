@@ -4998,7 +4998,12 @@ fn C_EncapsulateKey_impl(
                         };
                         let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
                         let eph_pub = x25519_dalek::PublicKey::from(&eph);
-                        let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+                        // Low-order peer point → all-zero secret; refused
+                        // like the X448 arm below (RFC 7748 §6.1).
+                        let ss = match crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer))) {
+                            Some(ss) => ss,
+                            None => return CKR_ARGUMENTS_BAD,
+                        };
                         (eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec())
                     }
                     CURVE_X448 => {
@@ -5490,10 +5495,14 @@ fn C_DecapsulateKey_impl(
                         Ok(v) => v,
                         Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
                     };
-                    x25519_dalek::StaticSecret::from(sk)
-                        .diffie_hellman(&x25519_dalek::PublicKey::from(peer))
-                        .as_bytes()
-                        .to_vec()
+                    // Low-order ciphertext point → all-zero secret; refused
+                    // like the X448 arm below (RFC 7748 §6.1).
+                    match crate::crypto::handlers::x25519_contributory(
+                        x25519_dalek::StaticSecret::from(sk).diffie_hellman(&x25519_dalek::PublicKey::from(peer)),
+                    ) {
+                        Some(ss) => ss.as_bytes().to_vec(),
+                        None => return CKR_ENCRYPTED_DATA_INVALID,
+                    }
                 }
                 CURVE_X448 => {
                     let sk: [u8; 56] = match scalar.as_slice().try_into() {
@@ -7385,11 +7394,17 @@ unsafe fn parse_sign_mech_params(
         // error either way.
         return parse_sign_additional_ctx(p_mechanism);
     }
-    if mech_type == CKM_EDDSA {
+    if mech_type == CKM_EDDSA || mech_type == CKM_EDDSA_PH {
         // CK_EDDSA_PARAMS (v3.2 §6.3.7) — `phFlag` was already consumed by
         // `eddsa_ph_flag` before this function was ever called (a `true`
-        // phFlag remaps `mech_type` to CKM_EDDSA_PH upstream, so a call
-        // reaching this branch always has phFlag=false). What's left,
+        // phFlag remaps `mech_type` to CKM_EDDSA_PH upstream). The context
+        // is read for BOTH: Ed25519ph/Ed448ph bind it into the dom2/dom4
+        // prefix exactly as Ed25519ctx does. Until 2026-09-27 this branch
+        // matched CKM_EDDSA only, so every pre-hash call — phFlag = TRUE or
+        // the vendor CKM_EDDSA_PH — reached sign_eddsa_ph/verify_eddsa_ph
+        // with an EMPTY context even after #276 fixed those handlers; the
+        // hub's ACVP harness measured 8 NIST preHash cases "differs"
+        // (eddsa_ph_context_ffi_tests). What's left,
         // `ulContextDataLen`/`pContextData`, was previously read NOWHERE:
         // this function had no CKM_EDDSA branch at all and fell through to
         // the `Ok((Vec::new(), false))` default at the bottom, so
@@ -11957,12 +11972,14 @@ pub fn C_DeriveKey(
                         let sk = x25519_dalek::StaticSecret::from(sk_arr);
                         let mut pk_arr = [0u8; 32];
                         pk_arr.copy_from_slice(peer_pk_bytes);
-                        let result = sk
-                            .diffie_hellman(&x25519_dalek::PublicKey::from(pk_arr))
-                            .as_bytes()
-                            .to_vec();
+                        let shared = crate::crypto::handlers::x25519_contributory(sk.diffie_hellman(&x25519_dalek::PublicKey::from(pk_arr)));
                         pk_arr.zeroize();
-                        result
+                        // Low-order peer point → all-zero secret; refused with
+                        // the X448 arm's code (RFC 7748 §6.1).
+                        match shared {
+                            Some(ss) => ss.as_bytes().to_vec(),
+                            None => return CKR_ARGUMENTS_BAD,
+                        }
                     }
                     (ALGO_ECDH_X448, _) => {
                         // X448 Diffie-Hellman (PKCS#11 v3.2 §6.7, RFC 7748 §6.2)
@@ -24085,6 +24102,62 @@ mod ecdh_cofactor_ffi_tests {
         assert_eq!(rv, CKR_KEY_TYPE_INCONSISTENT, "cofactor mode is not valid for CKK_EC_MONTGOMERY (Table 79)");
     }
 
+    /// X25519 low-order peer points (the set libsodium and RFC 7748 §6.1's
+    /// "check for the all-zero value" guard against): each forces the shared
+    /// secret to all zeros whatever our private key is. u = 0, u = 1, the two
+    /// order-8 points, and p − 1, p, p + 1 (the last two reduce to 0 and 1).
+    pub(super) const X25519_LOW_ORDER: [&str; 7] = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    ];
+
+    pub(super) fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// RFC 7748 §6.1: a low-order peer point makes the X25519 output all
+    /// zeros, and "the check for the all-zero value results in failure". The
+    /// X448 arm of this same C_DeriveKey branch already refused a low-order
+    /// point (x448::PublicKey::from_bytes returns None) with
+    /// CKR_ARGUMENTS_BAD; the X25519 arm derived a key from 32 zero bytes and
+    /// returned CKR_OK (register row rust-no-contributory-behaviour-check-ecdh).
+    #[test]
+    fn x25519_derive_refuses_a_low_order_peer_point() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_x25519_keypair(session, b"lo", "lo").unwrap();
+        for hex in X25519_LOW_ORDER {
+            let peer_pub = unhex(hex);
+            let (mut m, mut params) = ecdh_mech(CKM_ECDH1_DERIVE, &peer_pub);
+            m[1] = params.as_mut_ptr() as usize;
+            let class: u32 = CKO_SECRET_KEY;
+            let key_type: u32 = CKK_GENERIC_SECRET;
+            let extractable: u8 = 1; // CK_TRUE
+            let value_len: u32 = 32;
+            let mut tmpl: [usize; 12] = [
+                CKA_CLASS as usize, &class as *const u32 as usize, std::mem::size_of::<u32>(),
+                CKA_KEY_TYPE as usize, &key_type as *const u32 as usize, std::mem::size_of::<u32>(),
+                CKA_EXTRACTABLE as usize, &extractable as *const u8 as usize, std::mem::size_of::<u8>(),
+                CKA_VALUE_LEN as usize, &value_len as *const u32 as usize, std::mem::size_of::<u32>(),
+            ];
+            let mut key_handle: u32 = 0;
+            let rv = C_DeriveKey(
+                session,
+                m.as_mut_ptr() as *mut u8,
+                priv_a,
+                tmpl.as_mut_ptr() as *mut u8,
+                4,
+                &mut key_handle,
+            );
+            assert_eq!(rv, CKR_ARGUMENTS_BAD, "low-order X25519 peer point {hex} must be refused");
+        }
+    }
+
     #[test]
     fn standard_derive_still_works_for_x25519_key() {
         // Regression guard: the new gate must not have broken the valid,
@@ -28278,5 +28351,142 @@ mod ec_public_key_validation_tests {
         assert_eq!(verdict(&a), Ok(()));
         let b = template(CKK_RSA, OID_ED25519, vec![0u8; 5]);
         assert_eq!(verdict(&b), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod eddsa_ph_context_ffi_tests {
+    //! Ed25519ph / Ed448ph with a context, end to end through C_SignInit /
+    //! C_Sign and C_VerifyInit / C_Verify. #276 made sign_eddsa_ph and
+    //! verify_eddsa_ph bind the context and pinned that with a handler-level
+    //! test, but the context never reached them from the PKCS#11 entry points:
+    //! parse_sign_mech_params read CK_EDDSA_PARAMS' context only when
+    //! mech_type == CKM_EDDSA, and a phFlag = TRUE call has already been
+    //! remapped to CKM_EDDSA_PH by then. So C_Sign produced Ed25519ph/Ed448ph
+    //! with an EMPTY context and returned CKR_OK — measured by the hub's ACVP
+    //! harness on the wasm engine as 8 NIST EDDSA-SigGen-1.0 preHash cases
+    //! "differs" (register row rust-eddsa-ph-context-ignored).
+    //!
+    //! Every pre-hash test in tests/acvp/eddsa_test.json and
+    //! eddsa_ed448_test.json runs here, through both ways a caller selects
+    //! pre-hash: CKM_EDDSA with phFlag = TRUE, and the vendor CKM_EDDSA_PH.
+    use super::*;
+    use crate::native::test_lock;
+
+    const OID_ED25519: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+    const OID_ED448: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x71];
+
+    /// PKCS#11 v3.2 §6.3.7 CK_EDDSA_PARAMS at native layout.
+    #[repr(C)]
+    struct CkEddsaParams {
+        ph_flag: u8,
+        ul_context_data_len: usize,
+        p_context_data: *const u8,
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    fn setup() -> u32 {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "eddsa-ph-ctx-test")
+                .unwrap();
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        session
+    }
+
+    fn create(session: u32, attrs: &[(u32, *const u8, usize)]) -> u32 {
+        let tmpl: Vec<usize> =
+            attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+        let mut h = 0u32;
+        assert_eq!(
+            C_CreateObject(session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h),
+            CKR_OK
+        );
+        h
+    }
+
+    fn ed_key(session: u32, class: u32, oid: &[u8], value_attr: u32, value: &[u8]) -> u32 {
+        let (class, kt) = (class as usize, CKK_EC_EDWARDS as usize);
+        let us = std::mem::size_of::<usize>();
+        let usage = if class == CKO_PRIVATE_KEY as usize { CKA_SIGN } else { CKA_VERIFY };
+        create(
+            session,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, us),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, us),
+                (CKA_TOKEN, [0u8].as_ptr(), 1),
+                (usage, [1u8].as_ptr(), 1),
+                (CKA_EC_PARAMS, oid.as_ptr(), oid.len()),
+                (value_attr, value.as_ptr(), value.len()),
+            ],
+        )
+    }
+
+    #[test]
+    fn nist_prehash_vectors_with_context_byte_match_through_c_sign() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let mut checked = 0usize;
+        for (json, oid) in [
+            (include_str!("../../tests/acvp/eddsa_test.json"), OID_ED25519),
+            (include_str!("../../tests/acvp/eddsa_ed448_test.json"), OID_ED448),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+            for set in v["vectorSets"].as_array().expect("vectorSets") {
+                let scheme = set["scheme"].as_str().unwrap_or("");
+                if !scheme.ends_with("ph") {
+                    continue;
+                }
+                for t in set["tests"].as_array().expect("tests") {
+                    let id = t["id"].as_str().unwrap_or("?");
+                    let d = unhex(t["d"].as_str().expect("d"));
+                    let q = unhex(t["q"].as_str().expect("q"));
+                    let msg = unhex(t["message"].as_str().expect("message"));
+                    let ctx = unhex(t["context"].as_str().unwrap_or(""));
+                    let want = unhex(t["signature"].as_str().expect("signature"));
+                    let h_priv = ed_key(session, CKO_PRIVATE_KEY, oid, CKA_VALUE, &d);
+                    let h_pub = ed_key(session, CKO_PUBLIC_KEY, oid, CKA_EC_POINT, &q);
+                    let params = CkEddsaParams {
+                        ph_flag: 1,
+                        ul_context_data_len: ctx.len(),
+                        p_context_data: if ctx.is_empty() { std::ptr::null() } else { ctx.as_ptr() },
+                    };
+                    for mech in [CKM_EDDSA, CKM_EDDSA_PH] {
+                        let mut m: [usize; 3] = [
+                            mech as usize,
+                            &params as *const CkEddsaParams as usize,
+                            std::mem::size_of::<CkEddsaParams>(),
+                        ];
+                        assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, h_priv), CKR_OK);
+                        let mut sig = vec![0u8; 114];
+                        let mut len = sig.len() as u32;
+                        assert_eq!(
+                            C_Sign(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut len),
+                            CKR_OK,
+                            "{scheme} {id} mech {mech:#x}: C_Sign"
+                        );
+                        sig.truncate(len as usize);
+                        assert_eq!(
+                            sig, want,
+                            "{scheme} {id} mech {mech:#x}: C_Sign does not match NIST with a {}-byte context",
+                            ctx.len()
+                        );
+                        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, h_pub), CKR_OK);
+                        assert_eq!(
+                            C_Verify(session, msg.as_ptr() as *mut u8, msg.len() as u32, want.as_ptr() as *mut u8, want.len() as u32),
+                            CKR_OK,
+                            "{scheme} {id} mech {mech:#x}: C_Verify rejects NIST's signature"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 20, "expected the NIST pre-hash vectors, ran {checked}");
     }
 }

@@ -65,6 +65,21 @@ pub const CURVE_UNSUPPORTED: u32 = u32::MAX;
 /// this engine does not implement — `CKR_CURVE_NOT_SUPPORTED`. The
 /// implicitCA form (`NULL`, tag `0x05`) is forbidden outright and is
 /// reported as an invalid representation.
+/// RFC 7748 §6.1: X25519 with a low-order peer point yields the all-zero
+/// shared secret whatever our private key is, and "the check for the all-zero
+/// value results in failure"; RFC 9180 §7.1.4 makes that check a MUST for
+/// DHKEM(X25519). `None` for a non-contributory result, so every X25519 call
+/// site refuses it the way its X448 sibling already refuses a low-order point
+/// (the x448 crate returns `None` from `PublicKey::from_bytes` / `x448()`).
+/// Register row rust-no-contributory-behaviour-check-ecdh.
+pub fn x25519_contributory(ss: x25519_dalek::SharedSecret) -> Option<x25519_dalek::SharedSecret> {
+    if ss.was_contributory() {
+        Some(ss)
+    } else {
+        None
+    }
+}
+
 pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
     use crate::constants::{CKR_CURVE_NOT_SUPPORTED, CKR_DOMAIN_PARAMS_INVALID};
     if params.len() < 2 {
@@ -4751,4 +4766,43 @@ cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac956
         assert!(crate::crypto::awslc::rsa_generate(2560).is_none());
     }
 
+}
+
+#[cfg(test)]
+mod x25519_contributory_tests {
+    use super::x25519_contributory;
+
+    fn unhex32(s: &str) -> [u8; 32] {
+        let v: Vec<u8> = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect();
+        v.try_into().unwrap()
+    }
+
+    /// Every RFC 7748 / libsodium low-order u-coordinate is refused; RFC 7748
+    /// §6.1's own Alice/Bob exchange (a contributory result) is not.
+    #[test]
+    fn low_order_points_are_refused_and_rfc7748_exchange_is_not() {
+        let sk = x25519_dalek::StaticSecret::from(unhex32(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+        ));
+        for u in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ] {
+            let ss = sk.diffie_hellman(&x25519_dalek::PublicKey::from(unhex32(u)));
+            assert!(x25519_contributory(ss).is_none(), "low-order u {u} must be refused");
+        }
+        // RFC 7748 §6.1: Alice's private key with Bob's public key.
+        let bob = unhex32("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let ss = x25519_contributory(sk.diffie_hellman(&x25519_dalek::PublicKey::from(bob)))
+            .expect("a genuine exchange is contributory");
+        assert_eq!(
+            ss.as_bytes(),
+            &unhex32("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        );
+    }
 }
