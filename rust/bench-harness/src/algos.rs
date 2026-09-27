@@ -231,14 +231,15 @@ pub const SLH_DSA_SHAKE_256F: SignatureAlgo = SignatureAlgo {
 };
 
 /// RSA-PSS signing — added per the hub's Transition Guide (RSA is the
-/// classical algorithm referenced most, absent from this harness until
-/// now). PSS needs no `CK_RSA_PKCS_PSS_PARAMS` at sign/verify time:
-/// confirmed against `ffi.rs`'s dispatch that absent params fall back to
-/// sane legacy defaults ("Absent params keep legacy defaults") — the
-/// existing `sign_init`/`sign`/`verify_init`/`verify` wrappers (which
-/// always pass null mechanism parameters) work unchanged, no new
-/// params-struct plumbing needed. Key sizes/levels match the hub guide's
-/// own RSA-PSS rows (2048->L1, 3072->L3, 4096->L5).
+/// classical algorithm referenced most). The hash-specific PSS mechanisms
+/// REQUIRE a `CK_RSA_PKCS_PSS_PARAMS` (v3.2 §6.1.11); `pkcs11.rs::
+/// sig_mechanism` supplies it (hashAlg/mgf matching the mechanism's digest,
+/// sLen = digest length). This comment used to say the struct was optional
+/// because the engine fell back to defaults when it was absent — true until
+/// conformance decision E9/D6 (2026-09-25) made the engine enforce the spec,
+/// at which point every RSA-PSS provisioning failed with rv=0x71. Key
+/// sizes/levels match the hub guide's own RSA-PSS rows (2048->L1, 3072->L3,
+/// 4096->L5).
 pub const RSA_PSS_2048: SignatureAlgo = SignatureAlgo {
     name: "RSA-PSS-2048", security_level: "L1",
     keygen_mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN, keygen_param: KeygenParam::RsaModulusBits(2048),
