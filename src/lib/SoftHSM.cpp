@@ -229,6 +229,7 @@ static bool mechanismFixedKeyType(CK_MECHANISM_TYPE mech, CK_KEY_TYPE& out)
 		case CKM_ECDSA_SHA3_256:
 		case CKM_ECDSA_SHA3_384:
 		case CKM_ECDSA_SHA3_512:
+		case CKM_PQCTODAY_ECDSA_EXPLICIT_K:
 			out = CKK_EC;
 			return true;
 		case CKM_EDDSA:
