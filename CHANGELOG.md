@@ -10,6 +10,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Both engines (behaviour change): BIP32 output keys.**
+  - A child derive now stays on its parent's curve. A template naming another
+    curve (say P-256 on a secp256k1 parent) used to derive on the template's
+    curve and return `CKR_OK`; it is now `CKR_TEMPLATE_INCONSISTENT`.
+  - SLIP-10 Ed25519 nodes are now `CKK_EC_EDWARDS` keys that sign with
+    `CKM_EDDSA`. They used to be `CKK_EC`, which `CKM_EDDSA` refuses. The
+    hub's BIP32 wrapper already asked for `CKK_EC_EDWARDS`; the engines
+    overrode it.
+
+- **Rust engine (behaviour change): the bare BIP32 codes `0x105B`/`0x105C` are
+  no longer accepted.** They were silent aliases of the vendor
+  `CKM_BIP32_MASTER_DERIVE`/`CKM_BIP32_CHILD_DERIVE` (`0x8000105B`/`0x8000105C`),
+  never advertised, and sit in space OASIS reserves for future mechanisms.
+  `C_DeriveKey` now answers `CKR_MECHANISM_INVALID` for them, as the C++
+  engine always has. Derived keys no longer carry a second copy of the chain
+  code under the bare attribute ID `0x1021`. No known caller used either form.
+
 - **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
   the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
   flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
@@ -187,6 +204,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   caller's context was also dropped, so the signature was made with an empty
   one. Both are now honoured, through `C_Sign` and `C_SignMessage`. The
   hash-specific `CKM_HASH_*_<hash>` mechanisms were not affected.
+
+- **Rust engine: KMIP key agreement ran every 32-byte EC key as P-256.** The
+  curve was guessed from the private key's length, so a secp256k1 key failed
+  with `CKR_ARGUMENTS_BAD` over KMIP, although `C_DeriveKey` handled it. The
+  key's stored curve is now used.
+
+- **C++ engine: no BIP32-derived key could sign.** Derived nodes stored
+  `CKA_EC_PARAMS` unencrypted while the signing path decrypts it for private
+  keys, so `C_SignInit` answered `CKR_GENERAL_ERROR` for every BIP32 key. A
+  secp256k1 child now signs with `CKM_ECDSA`, and the SLIP-10 Ed25519 child
+  m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
+  published in SLIP-10 test vector 1.
 
 ### Added
 
