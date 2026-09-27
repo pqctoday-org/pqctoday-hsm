@@ -255,6 +255,16 @@
       "citation": "PKCS#11 v3.2 §5.4.4 C_GetMechanismInfo / CK_MECHANISM_INFO: ulMinKeySize and ulMaxKeySize are “the minimum/maximum size of the key” for the mechanism, stated in units that depend on the mechanism. No profile constrains the range, and Profiles v3.2 §5.1 requires no mechanism at all, so the supported range is a product decision."
     },
     {
+      "id": "LEGAL-EC-CURVENAME-WEIERSTRASS",
+      "status": "legal",
+      "scenario": "env.mechanism_info_all",
+      "path": "mi.*.ec_flags",
+      "cpp": "F_P+OID+UNCOMPRESS",
+      "rust": "F_P+OID+CURVENAME+UNCOMPRESS",
+      "justification": "On the Weierstrass-curve mechanisms both engines implement (EC key pair generation, the ECDSA family, ECDH1 and cofactor ECDH1, CKM_PQCTODAY_ECDSA_EXPLICIT_K) the Rust engine sets CKF_EC_CURVENAME and the C++ engine does not. Both are accurate. Rust's decode_ec_params accepts the curveName CHOICE arm (a PrintableString such as 'prime256v1') as well as the oID arm; the C++ engine maps a curveName only for the Edwards and Montgomery curves (OSSLUtil.cpp) and refuses one for a Weierstrass curve. The flag is a statement about what the library accepts, so each engine reporting its own acceptance is what the rule asks for. MATCHES EXACT VALUES ONLY: both engines must still report F_P, OID and UNCOMPRESS, and nothing else, for the difference to be excused; any other EC-flag difference on these mechanisms (or a missing flag set, '<none>') still fails. Non-EC capability flags are recorded separately under mi.*.flags and are not covered. Added 2026-09-27 with the harness widening that first recorded CKF_EC_* (plan 1.4), in the same change that gave the C++ Edwards/Montgomery mechanisms their EC flags, which previously were absent entirely.",
+      "citation": "PKCS#11 v3.2 §6.3, Table 63 (Mechanism Information Flags) and the text after it: \"the CKF_EC_CURVENAME flag identifies a Cryptoki library supporting the curveName choice. A Cryptoki library that can perform EC mechanisms must set the appropriate flag(s) for each EC mechanism.\" Supporting curveName is not required; setting the flag that matches what the library supports is. (Lowercase 'must': advisory under §1's key-words clause.)"
+    },
+    {
       "id": "LEGAL-RSA-X509-CAPABILITY-DIFFERENCE",
       "status": "legal",
       "scenario": "env.mechanism_info_all",
