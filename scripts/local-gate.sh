@@ -19,6 +19,8 @@
 #   8. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
 #   9. cross-engine PKCS#11 differential harness (every scenario vs exceptions.json)
 #  10. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
+#      (--cpp also runs the ACVP harness's C++ half + cross-engine checks, C++
+#      engine built to wasm in a digest-pinned emsdk image — plan 2.E)
 #  11. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
 #  12. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
 #  13. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
@@ -651,6 +653,21 @@ run_step "ACVP harness wasm build (Rust, release, 8 MiB stack, acvp feature)" \
   "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=8388608' /cargo-target/release/wasm-pack build --release --target bundler --out-dir pkg-acvp -- --features acvp >/dev/null 2>&1"
 run_step_host "ACVP wasm harness — Rust engine only (C++ WASM half not exercised)" \
   "cd '$ROOT' && (test -d node_modules/asn1js || npm ci --silent --no-audit --no-fund) && mkdir -p wasm/rust && cp rust/pkg-acvp/softhsmrustv3_bg.js rust/pkg-acvp/softhsmrustv3_bg.wasm wasm/rust/ && node tests/acvp-wasm.mjs --engine=rust 2>&1 | tail -60"
+
+# Plan item 2.E (2026-09-27): the C++ half of the same harness, plus the
+# cross-engine checks (HSS, ML-DSA, SLH-DSA, ML-KEM: signed/encapsulated by one
+# engine, verified/decapsulated by the other) that only run with
+# --engine=both. The C++ engine is built to wasm by the existing
+# scripts/build-wasm.sh inside the official Emscripten image PINNED BY DIGEST
+# (emsdk 6.0.10, arm64) — nothing is installed on the host or in
+# $RUST_CONTAINER. OpenSSL-for-wasm is cached in the worktree (deps/, first
+# run only); the engine build is incremental. The build log is kept in the
+# worktree. --cpp only: it is the C++ lane.
+EMSDK_IMAGE="emscripten/emsdk@sha256:e077d54e2b8970575ebc4f185ac1de0b95c05f2b266134d4ba27449af7aebf65"
+if [[ $RUN_CPP == 1 ]]; then
+  run_step_host "ACVP wasm harness — C++ engine + cross-engine checks (--engine=both)" \
+    "cd '$ROOT' && docker run --rm -v '$ROOT:/src' -w /src --entrypoint bash $EMSDK_IMAGE scripts/build-wasm.sh >'$ROOT/.gate-wasm-cpp-build.log' 2>&1 && test -s wasm/softhsm.wasm && node tests/acvp-wasm.mjs --engine=both 2>&1 | tail -40"
+fi
 
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and

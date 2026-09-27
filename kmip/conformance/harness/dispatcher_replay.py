@@ -1061,7 +1061,9 @@ def start_server(port: int | None = None, extra_args: list[str] | None = None) -
         # not, which is the point of the flag.
         proc = subprocess.Popen(
             [str(SERVER_BINARY), "--listen", f"127.0.0.1:{p}", "--store-memory",
-             "--enable-interop", *_profile_args, *(extra_args or [])],
+            # --no-auto-composite: composite-key plan §7.1 — the corpus was
+            # recorded against one managed object per Create; keep it that way.
+            "--enable-interop", "--no-auto-composite", *_profile_args, *(extra_args or [])],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,

@@ -20,7 +20,7 @@ use crate::error::{KmipError, Result, ResultReason};
 use crate::kmip30::{DecapsulateRequest, DecapsulateResponse, PkcsOp, State};
 
 use super::deps::Deps;
-use super::encapsulate::{is_classic_mceliece, is_classical_kem, is_frodokem, is_ml_kem, store_shared_secret};
+use super::encapsulate::{is_classic_mceliece, is_classical_kem, is_frodokem, is_ml_kem, store_shared_secret, SsMaterial};
 use super::helpers::{authorize_object, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err, state_name};
 
 pub fn decapsulate(
@@ -144,6 +144,13 @@ pub fn decapsulate(
     // per the algorithm's order through the derive machinery. The private key
     // material never enters this layer (that is the non-extractability fix);
     // ML-KEM implicit rejection is preserved inside the engine.
+    // WP 0.4 (G-20/G-26) — see encapsulate.rs: request Attributes shape the
+    // recovered shared-secret object; the secret is registered in the engine.
+    let x = super::register_import_export::extract_attrs(&req.attributes);
+    let ss_cka_id = uuid::Uuid::new_v4().as_bytes().to_vec();
+    let ss_extractable = x.extractable.unwrap_or(true);
+    let ss_sensitive = x.sensitive.unwrap_or(false);
+
     if let Some(hybrid) = obj.algorithm.hybrid_kem() {
         let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok().ok_or_else(|| {
             KmipError::failed(
@@ -171,12 +178,16 @@ pub fn decapsulate(
         )
         .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find-classical"))?
         .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-        let shared_secret = softhsmrustv3::native::hybrid::decapsulate(
+        let _ss_handle = softhsmrustv3::native::hybrid::decapsulate_to_handle(
             session,
             hybrid,
             mlkem_priv,
             classical_priv,
             &req.data,
+            &ss_cka_id,
+            "kmip-kem-ss",
+            ss_extractable,
+            ss_sensitive,
         )
         .map_err(|rv| {
             fail_err(
@@ -187,12 +198,14 @@ pub fn decapsulate(
             )
         })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_decapsulate", None, 0, "CKR_OK");
-        let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret, auth)?;
+        let ss_uid = store_shared_secret(
+            deps, obj.algorithm, SsMaterial::Engine { cka_id: ss_cka_id.clone() }, &x, auth,
+        )?;
         emit_success(deps, correlation_id, "Decapsulate");
         return Ok(DecapsulateResponse { uid: ss_uid });
     }
 
-    let shared_secret = match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
+    let ss_material: SsMaterial = match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         Some(session) => {
             // Resolve by PKCS#11 class: Decapsulate needs the PRIVATE key, but
             // a CreateKeyPair pair shares one CKA_ID across both halves, so a
@@ -220,9 +233,12 @@ pub fn decapsulate(
                     )
                 })?
             };
-            let r = softhsmrustv3::native::decapsulate(session, handle, native_mech, &req.data);
+            let r = softhsmrustv3::native::decapsulate_to_handle(
+                session, handle, native_mech, &req.data, &ss_cka_id, "kmip-kem-ss", ss_extractable, ss_sensitive,
+            );
             emit_pkcs11_result(deps, correlation_id, "native::decapsulate", Some(native_mech), &r);
-            r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
+            let _ss_handle = r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?;
+            SsMaterial::Engine { cka_id: ss_cka_id.clone() }
         }
         None => {
             // S-2 hardening: no engine session ⇒ fail rather than emit a fake
@@ -249,12 +265,12 @@ pub fn decapsulate(
                     0,
                     "CKR_OK",
                 );
-                placeholder_bytes(&req.uid, &req.data, b"ss", 32)
+                SsMaterial::Bytes(placeholder_bytes(&req.uid, &req.data, b"ss", 32))
             }
         }
     };
 
-    let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret, auth)?;
+    let ss_uid = store_shared_secret(deps, obj.algorithm, ss_material, &x, auth)?;
 
     emit_success(deps, correlation_id, "Decapsulate");
 
@@ -313,6 +329,7 @@ mod tests {
                 uid: "sk".to_string(),
                 data: vec![0u8; 1088],
                 cryptographic_parameters: None,
+                attributes: vec![],
             },
             &AuthContext::open(),
             "t",
@@ -348,6 +365,7 @@ mod tests {
                 uid: "ecdh-sk".to_string(),
                 data: vec![0u8; 65], // SEC1 uncompressed P-256 point length
                 cryptographic_parameters: None,
+                attributes: vec![],
             },
             &AuthContext::open(),
             "t",

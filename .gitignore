@@ -98,6 +98,10 @@ dist/
 wasm/rust/
 .gate-ok-*
 .gate-wasm-pkgnode.log
+.gate-wasm-cpp-build.log
+# C++ engine wasm build (scripts/build-wasm.sh)
+/build-wasm/
+/deps/openssl-wasm/
 build_conf/
 build_union/
 build_union_linux/
