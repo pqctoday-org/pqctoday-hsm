@@ -194,6 +194,7 @@
       "rust_max": 32
     },
     "CKM_AES_KEY_WRAP": {
+      "note": "Accepted limitation (ruling 2026-09-27, gap-closure plan 2.F): wrap/unwrap only. PKCS#11 v3.2 Table 126 (\"AES Key Wrap Mechanisms vs. Functions\") ticks Encrypt & Decrypt and Wrap & Unwrap for this mechanism, and \u00a76.16.3 says \"The mechanisms support only single-part operations, i.e. single part wrapping and unwrapping, and single-part encryption and decryption.\" Both engines implement C_WrapKey/C_UnwrapKey only, and their CK_MECHANISM_INFO flags honestly advertise CKF_WRAP|CKF_UNWRAP without CKF_ENCRYPT|CKF_DECRYPT. No product path uses AES key wrap as a cipher. If a v3.2 conformance claim ever needs the Encrypt/Decrypt column, that is a feature request, not a gap.",
       "value": "0x00002109",
       "cpp": "implemented",
       "rust": "implemented",
@@ -203,6 +204,7 @@
       "rust_max": 32
     },
     "CKM_AES_KEY_WRAP_KWP": {
+      "note": "Accepted limitation (ruling 2026-09-27, gap-closure plan 2.F): wrap/unwrap only. PKCS#11 v3.2 Table 126 (\"AES Key Wrap Mechanisms vs. Functions\") ticks Encrypt & Decrypt and Wrap & Unwrap for this mechanism, and \u00a76.16.3 says \"The mechanisms support only single-part operations, i.e. single part wrapping and unwrapping, and single-part encryption and decryption.\" Both engines implement C_WrapKey/C_UnwrapKey only, and their CK_MECHANISM_INFO flags honestly advertise CKF_WRAP|CKF_UNWRAP without CKF_ENCRYPT|CKF_DECRYPT. No product path uses AES key wrap as a cipher. If a v3.2 conformance claim ever needs the Encrypt/Decrypt column, that is a feature request, not a gap.",
       "value": "0x0000210B",
       "cpp": "implemented",
       "rust": "implemented",
@@ -212,6 +214,7 @@
       "rust_max": 32
     },
     "CKM_AES_KEY_WRAP_PAD": {
+      "note": "Accepted limitation (ruling 2026-09-27, gap-closure plan 2.F): wrap/unwrap only. PKCS#11 v3.2 Table 126 (\"AES Key Wrap Mechanisms vs. Functions\") ticks Encrypt & Decrypt and Wrap & Unwrap for this mechanism, and \u00a76.16.3 says \"The mechanisms support only single-part operations, i.e. single part wrapping and unwrapping, and single-part encryption and decryption.\" Both engines implement C_WrapKey/C_UnwrapKey only, and their CK_MECHANISM_INFO flags honestly advertise CKF_WRAP|CKF_UNWRAP without CKF_ENCRYPT|CKF_DECRYPT. No product path uses AES key wrap as a cipher. If a v3.2 conformance claim ever needs the Encrypt/Decrypt column, that is a feature request, not a gap.",
       "value": "0x0000210A",
       "cpp": "implemented",
       "rust": "implemented",
@@ -918,6 +921,7 @@
       "rust": "excluded-by-scope:legacy-signature-and-kex"
     },
     "CKM_ECDH1_COFACTOR_DERIVE": {
+      "note": "Accepted limitation (ruling 2026-09-27, gap-closure plan 2.F): PKCS#11 v3.2 Table 62 (\"Elliptic Curve Mechanisms vs. Functions\") ticks both Derive and Encapsulate/Decapsulate for CKM_ECDH1_COFACTOR_DERIVE. Both engines implement it for C_DeriveKey only (CKF_DERIVE advertised, no CKF_ENCAPSULATE|CKF_DECAPSULATE); ECDH-as-KEM is provided through CKM_ECDH1_DERIVE. Adding the Encapsulate column would be a feature request, not a gap.",
       "value": "0x00001051",
       "cpp": "implemented",
       "rust": "implemented",
@@ -2744,6 +2748,7 @@
       "rust_max": 64
     },
     "CKM_SP800_108_COUNTER_KDF": {
+      "note": "Recorded behaviour (ruling 2026-09-27, gap-closure plan 2.D, final): PKCS#11 v3.2 Tables 199-201 say of CK_SP800_108_ITERATION_VARIABLE \"This data field type is mandatory.\" (lowercase, so advisory under v3.2's key-words clause). Both engines accept a data-parameter list without it and supply the iteration variable themselves (counter mode: a 32-bit big-endian counter first; feedback/double-pipeline: the chaining value first). Kept accepted on purpose: refusing gains nothing for conformance and could break external callers.",
       "value": "0x000003ac",
       "cpp": "implemented",
       "rust": "implemented",
@@ -2753,6 +2758,7 @@
       "rust_max": 512
     },
     "CKM_SP800_108_DOUBLE_PIPELINE_KDF": {
+      "note": "Recorded behaviour (ruling 2026-09-27, gap-closure plan 2.D, final): PKCS#11 v3.2 Tables 199-201 say of CK_SP800_108_ITERATION_VARIABLE \"This data field type is mandatory.\" (lowercase, so advisory under v3.2's key-words clause). Both engines accept a data-parameter list without it and supply the iteration variable themselves (counter mode: a 32-bit big-endian counter first; feedback/double-pipeline: the chaining value first). Kept accepted on purpose: refusing gains nothing for conformance and could break external callers.",
       "value": "0x000003ae",
       "cpp": "implemented",
       "rust": "implemented",
@@ -2762,6 +2768,7 @@
       "rust_max": 512
     },
     "CKM_SP800_108_FEEDBACK_KDF": {
+      "note": "Recorded behaviour (ruling 2026-09-27, gap-closure plan 2.D, final): PKCS#11 v3.2 Tables 199-201 say of CK_SP800_108_ITERATION_VARIABLE \"This data field type is mandatory.\" (lowercase, so advisory under v3.2's key-words clause). Both engines accept a data-parameter list without it and supply the iteration variable themselves (counter mode: a 32-bit big-endian counter first; feedback/double-pipeline: the chaining value first). Kept accepted on purpose: refusing gains nothing for conformance and could break external callers.",
       "value": "0x000003ad",
       "cpp": "implemented",
       "rust": "implemented",
@@ -3060,7 +3067,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_EDDSA_PH": {
       "value": "engine-extension",
@@ -3076,19 +3083,19 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines. HPKE is a Rust-engine-only feature by design (hsm CLAUDE.md)."
     },
     "CKM_HPKE_KEM_KEY_PAIR_GEN": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines. HPKE is a Rust-engine-only feature by design (hsm CLAUDE.md)."
     },
     "CKM_KECCAK_256": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_KMAC_128": {
       "value": "engine-extension",
@@ -3164,13 +3171,13 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_X25519": {
       "value": "engine-extension",

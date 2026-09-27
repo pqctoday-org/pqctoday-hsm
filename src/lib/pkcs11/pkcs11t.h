@@ -1282,8 +1282,8 @@ typedef CK_ULONG          CK_MECHANISM_TYPE;
 #define CKM_X448                       (CKM_VENDOR_DEFINED | 0x00001059UL)
 
 /* BIP32 HD Derivation Mechanisms.
- * Formerly bare 0x105B/0x105C (OASIS-unassigned); the engine still accepts
- * those values at C_DeriveKey dispatch as deprecated aliases. */
+ * Formerly bare 0x105B/0x105C (OASIS-reserved). Neither engine accepts the
+ * bare values (the Rust engine's dispatch aliases were removed 2026-09-27). */
 #define CKM_BIP32_MASTER_DERIVE        (CKM_VENDOR_DEFINED | 0x0000105BUL)
 #define CKM_BIP32_CHILD_DERIVE         (CKM_VENDOR_DEFINED | 0x0000105CUL)
 

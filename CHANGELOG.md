@@ -10,6 +10,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **RSA C_Decrypt no longer decrypts twice for the two-call idiom.** A NULL
+  `pData` length query on `CKM_RSA_PKCS_OAEP` / `CKM_RSA_PKCS` ran the full
+  private-key operation just to learn the plaintext length, and the real call
+  then ran it again: two private-key operations per decrypt for every caller
+  that follows the §5.2 convention. The query now answers with the modulus length k (§5.2
+  allows an upper bound; the C++ engine already reports k) without touching
+  the private key. Only a well-formed request takes this path (ciphertext of
+  exactly k bytes, key carrying `CKA_MODULUS`); anything else keeps the full
+  path and its error codes. The answer depends on the key alone, so it
+  carries no padding-oracle signal.
+
+- **AES-GCM processes whole blocks instead of single bytes.** `GcmState`
+  (one-shot, multipart and message-based GCM in the Rust engine) produced
+  the CTR keystream one AES block per call and fed GHASH one byte at a time,
+  so once hardware AES made the cipher cheap, that loop set GCM's speed: GCM
+  gained 3–6× from hardware AES on every CPU measured, against 7–13× for CBC.
+  Aligned data now goes through a whole-block path: up to 32 counter blocks
+  per AES call (the backend pipelines them) and one GHASH update per 512-byte
+  batch. Only the bytes before the stream is block-aligned and the final
+  partial block take the byte path. Output is byte-identical: checked against
+  the NIST GCM vectors (all IV lengths), the existing KATs, and a new test
+  comparing every length 0–100 plus multi-batch sizes, in seven chunkings,
+  both directions and both APIs, with the independent `aes-gcm` crate.
+
+- **Both engines (behaviour change): BIP32 output keys.**
+  - A child derive now stays on its parent's curve. A template naming another
+    curve (say P-256 on a secp256k1 parent) used to derive on the template's
+    curve and return `CKR_OK`; it is now `CKR_TEMPLATE_INCONSISTENT`.
+  - SLIP-10 Ed25519 nodes are now `CKK_EC_EDWARDS` keys that sign with
+    `CKM_EDDSA`. They used to be `CKK_EC`, which `CKM_EDDSA` refuses. The
+    hub's BIP32 wrapper already asked for `CKK_EC_EDWARDS`; the engines
+    overrode it.
+
+- **Rust engine (behaviour change): the bare BIP32 codes `0x105B`/`0x105C` are
+  no longer accepted.** They were silent aliases of the vendor
+  `CKM_BIP32_MASTER_DERIVE`/`CKM_BIP32_CHILD_DERIVE` (`0x8000105B`/`0x8000105C`),
+  never advertised, and sit in space OASIS reserves for future mechanisms.
+  `C_DeriveKey` now answers `CKR_MECHANISM_INVALID` for them, as the C++
+  engine always has. Derived keys no longer carry a second copy of the chain
+  code under the bare attribute ID `0x1021`. No known caller used either form.
+
 - **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
   the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
   flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
@@ -59,6 +100,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pins an engine that includes this change.
 
 ### Fixed
+
+- **ChaCha20 kept its start block across a size query.** After a NULL-buffer
+  length query or `CKR_BUFFER_TOO_SMALL`, one-shot `C_Encrypt` / `C_Decrypt`
+  re-armed the operation with block counter 0, so the real call used the wrong
+  keystream block for a `CK_CHACHA20_PARAMS` start counter other than 0.
 
 - **Both engines: imported EC public keys are now validated
   (`CKR_PUBLIC_KEY_INVALID`).**
@@ -187,6 +233,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   caller's context was also dropped, so the signature was made with an empty
   one. Both are now honoured, through `C_Sign` and `C_SignMessage`. The
   hash-specific `CKM_HASH_*_<hash>` mechanisms were not affected.
+
+- **Rust engine: KMIP key agreement ran every 32-byte EC key as P-256.** The
+  curve was guessed from the private key's length, so a secp256k1 key failed
+  with `CKR_ARGUMENTS_BAD` over KMIP, although `C_DeriveKey` handled it. The
+  key's stored curve is now used.
+
+- **C++ engine: no BIP32-derived key could sign.** Derived nodes stored
+  `CKA_EC_PARAMS` unencrypted while the signing path decrypts it for private
+  keys, so `C_SignInit` answered `CKR_GENERAL_ERROR` for every BIP32 key. A
+  secp256k1 child now signs with `CKM_ECDSA`, and the SLIP-10 Ed25519 child
+  m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
+  published in SLIP-10 test vector 1.
+
+- **Rust engine: LMS signatures with a 24-byte hash and Winternitz w=1 were
+  wrong (correctness fix to the vendored `hbs-lms`, `rust/hbs-lms-patched`).**
+  The LMOTS checksum left shift is `ls = 16 − v·w` (RFC 8554 §4.1), which
+  depends on both w and the hash size n, but the crate used the 32-byte values
+  for every hash; it now computes `ls` from the formula. For `LMOTS_SHA256_N24_W1` and `LMOTS_SHAKE_N24_W1` it rejected
+  valid NIST signatures, and signed with the same wrong checksum, so its
+  signatures would not verify anywhere else. All other LMS parameter sets were
+  unaffected. The hub offers only the W4 and W8 variants of the 24-byte sets.
+  All 320 NIST LMS signature-verification cases now pass.
+
+- **Rust engine: SP 800-108 key derivation accepted a repeated DKM length
+  field.** PKCS#11 v3.2 (Tables 199–201) allows at most one
+  `CK_SP800_108_DKM_LENGTH` entry in the data parameters. A request with two
+  was accepted in counter, feedback and double-pipeline mode, and the derived
+  key silently depended on both. `C_DeriveKey` now refuses it with
+  `CKR_MECHANISM_PARAM_INVALID` in all three modes.
+
+- **Rust engine: SP 800-108 feedback and double-pipeline derivation accepted
+  a repeated counter field.** PKCS#11 v3.2 (Tables 200–201) allows at most one
+  `CK_SP800_108_COUNTER` entry. Two were accepted and both were mixed into the
+  derivation. `C_DeriveKey` now refuses the request with
+  `CKR_MECHANISM_PARAM_INVALID`. A single counter field still works as before.
+
+- **Rust engine: unwrapping could create a key of the wrong length for its
+  type.** For example, unwrapping 16 bytes into a `CKK_CHACHA20` key returned
+  `CKR_OK` and made a 128-bit ChaCha20 key, though ChaCha20 keys are always
+  256 bits. PKCS#11 v3.2 §5.18.4 requires `CKR_WRAPPED_KEY_LEN_RANGE` for such
+  a length conflict. `C_UnwrapKey` and `C_UnwrapKeyAuthenticated` now apply
+  the same length rules `C_DeriveKey` already uses (AES 16, 24 or 32 bytes;
+  AES-XTS 32 or 64; ChaCha20 exactly 32; a non-empty value for generic-secret,
+  HKDF and HMAC keys) and refuse anything else with that code. No key object is
+  created on refusal.
 
 ### Added
 
