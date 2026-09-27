@@ -9711,7 +9711,10 @@ pub fn C_Encrypt(
                         aad,
                         tag_bits,
                         multipart: None,
-                        block_counter: 0,
+                        // W7 — keep CKM_CHACHA20's starting block for the retry;
+                        // resetting it to 0 made the real call encrypt from the
+                        // wrong keystream block.
+                        block_counter,
                     },
                 );
             });
@@ -9980,6 +9983,15 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     CKR_OK
 }
 
+
+/// Byte length of an RSA key's modulus (k in RFC 8017), from its stored
+/// CKA_MODULUS with any leading zero bytes ignored. `None` when the object
+/// carries no modulus.
+fn rsa_modulus_len(h_key: u32) -> Option<usize> {
+    let n = get_object_attr_bytes(h_key, CKA_MODULUS)?;
+    Some(n.iter().position(|b| *b != 0).map_or(0, |i| n.len() - i))
+}
+
 #[wasm_bindgen(js_name = _C_Decrypt)]
 pub fn C_Decrypt(
     h_session: u32,
@@ -10024,6 +10036,41 @@ pub fn C_Decrypt(
     // (consistent with C_Encrypt).
     if p_encrypted_data.is_null() && ul_encrypted_data_len > 0 {
         return CKR_ARGUMENTS_BAD;
+    }
+    // RSA size query without the private-key operation. §5.2 lets a
+    // NULL-buffer length query return an upper bound, and an RSA plaintext
+    // is never longer than the modulus, so report k = modulus length (what
+    // the C++ engine reports) instead of decrypting to learn the exact
+    // length. Before this, the two-call idiom cost two private-key
+    // operations per C_Decrypt. Answered only for a well-formed request (a
+    // ciphertext of exactly k bytes, a key carrying CKA_MODULUS); anything
+    // else takes the full path below so its error codes are unchanged. It
+    // also leaks nothing: the answer depends on the key alone, never on
+    // whether the ciphertext unpads.
+    if p_data.is_null()
+        && !pul_data_len.is_null()
+        && matches!(mech_type, CKM_RSA_PKCS_OAEP | CKM_RSA_PKCS)
+    {
+        if let Some(k) = rsa_modulus_len(key_handle) {
+            if k > 0 && ul_encrypted_data_len as usize == k {
+                unsafe { *pul_data_len = k as u32 };
+                DECRYPT_STATE.with(|s| {
+                    s.borrow_mut().insert(
+                        h_session,
+                        EncryptCtx {
+                            mech_type,
+                            key_handle,
+                            iv,
+                            aad,
+                            tag_bits,
+                            multipart: None,
+                            block_counter,
+                        },
+                    );
+                });
+                return CKR_OK;
+            }
+        }
     }
     unsafe {
         let ciphertext: &[u8] = if p_encrypted_data.is_null() {
@@ -10408,7 +10455,10 @@ pub fn C_Decrypt(
                         aad,
                         tag_bits,
                         multipart: None,
-                        block_counter: 0,
+                        // W7 — keep CKM_CHACHA20's starting block for the
+                        // retry; resetting it to 0 made the real call decrypt
+                        // from the wrong keystream block.
+                        block_counter,
                     },
                 );
             });
@@ -17372,6 +17422,154 @@ mod multipart_ffi_tests {
             "an empty post-commit call must stay harmless, not be treated as real post-commit data",
         );
         assert_eq!(zero_len, 0);
+    }
+
+    // ── RSA one-shot C_Decrypt size query (RSA plan L0) ─────────────────────
+
+    /// A real RSA-2048 private key at KEY_HANDLE: PKCS#8 DER as CKA_VALUE and,
+    /// unless `with_modulus` is false, CKA_MODULUS. Returns the public key.
+    fn install_rsa_key(with_modulus: bool) -> rsa::RsaPublicKey {
+        use rsa::pkcs8::EncodePrivateKey;
+        use rsa::traits::PublicKeyParts;
+        crate::state::set_initialized(true);
+        let sk = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).expect("keygen");
+        let pk = rsa::RsaPublicKey::from(&sk);
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, sk.to_pkcs8_der().expect("pkcs8").as_bytes().to_vec());
+            if with_modulus {
+                attrs.insert(CKA_MODULUS, pk.n().to_bytes_be());
+            }
+            o.borrow_mut().insert(KEY_HANDLE, attrs);
+        });
+        pk
+    }
+
+    fn decrypt_size_query(session: u32, ct: &mut [u8]) -> (u32, u32) {
+        let mut need: u32 = 0;
+        let rv = C_Decrypt(session, ct.as_mut_ptr(), ct.len() as u32, std::ptr::null_mut(), &mut need);
+        (rv, need)
+    }
+
+    /// The NULL-buffer query answers from the modulus (k = 256) without the
+    /// private-key operation, keeps the operation alive, and the real call
+    /// then decrypts once into a k-byte buffer.
+    #[test]
+    fn rsa_decrypt_size_query_reports_modulus_length_and_round_trips() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_7001;
+        let pk = install_rsa_key(true);
+        install_session(session);
+        let pt = b"size query must not cost a private-key operation";
+        let mut ct = pk.encrypt(&mut rand::rngs::OsRng, rsa::Pkcs1v15Encrypt, pt).unwrap();
+        seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
+
+        assert_eq!(decrypt_size_query(session, &mut ct), (CKR_OK, 256));
+        // Repeating the query is harmless: the operation is still active.
+        assert_eq!(decrypt_size_query(session, &mut ct), (CKR_OK, 256));
+
+        let mut out = vec![0u8; 256];
+        let mut out_len = out.len() as u32;
+        assert_eq!(
+            C_Decrypt(session, ct.as_mut_ptr(), ct.len() as u32, out.as_mut_ptr(), &mut out_len),
+            CKR_OK
+        );
+        assert_eq!(&out[..out_len as usize], pt);
+        // The real call consumed the operation.
+        assert_eq!(decrypt_size_query(session, &mut ct).0, CKR_OPERATION_NOT_INITIALIZED);
+    }
+
+    /// Proof the query does not decrypt: a k-byte ciphertext that cannot
+    /// unpad still gets CKR_OK and k from the query (before this change it
+    /// got CKR_ENCRYPTED_DATA_INVALID, which only a decrypt can produce), and
+    /// the real call reports the failure.
+    #[test]
+    fn rsa_decrypt_size_query_does_not_run_the_private_key_operation() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_7002;
+        install_rsa_key(true);
+        install_session(session);
+        let mut garbage = vec![0x01u8; 256];
+        seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
+        assert_eq!(decrypt_size_query(session, &mut garbage), (CKR_OK, 256));
+        let mut out = vec![0u8; 256];
+        let mut out_len = out.len() as u32;
+        assert_eq!(
+            C_Decrypt(session, garbage.as_mut_ptr(), 256, out.as_mut_ptr(), &mut out_len),
+            CKR_ENCRYPTED_DATA_INVALID
+        );
+    }
+
+    /// Anything outside the well-formed case takes the old full path, so its
+    /// answers are unchanged: a key without CKA_MODULUS gets the exact
+    /// plaintext length, and a ciphertext shorter than k is still refused by
+    /// the query itself.
+    #[test]
+    fn rsa_decrypt_size_query_falls_back_outside_the_well_formed_case() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_7003;
+        let pk = install_rsa_key(false);
+        install_session(session);
+        let pt = b"no modulus attribute";
+        let mut ct = pk.encrypt(&mut rand::rngs::OsRng, rsa::Pkcs1v15Encrypt, pt).unwrap();
+        seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
+        assert_eq!(decrypt_size_query(session, &mut ct), (CKR_OK, pt.len() as u32));
+        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&session));
+
+        let pk = install_rsa_key(true);
+        let mut short = pk.encrypt(&mut rand::rngs::OsRng, rsa::Pkcs1v15Encrypt, pt).unwrap();
+        short.pop();
+        seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
+        assert_ne!(decrypt_size_query(session, &mut short).0, CKR_OK);
+        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&session));
+    }
+
+    // ── W7 — the ChaCha20 start block survives the §5.2 size query ────────────
+
+    /// Before this fix the size query re-inserted the operation with
+    /// block_counter 0, so the real call ran from keystream block 0 instead
+    /// of the caller's start block. Both directions.
+    #[test]
+    fn chacha20_size_query_keeps_the_start_block_counter() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_7004;
+        let key = [0x42u8; 32];
+        let nonce = [0x07u8; 12];
+        install_aes_key(&key);
+        install_session(session);
+        let pt: Vec<u8> = (0..100u8).collect();
+        let want = crate::native::encrypt::chacha20_encrypt_at(&key, &nonce, &pt, 3).unwrap();
+        for encrypt in [true, false] {
+            let state: &GlobalState<HashMap<u32, EncryptCtx>> =
+                if encrypt { &ENCRYPT_STATE } else { &DECRYPT_STATE };
+            state.borrow_mut().insert(
+                session,
+                EncryptCtx {
+                    mech_type: CKM_CHACHA20,
+                    key_handle: KEY_HANDLE,
+                    iv: nonce.to_vec(),
+                    aad: vec![],
+                    tag_bits: 0,
+                    multipart: None,
+                    block_counter: 3,
+                },
+            );
+            let mut input = if encrypt { pt.clone() } else { want.clone() };
+            let expect = if encrypt { &want } else { &pt };
+            let call = |out: *mut u8, len: &mut u32, input: &mut [u8]| {
+                if encrypt {
+                    C_Encrypt(session, input.as_mut_ptr(), input.len() as u32, out, len)
+                } else {
+                    C_Decrypt(session, input.as_mut_ptr(), input.len() as u32, out, len)
+                }
+            };
+            let mut need = 0u32;
+            assert_eq!(call(std::ptr::null_mut(), &mut need, &mut input), CKR_OK);
+            let mut out = vec![0u8; need as usize];
+            let mut out_len = need;
+            assert_eq!(call(out.as_mut_ptr(), &mut out_len, &mut input), CKR_OK);
+            assert_eq!(&out[..out_len as usize], &expect[..], "encrypt={encrypt}");
+        }
     }
 }
 
