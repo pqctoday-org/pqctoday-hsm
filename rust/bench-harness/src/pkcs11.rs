@@ -26,8 +26,9 @@ use softhsmrustv3::ck_abi::{
 };
 use softhsmrustv3::constants::{
     CKA_EC_PARAMS, CKA_MODULUS_BITS, CKA_PARAMETER_SET, CKA_VALUE_LEN, CKF_RW_SESSION,
-    CKF_SERIAL_SESSION, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM, CKR_OK, CKU_SO,
-    CKU_USER,
+    CKF_SERIAL_SESSION, CKG_MGF1_SHA256, CKG_MGF1_SHA384, CKG_MGF1_SHA512, CKM_AES_CBC,
+    CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM, CKM_SHA256, CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384,
+    CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512, CKM_SHA512_RSA_PKCS_PSS, CKR_OK, CKU_SO, CKU_USER,
 };
 
 use crate::algos::KeygenParam;
@@ -572,12 +573,56 @@ impl Engine {
         }
     }
 
-    pub fn sign_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
-        let mut mech = CK_MECHANISM {
-            mechanism: mechanism as CK_ULONG,
-            pParameter: std::ptr::null_mut(),
-            ulParameterLen: 0,
+    /// Mechanism for `C_SignInit`/`C_VerifyInit`. Every signature mechanism
+    /// this harness uses takes no parameter EXCEPT the hash-specific RSA-PSS
+    /// ones, which carry a `CK_RSA_PKCS_PSS_PARAMS` (v3.2 §6.1.11: they "have
+    /// a parameter, a CK_RSA_PKCS_PSS_PARAMS structure"). The engine enforces
+    /// that since conformance decision E9/D6 (2026-09-25): an absent struct is
+    /// `CKR_MECHANISM_PARAM_INVALID`. Until then it silently fell back to
+    /// defaults, and this harness relied on the fallback — which is how RSA-PSS
+    /// provisioning started failing with rv=0x71 the first time the harness
+    /// ran against an engine carrying the fix (appliance pin d1f74a52).
+    ///
+    /// `hashAlg`/`mgf` must equal the mechanism's own digest (the engine checks
+    /// exactly this pairing, `rsa_pss_mech_params` in `ffi.rs`), and `sLen` is
+    /// the digest length — the conventional PSS salt, and what the old default
+    /// used, so the measured operation is unchanged by this fix. Returned
+    /// boxed alongside the `CK_MECHANISM` that points into it, so the struct
+    /// outlives the FFI call (same shape as `oaep_mechanism`).
+    fn sig_mechanism(mechanism: u32) -> (CK_MECHANISM, Option<Box<CkRsaPkcsPssParams>>) {
+        let pss = match mechanism {
+            CKM_SHA256_RSA_PKCS_PSS => Some((CKM_SHA256, CKG_MGF1_SHA256, 32)),
+            CKM_SHA384_RSA_PKCS_PSS => Some((CKM_SHA384, CKG_MGF1_SHA384, 48)),
+            CKM_SHA512_RSA_PKCS_PSS => Some((CKM_SHA512, CKG_MGF1_SHA512, 64)),
+            _ => None,
         };
+        match pss {
+            Some((hash_alg, mgf, s_len)) => {
+                let mut params = Box::new(CkRsaPkcsPssParams {
+                    hash_alg: hash_alg as CK_ULONG,
+                    mgf: mgf as CK_ULONG,
+                    s_len: s_len as CK_ULONG,
+                });
+                let mech = CK_MECHANISM {
+                    mechanism: mechanism as CK_ULONG,
+                    pParameter: params.as_mut() as *mut CkRsaPkcsPssParams as CK_VOID_PTR,
+                    ulParameterLen: std::mem::size_of::<CkRsaPkcsPssParams>() as CK_ULONG,
+                };
+                (mech, Some(params))
+            }
+            None => (
+                CK_MECHANISM {
+                    mechanism: mechanism as CK_ULONG,
+                    pParameter: std::ptr::null_mut(),
+                    ulParameterLen: 0,
+                },
+                None,
+            ),
+        }
+    }
+
+    pub fn sign_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+        let (mut mech, _params) = Self::sig_mechanism(mechanism);
         ck(unsafe { (self.funcs().C_SignInit)(session, &mut mech, key) }, "C_SignInit")
     }
 
@@ -603,11 +648,7 @@ impl Engine {
     }
 
     pub fn verify_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
-        let mut mech = CK_MECHANISM {
-            mechanism: mechanism as CK_ULONG,
-            pParameter: std::ptr::null_mut(),
-            ulParameterLen: 0,
-        };
+        let (mut mech, _params) = Self::sig_mechanism(mechanism);
         ck(unsafe { (self.funcs().C_VerifyInit)(session, &mut mech, key) }, "C_VerifyInit")
     }
 
@@ -903,6 +944,15 @@ struct CkGcmParams {
     p_aad: CK_VOID_PTR,
     ul_aad_len: CK_ULONG,
     ul_tag_bits: CK_ULONG,
+}
+
+/// `CK_RSA_PKCS_PSS_PARAMS` (§6.1.9) — three NATIVE-width `CK_ULONG` fields
+/// (hashAlg, mgf, sLen), matching the engine's `ck_param::pss::LAYOUT`.
+#[repr(C)]
+struct CkRsaPkcsPssParams {
+    hash_alg: CK_ULONG,
+    mgf: CK_ULONG,
+    s_len: CK_ULONG,
 }
 
 /// `CK_RSA_PKCS_OAEP_PARAMS` (§6.4.4) — `CK_ULONG`/`CK_VOID_PTR` fields are
