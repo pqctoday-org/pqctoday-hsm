@@ -413,6 +413,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::KeyValuePresent(_)        => "KeyValuePresent",
         Attribute::QuantumSafe(_)            => "QuantumSafe",
         Attribute::RotateAutomatic(_)        => "RotateAutomatic",
+        Attribute::RotateLatest(_)           => "RotateLatest",
         Attribute::ShortUniqueIdentifier(_)  => "ShortUniqueIdentifier",
         Attribute::AlternativeName { .. }    => "AlternativeName",
         Attribute::Comment(_)                => "Comment",

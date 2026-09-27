@@ -223,6 +223,10 @@ pub fn create(
         name: x.name.clone(),
         alternative_name: x.alternative_name.clone(),
         alternative_name_type: x.alternative_name_type,
+        rotate_automatic: x.rotate_automatic,
+        rotate_interval: x.rotate_interval,
+        rotate_offset: x.rotate_offset,
+        rotate_name: x.rotate_name.clone(),
         links: std::collections::HashMap::new(),
         // Y1 — persist the request's custom attributes so use-time gates read
         // the classification tag off the stored symmetric key.

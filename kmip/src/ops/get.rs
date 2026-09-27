@@ -27,6 +27,22 @@ use crate::policy::{Decision, PolicyRequest};
 use super::deps::Deps;
 use super::helpers::{authorize_object, canonical_name, emit_pkcs11, emit_request, emit_success, fail_err, state_name};
 
+/// Why the engine withheld an object's CKA_VALUE, as the KMIP reason the
+/// §11 attribute gates would have given had the record known.
+fn withheld_by_engine(obj: &crate::store::ObjectRecord, uid: &str) -> KmipError {
+    if obj.extractable == Some(false) {
+        KmipError::not_extractable(format!("object {uid} is not Extractable"))
+    } else if obj.sensitive == Some(true) {
+        KmipError::sensitive(format!(
+            "object {uid} is Sensitive and held by the engine; it cannot be exported, wrapped or not"
+        ))
+    } else {
+        KmipError::key_value_not_present(format!(
+            "the engine did not release the key material of object {uid}"
+        ))
+    }
+}
+
 pub fn get(
     deps: &Deps,
     req: GetRequest,
@@ -223,9 +239,19 @@ pub fn get(
                 }
                 match bytes {
                     Some(v) => (KeyFormatType::Raw, v),
-                    None => (KeyFormatType::Raw, Vec::new()),
+                    // The engine withheld the value (CKA_SENSITIVE or
+                    // !CKA_EXTRACTABLE on the engine object, or no object).
+                    // This used to answer Success with an EMPTY Key Value —
+                    // and, with a Key Wrapping Specification, a wrapped empty
+                    // value. Fail with the reason instead. Engine-resident
+                    // Sensitive material cannot currently leave the engine
+                    // wrapped either: the AES-KW wrap runs in this crate.
+                    None => return Err(fail_err(deps, correlation_id, "Get",
+                        withheld_by_engine(&obj, &req.uid))),
                 }
             }
+            // No engine session: the unit-test / placeholder build, which
+            // has always answered with an empty Key Value (unchanged here).
             None => (KeyFormatType::Raw, Vec::new()),
         }
     };

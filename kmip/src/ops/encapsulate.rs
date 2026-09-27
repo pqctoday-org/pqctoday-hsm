@@ -117,7 +117,7 @@ pub fn encapsulate(
         &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
-    p_req.state = Some("Active");
+    p_req.state = Some(super::helpers::state_name(obj.state)); // WP 0.6 — real state
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
@@ -149,6 +149,14 @@ pub fn encapsulate(
     // `key_material` — it is public) plus a fresh ephemeral; no private handle.
     // The engine still needs a session because the shared-secret combine runs
     // through the PKCS#11 derive machinery (`run_combiner`).
+    // WP 0.4 (G-20/G-26) — the request's `Attributes` shape the new
+    // shared-secret object; the secret itself is registered INSIDE the engine
+    // under `ss_cka_id` and only the handle comes back (never the bytes).
+    let x = super::register_import_export::extract_attrs(&req.attributes);
+    let ss_cka_id = Uuid::new_v4().as_bytes().to_vec();
+    let ss_extractable = x.extractable.unwrap_or(true);
+    let ss_sensitive = x.sensitive.unwrap_or(false);
+
     if let Some(hybrid) = obj.algorithm.hybrid_kem() {
         let public = obj.key_material.as_deref().ok_or_else(|| {
             KmipError::failed(
@@ -162,7 +170,9 @@ pub fn encapsulate(
                 "hybrid KEM encapsulate requires an engine session".to_string(),
             )
         })?;
-        let enc = softhsmrustv3::native::hybrid::encapsulate(session, hybrid, public).map_err(|rv| {
+        let (enc_ct, _ss_handle) = softhsmrustv3::native::hybrid::encapsulate_to_handle(
+            session, hybrid, public, &ss_cka_id, "kmip-kem-ss", ss_extractable, ss_sensitive,
+        ).map_err(|rv| {
             fail_err(
                 deps,
                 correlation_id,
@@ -171,16 +181,18 @@ pub fn encapsulate(
             )
         })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_encapsulate", None, 0, "CKR_OK");
-        let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret, auth)?;
+        let ss_uid = store_shared_secret(
+            deps, obj.algorithm, SsMaterial::Engine { cka_id: ss_cka_id.clone() }, &x, auth,
+        )?;
         emit_success(deps, correlation_id, "Encapsulate");
-        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext, rekeyed: None });
+        return Ok(EncapsulateResponse { uid: ss_uid, data: enc_ct, rekeyed: None });
     }
 
     // The deterministic coins may arrive hoisted (`input_key_material`)
     // or only nested in CryptographicParameters — prefer the hoisted form.
     let coins = req.input_key_material.clone();
 
-    let (ciphertext, shared_secret) = match session {
+    let (ciphertext, ss_material): (Vec<u8>, SsMaterial) = match session {
         Some(session) => {
             // Resolve the handle by PKCS#11 class: a CreateKeyPair-generated
             // ML-KEM pair stores BOTH halves under one shared CKA_ID, so a
@@ -220,13 +232,17 @@ pub fn encapsulate(
                     )
                 })?
             };
-            match &coins {
+            let (ct, _ss_handle) = match &coins {
                 Some(m) => {
-                    let r = softhsmrustv3::native::encapsulate_deterministic(
+                    let r = softhsmrustv3::native::encapsulate_deterministic_to_handle(
                         session,
                         handle,
                         native_mech,
                         m,
+                        &ss_cka_id,
+                        "kmip-kem-ss",
+                        ss_extractable,
+                        ss_sensitive,
                     );
                     emit_pkcs11_result(
                         deps,
@@ -238,7 +254,9 @@ pub fn encapsulate(
                     r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap"))?
                 }
                 None => {
-                    let r = softhsmrustv3::native::encapsulate(session, handle, native_mech);
+                    let r = softhsmrustv3::native::encapsulate_to_handle(
+                        session, handle, native_mech, &ss_cka_id, "kmip-kem-ss", ss_extractable, ss_sensitive,
+                    );
                     emit_pkcs11_result(
                         deps,
                         correlation_id,
@@ -248,7 +266,8 @@ pub fn encapsulate(
                     );
                     r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap"))?
                 }
-            }
+            };
+            (ct, SsMaterial::Engine { cka_id: ss_cka_id.clone() })
         }
         None => {
             // S-2 hardening: no engine session ⇒ fail rather than emit fake
@@ -275,14 +294,14 @@ pub fn encapsulate(
                 );
                 (
                     placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"encap", 32),
-                    placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"ss", 32),
+                    SsMaterial::Bytes(placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"ss", 32)),
                 )
             }
         }
     };
 
-    // Create the NEW managed SecretData object holding the shared secret.
-    let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret, auth)?;
+    // Create the NEW managed SecretData object for the shared secret.
+    let ss_uid = store_shared_secret(deps, obj.algorithm, ss_material, &x, auth)?;
 
     emit_success(deps, correlation_id, "Encapsulate");
 
@@ -417,6 +436,9 @@ fn rekey_and_encapsulate(
             uid: ckp.public_key_uid.clone(),
             input_key_material: req.input_key_material.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
+            // WP 0.4 — the caller's Attributes for the shared secret still apply
+            // to the re-issued Encapsulate against the replacement key.
+            attributes: req.attributes.clone(),
         },
         auth,
         correlation_id,
@@ -480,15 +502,36 @@ pub(crate) fn is_classic_mceliece(a: KmipAlgorithm) -> bool {
 /// directly (the engine never sees the shared secret as a managed
 /// object — it is opaque KMIP material). Born `Active` so an immediate
 /// `Get` succeeds.
+/// Where a KEM shared secret lives (composite-key plan WP 0.4, G-26).
+pub(crate) enum SsMaterial {
+    /// Test-only placeholder path (no engine session): bytes in the store.
+    Bytes(Vec<u8>),
+    /// Production: an engine-resident generic-secret object under this
+    /// `CKA_ID`; the KMIP layer never held the bytes.
+    Engine { cka_id: Vec<u8> },
+}
+
 pub(crate) fn store_shared_secret(
     deps: &Deps,
     source_algorithm: KmipAlgorithm,
-    shared_secret: Vec<u8>,
+    material: SsMaterial,
+    x: &super::register_import_export::ExtractedAttrs,
     auth: &crate::server::auth::AuthContext,
 ) -> Result<String> {
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
-    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
+    let engine_resident = matches!(material, SsMaterial::Engine { .. });
+    let (key_material, pkcs11_cka_id) = match material {
+        SsMaterial::Bytes(b) => (Some(b), Uuid::new_v4().as_bytes().to_vec()),
+        SsMaterial::Engine { cka_id } => (None, cka_id),
+    };
+    let cka_id_for_cleanup = pkcs11_cka_id.clone();
+    // §6.1.22 Table 317 `Attributes`: an Activation Date at or before now
+    // births the object Active (§4.67 transition 1); with no dates it stays
+    // Pre-Active exactly as before (the OASIS PQC interop KATs Get then
+    // Destroy it, a Pre-Active → Destroyed edge).
+    let initial_state = super::register_import_export::compute_initial_state(now, x);
+    let put = deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: ObjectType::SecretData,
         // The shared secret is opaque bytes; record the source KEM
@@ -505,24 +548,45 @@ pub(crate) fn store_shared_secret(
         // then Destroy it directly; PreActive → Destroyed is a legal FSM
         // edge whereas Active is not (Active would require Revoke first,
         // as the KATs do for the key pair but NOT for the shared secret).
-        state: State::PreActive,
-        pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
+        state: initial_state,
+        pkcs11_cka_id,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: x.activation_date,
+        deactivation_date: x.deactivation_date,
+        process_start_date: x.process_start_date,
+        protect_stop_date: x.protect_stop_date,
+        usage_mask: x.usage.unwrap_or_else(crate::kmip30::UsageMask::empty),
+        name: x.name.clone(),
         last_change_date: Some(now),
         original_creation_date: Some(now),
-        key_material: Some(shared_secret),
+        key_material,
         key_format_type: Some(KeyFormatType::Raw as u32),
         // KMIP 3.0 §6.2 — the ML-KEM shared secret is keying seed
         // material; the OASIS PQC interop KATs serve it back as
         // SecretDataType=Seed (0x02), not the Password default.
         secret_data_type: Some(0x02),
-        extractable: Some(true),
-        sensitive: Some(false),
+        extractable: Some(x.extractable.unwrap_or(true)),
+        sensitive: Some(x.sensitive.unwrap_or(false)),
         fresh: Some(true),
         ..ObjectRecord::default()
-    }, auth))?;
+    }, auth));
+    if let Err(e) = put {
+        // The shared secret already exists in the engine; without its record
+        // nothing could ever reach (or destroy) it. Remove it before failing.
+        if engine_resident {
+            if let Ok(session) = deps.resolve_tenant_session(auth.identity.as_ref()) {
+                if let Ok(Some(h)) = super::helpers::find_handle_for_object(
+                    session,
+                    &cka_id_for_cleanup,
+                    ObjectType::SecretData,
+                ) {
+                    let _ = softhsmrustv3::native::destroy_object(session, h);
+                }
+            }
+        }
+        return Err(e);
+    }
     Ok(uid)
 }
 
@@ -599,6 +663,7 @@ mod tests {
                 uid: "pk".to_string(),
                 input_key_material: Some(vec![0x11; 32]),
                 cryptographic_parameters: None,
+                attributes: vec![],
             },
             &AuthContext::open(),
             "t",

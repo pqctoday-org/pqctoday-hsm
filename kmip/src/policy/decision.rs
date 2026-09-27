@@ -27,8 +27,16 @@ pub enum DenyReason {
     PermissionDenied,
     /// `min_key_length` failed.
     InvalidCryptographicParameters,
-    /// `lifecycle_state_gate` blocked an op against a non-Active object.
+    /// Retained for the Archive semantics (§6.1.4 / `Object Archived` 0x0d).
+    /// No policy rule emits it today: `lifecycle_state_gate` moved to
+    /// [`DenyReason::WrongKeyLifecycleState`] (composite-key plan WP 0.6),
+    /// because the hard-coded op gates already answer the same condition
+    /// with 0x43 and a policy denial for the same state must not differ.
     ObjectArchived,
+    /// `lifecycle_state_gate` blocked an op against an object whose State is
+    /// outside the rule's `allowed_states` — KMIP `Wrong Key Lifecycle State`
+    /// (0x43, §11.48: "The key lifecycle state is invalid for the operation").
+    WrongKeyLifecycleState,
     /// `require_usage_mask` or `require_custom_attribute` failed at Create.
     InvalidAttributeValue,
     /// `max_key_age` exceeded.
@@ -52,6 +60,7 @@ impl DenyReason {
             DenyReason::PermissionDenied => ResultReason::PermissionDenied,
             DenyReason::InvalidCryptographicParameters => ResultReason::BadCryptographicParameters,
             DenyReason::ObjectArchived => ResultReason::ObjectArchived,
+            DenyReason::WrongKeyLifecycleState => ResultReason::WrongKeyLifecycleState,
             DenyReason::InvalidAttributeValue => ResultReason::InvalidAttributeValue,
             // Closest existing spec concept to "this key has aged out":
             // the op requires a usable-for-this-purpose key and this one
@@ -294,6 +303,7 @@ mod tests {
             ResultReason::BadCryptographicParameters
         );
         assert_eq!(DenyReason::ObjectArchived.to_result_reason(), ResultReason::ObjectArchived);
+        assert_eq!(DenyReason::WrongKeyLifecycleState.to_result_reason(), ResultReason::WrongKeyLifecycleState);
         assert_eq!(
             DenyReason::InvalidAttributeValue.to_result_reason(),
             ResultReason::InvalidAttributeValue
