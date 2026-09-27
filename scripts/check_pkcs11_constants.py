@@ -689,6 +689,46 @@ def check_manifest(spec: dict) -> list:
     return errors
 
 
+def check_manifest_vendor(vend: dict, rust: dict) -> list:
+    """The manifest's vendor blocks must mirror what the engines define.
+
+    Added 2026-09-27. `active` / `active_key_types` claimed to mirror the priv
+    allocation authority but nothing read them: they still listed the four
+    FrodoKEM / McEliece mechanisms of 2026-07-06 while the engines had grown
+    to sixteen vendor mechanisms (HPKE, ECDSA_EXPLICIT_K, and the nineteen
+    allocations registered in authority §1.4.2 on 2026-09-23). The authority
+    file itself lives in the private repo, so CI cannot hash it; the engines'
+    own definitions are the public stand-in, and the authority's completeness
+    check (check_completeness above) already ties those back to it.
+    """
+    errors = []
+    if not MANIFEST.exists():
+        return [f"MANIFEST-MISSING  {MANIFEST} not found"]
+    data = json.loads(MANIFEST.read_text())
+    for block, prefix in (("active", "CKM_"), ("active_key_types", "CKK_")):
+        engines = {}
+        for src in (vend, rust):
+            for name, val in src.items():
+                if name.startswith(prefix) and 0x80000000 <= val < 0xFFFFFFFF:
+                    engines[name] = val
+        listed = {
+            e.get("symbol"): int(cp, 16)
+            for cp, e in data.get(block, {}).items() if not cp.startswith("_")
+        }
+        for name, val in sorted(engines.items()):
+            if name not in listed:
+                errors.append(f"MANIFEST-VENDOR  {name} = 0x{val:08x} defined by an "
+                              f"engine but missing from manifest `{block}`")
+            elif listed[name] != val:
+                errors.append(f"MANIFEST-VENDOR  {name}: manifest `{block}`="
+                              f"0x{listed[name]:08x} engines=0x{val:08x}")
+        for name, val in sorted(listed.items()):
+            if name not in engines:
+                errors.append(f"MANIFEST-VENDOR  {name} = 0x{val:08x} in manifest "
+                              f"`{block}` but defined by neither engine")
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # VENDOR_PRESENCE — which sources each vendor allocation MUST appear in.
 #
@@ -836,6 +876,8 @@ def main() -> int:
          check_manifest(spec)),
         ("vendor allocation completeness (present, not just correct)",
          check_completeness(vend, rust)),
+        ("kmip/pkcs11-mech-manifest.json (active vendor blocks vs engines)",
+         check_manifest_vendor(vend, rust)),
     ]
 
     total_errors = 0
