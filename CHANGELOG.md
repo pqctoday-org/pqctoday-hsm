@@ -10,6 +10,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine: RSASSA-PSS signing uses AWS-LC for the default parameters.**
+  `CKM_SHA256/384/512_RSA_PKCS_PSS` with the PKCS#11 default salt (sLen =
+  digest length; MGF1 is always the mechanism's hash) now sign through AWS-LC
+  instead of the `rsa` crate, so PSS signing gets AWS-LC's speed and, on
+  Cortex-A53/A55, the vendored Montgomery kernel choice. Every other salt
+  length, bare `CKM_RSA_PKCS_PSS` and the SHA-1/224/SHA-3 PSS variants keep the
+  pure-Rust signer unchanged. Verification is unchanged (pure Rust; sLen as
+  given, or hash length and the maximum when omitted). A new test checks
+  interop both ways for every routed hash on 2048- and 3072-bit keys (AWS-LC
+  signatures verify in pure Rust, pure-Rust default-salt signatures verify in
+  AWS-LC) and that non-default salts stay on the pure path; a sabotage run
+  (SHA-256 routed to the SHA-384 encoding) made it fail as it should.
+
 - **RSA private-key operations 1.2–1.7× faster on Cortex-A53/A55 (KV260,
   i.MX 95).** AWS-LC sends every ARM core without a "wide multiplier" to
   s2n-bignum's Montgomery kernels, which are tuned for Graviton2 and lose on
