@@ -3060,7 +3060,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_EDDSA_PH": {
       "value": "engine-extension",
@@ -3076,19 +3076,19 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines. HPKE is a Rust-engine-only feature by design (hsm CLAUDE.md)."
     },
     "CKM_HPKE_KEM_KEY_PAIR_GEN": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines. HPKE is a Rust-engine-only feature by design (hsm CLAUDE.md)."
     },
     "CKM_KECCAK_256": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_KMAC_128": {
       "value": "engine-extension",
@@ -3164,13 +3164,13 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Intentionally Rust-only (ruling 2026-09-27, gap-closure plan 4.D): a vendor extension the C++ engine does not implement; tests/differential/exceptions.json covers vendor-range differences between the engines."
     },
     "CKM_X25519": {
       "value": "engine-extension",

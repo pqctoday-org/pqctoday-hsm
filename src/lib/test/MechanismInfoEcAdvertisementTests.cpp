@@ -444,3 +444,117 @@ void MechanismInfoEcAdvertisementTests::testBip32MasterKeyStartingWith0x30()
 	CPPUNIT_ASSERT_MESSAGE("BIP32 child derive from that master failed, rv=" + std::to_string(rv),
 		rv == CKR_OK);
 }
+
+// 4.F (ruling 2026-09-27). Two BIP32 output defects this engine shared with the
+// Rust one: (i) a child derive took its curve from the TEMPLATE, never the
+// parent, so a P-256 template on a secp256k1 parent derived on the wrong curve
+// with CKR_OK; (ii) every output was CKK_EC, including SLIP-10 Ed25519 nodes,
+// which CKM_EDDSA cannot use. Now (i) is CKR_TEMPLATE_INCONSISTENT and (ii) is
+// CKK_EC_EDWARDS. The Ed25519 child m/0H of SLIP-10 test vector 1 (seed
+// 000102...0f) must sign, and the signature must verify under the PUBLISHED
+// m/0H public key 8c8a13df...350c (recomputed with Python cryptography).
+void MechanismInfoEcAdvertisementTests::testBip32ChildCurveFollowsParentAndEd25519IsEdwards()
+{
+	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_Initialize(NULL_PTR) ) == CKR_OK);
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(login(hSession, m_initializedTokenSlotID, m_userPin1, m_userPin1Length) == CKR_OK);
+
+	CK_BYTE seed[16];
+	for (int i = 0; i < 16; i++) seed[i] = (CK_BYTE)i;
+	CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+	CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+	CK_ATTRIBUTE seedTmpl[] = {
+		{ CKA_CLASS, &secClass, sizeof(secClass) },
+		{ CKA_KEY_TYPE, &genType, sizeof(genType) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_DERIVE, &bTrue, sizeof(bTrue) },
+		{ CKA_VALUE, seed, sizeof(seed) }
+	};
+	CK_OBJECT_HANDLE hSeed = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_CreateObject(hSession, seedTmpl, 5, &hSeed) ) == CKR_OK);
+
+	CK_BYTE oidK1[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a };
+	CK_BYTE oidP256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+	CK_BYTE oidEd25519[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
+	CK_OBJECT_CLASS prkClass = CKO_PRIVATE_KEY;
+	auto derive = [&](CK_MECHANISM_TYPE mt, CK_BIP32_CHILD_DERIVE_PARAMS* params, CK_OBJECT_HANDLE base,
+	                  CK_BYTE* oid, CK_ULONG oidLen, CK_OBJECT_HANDLE& out) -> CK_RV {
+		CK_ATTRIBUTE t[] = {
+			{ CKA_CLASS, &prkClass, sizeof(prkClass) },
+			{ CKA_EC_PARAMS, oid, oidLen },
+			{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+			{ CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+			{ CKA_DERIVE, &bTrue, sizeof(bTrue) },
+			{ CKA_SIGN, &bTrue, sizeof(bTrue) }
+		};
+		CK_MECHANISM m = { mt, params, params ? (CK_ULONG)sizeof(*params) : 0 };
+		out = CK_INVALID_HANDLE;
+		return CRYPTOKI_F_PTR( C_DeriveKey(hSession, &m, base, t, 6, &out) );
+	};
+	auto keyType = [&](CK_OBJECT_HANDLE h) -> CK_KEY_TYPE {
+		CK_KEY_TYPE kt = 0;
+		CK_ATTRIBUTE a = { CKA_KEY_TYPE, &kt, sizeof(kt) };
+		CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, h, &a, 1) ) == CKR_OK);
+		return kt;
+	};
+	CK_BIP32_CHILD_DERIVE_PARAMS hardened0 = { NULL_PTR, 1, 0 };
+
+	// (i) secp256k1 parent: a P-256 child template is refused; the parent's
+	// own curve still derives.
+	CK_OBJECT_HANDLE hK1 = CK_INVALID_HANDLE, hK1Child = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT(derive(CKM_BIP32_MASTER_DERIVE, NULL_PTR, hSeed, oidK1, sizeof(oidK1), hK1) == CKR_OK);
+	CK_RV rv = derive(CKM_BIP32_CHILD_DERIVE, &hardened0, hK1, oidP256, sizeof(oidP256), hK1Child);
+	CPPUNIT_ASSERT_EQUAL_MESSAGE("a child derive must not switch curves away from its parent",
+		(CK_RV)CKR_TEMPLATE_INCONSISTENT, rv);
+	CPPUNIT_ASSERT(derive(CKM_BIP32_CHILD_DERIVE, &hardened0, hK1, oidK1, sizeof(oidK1), hK1Child) == CKR_OK);
+	CPPUNIT_ASSERT_EQUAL((CK_KEY_TYPE)CKK_EC, keyType(hK1Child));
+	// The secp256k1 child must be usable too. Every BIP32 node used to store
+	// CKA_EC_PARAMS in plaintext while the signing path decrypts it, so
+	// C_SignInit answered CKR_GENERAL_ERROR on any BIP32-derived key.
+	{
+		CK_MECHANISM ecdsa = { CKM_ECDSA, NULL_PTR, 0 };
+		CK_BYTE digest[32] = { 0 };
+		CK_BYTE ecSig[72];
+		CK_ULONG ecSigLen = sizeof(ecSig);
+		CPPUNIT_ASSERT_EQUAL_MESSAGE("a BIP32 secp256k1 child signs with CKM_ECDSA",
+			(CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_SignInit(hSession, &ecdsa, hK1Child) ));
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_Sign(hSession, digest, sizeof(digest), ecSig, &ecSigLen) ));
+	}
+
+	// (ii) SLIP-10 Ed25519: master and m/0H are Edwards keys, and m/0H signs.
+	CK_OBJECT_HANDLE hEd = CK_INVALID_HANDLE, hEdChild = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT(derive(CKM_BIP32_MASTER_DERIVE, NULL_PTR, hSeed, oidEd25519, sizeof(oidEd25519), hEd) == CKR_OK);
+	CPPUNIT_ASSERT_EQUAL_MESSAGE("SLIP-10 Ed25519 master must be an Edwards key",
+		(CK_KEY_TYPE)CKK_EC_EDWARDS, keyType(hEd));
+	CPPUNIT_ASSERT(derive(CKM_BIP32_CHILD_DERIVE, &hardened0, hEd, oidEd25519, sizeof(oidEd25519), hEdChild) == CKR_OK);
+	CPPUNIT_ASSERT_EQUAL_MESSAGE("SLIP-10 Ed25519 child must be an Edwards key",
+		(CK_KEY_TYPE)CKK_EC_EDWARDS, keyType(hEdChild));
+
+	CK_BYTE msg[] = { 's', 'l', 'i', 'p', '1', '0' };
+	CK_MECHANISM eddsa = { CKM_EDDSA, NULL_PTR, 0 };
+	CK_BYTE sig[64];
+	CK_ULONG sigLen = sizeof(sig);
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_SignInit(hSession, &eddsa, hEdChild) ));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_Sign(hSession, msg, sizeof(msg), sig, &sigLen) ));
+
+	const CK_BYTE pubM0H[32] = {
+		0x8c,0x8a,0x13,0xdf,0x77,0xa2,0x8f,0x34,0x45,0x21,0x3a,0x0f,0x43,0x2f,0xde,0x64,
+		0x4a,0xca,0xa2,0x15,0xfc,0x72,0xdc,0xdf,0x30,0x0d,0x5e,0xfa,0xa8,0x5d,0x35,0x0c };
+	CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+	CK_KEY_TYPE edType = CKK_EC_EDWARDS;
+	CK_ATTRIBUTE pubTmpl[] = {
+		{ CKA_CLASS, &pubClass, sizeof(pubClass) },
+		{ CKA_KEY_TYPE, &edType, sizeof(edType) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_VERIFY, &bTrue, sizeof(bTrue) },
+		{ CKA_EC_PARAMS, oidEd25519, sizeof(oidEd25519) },
+		{ CKA_EC_POINT, (CK_VOID_PTR)pubM0H, sizeof(pubM0H) }
+	};
+	CK_OBJECT_HANDLE hPub = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_CreateObject(hSession, pubTmpl, 6, &hPub) ));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifyInit(hSession, &eddsa, hPub) ));
+	CPPUNIT_ASSERT_EQUAL_MESSAGE("m/0H's signature verifies under SLIP-10's published m/0H public key",
+		(CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_Verify(hSession, msg, sizeof(msg), sig, sigLen) ));
+}

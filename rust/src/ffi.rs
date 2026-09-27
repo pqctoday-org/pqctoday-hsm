@@ -1959,8 +1959,8 @@ mod mechanism_table_tests {
 
     /// F1 — canonical OASIS v3.2 re-sync: CKA_UNIQUE_ID is 0x4 (the local
     /// header had drifted to 0x17), and the BIP32 inventions live in the
-    /// vendor-defined space; the legacy bare codepoints are dispatch-only
-    /// deprecated aliases and must NOT be advertised.
+    /// vendor-defined space; the bare, OASIS-reserved 0x105B/0x105C are
+    /// neither advertised nor (since 4.D) accepted.
     #[test]
     fn f1_canonical_constant_values() {
         assert_eq!(CKA_UNIQUE_ID, 0x0000_0004);
@@ -1968,7 +1968,7 @@ mod mechanism_table_tests {
         assert_eq!(CKM_BIP32_CHILD_DERIVE, 0x8000_105C);
         assert_eq!(CKA_BIP32_CHAIN_CODE, 0x8000_1021);
         assert_eq!(CKA_BIP32_CHILD_INDEX, 0x8000_1022);
-        for legacy in [CKM_BIP32_MASTER_DERIVE_LEGACY, CKM_BIP32_CHILD_DERIVE_LEGACY] {
+        for legacy in [0x0000_105Bu32, 0x0000_105C] {
             assert!(
                 !SUPPORTED_MECHS.contains(&legacy),
                 "legacy BIP32 codepoint {legacy:#06x} must not be advertised"
@@ -11512,17 +11512,9 @@ pub fn C_DeriveKey(
         {
             return rv;
         }
+        // The bare BIP32 codepoints 0x105B/0x105C (OASIS-reserved) are no
+        // longer accepted as aliases of the vendor CKM_BIP32_* (4.D, 2026-09-27).
         let mech_type = ck_param::mech(p_mechanism).mechanism;
-        // DEPRECATED aliases: BIP32 mechanisms formerly shipped on the bare
-        // (OASIS-unassigned) codepoints 0x105B/0x105C before moving to the
-        // vendor space (F1 re-sync). Only the vendor codepoints are
-        // advertised, but in-the-wild JS callers may still send the old
-        // values — accept them at dispatch.
-        let mech_type = match mech_type {
-            CKM_BIP32_MASTER_DERIVE_LEGACY => CKM_BIP32_MASTER_DERIVE,
-            CKM_BIP32_CHILD_DERIVE_LEGACY => CKM_BIP32_CHILD_DERIVE,
-            m => m,
-        };
         let key_len =
             get_attr_ulong(p_template, ul_attribute_count, CKA_VALUE_LEN).unwrap_or(32) as usize;
 
@@ -11605,16 +11597,25 @@ pub fn C_DeriveKey(
                         if let Some(v) = o_attrs.get(&CKA_BIP32_CHAIN_CODE) {
                             return v.clone();
                         }
-                        // Deprecated alias: objects imported by older callers
-                        // may carry the chain code under the bare legacy id.
-                        if let Some(v) = o_attrs.get(&CKA_BIP32_CHAIN_CODE_LEGACY) {
-                            return v.clone();
-                        }
                     }
                     vec![]
                 });
                 if parent_chain_code.is_empty() {
                     return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                // 4.F (2026-09-27): a child lives on its parent's curve. The
+                // curve used to come from the template alone, so a P-256
+                // template on a secp256k1 parent derived on the wrong curve
+                // and returned CKR_OK. A parent that records its curve must
+                // match the template's.
+                let parent_curve = OBJECTS.with(|o| {
+                    o.borrow()
+                        .get(&h_base_key)
+                        .and_then(|a| a.get(&CKA_EC_PARAMS).cloned())
+                        .and_then(|p| crate::crypto::HDCurve::from_oid(&p))
+                });
+                if matches!(parent_curve, Some(pc) if pc != curve) {
+                    return CKR_TEMPLATE_INCONSISTENT;
                 }
 
                 // Adjudicated 2026-08-14. The engine now reads the struct the
@@ -11687,12 +11688,13 @@ pub fn C_DeriveKey(
                 .unwrap_or(false);
 
             store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
-            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_EC);
+            // 4.F (2026-09-27): a SLIP-10 Ed25519 node is an Edwards key — the
+            // 32-byte value is the RFC 8032 private key CKM_EDDSA signs with.
+            // It used to be stored as CKK_EC, which CKM_EDDSA refuses.
+            let out_key_type = if curve == crate::crypto::HDCurve::Ed25519 { CKK_EC_EDWARDS } else { CKK_EC };
+            store_ulong(&mut attrs, CKA_KEY_TYPE, out_key_type);
             attrs.insert(CKA_VALUE, priv_key);
-            attrs.insert(CKA_BIP32_CHAIN_CODE, chain_code.clone());
-            // Deprecated alias: also expose the chain code under the bare
-            // legacy id so pre-F1 readers (GetAttributeValue 0x1021) work.
-            attrs.insert(CKA_BIP32_CHAIN_CODE_LEGACY, chain_code);
+            attrs.insert(CKA_BIP32_CHAIN_CODE, chain_code);
 
             store_bool(&mut attrs, CKA_TOKEN, false);
             store_bool(&mut attrs, CKA_PRIVATE, true);
@@ -19829,24 +19831,27 @@ mod return_code_ffi_tests {
         assert_eq!(rv, CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
 
-    /// F1 — the legacy bare BIP32 codepoints (0x105B/0x105C) must still be
-    /// ACCEPTED at C_DeriveKey dispatch as deprecated aliases: with a valid
-    /// base key and an empty template they must reach the BIP32 arm (which
-    /// rejects the missing CKA_EC_PARAMS with CKR_TEMPLATE_INCONSISTENT)
-    /// rather than fall through to CKR_MECHANISM_INVALID.
+    /// The bare 0x105B/0x105C are OASIS-reserved, unadvertised, and no longer
+    /// accepted (ruling 2026-09-27, gap-closure plan item 4.D). They used to be
+    /// dispatch-only aliases of the vendor CKM_BIP32_*; no caller sends them
+    /// (the hub's constants.ts says so), and the C++ engine never accepted
+    /// them. Now C_DeriveKey refuses them with CKR_MECHANISM_INVALID like any
+    /// other unknown mechanism, while the vendor codepoints still reach the
+    /// BIP32 arm (which rejects the empty template with
+    /// CKR_TEMPLATE_INCONSISTENT).
     #[test]
-    fn bip32_legacy_codepoints_accepted_at_dispatch() {
+    fn bip32_bare_codepoints_are_refused_vendor_ones_dispatch() {
         let _guard = test_lock::acquire();
         setup();
         const H_SEED: u32 = 0x5334_3001;
         install_key(H_SEED, 32, &[(CKA_DERIVE, true)]);
-        for legacy in [
-            CKM_BIP32_MASTER_DERIVE_LEGACY,
-            CKM_BIP32_CHILD_DERIVE_LEGACY,
-            CKM_BIP32_MASTER_DERIVE,
-            CKM_BIP32_CHILD_DERIVE,
+        for (mech_type, want) in [
+            (0x0000_105Bu32, CKR_MECHANISM_INVALID),
+            (0x0000_105Cu32, CKR_MECHANISM_INVALID),
+            (CKM_BIP32_MASTER_DERIVE, CKR_TEMPLATE_INCONSISTENT),
+            (CKM_BIP32_CHILD_DERIVE, CKR_TEMPLATE_INCONSISTENT),
         ] {
-            let mut mech: [usize; 3] = [legacy as usize, 0, 0];
+            let mut mech: [usize; 3] = [mech_type as usize, 0, 0];
             let mut h_new: u32 = 0;
             assert_eq!(
                 C_DeriveKey(
@@ -19857,8 +19862,8 @@ mod return_code_ffi_tests {
                     0,
                     &mut h_new,
                 ),
-                CKR_TEMPLATE_INCONSISTENT,
-                "mech {legacy:#010x} did not reach the BIP32 dispatch arm"
+                want,
+                "mech {mech_type:#010x}"
             );
         }
     }
@@ -26796,6 +26801,111 @@ mod param_struct_width_tests {
         assert_eq!(offset_at(b::LAYOUT.fields, b::FLAGS, 4), 4);
         assert_eq!(offset_at(b::LAYOUT.fields, b::INDEX, 4), 8);
         assert_eq!(size_at(b::LAYOUT.fields, 4), 12);
+    }
+
+    /// 4.F (ruling 2026-09-27). Two BIP32 output defects shared by both
+    /// engines: (i) a child derive took its curve from the TEMPLATE, never the
+    /// parent, so a P-256 template on a secp256k1 parent derived on the wrong
+    /// curve with CKR_OK; (ii) every output was stored as CKK_EC, including
+    /// Ed25519 (SLIP-10) nodes, which CKM_EDDSA cannot use. Now (i) is
+    /// CKR_TEMPLATE_INCONSISTENT and (ii) is CKK_EC_EDWARDS, and the Ed25519
+    /// child actually signs, verified by an independent ed25519-dalek check.
+    #[test]
+    fn bip32_child_curve_follows_parent_and_ed25519_nodes_are_edwards() {
+        let _guard = crate::native::test_lock::acquire();
+        // Derived BIP32 nodes are CKA_PRIVATE: a logged-in user session.
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let sess = crate::native::session::bootstrap_default_token(0, "so", "user", "bip32-4f").unwrap();
+        let k256: [u8; 7] = [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a];
+        let p256: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+        let ed25519: [u8; 5] = [0x06, 0x03, 0x2b, 0x65, 0x70];
+        let yes: u8 = 1;
+        let w = size_of::<crate::ck_abi::CK_ULONG>();
+
+        // Seed (BIP-32 test vector 1).
+        let seed: Vec<u8> = (0u8..16).collect();
+        let cls = CKO_SECRET_KEY as crate::ck_abi::CK_ULONG;
+        let kt = CKK_GENERIC_SECRET as crate::ck_abi::CK_ULONG;
+        let mut seed_tpl: Vec<usize> = Vec::new();
+        for (t, p, l) in [
+            (CKA_CLASS, &cls as *const _ as *const u8, w),
+            (CKA_KEY_TYPE, &kt as *const _ as *const u8, w),
+            (CKA_VALUE, seed.as_ptr(), seed.len()),
+            (CKA_DERIVE, &yes as *const u8, 1),
+        ] {
+            seed_tpl.extend_from_slice(&[t as usize, p as usize, l]);
+        }
+        let mut h_seed: u32 = 0;
+        assert_eq!(C_CreateObject(sess, seed_tpl.as_mut_ptr() as *mut u8, 4, &mut h_seed), CKR_OK);
+
+        let derive = |mech: u32, param: &mut Vec<usize>, base: u32, oid: &[u8]| -> (u32, u32) {
+            let mut tpl: Vec<usize> = Vec::new();
+            for (t, p, l) in [
+                (CKA_EC_PARAMS, oid.as_ptr(), oid.len()),
+                (CKA_DERIVE, &yes as *const u8, 1),
+                (CKA_SIGN, &yes as *const u8, 1),
+            ] {
+                tpl.extend_from_slice(&[t as usize, p as usize, l]);
+            }
+            let mut m = if param.is_empty() {
+                packed_mech(mech, core::ptr::null(), 0)
+            } else {
+                packed_mech(mech, param.as_mut_ptr() as *const u8, param.len() * size_of::<usize>())
+            };
+            let mut h: u32 = 0;
+            let rv = C_DeriveKey(sess, m.as_mut_ptr() as *mut u8, base, tpl.as_mut_ptr() as *mut u8, 3, &mut h);
+            (rv, h)
+        };
+        let key_type = |h: u32| -> u32 {
+            OBJECTS.with(|o| crate::state::get_object_attr_u32_from(o.borrow().get(&h).unwrap(), CKA_KEY_TYPE).unwrap())
+        };
+
+        // (i) secp256k1 parent: a P-256 child template is refused; the
+        // parent's own curve is still accepted.
+        let (rv, h_k1) = derive(CKM_BIP32_MASTER_DERIVE, &mut vec![], h_seed, &k256);
+        assert_eq!(rv, CKR_OK);
+        let mut hardened_0: Vec<usize> = vec![0, 1, 0];
+        assert_eq!(
+            derive(CKM_BIP32_CHILD_DERIVE, &mut hardened_0, h_k1, &p256).0,
+            CKR_TEMPLATE_INCONSISTENT,
+            "a child derive must not switch curves away from its parent"
+        );
+        let (rv, h_k1_child) = derive(CKM_BIP32_CHILD_DERIVE, &mut hardened_0, h_k1, &k256);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(key_type(h_k1_child), CKK_EC);
+        // The chain code travels under the VENDOR attribute (0x80001021) only;
+        // the bare 0x1021 copy is gone (4.D).
+        OBJECTS.with(|o| {
+            let o = o.borrow();
+            let a = o.get(&h_k1_child).unwrap();
+            assert_eq!(a.get(&CKA_BIP32_CHAIN_CODE).map(|v| v.len()), Some(32), "vendor chain code present");
+            assert!(a.get(&0x0000_1021).is_none(), "no bare 0x1021 copy");
+        });
+
+        // (ii) Ed25519 (SLIP-10): master and child are CKK_EC_EDWARDS, and the
+        // child signs with CKM_EDDSA.
+        let (rv, h_ed) = derive(CKM_BIP32_MASTER_DERIVE, &mut vec![], h_seed, &ed25519);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(key_type(h_ed), CKK_EC_EDWARDS, "SLIP-10 Ed25519 master must be an Edwards key");
+        let (rv, h_ed_child) = derive(CKM_BIP32_CHILD_DERIVE, &mut hardened_0, h_ed, &ed25519);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(key_type(h_ed_child), CKK_EC_EDWARDS, "SLIP-10 Ed25519 child must be an Edwards key");
+
+        let msg = b"slip-10 child signs";
+        let mut m = packed_mech(CKM_EDDSA, core::ptr::null(), 0);
+        assert_eq!(C_SignInit(sess, m.as_mut_ptr() as *mut u8, h_ed_child), CKR_OK);
+        let mut sig = vec![0u8; 64];
+        let mut len = sig.len() as u32;
+        assert_eq!(C_Sign(sess, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut len), CKR_OK);
+        let child_seed: [u8; 32] = OBJECTS
+            .with(|o| o.borrow().get(&h_ed_child).unwrap().get(&CKA_VALUE).cloned().unwrap())
+            .try_into()
+            .unwrap();
+        let vk = ed25519_dalek::SigningKey::from_bytes(&child_seed).verifying_key();
+        use ed25519_dalek::Verifier;
+        vk.verify(msg, &ed25519_dalek::Signature::from_bytes(&sig[..64].try_into().unwrap()))
+            .expect("the SLIP-10 child's CKM_EDDSA signature verifies under its own public key");
     }
 
     /// End-to-end: `flags` and `index` come from words one and two, and a

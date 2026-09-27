@@ -282,11 +282,6 @@ PINNED = {
     "CKP_CLASSIC_MCELIECE_6960119F": (0x08, "param-set"),
     "CKP_CLASSIC_MCELIECE_8192128": (0x09, "param-set"),
     "CKP_CLASSIC_MCELIECE_8192128F": (0x0a, "param-set"),
-    # legacy bare BIP32 codepoints (pre vendor-space migration, still accepted)
-    "CKA_BIP32_CHAIN_CODE_LEGACY": (0x1021, "legacy"),
-    "CKA_BIP32_CHILD_INDEX_LEGACY": (0x1022, "legacy"),
-    "CKM_BIP32_MASTER_DERIVE_LEGACY": (0x105B, "legacy"),
-    "CKM_BIP32_CHILD_DERIVE_LEGACY": (0x105C, "legacy"),
     # naming drift from spec constants (values equal the spec ones)
     "CKP_PBKDF2_HMAC_SHA256": (0x04, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA256
     "CKP_PBKDF2_HMAC_SHA384": (0x05, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA384
