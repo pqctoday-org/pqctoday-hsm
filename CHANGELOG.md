@@ -122,6 +122,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **C++ engine: Edwards and Montgomery mechanisms advertised no EC
+  capability flags.** `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EDDSA`,
+  `CKM_EDDSA_PH`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN`, `CKM_X25519` and
+  `CKM_X448` now report `CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME |
+  CKF_EC_UNCOMPRESS`, matching what the engine accepts (PKCS#11 v3.2 §6.3).
+  The cross-engine differential harness now compares the `CKF_EC_*` flags,
+  which it never recorded before; the one legal difference it finds (only the
+  Rust engine accepts a curve name for P-256 and the other Weierstrass curves)
+  is recorded with its citation.
+
 - **The KMIP mechanism manifest listed 4 of the 16 vendor mechanisms.**
   `kmip/pkcs11-mech-manifest.json` still showed the July FrodoKEM / Classic
   McEliece entries and an authority checksum four revisions old, and claimed
