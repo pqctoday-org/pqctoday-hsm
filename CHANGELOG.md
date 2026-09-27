@@ -364,6 +364,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **bench-harness can measure SHAKE128/256, labelled as outside the HSM.**
+  PKCS#11 v3.2 defines no SHAKE digest mechanism, so the benchmark had no
+  SHAKE row. The new `bench-harness xof` subcommand times the same `sha3`
+  crate the engine links, directly, at 64 B / 1 KiB / 16 KiB. Every row
+  carries `access_path = "rust-sha3-direct"` and an empty `engine_version`,
+  so it cannot be read as an HSM figure. The PKCS#11 matrix
+  (`--list-algorithms`, 113 cells) is unchanged; a FIPS 202 known-answer test
+  pins the output. M4 Pro, 4 threads: SHAKE128 16 KiB 238k ops/s, SHAKE256
+  196k.
+
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
   caller-supplied nonce — a deliberate key-recovery primitive for teaching.**
 
