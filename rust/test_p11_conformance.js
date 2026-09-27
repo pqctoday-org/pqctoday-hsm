@@ -3495,7 +3495,7 @@ end of every run, not hand-edited.
 **Regenerate:** \`scripts/local-gate.sh --rust-p11\` (see below), or manually:
 \`\`\`
 docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \\
-  RUSTFLAGS="-C link-arg=-zstack-size=2097152" \\
+  RUSTFLAGS="-C link-arg=-zstack-size=8388608" \\
   wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp'
 cd rust && node test_p11_conformance.js
 \`\`\`

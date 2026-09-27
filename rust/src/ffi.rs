@@ -1741,8 +1741,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // 256-bit keys only. CKF_ENCRYPT | CKF_DECRYPT; no CKF_MESSAGE_*
         // (the message-based family does not dispatch these mechanisms).
         CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => (32, 32, 0x00000100 | 0x00000200),
-        // BIP32 HD derivation (C_DeriveKey) — 32-byte seeds/keys, CKF_DERIVE.
-        CKM_BIP32_MASTER_DERIVE | CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
+        // BIP32 HD derivation (C_DeriveKey), CKF_DERIVE. Master: a 16..64-byte
+        // seed (maintainer ruling 2026-09-26, the C++ engine's b9cc607c) —
+        // BIP-32 permits 128 to 512 bits of seed entropy, and 64 is the seed
+        // BIP-39 produces. Enforced at C_DeriveKey, not only advertised.
+        // Child: the parent's 32-byte private scalar, on every supported curve.
+        CKM_BIP32_MASTER_DERIVE => (16, 64, 0x00080000),
+        CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
         // Hybrid-KEM combiner building blocks (§6.43 concat, §6.22/§6.29
         // digest key-derivation) — arbitrary-length secret values, CKF_DERIVE.
         CKM_CONCATENATE_BASE_AND_KEY
@@ -1945,8 +1950,11 @@ mod mechanism_table_tests {
                 SUPPORTED_MECHS.contains(&mech),
                 "mech {mech:#06x} missing from SUPPORTED_MECHS"
             );
-            assert_eq!(mechanism_info(mech), Some((32, 32, 0x00080000)));
         }
+        // Master: 16..64-byte seed (matches the C++ engine, b9cc607c).
+        assert_eq!(mechanism_info(CKM_BIP32_MASTER_DERIVE), Some((16, 64, 0x00080000)));
+        // Child: the parent's 32-byte private scalar.
+        assert_eq!(mechanism_info(CKM_BIP32_CHILD_DERIVE), Some((32, 32, 0x00080000)));
     }
 
     /// F1 — canonical OASIS v3.2 re-sync: CKA_UNIQUE_ID is 0x4 (the local
@@ -4998,7 +5006,12 @@ fn C_EncapsulateKey_impl(
                         };
                         let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
                         let eph_pub = x25519_dalek::PublicKey::from(&eph);
-                        let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+                        // Low-order peer point → all-zero secret; refused
+                        // like the X448 arm below (RFC 7748 §6.1).
+                        let ss = match crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer))) {
+                            Some(ss) => ss,
+                            None => return CKR_ARGUMENTS_BAD,
+                        };
                         (eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec())
                     }
                     CURVE_X448 => {
@@ -5490,10 +5503,14 @@ fn C_DecapsulateKey_impl(
                         Ok(v) => v,
                         Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
                     };
-                    x25519_dalek::StaticSecret::from(sk)
-                        .diffie_hellman(&x25519_dalek::PublicKey::from(peer))
-                        .as_bytes()
-                        .to_vec()
+                    // Low-order ciphertext point → all-zero secret; refused
+                    // like the X448 arm below (RFC 7748 §6.1).
+                    match crate::crypto::handlers::x25519_contributory(
+                        x25519_dalek::StaticSecret::from(sk).diffie_hellman(&x25519_dalek::PublicKey::from(peer)),
+                    ) {
+                        Some(ss) => ss.as_bytes().to_vec(),
+                        None => return CKR_ENCRYPTED_DATA_INVALID,
+                    }
                 }
                 CURVE_X448 => {
                     let sk: [u8; 56] = match scalar.as_slice().try_into() {
@@ -7310,10 +7327,19 @@ unsafe fn remap_generic_hash_mech(
 /// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash),
 /// plus CKM_ML_DSA_EXTERNAL_MU (remediation R34, PQCTODAY-VENDOR-EXT-MU),
 /// which reuses the same struct for its hedgeVariant field.
+///
+/// The GENERIC pre-hash mechanisms are included: their
+/// CK_HASH_SIGN_ADDITIONAL_CONTEXT starts with the same three fields
+/// (hedgeVariant, pContext, ulContextLen) and parse_sign_additional_ctx reads
+/// only those. They were left out after R37 stopped remapping them onto the
+/// hash-specific mechanisms, so from then on their hedge variant and context
+/// were silently dropped (gap-closure plan item 4.G).
 fn takes_sign_additional_ctx(mech: u32) -> bool {
     mech == CKM_ML_DSA
         || mech == CKM_SLH_DSA
         || mech == CKM_ML_DSA_EXTERNAL_MU
+        || mech == CKM_HASH_ML_DSA
+        || mech == CKM_HASH_SLH_DSA
         || is_prehash_ml_dsa(mech)
         || is_prehash_slh_dsa(mech)
 }
@@ -7385,11 +7411,17 @@ unsafe fn parse_sign_mech_params(
         // error either way.
         return parse_sign_additional_ctx(p_mechanism);
     }
-    if mech_type == CKM_EDDSA {
+    if mech_type == CKM_EDDSA || mech_type == CKM_EDDSA_PH {
         // CK_EDDSA_PARAMS (v3.2 §6.3.7) — `phFlag` was already consumed by
         // `eddsa_ph_flag` before this function was ever called (a `true`
-        // phFlag remaps `mech_type` to CKM_EDDSA_PH upstream, so a call
-        // reaching this branch always has phFlag=false). What's left,
+        // phFlag remaps `mech_type` to CKM_EDDSA_PH upstream). The context
+        // is read for BOTH: Ed25519ph/Ed448ph bind it into the dom2/dom4
+        // prefix exactly as Ed25519ctx does. Until 2026-09-27 this branch
+        // matched CKM_EDDSA only, so every pre-hash call — phFlag = TRUE or
+        // the vendor CKM_EDDSA_PH — reached sign_eddsa_ph/verify_eddsa_ph
+        // with an EMPTY context even after #276 fixed those handlers; the
+        // hub's ACVP harness measured 8 NIST preHash cases "differs"
+        // (eddsa_ph_context_ffi_tests). What's left,
         // `ulContextDataLen`/`pContextData`, was previously read NOWHERE:
         // this function had no CKM_EDDSA branch at all and fell through to
         // the `Ok((Vec::new(), false))` default at the bottom, so
@@ -10870,6 +10902,21 @@ enum Sp800Seg {
     /// [L]: pre-encoded DKM length field bytes
     DkmLength(Vec<u8>),
     Bytes(Vec<u8>),
+    /// The iteration variable's POSITION — K(i-1) in Feedback Mode, A(i) in
+    /// Double Pipeline Mode. Carries no bytes of its own: the runner
+    /// substitutes the current chaining value wherever this segment sits.
+    ///
+    /// Added 2026-09-26. Tables 199, 200 and 201 each state, in identical
+    /// words, that CK_SP800_108_ITERATION_VARIABLE "identifies the location of
+    /// the iteration variable in the constructed PRF input data" — so the
+    /// position is normative in all three modes, not only Counter Mode.
+    /// Previously sp800_108_run_feedback and sp800_108_run_double_pipeline fed
+    /// the chaining value into the MAC *before* walking the caller's segments,
+    /// so the iteration variable was always first and ACVP's "before iterator"
+    /// placement — the counter ahead of K(i-1)/A(i) — was unreachable. The C++
+    /// engine had the identical defect, which is exactly why the differential
+    /// harness could never see it: both engines agreed on the wrong answer.
+    IterationVariable,
 }
 
 /// PKCS#11 v3.2 §6.42.2 — PRF output length in bytes for the SP 800-108
@@ -10968,7 +11015,33 @@ unsafe fn parse_sp800_108_segments(
                 // counter [i] is OPTIONAL and SEPARATE from K(i-1), which is
                 // what CK_SP800_108_COUNTER exists for in those modes. Read as
                 // an editorial carry-over from Table 199.
-                if allow_explicit_counter && val_ptr.is_null() {
+                if allow_explicit_counter {
+                    // Feedback / Double Pipeline. §13515-13520 (v3.2 p352) is
+                    // explicit about the wire shape here: "For the Counter Mode
+                    // KDF, pValue must be assigned a valid
+                    // CK_SP800_108_COUNTER_FORMAT_PTR ... For all other KDF
+                    // types, pValue must be set to NULL_PTR and ulValueLen must
+                    // be set to 0." So NULL is the conformant value and a
+                    // supplied counter format describes nothing — Table 200/201
+                    // define this variable's "size, format and value" as coming
+                    // from "the internal KDF structure and PRF output".
+                    //
+                    // A non-NULL pValue is therefore non-conformant caller
+                    // input. We ignore the format rather than reject it: the
+                    // spec's "must" here is lowercase, so under v3.2's Key
+                    // Words clause ("when, and only when, they appear in all
+                    // capitals") it does not bind, and the C++ engine ignores
+                    // it too — so ignoring keeps the engines byte-identical on
+                    // input the spec does not define. Honouring it would mean
+                    // following Table 200's trailing "Exact formatting of the
+                    // counter value is defined by the
+                    // CK_SP800_108_COUNTER_FORMAT structure" sentence, which
+                    // contradicts the "defined as K(i-1)" line two rows above
+                    // it and is a known editorial carry-over from Table 199.
+                    //
+                    // Either way the POSITION is preserved, which is the part
+                    // all three tables make normative.
+                    out.push(Sp800Seg::IterationVariable);
                     continue;
                 }
                 // pValue → CK_SP800_108_COUNTER_FORMAT { bLittleEndian: CK_BBOOL,
@@ -11090,6 +11163,9 @@ fn sp800_108_fixed_only(segs: &[Sp800Seg]) -> Vec<Vec<u8>> {
     segs.iter()
         .filter_map(|s| match s {
             Sp800Seg::Counter(..) => None,
+            // A(0) is FixedInputData ALONE (SP 800-108 §5.3) — neither the
+            // counter nor the iteration variable enters the A chain.
+            Sp800Seg::IterationVariable => None,
             Sp800Seg::DkmLength(b) => Some(b.clone()),
             Sp800Seg::Bytes(b) => Some(b.clone()),
         })
@@ -11099,8 +11175,14 @@ fn sp800_108_fixed_only(segs: &[Sp800Seg]) -> Vec<Vec<u8>> {
 /// Feedback-mode per-iteration input: segments in order, NO implicit
 /// counter when ITERATION_VARIABLE is absent (SP 800-108 §4.2 makes the
 /// counter optional in feedback mode).
-fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
+fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32, chain: &[u8]) -> Vec<Vec<u8>> {
     let mut pieces = Vec::new();
+    // No ITERATION_VARIABLE segment: the chaining value goes first, which is
+    // this engine's prior layout and also the C++ engine's fallback, so the
+    // default stays byte-identical across both.
+    if !segs.iter().any(|s| matches!(s, Sp800Seg::IterationVariable)) {
+        pieces.push(chain.to_vec());
+    }
     for seg in segs {
         match seg {
             Sp800Seg::Counter(le, width) => {
@@ -11115,6 +11197,7 @@ fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
                     full[8 - *width..].to_vec()
                 });
             }
+            Sp800Seg::IterationVariable => pieces.push(chain.to_vec()),
             Sp800Seg::DkmLength(b) => pieces.push(b.clone()),
             Sp800Seg::Bytes(b) => pieces.push(b.clone()),
         }
@@ -11125,7 +11208,7 @@ fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
 /// Per-iteration PRF input pieces, in segment order. With no
 /// ITERATION_VARIABLE segment the legacy 32-bit BE counter is prepended
 /// (the engine's historical behavior).
-fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
+fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32, chain: &[u8]) -> Vec<Vec<u8>> {
     let mut pieces = Vec::new();
     let has_counter = segs.iter().any(|s| matches!(s, Sp800Seg::Counter(..)));
     if !has_counter {
@@ -11145,6 +11228,7 @@ fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
                     full[8 - *width..].to_vec()
                 });
             }
+            Sp800Seg::IterationVariable => pieces.push(chain.to_vec()),
             Sp800Seg::DkmLength(b) => pieces.push(b.clone()),
             Sp800Seg::Bytes(b) => pieces.push(b.clone()),
         }
@@ -11166,7 +11250,10 @@ where
     let mut counter: u32 = 1;
     while out.len() < key_len {
         let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
-        for piece in sp800_108_iter_input(segs, counter) {
+        // Counter Mode has no chaining value: Table 199's iteration variable
+        // IS the counter, so it parses as Sp800Seg::Counter and no
+        // IterationVariable segment can occur here.
+        for piece in sp800_108_iter_input(segs, counter, &[]) {
             mac.update(&piece);
         }
         out.extend_from_slice(&mac.finalize().into_bytes());
@@ -11193,10 +11280,12 @@ where
     let mut counter: u32 = 1;
     while out.len() < key_len {
         let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
-        mac.update(&k_prev);
-        // Feedback mode: an absent ITERATION_VARIABLE means NO counter
-        // (unlike counter mode), so only emit explicitly-requested segments.
-        for piece in sp800_108_feedback_input(segs, counter) {
+        // K(i-1) is emitted by the segment walk at the position the caller's
+        // ITERATION_VARIABLE occupied, NOT unconditionally first — that
+        // hardcoding is what made "before iterator" unreachable. Feedback mode
+        // also treats an absent ITERATION_VARIABLE as NO counter (unlike
+        // counter mode), so only explicitly-requested segments are emitted.
+        for piece in sp800_108_feedback_input(segs, counter, &k_prev) {
             mac.update(&piece);
         }
         k_prev = mac.finalize().into_bytes().to_vec();
@@ -11236,8 +11325,8 @@ where
     let mut counter: u32 = 1;
     while out.len() < key_len {
         let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
-        mac.update(&a);
-        for piece in sp800_108_feedback_input(segs, counter) {
+        // A(i) emitted at the caller's ITERATION_VARIABLE position, as above.
+        for piece in sp800_108_feedback_input(segs, counter, &a) {
             mac.update(&piece);
         }
         out.extend_from_slice(&mac.finalize().into_bytes());
@@ -11486,11 +11575,23 @@ pub fn C_DeriveKey(
             };
 
             let (priv_key, chain_code) = if mech_type == CKM_BIP32_MASTER_DERIVE {
-                let seed = match get_object_value(h_base_key) {
+                let mut seed = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_OBJECT_HANDLE_INVALID,
                 };
-                match crate::crypto::derive_master_node(&seed, curve) {
+                // Seed length contract: 16..64 bytes, which is what
+                // C_GetMechanismInfo advertises (the C++ engine enforces the
+                // same range, SoftHSM_keygen.cpp). derive_master_node
+                // HMAC-SHA512s the seed as the MAC message, so without this
+                // check any length derives and the advertised range would be
+                // a constraint the engine does not have (finding E20's class).
+                if !(16..=64).contains(&seed.len()) {
+                    seed.zeroize();
+                    return CKR_KEY_SIZE_RANGE;
+                }
+                let res = crate::crypto::derive_master_node(&seed, curve);
+                seed.zeroize();
+                match res {
                     Ok(res) => res,
                     Err(e) => return e,
                 }
@@ -11950,12 +12051,14 @@ pub fn C_DeriveKey(
                         let sk = x25519_dalek::StaticSecret::from(sk_arr);
                         let mut pk_arr = [0u8; 32];
                         pk_arr.copy_from_slice(peer_pk_bytes);
-                        let result = sk
-                            .diffie_hellman(&x25519_dalek::PublicKey::from(pk_arr))
-                            .as_bytes()
-                            .to_vec();
+                        let shared = crate::crypto::handlers::x25519_contributory(sk.diffie_hellman(&x25519_dalek::PublicKey::from(pk_arr)));
                         pk_arr.zeroize();
-                        result
+                        // Low-order peer point → all-zero secret; refused with
+                        // the X448 arm's code (RFC 7748 §6.1).
+                        match shared {
+                            Some(ss) => ss.as_bytes().to_vec(),
+                            None => return CKR_ARGUMENTS_BAD,
+                        }
                     }
                     (ALGO_ECDH_X448, _) => {
                         // X448 Diffie-Hellman (PKCS#11 v3.2 §6.7, RFC 7748 §6.2)
@@ -19760,6 +19863,83 @@ mod return_code_ffi_tests {
         }
     }
 
+    /// CKM_BIP32_MASTER_DERIVE seed length: 16..64 bytes, advertised AND
+    /// enforced (maintainer ruling 2026-09-26; the C++ engine's b9cc607c).
+    /// Before this, the engine advertised 32/32 but derived from a seed of any
+    /// length. Both ends are pinned with BIP-32's own published test vectors
+    /// (vector 1: 16-byte seed; vector 2: 64-byte seed — the BIP-39 length),
+    /// master keys checked independently with Python's hmac/hashlib. Lengths
+    /// outside the range are refused with CKR_KEY_SIZE_RANGE.
+    #[test]
+    fn bip32_master_seed_range_is_16_to_64_and_enforced() {
+        let _guard = test_lock::acquire();
+        setup();
+        const SECP256K1_OID: [u8; 7] = [0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A];
+        fn hex(s: &str) -> Vec<u8> {
+            (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        }
+        fn derive_master(h_seed: u32) -> (u32, u32) {
+            let oid = SECP256K1_OID;
+            let mut tmpl: [usize; 3] = [CKA_EC_PARAMS as usize, oid.as_ptr() as usize, oid.len()];
+            let mut mech: [usize; 3] = [CKM_BIP32_MASTER_DERIVE as usize, 0, 0];
+            let mut h_new: u32 = 0;
+            let rv = C_DeriveKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_seed,
+                tmpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_new,
+            );
+            (rv, h_new)
+        }
+        let install_seed = |h: u32, seed: &[u8]| {
+            install_key(h, seed.len(), &[(CKA_DERIVE, true)]);
+            OBJECTS.with(|o| {
+                o.borrow_mut().get_mut(&h).unwrap().insert(CKA_VALUE, seed.to_vec());
+            });
+        };
+
+        // BIP-32 test vectors 1 and 2: the two ends of the range.
+        let vectors = [
+            (
+                "000102030405060708090a0b0c0d0e0f",
+                "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35",
+            ),
+            (
+                "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a2\
+                 9f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
+                "4b03d6fc340455b363f51020ad3ecca4f0850280cf436c70c727923f6db46c3e",
+            ),
+        ];
+        for (i, (seed_hex, master_hex)) in vectors.iter().enumerate() {
+            let seed = hex(&seed_hex.split_whitespace().collect::<String>());
+            let h_seed = 0x5334_3010 + i as u32;
+            install_seed(h_seed, &seed);
+            let (rv, h_new) = derive_master(h_seed);
+            assert_eq!(rv, CKR_OK, "{}-byte seed (BIP-32 vector {}) must derive", seed.len(), i + 1);
+            let value = OBJECTS.with(|o| o.borrow().get(&h_new).and_then(|a| a.get(&CKA_VALUE).cloned()));
+            assert_eq!(
+                value,
+                Some(hex(master_hex)),
+                "{}-byte seed: wrong master key (BIP-32 vector {})",
+                seed.len(),
+                i + 1
+            );
+        }
+
+        // Outside the range: refused, whatever the content.
+        for (j, len) in [8usize, 15, 65, 128].into_iter().enumerate() {
+            let h_seed = 0x5334_3020 + j as u32;
+            install_seed(h_seed, &vec![0x5a; len]);
+            assert_eq!(
+                derive_master(h_seed).0,
+                CKR_KEY_SIZE_RANGE,
+                "a {len}-byte seed must be refused with CKR_KEY_SIZE_RANGE"
+            );
+        }
+    }
+
     // ── SP 800-108 KBKDF PRF policy (§6.26) ─────────────────────────────────
 
     /// PKCS#11 v3.2 §6.26 — the SP 800-108 PRF must be a keyed-MAC
@@ -19886,6 +20066,178 @@ mod return_code_ffi_tests {
     /// (NIST SP 800-108 §5.2, stdlib hmac/hashlib only) — all three (Python
     /// reference, C++ engine post-fix, Rust engine) agree byte-for-byte on
     /// both hex strings below.
+    /// Every ACVP counterLocation placement, all three SP 800-108 modes
+    /// (2026-09-26).
+    ///
+    /// Tables 199, 200 and 201 each say CK_SP800_108_ITERATION_VARIABLE
+    /// "identifies the location of the iteration variable in the constructed
+    /// PRF input data", so its array position is normative in all three modes.
+    /// Both runners used to feed the chaining value into the MAC before walking
+    /// the caller's segments, which made "before iterator" — the counter ahead
+    /// of K(i-1)/A(i) — unreachable. The C++ engine had the identical defect, so
+    /// the differential harness could never see it; both engines agreed on the
+    /// wrong answer.
+    ///
+    /// The vectors are NIST ACVP KDF-1.0. Note the reachability guard below:
+    /// this repo's OTHER two KBKDF vector files hold 42 cases that are all
+    /// "before fixed data", so a test over those could never have failed.
+    #[test]
+    fn sp800_108_all_counter_placements_match_nist_acvp() {
+        #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+        enum Loc {
+            BeforeFixed,
+            AfterFixed,
+            MiddleFixed,
+            BeforeIter,
+            None_,
+        }
+        fn unhex(s: &str) -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+                .collect()
+        }
+        let json = include_str!("../../tests/acvp/sp800_108_kbkdf_placement_test.json");
+        let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+
+        let mut ran = 0usize;
+        let mut seen: std::collections::HashSet<Loc> = Default::default();
+        let mut skipped_cmac = 0usize;
+
+        for g in v["testGroups"].as_array().expect("testGroups") {
+            let mode = g["kdfMode"].as_str().unwrap_or("");
+            let loc = match g["counterLocation"].as_str().unwrap_or("") {
+                "before fixed data" => Loc::BeforeFixed,
+                "after fixed data" => Loc::AfterFixed,
+                "middle fixed data" => Loc::MiddleFixed,
+                "before iterator" => Loc::BeforeIter,
+                "none" => Loc::None_,
+                other => panic!("unknown counterLocation {other}"),
+            };
+            let prf = match g["macMode"].as_str().unwrap_or("") {
+                "HMAC-SHA-1" => CKM_SHA_1_HMAC,
+                "HMAC-SHA2-224" => CKM_SHA224_HMAC,
+                "HMAC-SHA2-256" => CKM_SHA256_HMAC,
+                "HMAC-SHA2-384" => CKM_SHA384_HMAC,
+                "HMAC-SHA2-512" => CKM_SHA512_HMAC,
+                // AES-CMAC and the SHA-3 HMACs go through the same segment
+                // logic; they are exercised by the C++ probe against these same
+                // vectors. Counted so the skip is visible rather than silent.
+                _ => {
+                    skipped_cmac += g["tests"].as_array().map(|a| a.len()).unwrap_or(0);
+                    continue;
+                }
+            };
+            let width_bits = g["counterLength"].as_u64().unwrap_or(32) as usize;
+            if loc != Loc::None_ && !matches!(width_bits, 8 | 16 | 24 | 32) {
+                continue;
+            }
+            let wb = width_bits / 8;
+
+            for t in g["tests"].as_array().expect("tests") {
+                let key = unhex(t["keyIn"].as_str().expect("keyIn"));
+                let fixed = unhex(t["fixedData"].as_str().unwrap_or(""));
+                let iv = unhex(t["iv"].as_str().unwrap_or(""));
+                let want = unhex(t["keyOut"].as_str().expect("keyOut"));
+                let klen = g["keyOutLength"].as_u64().expect("keyOutLength") as usize / 8;
+                let tc = t["tcId"].as_u64().unwrap_or(0);
+
+                // Segment order IS the placement. Counter mode's iteration
+                // variable is itself the counter (Table 199), so it appears as
+                // Sp800Seg::Counter; feedback and double-pipeline carry a
+                // separate optional counter plus the iteration variable's
+                // position.
+                let segs: Vec<Sp800Seg> = if mode == "counter" {
+                    match loc {
+                        Loc::BeforeFixed => vec![
+                            Sp800Seg::Counter(false, wb),
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        Loc::AfterFixed => vec![
+                            Sp800Seg::Bytes(fixed.clone()),
+                            Sp800Seg::Counter(false, wb),
+                        ],
+                        Loc::MiddleFixed => {
+                            // breakLocation is in BITS, not bytes. Getting this
+                            // wrong yields plausible wrong bytes, not an error.
+                            let b = t["breakLocation"].as_u64().expect("breakLocation") as usize / 8;
+                            vec![
+                                Sp800Seg::Bytes(fixed[..b].to_vec()),
+                                Sp800Seg::Counter(false, wb),
+                                Sp800Seg::Bytes(fixed[b..].to_vec()),
+                            ]
+                        }
+                        other => panic!("counter mode cannot have {other:?}"),
+                    }
+                } else {
+                    match loc {
+                        Loc::BeforeFixed => vec![
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Counter(false, wb),
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        Loc::AfterFixed => vec![
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Bytes(fixed.clone()),
+                            Sp800Seg::Counter(false, wb),
+                        ],
+                        Loc::BeforeIter => vec![
+                            Sp800Seg::Counter(false, wb),
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        Loc::None_ => vec![
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        other => panic!("{mode} cannot have {other:?}"),
+                    }
+                };
+
+                let got = match mode {
+                    "counter" => sp800_108_counter_kbkdf(prf, &key, &segs, klen),
+                    "feedback" => sp800_108_feedback_kbkdf(prf, &key, &iv, &segs, klen),
+                    "double pipeline iteration" => {
+                        sp800_108_double_pipeline_kbkdf(prf, &key, &segs, klen)
+                    }
+                    other => panic!("unknown kdfMode {other}"),
+                }
+                .unwrap_or_else(|e| panic!("tc{tc} {mode}/{loc:?}: derive failed 0x{e:x}"));
+
+                assert_eq!(
+                    got, want,
+                    "tc{tc} {mode}/{loc:?}: derived key mismatch — the caller's \
+                     segment order is not being honoured"
+                );
+                ran += 1;
+                seen.insert(loc);
+            }
+        }
+
+        // Reachability. A loop that ran zero times, or one that only ever saw
+        // "before fixed data", proves nothing — and that is precisely the state
+        // the repo's other two KBKDF vector files are in.
+        assert!(ran > 0, "no vectors were exercised");
+        for need in [
+            Loc::BeforeFixed,
+            Loc::AfterFixed,
+            Loc::MiddleFixed,
+            Loc::BeforeIter,
+            Loc::None_,
+        ] {
+            assert!(
+                seen.contains(&need),
+                "placement {need:?} was never exercised — this test cannot \
+                 detect a regression in it"
+            );
+        }
+        assert!(
+            skipped_cmac > 0,
+            "expected some AES-CMAC/SHA-3 groups to be skipped here; if none \
+             were, the vector file changed shape"
+        );
+    }
+
     #[test]
     fn sp800_108_feedback_no_counter_matches_cpp_and_reference() {
         let base_key: Vec<u8> = (0u8..32).collect();
@@ -23876,6 +24228,81 @@ mod generic_prehash_mech_ffi_tests {
         (m, ctx)
     }
 
+    /// 4.G (register row rust-hash-slh-dsa-deterministic-not-honoured). Since
+    /// R37 stopped remapping the GENERIC mechanisms onto the hash-specific
+    /// ones, takes_sign_additional_ctx no longer matched CKM_HASH_ML_DSA /
+    /// CKM_HASH_SLH_DSA, so parse_sign_mech_params dropped the WHOLE
+    /// CK_HASH_SIGN_ADDITIONAL_CONTEXT prefix: hedgeVariant (a
+    /// CKH_DETERMINISTIC_REQUIRED request signed hedged — the hub measured two
+    /// different SLH-DSA signatures for the same digest on all 12 sets) AND
+    /// the context (signed with an empty one). Both, both mechanisms, single
+    /// part and message-based.
+    fn hash_mech_with(base: u32, hash: u32, hedge: usize, ctx: &[u8]) -> ([usize; 3], [usize; 4]) {
+        let p: [usize; 4] = [hedge, ctx.as_ptr() as usize, ctx.len(), hash as usize];
+        let usz = std::mem::size_of::<usize>();
+        ([base as usize, 0, 4 * usz], p)
+    }
+
+    fn sign_generic(session: u32, key: u32, base: u32, hedge: usize, ctx: &[u8], phm: &[u8], message: bool) -> Vec<u8> {
+        let (mut m, p) = hash_mech_with(base, CKM_SHA256, hedge, ctx);
+        m[1] = p.as_ptr() as usize;
+        let mut sig = vec![0u8; 50_000];
+        let mut len = sig.len() as u32;
+        if message {
+            assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, key), CKR_OK);
+            assert_eq!(
+                C_SignMessage(session, std::ptr::null_mut(), 0, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_mut_ptr(), &mut len),
+                CKR_OK
+            );
+            assert_eq!(C_MessageSignFinal(session), CKR_OK);
+        } else {
+            assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, key), CKR_OK);
+            assert_eq!(
+                C_Sign(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_mut_ptr(), &mut len),
+                CKR_OK
+            );
+        }
+        sig.truncate(len as usize);
+        sig
+    }
+
+    fn verify_generic(session: u32, key: u32, base: u32, ctx: &[u8], phm: &[u8], sig: &[u8]) -> u32 {
+        let (mut m, p) = hash_mech_with(base, CKM_SHA256, 0, ctx);
+        m[1] = p.as_ptr() as usize;
+        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, key), CKR_OK);
+        C_Verify(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32)
+    }
+
+    #[test]
+    fn generic_hash_mechanisms_honour_hedge_variant_and_context() {
+        let _guard = test_lock::acquire();
+        let (session, ml_pub, ml_priv) = setup();
+        let (slh_pub, slh_priv) =
+            crate::native::keygen::generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHA2_128F, b"s", "s")
+                .expect("slh-dsa-sha2-128f keygen");
+        use sha2::Digest;
+        let phm = sha2::Sha256::digest(b"generic pre-hash, deterministic").to_vec();
+        let ctx = b"a context".as_slice();
+        for (name, base, pubk, privk) in [
+            ("CKM_HASH_ML_DSA", CKM_HASH_ML_DSA, ml_pub, ml_priv),
+            ("CKM_HASH_SLH_DSA", CKM_HASH_SLH_DSA, slh_pub, slh_priv),
+        ] {
+            for message in [false, true] {
+                let form = if message { "C_SignMessage" } else { "C_Sign" };
+                let a = sign_generic(session, privk, base, CKH_DETERMINISTIC_REQUIRED as usize, &[], &phm, message);
+                let b = sign_generic(session, privk, base, CKH_DETERMINISTIC_REQUIRED as usize, &[], &phm, message);
+                assert_eq!(a, b, "{name} via {form}: CKH_DETERMINISTIC_REQUIRED must give one signature");
+                let c = sign_generic(session, privk, base, CKH_DETERMINISTIC_REQUIRED as usize, ctx, &phm, message);
+                assert_eq!(verify_generic(session, pubk, base, ctx, &phm, &c), CKR_OK, "{name} via {form}: same context verifies");
+                assert_eq!(
+                    verify_generic(session, pubk, base, &[], &phm, &c),
+                    CKR_SIGNATURE_INVALID,
+                    "{name} via {form}: a signature made with a context must not verify without it"
+                );
+            }
+        }
+    }
+
     #[test]
     fn generic_hash_ml_dsa_sign_verify_round_trip() {
         let _guard = test_lock::acquire();
@@ -24052,6 +24479,62 @@ mod ecdh_cofactor_ffi_tests {
             &mut key_handle,
         );
         assert_eq!(rv, CKR_KEY_TYPE_INCONSISTENT, "cofactor mode is not valid for CKK_EC_MONTGOMERY (Table 79)");
+    }
+
+    /// X25519 low-order peer points (the set libsodium and RFC 7748 §6.1's
+    /// "check for the all-zero value" guard against): each forces the shared
+    /// secret to all zeros whatever our private key is. u = 0, u = 1, the two
+    /// order-8 points, and p − 1, p, p + 1 (the last two reduce to 0 and 1).
+    pub(super) const X25519_LOW_ORDER: [&str; 7] = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    ];
+
+    pub(super) fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// RFC 7748 §6.1: a low-order peer point makes the X25519 output all
+    /// zeros, and "the check for the all-zero value results in failure". The
+    /// X448 arm of this same C_DeriveKey branch already refused a low-order
+    /// point (x448::PublicKey::from_bytes returns None) with
+    /// CKR_ARGUMENTS_BAD; the X25519 arm derived a key from 32 zero bytes and
+    /// returned CKR_OK (register row rust-no-contributory-behaviour-check-ecdh).
+    #[test]
+    fn x25519_derive_refuses_a_low_order_peer_point() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_x25519_keypair(session, b"lo", "lo").unwrap();
+        for hex in X25519_LOW_ORDER {
+            let peer_pub = unhex(hex);
+            let (mut m, mut params) = ecdh_mech(CKM_ECDH1_DERIVE, &peer_pub);
+            m[1] = params.as_mut_ptr() as usize;
+            let class: u32 = CKO_SECRET_KEY;
+            let key_type: u32 = CKK_GENERIC_SECRET;
+            let extractable: u8 = 1; // CK_TRUE
+            let value_len: u32 = 32;
+            let mut tmpl: [usize; 12] = [
+                CKA_CLASS as usize, &class as *const u32 as usize, std::mem::size_of::<u32>(),
+                CKA_KEY_TYPE as usize, &key_type as *const u32 as usize, std::mem::size_of::<u32>(),
+                CKA_EXTRACTABLE as usize, &extractable as *const u8 as usize, std::mem::size_of::<u8>(),
+                CKA_VALUE_LEN as usize, &value_len as *const u32 as usize, std::mem::size_of::<u32>(),
+            ];
+            let mut key_handle: u32 = 0;
+            let rv = C_DeriveKey(
+                session,
+                m.as_mut_ptr() as *mut u8,
+                priv_a,
+                tmpl.as_mut_ptr() as *mut u8,
+                4,
+                &mut key_handle,
+            );
+            assert_eq!(rv, CKR_ARGUMENTS_BAD, "low-order X25519 peer point {hex} must be refused");
+        }
     }
 
     #[test]
@@ -28247,5 +28730,142 @@ mod ec_public_key_validation_tests {
         assert_eq!(verdict(&a), Ok(()));
         let b = template(CKK_RSA, OID_ED25519, vec![0u8; 5]);
         assert_eq!(verdict(&b), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod eddsa_ph_context_ffi_tests {
+    //! Ed25519ph / Ed448ph with a context, end to end through C_SignInit /
+    //! C_Sign and C_VerifyInit / C_Verify. #276 made sign_eddsa_ph and
+    //! verify_eddsa_ph bind the context and pinned that with a handler-level
+    //! test, but the context never reached them from the PKCS#11 entry points:
+    //! parse_sign_mech_params read CK_EDDSA_PARAMS' context only when
+    //! mech_type == CKM_EDDSA, and a phFlag = TRUE call has already been
+    //! remapped to CKM_EDDSA_PH by then. So C_Sign produced Ed25519ph/Ed448ph
+    //! with an EMPTY context and returned CKR_OK — measured by the hub's ACVP
+    //! harness on the wasm engine as 8 NIST EDDSA-SigGen-1.0 preHash cases
+    //! "differs" (register row rust-eddsa-ph-context-ignored).
+    //!
+    //! Every pre-hash test in tests/acvp/eddsa_test.json and
+    //! eddsa_ed448_test.json runs here, through both ways a caller selects
+    //! pre-hash: CKM_EDDSA with phFlag = TRUE, and the vendor CKM_EDDSA_PH.
+    use super::*;
+    use crate::native::test_lock;
+
+    const OID_ED25519: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+    const OID_ED448: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x71];
+
+    /// PKCS#11 v3.2 §6.3.7 CK_EDDSA_PARAMS at native layout.
+    #[repr(C)]
+    struct CkEddsaParams {
+        ph_flag: u8,
+        ul_context_data_len: usize,
+        p_context_data: *const u8,
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    fn setup() -> u32 {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "eddsa-ph-ctx-test")
+                .unwrap();
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        session
+    }
+
+    fn create(session: u32, attrs: &[(u32, *const u8, usize)]) -> u32 {
+        let tmpl: Vec<usize> =
+            attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+        let mut h = 0u32;
+        assert_eq!(
+            C_CreateObject(session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h),
+            CKR_OK
+        );
+        h
+    }
+
+    fn ed_key(session: u32, class: u32, oid: &[u8], value_attr: u32, value: &[u8]) -> u32 {
+        let (class, kt) = (class as usize, CKK_EC_EDWARDS as usize);
+        let us = std::mem::size_of::<usize>();
+        let usage = if class == CKO_PRIVATE_KEY as usize { CKA_SIGN } else { CKA_VERIFY };
+        create(
+            session,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, us),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, us),
+                (CKA_TOKEN, [0u8].as_ptr(), 1),
+                (usage, [1u8].as_ptr(), 1),
+                (CKA_EC_PARAMS, oid.as_ptr(), oid.len()),
+                (value_attr, value.as_ptr(), value.len()),
+            ],
+        )
+    }
+
+    #[test]
+    fn nist_prehash_vectors_with_context_byte_match_through_c_sign() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let mut checked = 0usize;
+        for (json, oid) in [
+            (include_str!("../../tests/acvp/eddsa_test.json"), OID_ED25519),
+            (include_str!("../../tests/acvp/eddsa_ed448_test.json"), OID_ED448),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+            for set in v["vectorSets"].as_array().expect("vectorSets") {
+                let scheme = set["scheme"].as_str().unwrap_or("");
+                if !scheme.ends_with("ph") {
+                    continue;
+                }
+                for t in set["tests"].as_array().expect("tests") {
+                    let id = t["id"].as_str().unwrap_or("?");
+                    let d = unhex(t["d"].as_str().expect("d"));
+                    let q = unhex(t["q"].as_str().expect("q"));
+                    let msg = unhex(t["message"].as_str().expect("message"));
+                    let ctx = unhex(t["context"].as_str().unwrap_or(""));
+                    let want = unhex(t["signature"].as_str().expect("signature"));
+                    let h_priv = ed_key(session, CKO_PRIVATE_KEY, oid, CKA_VALUE, &d);
+                    let h_pub = ed_key(session, CKO_PUBLIC_KEY, oid, CKA_EC_POINT, &q);
+                    let params = CkEddsaParams {
+                        ph_flag: 1,
+                        ul_context_data_len: ctx.len(),
+                        p_context_data: if ctx.is_empty() { std::ptr::null() } else { ctx.as_ptr() },
+                    };
+                    for mech in [CKM_EDDSA, CKM_EDDSA_PH] {
+                        let mut m: [usize; 3] = [
+                            mech as usize,
+                            &params as *const CkEddsaParams as usize,
+                            std::mem::size_of::<CkEddsaParams>(),
+                        ];
+                        assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, h_priv), CKR_OK);
+                        let mut sig = vec![0u8; 114];
+                        let mut len = sig.len() as u32;
+                        assert_eq!(
+                            C_Sign(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut len),
+                            CKR_OK,
+                            "{scheme} {id} mech {mech:#x}: C_Sign"
+                        );
+                        sig.truncate(len as usize);
+                        assert_eq!(
+                            sig, want,
+                            "{scheme} {id} mech {mech:#x}: C_Sign does not match NIST with a {}-byte context",
+                            ctx.len()
+                        );
+                        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, h_pub), CKR_OK);
+                        assert_eq!(
+                            C_Verify(session, msg.as_ptr() as *mut u8, msg.len() as u32, want.as_ptr() as *mut u8, want.len() as u32),
+                            CKR_OK,
+                            "{scheme} {id} mech {mech:#x}: C_Verify rejects NIST's signature"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 20, "expected the NIST pre-hash vectors, ran {checked}");
     }
 }

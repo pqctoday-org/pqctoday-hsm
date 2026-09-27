@@ -85,9 +85,8 @@ import {
   hkdf,
   concatBytes,
   importGenericSecret,
-  sp800108CounterKdf,
-  sp800108FeedbackKdf,
-  sp800108DoublePipelineKdf,
+  kbkdfSegments,
+  sp800108Kdf,
   aesCcmEncrypt,
   aesCcmDecrypt,
   gmacSign,
@@ -148,6 +147,7 @@ const x25519x448Vec = loadJson('x25519_x448_rfc7748_test.json')
 const kdaHkdfVec = loadJson('kda_hkdf_sp800_56cr1_test.json')
 const kbkdfVec = loadJson('sp800_108_kbkdf_test.json')
 const dpipeVec = loadJson('sp800_108_double_pipeline_test.json')
+const kbkdfPlacementVec = loadJson('sp800_108_kbkdf_placement_test.json')
 const aesOfbVec = loadJson('aes_ofb_test.json')
 const aesCfb1Vec = loadJson('aes_cfb1_test.json')
 const aesCfb8Vec = loadJson('aes_cfb8_test.json')
@@ -1276,9 +1276,13 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 18c. SP800-108 KBKDF Real ACVP KAT (Counter + Feedback, "before
-    // fixed data" only — see sp800_108_kbkdf_test.json's _provenance for why,
-    // and for the 3 real bugs this evidence found and fixed) ─────────────
+    // ── 18c/18d. SP800-108 KBKDF Real ACVP KAT — counter, feedback and
+    // double-pipeline. Every case is built from its own counterLocation (and
+    // breakLocation) via kbkdfSegments; nothing assumes a placement. Three
+    // files: the original counter/feedback set and double-pipeline set (both
+    // "before fixed data" only — see their _provenance), plus
+    // sp800_108_kbkdf_placement_test.json, which covers after / middle /
+    // before-iterator / none so that a placement regression is detectable. ─
     {
       const HMAC_PRF_TO_MECH = {
         'HMAC-SHA-1': CK.CKM_SHA_1_HMAC,
@@ -1296,80 +1300,38 @@ async function runSuite(engineName) {
         'CMAC-AES192': CK.CKM_AES_CMAC,
         'CMAC-AES256': CK.CKM_AES_CMAC,
       }
-      for (const tg of kbkdfVec.testGroups) {
-        const prfType = HMAC_PRF_TO_MECH[tg.macMode]
-        const label = `SP800-108-${tg.kdfMode}-${tg.macMode}`
-        if (!prfType) {
-          addResult('sp800-108', label, `tgId=${tg.tgId}`, 'SKIP', 'no mechanism mapping')
-          continue
-        }
-        for (const t of tg.tests) {
-          try {
-            const keyIn = hexToBytes(t.keyIn)
-            const fixedData = hexToBytes(t.fixedData)
-            const outLen = tg.keyOutLength / 8
-            const baseKeyH = prfType === CK.CKM_AES_CMAC
-              ? importAESKey(M, hSession, keyIn, { encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: true, extractable: false })
-              : importGenericSecret(M, hSession, keyIn)
-            let out
-            if (tg.kdfMode === 'counter') {
-              out = sp800108CounterKdf(M, hSession, baseKeyH, prfType, fixedData, tg.counterLength, outLen)
-            } else {
-              const iv = t.iv ? hexToBytes(t.iv) : new Uint8Array(0)
-              out = sp800108FeedbackKdf(M, hSession, baseKeyH, prfType, fixedData, tg.counterLength, iv, outLen)
-            }
-            const expected = hexToBytes(t.keyOut)
-            const ok = arrEq(out, expected)
-            addResult('sp800-108', label, `${tg.testType} tgId=${tg.tgId}`, ok ? 'PASS' : 'FAIL', `keyOut[${out.length}B]: ${bytesToHex(out, 16)}`)
-          } catch (e) {
-            addResult('sp800-108', label, `${tg.testType} tgId=${tg.tgId}`, 'FAIL', e.message)
+      const KBKDF_FILES = [
+        ['sp800-108', kbkdfVec, (tg) => `SP800-108-${tg.kdfMode}-${tg.macMode}`],
+        ['sp800-108-dpipe', dpipeVec, (tg) => `SP800-108-dpipe-${tg.macMode}`],
+        ['sp800-108-placement', kbkdfPlacementVec, (tg) => `SP800-108-${tg.kdfMode}-${tg.counterLocation}-${tg.macMode}`],
+      ]
+      for (const [id, vec, labelOf] of KBKDF_FILES) {
+        for (const tg of vec.testGroups) {
+          const prfType = HMAC_PRF_TO_MECH[tg.macMode]
+          const label = labelOf(tg)
+          if (!prfType) {
+            addResult(id, label, `tgId=${tg.tgId}`, 'SKIP', 'no mechanism mapping')
+            continue
           }
-        }
-      }
-    }
-
-    // ── 18d. SP800-108 Double Pipeline KDF Real ACVP KAT — new mechanism,
-    // hand-built EVP_MAC round loop (OpenSSL's KBKDF has no meta-provider
-    // path for this mode). See sp800_108_double_pipeline_test.json's
-    // _provenance for the construction and how it was verified. ─────────
-    {
-      const HMAC_PRF_TO_MECH = {
-        'HMAC-SHA-1': CK.CKM_SHA_1_HMAC,
-        'HMAC-SHA2-224': CK.CKM_SHA224_HMAC,
-        'HMAC-SHA2-256': CK.CKM_SHA256_HMAC,
-        'HMAC-SHA2-384': CK.CKM_SHA384_HMAC,
-        'HMAC-SHA2-512': CK.CKM_SHA512_HMAC,
-        'HMAC-SHA2-512/224': CK.CKM_SHA512_224_HMAC,
-        'HMAC-SHA2-512/256': CK.CKM_SHA512_256_HMAC,
-        'HMAC-SHA3-224': CK.CKM_SHA3_224_HMAC,
-        'HMAC-SHA3-256': CK.CKM_SHA3_256_HMAC,
-        'HMAC-SHA3-384': CK.CKM_SHA3_384_HMAC,
-        'HMAC-SHA3-512': CK.CKM_SHA3_512_HMAC,
-        'CMAC-AES128': CK.CKM_AES_CMAC,
-        'CMAC-AES192': CK.CKM_AES_CMAC,
-        'CMAC-AES256': CK.CKM_AES_CMAC,
-      }
-      for (const tg of dpipeVec.testGroups) {
-        const prfType = HMAC_PRF_TO_MECH[tg.macMode]
-        const label = `SP800-108-dpipe-${tg.macMode}`
-        if (!prfType) {
-          addResult('sp800-108-dpipe', label, `tgId=${tg.tgId}`, 'SKIP', 'no mechanism mapping')
-          continue
-        }
-        for (const t of tg.tests) {
-          try {
-            const keyIn = hexToBytes(t.keyIn)
-            const fixedData = hexToBytes(t.fixedData)
-            const outLen = tg.keyOutLength / 8
-            const baseKeyH = prfType === CK.CKM_AES_CMAC
-              ? importAESKey(M, hSession, keyIn, { encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: true, extractable: false })
-              : importGenericSecret(M, hSession, keyIn)
-            const out = sp800108DoublePipelineKdf(M, hSession, baseKeyH, prfType, fixedData, tg.counterLength, outLen)
-            const expected = hexToBytes(t.keyOut)
-            const ok = arrEq(out, expected)
-            addResult('sp800-108-dpipe', label, `${tg.testType} tgId=${tg.tgId}`, ok ? 'PASS' : 'FAIL', `keyOut[${out.length}B]: ${bytesToHex(out, 16)}`)
-          } catch (e) {
-            addResult('sp800-108-dpipe', label, `${tg.testType} tgId=${tg.tgId}`, 'FAIL', e.message)
+          for (const t of tg.tests) {
+            const tcase = `${tg.testType} tgId=${tg.tgId} tcId=${t.tcId}`
+            try {
+              const keyIn = hexToBytes(t.keyIn)
+              const fixedData = hexToBytes(t.fixedData)
+              const outLen = tg.keyOutLength / 8
+              const baseKeyH = prfType === CK.CKM_AES_CMAC
+                ? importAESKey(M, hSession, keyIn, { encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: true, extractable: false })
+                : importGenericSecret(M, hSession, keyIn)
+              const segments = kbkdfSegments(tg.kdfMode, tg.counterLocation, fixedData, t.breakLocation)
+              // Only feedback mode has an IV (Table 201's struct); ACVP emits an
+              // iv field for the other modes too, which PKCS#11 has no slot for.
+              const iv = tg.kdfMode === 'feedback' && t.iv ? hexToBytes(t.iv) : new Uint8Array(0)
+              const out = sp800108Kdf(M, hSession, baseKeyH, tg.kdfMode, prfType, segments, tg.counterLength, outLen, iv)
+              const ok = arrEq(out, hexToBytes(t.keyOut))
+              addResult(id, label, tcase, ok ? 'PASS' : 'FAIL', `keyOut[${out.length}B]: ${bytesToHex(out, 16)}`)
+            } catch (e) {
+              addResult(id, label, tcase, 'FAIL', e.message)
+            }
           }
         }
       }
