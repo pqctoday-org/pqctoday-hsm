@@ -111,6 +111,13 @@ static constexpr CK_ULONG AES_KEY_BYTES_256         = 32UL;  ///< AES-256
 /// Defined in SoftHSM.cpp; called by constructor, destructor, and C_Initialize.
 void resetMutexFactoryCallbacks();
 
+/// True when `p[0..n)` is exactly ONE complete DER value (tag, short- or
+/// long-form length, contents) with nothing after it. CKA_EC_PARAMS must be
+/// one DER-encoded Parameters CHOICE; a valid OID followed by stray bytes used
+/// to be accepted because OpenSSL decodes the prefix (plan 3.B′, 2026-09-27).
+/// Defined in SoftHSM_objects.cpp; used by objects and keygen files.
+bool isSingleDerValue(const unsigned char* p, size_t n);
+
 /// Check that a secret-key byte length is valid for the given CKK_* type.
 /// Defined in SoftHSM_objects.cpp; used by objects and keygen files.
 CK_RV checkKeyLength(CK_KEY_TYPE keyType, size_t byteLen);

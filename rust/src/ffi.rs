@@ -6979,6 +6979,23 @@ fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
     }
 }
 
+/// Plan item 0.D′ (ruling 2026-09-27): an unwrapped RSA private key gets the
+/// same check C_CreateObject applies (check_rsa_private_blob) — notably the
+/// public-exponent cap (e >= 2^33 is refused). C_UnwrapKey used to store the
+/// unwrapped PrivateKeyInfo verbatim, so such a key was accepted here and
+/// failed later on use. A blob that fails the check is not a valid wrapped
+/// key for this token: CKR_WRAPPED_KEY_INVALID.
+fn unwrap_rsa_private_check(attrs: &Attributes) -> Result<(), u32> {
+    let read_u32 = |t: u32| attrs.get(&t).filter(|v| v.len() >= 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+    if read_u32(CKA_CLASS) != Some(CKO_PRIVATE_KEY) || read_u32(CKA_KEY_TYPE) != Some(CKK_RSA) {
+        return Ok(());
+    }
+    match attrs.get(&CKA_VALUE) {
+        Some(blob) => check_rsa_private_blob(attrs, blob).map_err(|_| CKR_WRAPPED_KEY_INVALID),
+        None => Err(CKR_WRAPPED_KEY_INVALID),
+    }
+}
+
 /// PKCS#11 v3.2 §5.18.4 (C_UnwrapKey; §5.18.7 C_UnwrapKeyAuthenticated
 /// defers to it): "If any length conflict occurs between the key type of the
 /// unwrapped key, the output from the unwrapping mechanism, or the specified
@@ -13775,6 +13792,9 @@ pub fn C_UnwrapKey(
         if let Err(rv) = unwrap_secret_len_check(&attrs, unwrapped_class) {
             return rv;
         }
+        if let Err(rv) = unwrap_rsa_private_check(&attrs) {
+            return rv;
+        }
         if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
@@ -14197,6 +14217,9 @@ pub fn C_UnwrapKeyAuthenticated(
             .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
         // §5.18.4 — unwrapped length vs key type; see unwrap_secret_len_check.
         if let Err(rv) = unwrap_secret_len_check(&attrs, unwrapped_class) {
+            return rv;
+        }
+        if let Err(rv) = unwrap_rsa_private_check(&attrs) {
             return rv;
         }
         if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
@@ -29886,5 +29909,112 @@ mod dkm_length_reference_tests {
             let got = OBJECTS.with(|o| o.borrow().get(&h).and_then(|a| a.get(&CKA_VALUE).cloned())).unwrap();
             assert_eq!(got, unhex(want), "{mode} method={method} width={width} le={le}: DKM bytes differ from the reference");
         }
+    }
+}
+
+#[cfg(test)]
+mod rsa_unwrap_wide_e_tests {
+    //! Plan item 0.D′ (ruling 2026-09-27: RSA keys with e >= 2^33 stay
+    //! refused). C_CreateObject refuses such a key (check_rsa_private_blob),
+    //! but C_UnwrapKey stored an unwrapped RSA PrivateKeyInfo verbatim, with
+    //! no check, so the key was accepted at unwrap and failed later on use.
+    //! Keys: the NIST ACVP KTS-IFC OAEP vectors in tests/acvp/rsa_oaep_test.json
+    //! (one with e >= 2^33, one with a small e as the positive control),
+    //! encoded straight into PKCS#1 / PKCS#8 from their components — the rsa
+    //! crate refuses to construct the wide one — and AES-KWP-wrapped.
+    use super::*;
+    use crate::native::test_lock;
+    use rsa::pkcs8::der::Encode;
+
+    const US: usize = std::mem::size_of::<usize>();
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+    fn strip(v: &[u8]) -> &[u8] {
+        let i = v.iter().position(|&b| b != 0).unwrap_or(v.len() - 1);
+        &v[i..]
+    }
+
+    fn pkcs8(t: &serde_json::Value) -> Vec<u8> {
+        let f = |k: &str| unhex(t[k].as_str().unwrap());
+        let (n, e, d, p, q, dp, dq, qi) = (f("n"), f("e"), f("d"), f("p"), f("q"), f("dp"), f("dq"), f("qi"));
+        fn u(v: &[u8]) -> rsa::pkcs1::UintRef<'_> {
+            rsa::pkcs1::UintRef::new(strip(v)).unwrap()
+        }
+        let k = rsa::pkcs1::RsaPrivateKey {
+            modulus: u(&n),
+            public_exponent: u(&e),
+            private_exponent: u(&d),
+            prime1: u(&p),
+            prime2: u(&q),
+            exponent1: u(&dp),
+            exponent2: u(&dq),
+            coefficient: u(&qi),
+            other_prime_infos: None,
+        };
+        let pkcs1 = k.to_der().unwrap();
+        rsa::pkcs8::PrivateKeyInfo::new(rsa::pkcs1::ALGORITHM_ID, &pkcs1).to_der().unwrap()
+    }
+
+    fn unwrap_rsa(s: u32, kek: u32, wrapped: &mut [u8]) -> u32 {
+        let mut mech: [usize; 3] = [CKM_AES_KEY_WRAP_KWP as usize, 0, 0];
+        let (class, kt) = (CKO_PRIVATE_KEY as usize, CKK_RSA as usize);
+        let t: Vec<usize> = [
+            (CKA_CLASS, &class as *const _ as usize, US),
+            (CKA_KEY_TYPE, &kt as *const _ as usize, US),
+            (CKA_TOKEN, [0u8].as_ptr() as usize, 1),
+            (CKA_DECRYPT, [1u8].as_ptr() as usize, 1),
+        ]
+        .iter()
+        .flat_map(|(a, p, l)| [*a as usize, *p, *l])
+        .collect();
+        let mut h = 0u32;
+        C_UnwrapKey(s, mech.as_mut_ptr() as *mut u8, kek, wrapped.as_mut_ptr(), wrapped.len() as u32,
+                    t.as_ptr() as *mut u8, 4, &mut h)
+    }
+
+    #[test]
+    fn unwrap_refuses_an_rsa_key_with_e_at_least_2_pow_33_like_create_object() {
+        let _g = test_lock::acquire();
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let s = crate::native::session::bootstrap_default_token(0, "so", "user", "wide-e-unwrap").unwrap();
+        let kek_bytes = [0x5au8; 32];
+        let (class, kt) = (CKO_SECRET_KEY as usize, CKK_AES as usize);
+        let kt_tmpl: Vec<usize> = [
+            (CKA_CLASS, &class as *const _ as usize, US),
+            (CKA_KEY_TYPE, &kt as *const _ as usize, US),
+            (CKA_TOKEN, [0u8].as_ptr() as usize, 1),
+            (CKA_UNWRAP, [1u8].as_ptr() as usize, 1),
+            (CKA_VALUE, kek_bytes.as_ptr() as usize, kek_bytes.len()),
+        ]
+        .iter()
+        .flat_map(|(a, p, l)| [*a as usize, *p, *l])
+        .collect();
+        let mut kek = 0u32;
+        assert_eq!(C_CreateObject(s, kt_tmpl.as_ptr() as *mut u8, 5, &mut kek), CKR_OK);
+
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/acvp/rsa_oaep_test.json")).unwrap();
+        let (mut wide_seen, mut small_seen) = (false, false);
+        for g in v["testGroups"].as_array().unwrap() {
+            for t in g["tests"].as_array().unwrap() {
+                let wide = rsa::BigUint::from_bytes_be(&unhex(t["e"].as_str().unwrap())).bits() > 33;
+                if (wide && wide_seen) || (!wide && small_seen) {
+                    continue;
+                }
+                let mut wrapped = crate::crypto::aeskw::kwp_wrap(&kek_bytes, &pkcs8(t)).ok().unwrap();
+                let rv = unwrap_rsa(s, kek, &mut wrapped);
+                if wide {
+                    assert_eq!(rv, CKR_WRAPPED_KEY_INVALID, "tc{}: an RSA key with e >= 2^33 must be refused at unwrap", t["tcId"]);
+                    wide_seen = true;
+                } else {
+                    assert_eq!(rv, CKR_OK, "tc{}: a small-e RSA key must still unwrap", t["tcId"]);
+                    small_seen = true;
+                }
+            }
+        }
+        assert!(wide_seen && small_seen, "need one wide-e and one small-e NIST key");
     }
 }

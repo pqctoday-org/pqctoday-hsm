@@ -1324,6 +1324,16 @@ fn w1_ec_params_are_decoded_never_defaulted() {
         "implicitCA is forbidden — an invalid representation, not a curve"
     );
 
+    // A valid OID followed by a stray byte is not ONE DER value (plan 3.B′):
+    // it used to be accepted, the tail ignored.
+    let mut trailing = oid(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]);
+    trailing.push(0x00);
+    let (rv, _, _) = gen_ec(Some(trailing), CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(
+        rv, CKR_DOMAIN_PARAMS_INVALID,
+        "P-256's OID plus a trailing byte is an invalid representation"
+    );
+
     // Last-byte collision: 1.3.36.3.3.2.8.1.1.10 ends in 0x0a, the byte the
     // old code read as "secp256k1".
     let collide = oid(&[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0a]);

@@ -9179,6 +9179,53 @@ static CK_RV derive_readable(CK_MECHANISM* m, CK_OBJECT_HANDLE base, CK_ULONG le
     return rv;
 }
 
+/* ---------------------------------------------------------------------------
+ * test_3c_structure_packing  (plan 3.C, ruling 2026-09-26: cited XFAIL)
+ *
+ * PKCS#11 v3.2 §2.1: "Cryptoki structures SHALL be packed with 1-byte
+ * alignment." This engine (like the Rust one) uses natural alignment, as
+ * every Unix consumer does: OpenSC's and p11-kit's pkcs11.h apply
+ * #pragma pack(push, cryptoki, 1) only under _WIN32 / CRYPTOKI_FORCE_WIN32,
+ * and the vendored pkcs11-provider never packs. Packing here would break the
+ * ABI with all of them, so each info structure whose natural size differs
+ * from its packed size is reported as a known, cited XFAIL — measured, not
+ * assumed — and becomes a PASS if the two ever coincide.
+ * ------------------------------------------------------------------------- */
+#define P11_MEMBER_SIZE(T, m) sizeof(((T*)0)->m)
+void test_3c_structure_packing() {
+    const char* CAT = "StructPacking";
+    const std::string why = " — §2.1 SHALL 1-byte alignment; natural alignment kept because OpenSC and p11-kit "
+                            "pack only on _WIN32 and pkcs11-provider never does (ruling 2026-09-26, plan 3.C)";
+    struct { const char* name; size_t natural; size_t packed; } s[] = {
+        { "CK_INFO", sizeof(CK_INFO),
+          P11_MEMBER_SIZE(CK_INFO, cryptokiVersion) + P11_MEMBER_SIZE(CK_INFO, manufacturerID) +
+          P11_MEMBER_SIZE(CK_INFO, flags) + P11_MEMBER_SIZE(CK_INFO, libraryDescription) +
+          P11_MEMBER_SIZE(CK_INFO, libraryVersion) },
+        { "CK_SLOT_INFO", sizeof(CK_SLOT_INFO),
+          P11_MEMBER_SIZE(CK_SLOT_INFO, slotDescription) + P11_MEMBER_SIZE(CK_SLOT_INFO, manufacturerID) +
+          P11_MEMBER_SIZE(CK_SLOT_INFO, flags) + P11_MEMBER_SIZE(CK_SLOT_INFO, hardwareVersion) +
+          P11_MEMBER_SIZE(CK_SLOT_INFO, firmwareVersion) },
+        { "CK_TOKEN_INFO", sizeof(CK_TOKEN_INFO),
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, label) + P11_MEMBER_SIZE(CK_TOKEN_INFO, manufacturerID) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, model) + P11_MEMBER_SIZE(CK_TOKEN_INFO, serialNumber) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, flags) + 10 * sizeof(CK_ULONG) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, hardwareVersion) + P11_MEMBER_SIZE(CK_TOKEN_INFO, firmwareVersion) +
+          P11_MEMBER_SIZE(CK_TOKEN_INFO, utcTime) },
+        { "CK_SESSION_INFO", sizeof(CK_SESSION_INFO),
+          P11_MEMBER_SIZE(CK_SESSION_INFO, slotID) + P11_MEMBER_SIZE(CK_SESSION_INFO, state) +
+          P11_MEMBER_SIZE(CK_SESSION_INFO, flags) + P11_MEMBER_SIZE(CK_SESSION_INFO, ulDeviceError) },
+        { "CK_MECHANISM_INFO", sizeof(CK_MECHANISM_INFO),
+          P11_MEMBER_SIZE(CK_MECHANISM_INFO, ulMinKeySize) + P11_MEMBER_SIZE(CK_MECHANISM_INFO, ulMaxKeySize) +
+          P11_MEMBER_SIZE(CK_MECHANISM_INFO, flags) },
+    };
+    for (auto& x : s) {
+        std::string d = "sizeof=" + std::to_string(x.natural) + " packed=" + std::to_string(x.packed);
+        record_result(CAT, std::string(x.name) + "_packing", x.natural == x.packed ? "PASS" : "XFAIL",
+                      x.natural == x.packed ? d : d + why);
+    }
+}
+#undef P11_MEMBER_SIZE
+
 void test_2f_hidden_coverage() {
     const char* CAT = "2F";
 
@@ -11269,6 +11316,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "2f") {
         refresh_session(); test_2f_hidden_coverage();
+    }
+    if (opt_category == "all" || opt_category == "packing") {
+        test_3c_structure_packing();
     }
     // Last, and only on a full run: it checks tests from every category.
     if (opt_category == "all") {
