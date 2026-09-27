@@ -315,7 +315,7 @@ impl LocateFilters {
             // An object with no Rotate Latest value is not "the latest";
             // a filter of `false` matches only objects explicitly marked
             // superseded (the spec's Boolean, not tri-state).
-            if r.rotate_latest.unwrap_or(false) != want {
+            if r.rotate_latest != Some(want) {
                 return false;
             }
         }
@@ -1005,6 +1005,10 @@ mod tests {
         // `Rotate Latest = true` alone never matches an object that has no
         // rotation bookkeeping at all.
         assert_eq!(by_name(vec![Attribute::RotateLatest(true)]), vec!["g2"]);
+        // ...and `Rotate Latest = false` matches only the explicitly
+        // superseded generations, not every object without rotation
+        // bookkeeping (PR #241 review: `unwrap_or(false)` matched "other").
+        assert_eq!(by_name(vec![Attribute::RotateLatest(false)]), vec!["g1", "g0"]);
     }
 
     #[test]

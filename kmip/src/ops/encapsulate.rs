@@ -520,16 +520,18 @@ pub(crate) fn store_shared_secret(
 ) -> Result<String> {
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
+    let engine_resident = matches!(material, SsMaterial::Engine { .. });
     let (key_material, pkcs11_cka_id) = match material {
         SsMaterial::Bytes(b) => (Some(b), Uuid::new_v4().as_bytes().to_vec()),
         SsMaterial::Engine { cka_id } => (None, cka_id),
     };
+    let cka_id_for_cleanup = pkcs11_cka_id.clone();
     // §6.1.22 Table 317 `Attributes`: an Activation Date at or before now
     // births the object Active (§4.67 transition 1); with no dates it stays
     // Pre-Active exactly as before (the OASIS PQC interop KATs Get then
     // Destroy it, a Pre-Active → Destroyed edge).
     let initial_state = super::register_import_export::compute_initial_state(now, x);
-    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
+    let put = deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: ObjectType::SecretData,
         // The shared secret is opaque bytes; record the source KEM
@@ -568,7 +570,23 @@ pub(crate) fn store_shared_secret(
         sensitive: Some(x.sensitive.unwrap_or(false)),
         fresh: Some(true),
         ..ObjectRecord::default()
-    }, auth))?;
+    }, auth));
+    if let Err(e) = put {
+        // The shared secret already exists in the engine; without its record
+        // nothing could ever reach (or destroy) it. Remove it before failing.
+        if engine_resident {
+            if let Ok(session) = deps.resolve_tenant_session(auth.identity.as_ref()) {
+                if let Ok(Some(h)) = super::helpers::find_handle_for_object(
+                    session,
+                    &cka_id_for_cleanup,
+                    ObjectType::SecretData,
+                ) {
+                    let _ = softhsmrustv3::native::destroy_object(session, h);
+                }
+            }
+        }
+        return Err(e);
+    }
     Ok(uid)
 }
 

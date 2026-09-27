@@ -664,9 +664,12 @@ mod tests {
 /// HMAC-keyed derivation (KMIP §11.15 `HMAC`: "derives a key by computing an
 /// HMAC over the derivation data"; also the single-block HKDF-Expand /
 /// HKDF-Extract shape RFC 9180 §5.1 needs): `HMAC_mech(base.CKA_VALUE, data)`,
-/// truncated to `out_len`, registered as `key_type`. The base is gated per
-/// §4.8 Table 13 against `hmac_mech` (needs `CKA_SIGN`, as `native::sign`
-/// would). `CKR_KEY_SIZE_RANGE` when `out_len` exceeds one MAC block.
+/// truncated to `out_len`, registered as `key_type`. The base is gated only
+/// by CKA_ALLOWED_MECHANISMS (§4.8 Table 13) against `hmac_mech`, like the
+/// other `*_key_derivation` functions here; the caller's authorization to
+/// derive (KMIP Cryptographic Usage Mask Derive Key) is enforced by the KMIP
+/// layer before this is reached. `CKR_KEY_SIZE_RANGE` when `out_len` exceeds
+/// one MAC block.
 #[allow(clippy::too_many_arguments)]
 pub fn hmac_key_derivation(
     session: u32,

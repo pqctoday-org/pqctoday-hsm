@@ -1562,6 +1562,95 @@ fn kem_shared_secret_is_engine_resident_and_honours_request_attributes() {
     assert!(r.is_err(), "a non-extractable, sensitive shared secret must not be served by Get");
 }
 
+/// PR #241 review (2026-09-27) — an engine-resident derived key must honour
+/// Extractable / Sensitive on Get with the KMIP reason, never answer Success
+/// with an empty Key Value. Before the fix the derived RECORD carried neither
+/// flag (only the engine object did), so Get's §11 gates did not fire, the
+/// engine withheld CKA_VALUE, and Get returned Success with zero bytes — and a
+/// wrapped Get wrapped the empty value. Also covers a record whose flag was
+/// later changed (Modify) while the engine object kept its own: the engine's
+/// refusal must still surface as an error.
+#[test]
+fn derived_key_extractable_sensitive_are_enforced_on_get() {
+    use pqctoday_kmip::error::{KmipError, ResultReason};
+    use pqctoday_kmip::kmip30::{
+        Attribute, DerivationMethod, DerivationParameters, DeriveKeyRequest, GetRequest,
+        KeyFormatType,
+    };
+    use pqctoday_kmip::ops::derive_key::derive_key;
+    use pqctoday_kmip::ops::get::get;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+    let k: Vec<u8> = (0u8..32).collect();
+    let base = register_pqc(
+        &deps,
+        ObjectType::SymmetricKey,
+        KmipAlgorithm::HmacSha256,
+        KeyFormatType::Raw,
+        k,
+        UsageMask::DERIVE_KEY | UsageMask::MAC_GENERATE,
+    )
+    .expect("register HMAC base");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let derive_with = |flag: Attribute, tag: &str| {
+        derive_key(
+            &deps,
+            DeriveKeyRequest {
+                object_type: ObjectType::SymmetricKey,
+                uids: vec![base.clone()],
+                derivation_method: DerivationMethod::Hmac,
+                derivation_parameters: DerivationParameters {
+                    derivation_data: Some(b"ctx".to_vec()),
+                    ..Default::default()
+                },
+                template_attribute: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                    Attribute::CryptographicLength(128),
+                    Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+                    Attribute::ActivationDate(now - 1),
+                    flag,
+                ],
+            },
+            &AuthContext::open(),
+            tag,
+        )
+        .expect("DeriveKey")
+        .uid
+    };
+    let reason = |uid: &str, tag: &str| -> ResultReason {
+        match get(
+            &deps,
+            GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            &AuthContext::open(),
+            tag,
+        ) {
+            Ok(r) => panic!("Get must refuse, got Success with {} key bytes", r.key_block.key_value.len()),
+            Err(KmipError::Failed { reason, .. }) => reason,
+            Err(e) => panic!("unexpected error {e}"),
+        }
+    };
+
+    let ne = derive_with(Attribute::Extractable(false), "dk-nonextractable");
+    let rec = deps.store.get(&ne).unwrap().unwrap();
+    assert_eq!(rec.extractable, Some(false), "the record carries the flag the engine object got");
+    assert_eq!(reason(&ne, "get-ne"), ResultReason::NotExtractable);
+
+    let se = derive_with(Attribute::Sensitive(true), "dk-sensitive");
+    assert_eq!(deps.store.get(&se).unwrap().unwrap().sensitive, Some(true));
+    assert_eq!(reason(&se, "get-se"), ResultReason::Sensitive);
+
+    // Record says extractable (as after a Modify), engine object still is not.
+    let mut rec = deps.store.get(&ne).unwrap().unwrap();
+    rec.extractable = Some(true);
+    deps.store.update(rec).unwrap();
+    let r = reason(&ne, "get-ne-after-modify");
+    assert!(
+        matches!(r, ResultReason::NotExtractable | ResultReason::KeyValueNotPresent),
+        "an engine refusal must be an error, got {r:?}"
+    );
+}
+
 /// Composite-key plan WP 0.5 (G-21 / G-27) — HMAC and HASH derivations run
 /// inside the engine and their output is engine-resident; correctness is
 /// pinned byte-exactly against an independent software computation:

@@ -364,6 +364,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **KMIP: KEM shared secrets and derived keys now stay inside the engine
+  (composite-key Phase 0, PR #241).** Encapsulate, Decapsulate and Derive Key
+  (HMAC, HASH, PBKDF2 and both SP 800-108 modes) create their result as an
+  engine object; the KMIP layer keeps only its handle. The request's
+  attributes shape the new object: an Activation Date in the past makes it
+  Active at once, and Extractable=false or Sensitive=true stop Get from
+  returning it. Also: the Rotate attribute family on the wire, Locate by
+  Rotate Name / Rotate Latest / Rotate Generation with newest objects first,
+  integer Unique Identifier references (§4.68), and `--no-auto-composite`.
+  Review fixes before merging: a derived key's Extractable and Sensitive were
+  kept only on the engine object, so Get answered Success with an empty
+  key instead of refusing; Get now always fails with the reason when the
+  engine withholds a key; `Rotate Latest = false` no longer matches objects
+  with no rotation data; an engine object is removed if its KMIP record
+  cannot be saved. Known limits: an engine-resident Sensitive key cannot be
+  exported wrapped either; an engine-resident shared secret cannot serve as
+  extra Derivation Data; streaming Encrypt and Export do not return an
+  engine-resident derived key's bytes, as for other engine-held keys.
+
 - **bench-harness can measure SHAKE128/256, labelled as outside the HSM.**
   PKCS#11 v3.2 defines no SHAKE digest mechanism, so the benchmark had no
   SHAKE row. The new `bench-harness xof` subcommand times the same `sha3`

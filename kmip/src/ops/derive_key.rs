@@ -746,14 +746,14 @@ pub fn derive_key(
     // mirror DerivedObjectLink on EVERY base below).
     links.insert(LINK_DERIVATION_BASE.to_string(), base.uid.clone());
 
-    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
+    let put = deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: derived_algorithm,
         cryptographic_length: length_bits,
         usage_mask: x.usage.unwrap_or_else(UsageMask::empty),
         state: initial_state,
-        pkcs11_cka_id: cka_id_bytes,
+        pkcs11_cka_id: cka_id_bytes.clone(),
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
         activation_date: x.activation_date,
@@ -778,10 +778,29 @@ pub fn derive_key(
         key_material,
         key_format_type: Some(0x01), // Raw — §6.2 KeyFormatType table
         digest_value,
+        // The record must carry the same Extractable/Sensitive the engine
+        // object was created with: Get's §11 gates read the RECORD. Without
+        // these, a derived key made Extractable=false or Sensitive=true got
+        // Success with an empty Key Value (the engine withheld CKA_VALUE)
+        // instead of Not Extractable / Sensitive.
+        extractable: Some(derived_extractable),
+        sensitive: Some(derived_sensitive),
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
         ..ObjectRecord::default()
-    }, auth))?;
+    }, auth));
+    if let Err(e) = put {
+        // The derived key already exists in the engine; without its record
+        // nothing could ever reach (or destroy) it. Remove it before failing.
+        if let Some(session) = derive_session {
+            if let Ok(Some(h)) =
+                super::helpers::find_handle_for_object(session, &cka_id_bytes, req.object_type)
+            {
+                let _ = softhsmrustv3::native::destroy_object(session, h);
+            }
+        }
+        return Err(e);
+    }
 
     // §6.1.18 — "the server SHALL create a Derived Object Link
     // attribute pointing to the … object derived as a result of this
