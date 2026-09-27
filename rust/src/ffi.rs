@@ -6481,6 +6481,42 @@ fn reject_invalid_ml_kem_key_value(class: Option<u32>, attrs: &Attributes) -> Re
 /// attribute map. Split from the FFI wrapper so policy can be unit-tested on
 /// 64-bit native builds, where CK_ATTRIBUTE templates (32-bit value pointers)
 /// cannot be constructed.
+/// Public-key validation for an imported EC-family public key (CKK_EC,
+/// CKK_EC_EDWARDS, CKK_EC_MONTGOMERY) — see
+/// `crypto::handlers::validate_ec_public_point` for what each curve checks.
+/// CKA_EC_POINT is reduced to the bare point by the curve's exact size, never
+/// by sniffing a leading 0x04 (a bare Ed25519 / X25519 key starts with 0x04
+/// about once in 256). An undecodable CKA_EC_PARAMS is left to the paths that
+/// already report it.
+fn validate_imported_ec_public_key(attrs: &Attributes) -> Result<(), u32> {
+    let class = crate::state::get_object_attr_u32_from(attrs, CKA_CLASS);
+    let key_type = crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE);
+    if class != Some(CKO_PUBLIC_KEY)
+        || !matches!(key_type, Some(CKK_EC | CKK_EC_EDWARDS | CKK_EC_MONTGOMERY))
+    {
+        return Ok(());
+    }
+    let (Some(params), Some(point)) = (attrs.get(&CKA_EC_PARAMS), attrs.get(&CKA_EC_POINT)) else {
+        return Ok(());
+    };
+    let Ok(curve) = crate::crypto::handlers::decode_ec_params(params) else {
+        return Ok(());
+    };
+    use crate::crypto::handlers::*;
+    let raw_len = match curve {
+        CURVE_P224 => Some(57),
+        CURVE_P256 | CURVE_K256 => Some(65),
+        CURVE_P384 => Some(97),
+        CURVE_P521 => Some(133),
+        CURVE_ED25519 | CURVE_X25519 => Some(32),
+        CURVE_ED448 => Some(57),
+        CURVE_X448 => Some(56),
+        _ => None,
+    };
+    let bare = crate::state::unwrap_peer_ec_point(point, raw_len);
+    validate_ec_public_point(curve, bare)
+}
+
 pub(crate) fn create_object_from_attrs(
     h_session: u32,
     mut new_attrs: Attributes,
@@ -6513,6 +6549,11 @@ pub(crate) fn create_object_from_attrs(
     // PKCS#11 v3.2 §4.1.1 — template validation (required attrs, value
     // sanity, class/type consistency) before any object is created.
     validate_create_template(&new_attrs)?;
+    // PKCS#11 v3.2 §5.1.6 — CKR_PUBLIC_KEY_INVALID "may be returned by
+    // C_CreateObject, when the public key is created". Checked here, before
+    // any object exists, so a refused key leaves nothing behind (the C++
+    // engine's checkECPublicKeyPoint does the same for its curves).
+    validate_imported_ec_public_key(&new_attrs)?;
     // PKCS#11 v3.2 §5.6 — a token object (CKA_TOKEN=TRUE) may only be
     // created from a read/write session. Session objects are allowed in R/O.
     if read_bool_attr(&new_attrs, CKA_TOKEN) && !crate::state::session_is_rw(h_session) {
@@ -27421,5 +27462,209 @@ mod rsa_private_component_import_tests {
         let before = a.clone();
         synthesize_rsa_private_pkcs8(&mut a).expect("no-op");
         assert_eq!(a, before);
+    }
+}
+
+#[cfg(test)]
+mod ec_public_key_validation_tests {
+    //! PKCS#11 v3.2 §5.1.6 CKR_PUBLIC_KEY_INVALID at C_CreateObject for
+    //! EC-family public keys: NIST ACVP KeyVer (verdict-exact), plus the
+    //! Edwards cases NIST does not publish — identity, small-order, MIXED-order
+    //! and non-canonical encodings — built from curve25519-dalek's own
+    //! constants rather than hand-copied bytes.
+    use super::*;
+    use curve25519_dalek::constants::{ED25519_BASEPOINT_POINT, EIGHT_TORSION};
+    use curve25519_dalek::scalar::Scalar;
+
+    const OID_P224: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21];
+    const OID_P256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    const OID_P384: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+    const OID_P521: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23];
+    const OID_ED25519: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+    const OID_ED448: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x71];
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    fn der_octet(bare: &[u8]) -> Vec<u8> {
+        let mut v = vec![0x04];
+        if bare.len() >= 0x80 {
+            v.push(0x81);
+        }
+        v.push(bare.len() as u8);
+        v.extend_from_slice(bare);
+        v
+    }
+
+    fn template(key_type: u32, oid: &[u8], ec_point: Vec<u8>) -> Attributes {
+        let mut a = Attributes::new();
+        a.insert(CKA_CLASS, CKO_PUBLIC_KEY.to_le_bytes().to_vec());
+        a.insert(CKA_KEY_TYPE, key_type.to_le_bytes().to_vec());
+        a.insert(CKA_EC_PARAMS, oid.to_vec());
+        a.insert(CKA_EC_POINT, ec_point);
+        a
+    }
+
+    fn verdict(a: &Attributes) -> Result<(), u32> {
+        validate_imported_ec_public_key(a)
+    }
+
+    #[test]
+    fn nist_keyver_verdicts_match() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/acvp/ec_keyver_test.json")).unwrap();
+        let (mut ok, mut refused) = (0usize, 0usize);
+        let mut curves = std::collections::HashSet::new();
+        for g in v["testGroups"].as_array().unwrap() {
+            let curve = g["curve"].as_str().unwrap();
+            curves.insert(curve.to_string());
+            for t in g["tests"].as_array().unwrap() {
+                let tc = t["tcId"].as_u64().unwrap();
+                let passed = t["testPassed"].as_bool().unwrap();
+                // Edwards keys go in both forms §6.3 allows: bare and DER.
+                let cases: Vec<Attributes> = match curve {
+                    "ED-25519" | "ED-448" => {
+                        let q = unhex(t["q"].as_str().unwrap());
+                        let oid = if curve == "ED-25519" { OID_ED25519 } else { OID_ED448 };
+                        vec![
+                            template(CKK_EC_EDWARDS, oid, q.clone()),
+                            template(CKK_EC_EDWARDS, oid, der_octet(&q)),
+                        ]
+                    }
+                    _ => {
+                        let oid = match curve {
+                            "P-224" => OID_P224,
+                            "P-256" => OID_P256,
+                            "P-384" => OID_P384,
+                            "P-521" => OID_P521,
+                            other => panic!("unmapped curve {other}"),
+                        };
+                        let mut sec1 = vec![0x04];
+                        sec1.extend(unhex(t["qx"].as_str().unwrap()));
+                        sec1.extend(unhex(t["qy"].as_str().unwrap()));
+                        vec![template(CKK_EC, oid, der_octet(&sec1))]
+                    }
+                };
+                for a in cases {
+                    let got = verdict(&a);
+                    if passed {
+                        assert_eq!(got, Ok(()), "{curve} tc{tc}: NIST-valid key refused");
+                        ok += 1;
+                    } else {
+                        assert_eq!(
+                            got,
+                            Err(CKR_PUBLIC_KEY_INVALID),
+                            "{curve} tc{tc} ({}): NIST-invalid key accepted",
+                            t["reason"]
+                        );
+                        refused += 1;
+                    }
+                }
+            }
+        }
+        // 12 Weierstrass cases (4 valid) + 8 Edwards cases in two encodings.
+        assert_eq!((ok, refused), (4 + 8, 8 + 8));
+        assert_eq!(curves.len(), 6);
+    }
+
+    #[test]
+    fn edwards_points_outside_the_prime_order_subgroup_are_refused() {
+        let valid = (ED25519_BASEPOINT_POINT * Scalar::from(7u64)).compress().to_bytes();
+        assert_eq!(verdict(&template(CKK_EC_EDWARDS, OID_ED25519, valid.to_vec())), Ok(()));
+
+        // Identity: torsion-free, but order 1.
+        let identity = EIGHT_TORSION[0].compress().to_bytes();
+        // A small-order (order 8) point.
+        let small = EIGHT_TORSION[1].compress().to_bytes();
+        // MIXED order: a valid prime-order point plus a torsion component. Not
+        // small-order, so a small-order test alone would accept it.
+        let mixed_pt = ED25519_BASEPOINT_POINT * Scalar::from(7u64) + EIGHT_TORSION[1];
+        assert!(!mixed_pt.is_small_order(), "precondition: mixed-order is not small-order");
+        let mixed = mixed_pt.compress().to_bytes();
+        for (name, p) in [("identity", identity), ("small-order", small), ("mixed-order", mixed)] {
+            assert_eq!(
+                verdict(&template(CKK_EC_EDWARDS, OID_ED25519, p.to_vec())),
+                Err(CKR_PUBLIC_KEY_INVALID),
+                "{name} Ed25519 point accepted"
+            );
+        }
+        // Non-canonical encoding of y = 1 (the identity's y): y + p, which a
+        // lenient decoder reduces back to 1.
+        let mut noncanon = [0xffu8; 32];
+        noncanon[0] = 0xee;
+        noncanon[31] = 0x7f;
+        assert_eq!(
+            verdict(&template(CKK_EC_EDWARDS, OID_ED25519, noncanon.to_vec())),
+            Err(CKR_PUBLIC_KEY_INVALID)
+        );
+        // Ed448 identity (y = 1, sign 0).
+        let mut id448 = [0u8; 57];
+        id448[0] = 1;
+        assert_eq!(
+            verdict(&template(CKK_EC_EDWARDS, OID_ED448, id448.to_vec())),
+            Err(CKR_PUBLIC_KEY_INVALID)
+        );
+    }
+
+    /// A VALID bare Ed25519 key that happens to start with 0x04 — the byte a
+    /// DER OCTET STRING starts with — must not be mistaken for DER.
+    #[test]
+    fn valid_edwards_key_starting_with_0x04_is_accepted() {
+        let mut k = 1u64;
+        let bytes = loop {
+            let b = (ED25519_BASEPOINT_POINT * Scalar::from(k)).compress().to_bytes();
+            if b[0] == 0x04 {
+                break b;
+            }
+            k += 1;
+        };
+        assert_eq!(verdict(&template(CKK_EC_EDWARDS, OID_ED25519, bytes.to_vec())), Ok(()));
+        assert_eq!(verdict(&template(CKK_EC_EDWARDS, OID_ED25519, der_octet(&bytes))), Ok(()));
+    }
+
+    /// End to end through the real create path: a refused key leaves no
+    /// object behind, and a valid one is created.
+    #[test]
+    fn create_object_refuses_invalid_and_keeps_valid() {
+        let _guard = crate::native::test_lock::acquire();
+        const S: u32 = 0x5434_2001;
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/acvp/ec_keyver_test.json")).unwrap();
+        let g = v["testGroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["curve"] == "P-256")
+            .unwrap();
+        for t in g["tests"].as_array().unwrap() {
+            let mut sec1 = vec![0x04];
+            sec1.extend(unhex(t["qx"].as_str().unwrap()));
+            sec1.extend(unhex(t["qy"].as_str().unwrap()));
+            let before = OBJECTS.with(|o| o.borrow().len());
+            let got = create_object_from_attrs(S, template(CKK_EC, OID_P256, der_octet(&sec1)));
+            let after = OBJECTS.with(|o| o.borrow().len());
+            if t["testPassed"].as_bool().unwrap() {
+                assert!(got.is_ok(), "valid P-256 key refused: {got:?}");
+                assert_eq!(after, before + 1);
+            } else {
+                assert_eq!(got, Err(CKR_PUBLIC_KEY_INVALID), "{}", t["reason"]);
+                assert_eq!(after, before, "a refused key must leave no object");
+            }
+        }
+    }
+
+    #[test]
+    fn non_ec_and_private_keys_are_untouched() {
+        let mut a = template(CKK_EC_EDWARDS, OID_ED25519, vec![0u8; 5]);
+        a.insert(CKA_CLASS, CKO_PRIVATE_KEY.to_le_bytes().to_vec());
+        assert_eq!(verdict(&a), Ok(()));
+        let b = template(CKK_RSA, OID_ED25519, vec![0u8; 5]);
+        assert_eq!(verdict(&b), Ok(()));
     }
 }
