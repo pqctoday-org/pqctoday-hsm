@@ -1831,40 +1831,129 @@ export function importGenericSecret(M, hSession, keyBytes, { derive = true } = {
 }
 
 /**
- * SP800-108 Counter Mode KDF (CKM_SP800_108_COUNTER_KDF) → raw derived bytes.
- * dataParams = [{BYTE_ARRAY: fixedInput}, {ITERATION_VARIABLE: counterFormat}]
- * i.e. PRF(Ki, fixedInput || counter) — the only counter placement this
- * engine's OpenSSL KBKDF backend can produce (see SoftHSM_keygen.cpp comment
- * at the CKM_SP800_108_COUNTER_KDF handler); matches ACVP's "before fixed
- * data" counterLocation configuration exactly since fixedInput here plays
- * the role of OpenSSL's "info"/context with an empty label.
+ * Map an ACVP KBKDF test case to the ordered PKCS#11 data-parameter segments
+ * that reproduce it. Segment ORDER is the placement: Table 199/200/201 say the
+ * ITERATION_VARIABLE entry "identifies the location of the iteration variable
+ * in the constructed PRF input data", and every other entry is emitted where
+ * it sits in the array. The helper must therefore read counterLocation from
+ * the vector — assuming one placement is exactly how two of the three
+ * previous per-mode helpers came to encode the wrong one.
+ *
+ * Segment kinds:
+ *   { kind: 'iter' }          ITERATION_VARIABLE. In counter mode it IS the
+ *                             counter (pValue = CK_SP800_108_COUNTER_FORMAT);
+ *                             in feedback / double-pipeline it is K(i-1) / A(i)
+ *                             and pValue must be NULL_PTR (§13515-13520).
+ *   { kind: 'counter' }       CK_SP800_108_OPTIONAL_COUNTER (feedback and
+ *                             double-pipeline only).
+ *   { kind: 'bytes', data }   CK_SP800_108_BYTE_ARRAY.
+ *
+ * breakLocation (middle fixed data) is in BITS. PKCS#11 byte arrays cannot
+ * split a byte, so a non-byte-aligned break is not expressible and throws.
+ */
+export function kbkdfSegments(kdfMode, counterLocation, fixedData, breakLocationBits) {
+  const fixed = { kind: 'bytes', data: fixedData }
+  if (kdfMode === 'counter') {
+    switch (counterLocation) {
+      case 'before fixed data': return [{ kind: 'iter' }, fixed]
+      case 'after fixed data': return [fixed, { kind: 'iter' }]
+      case 'middle fixed data': {
+        if (breakLocationBits === undefined || breakLocationBits % 8 !== 0) {
+          throw new Error(`middle fixed data needs a byte-aligned breakLocation, got ${breakLocationBits}`)
+        }
+        const b = breakLocationBits / 8
+        return [
+          { kind: 'bytes', data: fixedData.slice(0, b) },
+          { kind: 'iter' },
+          { kind: 'bytes', data: fixedData.slice(b) },
+        ]
+      }
+      default: throw new Error(`counter mode cannot have counterLocation "${counterLocation}"`)
+    }
+  }
+  if (kdfMode === 'feedback' || kdfMode === 'double pipeline iteration') {
+    switch (counterLocation) {
+      case 'before fixed data': return [{ kind: 'iter' }, { kind: 'counter' }, fixed]
+      case 'after fixed data': return [{ kind: 'iter' }, fixed, { kind: 'counter' }]
+      case 'before iterator': return [{ kind: 'counter' }, { kind: 'iter' }, fixed]
+      case 'none': return [{ kind: 'iter' }, fixed]
+      default: throw new Error(`${kdfMode} cannot have counterLocation "${counterLocation}"`)
+    }
+  }
+  throw new Error(`unknown kdfMode "${kdfMode}"`)
+}
+
+const KBKDF_MECH_BY_MODE = {
+  counter: 'CKM_SP800_108_COUNTER_KDF',
+  feedback: 'CKM_SP800_108_FEEDBACK_KDF',
+  'double pipeline iteration': 'CKM_SP800_108_DOUBLE_PIPELINE_KDF',
+}
+
+/**
+ * SP 800-108 KDF (counter, feedback or double-pipeline) → raw derived bytes,
+ * with the caller's segments passed through in order (see kbkdfSegments).
+ * Counters are big-endian (the ACVP convention).
  * CK_SP800_108_COUNTER_FORMAT (8 bytes on 32-bit WASM): bLittleEndian(1)+pad(3)+ulWidthInBits(4)
  * CK_PRF_DATA_PARAM (12 bytes): type(4)+pValue(4)+ulValueLen(4)
- * CK_SP800_108_KDF_PARAMS (20 bytes): prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
+ * CK_SP800_108_KDF_PARAMS (20 bytes, counter + double-pipeline):
+ *   prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
+ * CK_SP800_108_FEEDBACK_KDF_PARAMS (28 bytes):
+ *   prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulIVLen(4)+pIV(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
  */
-export function sp800108CounterKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, outLen) {
-  const fixedPtr = writeBytes(M, fixedInput)
+export function sp800108Kdf(M, hSession, baseKeyHandle, kdfMode, prfType, segments, counterBits, outLen, iv = new Uint8Array(0)) {
+  const mechName = KBKDF_MECH_BY_MODE[kdfMode]
+  if (!mechName) throw new Error(`unknown kdfMode "${kdfMode}"`)
+  const isCounterMode = kdfMode === 'counter'
+  const isFeedback = kdfMode === 'feedback'
+  const owned = []
+
   const counterFormatPtr = M._malloc(8)
+  owned.push(counterFormatPtr)
   M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
   M.HEAPU8[counterFormatPtr + 0] = 0 // bLittleEndian = false (big-endian, ACVP convention)
   M.setValue(counterFormatPtr + 4, counterBits, 'i32')
 
-  const dataParamsPtr = M._malloc(24)
-  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
-  M.setValue(dataParamsPtr + 4, fixedPtr, 'i32')
-  M.setValue(dataParamsPtr + 8, fixedInput.length, 'i32')
-  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
-  M.setValue(dataParamsPtr + 16, counterFormatPtr, 'i32')
-  M.setValue(dataParamsPtr + 20, 8, 'i32')
+  const dataParamsPtr = M._malloc(12 * segments.length)
+  owned.push(dataParamsPtr)
+  segments.forEach((seg, i) => {
+    const at = dataParamsPtr + 12 * i
+    let type, ptr, len
+    if (seg.kind === 'iter') {
+      type = CK.CK_SP800_108_ITERATION_VARIABLE
+      ;[ptr, len] = isCounterMode ? [counterFormatPtr, 8] : [0, 0]
+    } else if (seg.kind === 'counter') {
+      if (isCounterMode) throw new Error('counter mode carries its counter in the iteration variable')
+      type = CK.CK_SP800_108_OPTIONAL_COUNTER
+      ;[ptr, len] = [counterFormatPtr, 8]
+    } else if (seg.kind === 'bytes') {
+      type = CK.CK_SP800_108_BYTE_ARRAY
+      ptr = writeBytes(M, seg.data)
+      owned.push(ptr)
+      len = seg.data.length
+    } else {
+      throw new Error(`unknown segment kind "${seg.kind}"`)
+    }
+    M.setValue(at + 0, type, 'i32')
+    M.setValue(at + 4, ptr, 'i32')
+    M.setValue(at + 8, len, 'i32')
+  })
 
-  const kdfParamsPtr = M._malloc(20)
+  const paramsLen = isFeedback ? 28 : 20
+  const kdfParamsPtr = M._malloc(paramsLen)
+  owned.push(kdfParamsPtr)
+  M.HEAPU8.fill(0, kdfParamsPtr, kdfParamsPtr + paramsLen)
   M.setValue(kdfParamsPtr + 0, prfType, 'i32')
-  M.setValue(kdfParamsPtr + 4, 2, 'i32')
+  M.setValue(kdfParamsPtr + 4, segments.length, 'i32')
   M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
-  M.setValue(kdfParamsPtr + 12, 0, 'i32')
-  M.setValue(kdfParamsPtr + 16, 0, 'i32')
+  if (isFeedback && iv.length > 0) {
+    const ivPtr = writeBytes(M, iv)
+    owned.push(ivPtr)
+    M.setValue(kdfParamsPtr + 12, iv.length, 'i32')
+    M.setValue(kdfParamsPtr + 16, ivPtr, 'i32')
+  }
 
-  const mechPtr = buildMech(M, CK.CKM_SP800_108_COUNTER_KDF, kdfParamsPtr, 20)
+  const mechPtr = buildMech(M, CK[mechName], kdfParamsPtr, paramsLen)
+  owned.push(mechPtr)
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
     { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
@@ -1874,141 +1963,17 @@ export function sp800108CounterKdf(M, hSession, baseKeyHandle, prfType, fixedInp
     { type: CK.CKA_VALUE_LEN, value: outLen },
   ])
   const hPtr = allocUlong(M)
-  check(
-    'C_DeriveKey(SP800-108-Counter)',
-    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
-  )
-  const derivedHandle = readUlong(M, hPtr)
-  const result = extractKeyValue(M, hSession, derivedHandle)
-  freeTemplate(M, tpl)
-  freePtr(M, hPtr)
-  M._free(mechPtr)
-  M._free(kdfParamsPtr)
-  M._free(dataParamsPtr)
-  M._free(counterFormatPtr)
-  M._free(fixedPtr)
-  return result
-}
-
-/**
- * SP800-108 Feedback Mode KDF (CKM_SP800_108_FEEDBACK_KDF) → raw derived bytes.
- * dataParams = [{ITERATION_VARIABLE: NULL (K(i-1)/IV, implicit)}, {BYTE_ARRAY: fixedInput},
- *               {COUNTER: counterFormat}] i.e. PRF(Ki, K(i-1) || counter || fixedInput),
- * matching ACVP's "before fixed data" counterLocation for feedback mode.
- * CK_SP800_108_FEEDBACK_KDF_PARAMS (28 bytes): prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulIVLen(4)+pIV(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
- */
-export function sp800108FeedbackKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, iv, outLen) {
-  const fixedPtr = writeBytes(M, fixedInput)
-  const counterFormatPtr = M._malloc(8)
-  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
-  M.HEAPU8[counterFormatPtr + 0] = 0
-  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
-
-  const dataParamsPtr = M._malloc(36) // 3 entries * 12 bytes
-  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
-  M.setValue(dataParamsPtr + 4, 0, 'i32') // pValue = NULL_PTR (K(i-1) is implicit)
-  M.setValue(dataParamsPtr + 8, 0, 'i32')
-  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_OPTIONAL_COUNTER, 'i32')
-  M.setValue(dataParamsPtr + 16, counterFormatPtr, 'i32')
-  M.setValue(dataParamsPtr + 20, 8, 'i32')
-  M.setValue(dataParamsPtr + 24, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
-  M.setValue(dataParamsPtr + 28, fixedPtr, 'i32')
-  M.setValue(dataParamsPtr + 32, fixedInput.length, 'i32')
-
-  const ivPtr = writeBytes(M, iv)
-  const kdfParamsPtr = M._malloc(28)
-  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
-  M.setValue(kdfParamsPtr + 4, 3, 'i32')
-  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
-  M.setValue(kdfParamsPtr + 12, iv.length, 'i32')
-  M.setValue(kdfParamsPtr + 16, iv.length > 0 ? ivPtr : 0, 'i32')
-  M.setValue(kdfParamsPtr + 20, 0, 'i32')
-  M.setValue(kdfParamsPtr + 24, 0, 'i32')
-
-  const mechPtr = buildMech(M, CK.CKM_SP800_108_FEEDBACK_KDF, kdfParamsPtr, 28)
-  const tpl = buildTemplate(M, [
-    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
-    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
-    { type: CK.CKA_TOKEN, value: false },
-    { type: CK.CKA_EXTRACTABLE, value: true },
-    { type: CK.CKA_SENSITIVE, value: false },
-    { type: CK.CKA_VALUE_LEN, value: outLen },
-  ])
-  const hPtr = allocUlong(M)
-  check(
-    'C_DeriveKey(SP800-108-Feedback)',
-    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
-  )
-  const derivedHandle = readUlong(M, hPtr)
-  const result = extractKeyValue(M, hSession, derivedHandle)
-  freeTemplate(M, tpl)
-  freePtr(M, hPtr)
-  M._free(mechPtr)
-  M._free(kdfParamsPtr)
-  M._free(dataParamsPtr)
-  M._free(counterFormatPtr)
-  M._free(fixedPtr)
-  M._free(ivPtr)
-  return result
-}
-
-/**
- * SP800-108 Double Pipeline Iteration Mode KDF (CKM_SP800_108_DOUBLE_PIPELINE_KDF)
- * → raw derived bytes. dataParams = [{ITERATION_VARIABLE: NULL (A(i), implicit)},
- * {BYTE_ARRAY: fixedInput}, {COUNTER: counterFormat}] i.e. A(0)=fixedInput,
- * A(i)=PRF(Ki,A(i-1)), round = PRF(Ki, A(i) || counter || fixedInput) — same
- * "before fixed data" placement as sp800108CounterKdf/sp800108FeedbackKdf.
- * Uses CK_SP800_108_KDF_PARAMS (20 bytes, same struct as Counter mode — no IV field).
- */
-export function sp800108DoublePipelineKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, outLen) {
-  const fixedPtr = writeBytes(M, fixedInput)
-  const counterFormatPtr = M._malloc(8)
-  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
-  M.HEAPU8[counterFormatPtr + 0] = 0
-  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
-
-  const dataParamsPtr = M._malloc(36) // 3 entries * 12 bytes
-  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
-  M.setValue(dataParamsPtr + 4, 0, 'i32') // pValue = NULL_PTR (A(i) is implicit)
-  M.setValue(dataParamsPtr + 8, 0, 'i32')
-  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
-  M.setValue(dataParamsPtr + 16, fixedPtr, 'i32')
-  M.setValue(dataParamsPtr + 20, fixedInput.length, 'i32')
-  M.setValue(dataParamsPtr + 24, CK.CK_SP800_108_OPTIONAL_COUNTER, 'i32')
-  M.setValue(dataParamsPtr + 28, counterFormatPtr, 'i32')
-  M.setValue(dataParamsPtr + 32, 8, 'i32')
-
-  const kdfParamsPtr = M._malloc(20)
-  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
-  M.setValue(kdfParamsPtr + 4, 3, 'i32')
-  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
-  M.setValue(kdfParamsPtr + 12, 0, 'i32')
-  M.setValue(kdfParamsPtr + 16, 0, 'i32')
-
-  const mechPtr = buildMech(M, CK.CKM_SP800_108_DOUBLE_PIPELINE_KDF, kdfParamsPtr, 20)
-  const tpl = buildTemplate(M, [
-    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
-    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
-    { type: CK.CKA_TOKEN, value: false },
-    { type: CK.CKA_EXTRACTABLE, value: true },
-    { type: CK.CKA_SENSITIVE, value: false },
-    { type: CK.CKA_VALUE_LEN, value: outLen },
-  ])
-  const hPtr = allocUlong(M)
-  check(
-    'C_DeriveKey(SP800-108-DoublePipeline)',
-    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
-  )
-  const derivedHandle = readUlong(M, hPtr)
-  const result = extractKeyValue(M, hSession, derivedHandle)
-  freeTemplate(M, tpl)
-  freePtr(M, hPtr)
-  M._free(mechPtr)
-  M._free(kdfParamsPtr)
-  M._free(dataParamsPtr)
-  M._free(counterFormatPtr)
-  M._free(fixedPtr)
-  return result
+  try {
+    check(
+      `C_DeriveKey(SP800-108-${kdfMode})`,
+      M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+    )
+    return extractKeyValue(M, hSession, readUlong(M, hPtr))
+  } finally {
+    freeTemplate(M, tpl)
+    freePtr(M, hPtr)
+    for (const p of owned) M._free(p)
+  }
 }
 
 // ── Engine loading ───────────────────────────────────────────────────────────

@@ -122,7 +122,7 @@ cargo test
 
 # WASM bundle (bundler target, dev profile, ACVP KATs enabled) — runs in the
 # OrbStack/Docker `pqc-rust` container if cargo isn't on PATH locally.
-RUSTFLAGS="-C link-arg=-zstack-size=2097152" \
+RUSTFLAGS="-C link-arg=-zstack-size=8388608" \
   wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp
 ```
 

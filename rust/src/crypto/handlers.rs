@@ -65,6 +65,21 @@ pub const CURVE_UNSUPPORTED: u32 = u32::MAX;
 /// this engine does not implement — `CKR_CURVE_NOT_SUPPORTED`. The
 /// implicitCA form (`NULL`, tag `0x05`) is forbidden outright and is
 /// reported as an invalid representation.
+/// RFC 7748 §6.1: X25519 with a low-order peer point yields the all-zero
+/// shared secret whatever our private key is, and "the check for the all-zero
+/// value results in failure"; RFC 9180 §7.1.4 makes that check a MUST for
+/// DHKEM(X25519). `None` for a non-contributory result, so every X25519 call
+/// site refuses it the way its X448 sibling already refuses a low-order point
+/// (the x448 crate returns `None` from `PublicKey::from_bytes` / `x448()`).
+/// Register row rust-no-contributory-behaviour-check-ecdh.
+pub fn x25519_contributory(ss: x25519_dalek::SharedSecret) -> Option<x25519_dalek::SharedSecret> {
+    if ss.was_contributory() {
+        Some(ss)
+    } else {
+        None
+    }
+}
+
 pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
     use crate::constants::{CKR_CURVE_NOT_SUPPORTED, CKR_DOMAIN_PARAMS_INVALID};
     if params.len() < 2 {
@@ -3760,6 +3775,18 @@ pub fn verify_ecdsa(
     }
 }
 
+/// RFC 8032 §5.2.2/§5.2.3 (Ed448): a point is encoded as 57 bytes whose last
+/// byte carries the x sign in its top bit and whose other seven bits (448 to
+/// 454) are zero. In a signature, R is bytes 0..57, so byte 56 must be 0x00
+/// or 0x80. `ed448_goldilocks` decodes R ignoring those bits, so a signature
+/// whose R sets them — and whose S was computed over those modified bytes —
+/// verified (Wycheproof ed448_test.json tcIds 63-65, InvalidEncoding; register
+/// row rust-ed448-accepts-noncanonical-r). Checked before any curve
+/// arithmetic by every Ed448 verifier here.
+fn ed448_r_unused_bits_clear(sig: &[u8]) -> bool {
+    sig.len() == 114 && sig[56] & 0x7f == 0
+}
+
 pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
     match pk_bytes.len() {
         32 => {
@@ -3776,6 +3803,9 @@ pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(),
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if !ed448_r_unused_bits_clear(sig_arr) {
+                return Err(CKR_SIGNATURE_INVALID);
+            }
             let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
@@ -3797,6 +3827,9 @@ pub fn verify_eddsa_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: 
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if !ed448_r_unused_bits_clear(sig_arr) {
+                return Err(CKR_SIGNATURE_INVALID);
+            }
             let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
@@ -3886,6 +3919,9 @@ pub fn verify_eddsa_ph(
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if !ed448_r_unused_bits_clear(sig_arr) {
+                return Err(CKR_SIGNATURE_INVALID);
+            }
             let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
@@ -4751,4 +4787,103 @@ cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac956
         assert!(crate::crypto::awslc::rsa_generate(2560).is_none());
     }
 
+}
+
+#[cfg(test)]
+mod x25519_contributory_tests {
+    use super::x25519_contributory;
+
+    fn unhex32(s: &str) -> [u8; 32] {
+        let v: Vec<u8> = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect();
+        v.try_into().unwrap()
+    }
+
+    /// Every RFC 7748 / libsodium low-order u-coordinate is refused; RFC 7748
+    /// §6.1's own Alice/Bob exchange (a contributory result) is not.
+    #[test]
+    fn low_order_points_are_refused_and_rfc7748_exchange_is_not() {
+        let sk = x25519_dalek::StaticSecret::from(unhex32(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+        ));
+        for u in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ] {
+            let ss = sk.diffie_hellman(&x25519_dalek::PublicKey::from(unhex32(u)));
+            assert!(x25519_contributory(ss).is_none(), "low-order u {u} must be refused");
+        }
+        // RFC 7748 §6.1: Alice's private key with Bob's public key.
+        let bob = unhex32("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let ss = x25519_contributory(sk.diffie_hellman(&x25519_dalek::PublicKey::from(bob)))
+            .expect("a genuine exchange is contributory");
+        assert_eq!(
+            ss.as_bytes(),
+            &unhex32("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        );
+    }
+}
+
+#[cfg(test)]
+mod ed448_r_encoding_tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Wycheproof ed448_test.json (C2SP/wycheproof testvectors_v1 @ 3fa63dd0,
+    /// byte-identical to the hub's vendored copy), group index 3, tcIds 63/64/65:
+    /// "modified bit 448/449/454 in R. Bits 448 to 454 of R are unused and must
+    /// be zero" — result invalid, flag InvalidEncoding. The Rust engine returned
+    /// CKR_OK on all three (hub ACVP harness, register row
+    /// rust-ed448-accepts-noncanonical-r). The same bytes with R's last byte put
+    /// back to 0x80 (only the x sign bit, bit 455) are the valid signature.
+    const PK: &str = "419610a534af127f583b04818cdb7f0ff300b025f2e01682bcae33fd691cee039511df0cddc690ee978426e8b38e50ce5af7dcfba50f704c00";
+    const MSG: &str = "313233343030";
+    const TC63: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff2811adf92201088e051ee48b57aecf46edfc68e5baeed5ae4910ba5681d370f75ab593811e18293ef0808581c254196bcbf2b4c454136a6711b00";
+    const TC64: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff2825e06c3999e8308be439c40940b0075d3e4f65147c1608cbe6e9c432e33bed6686f9393ae2568f0ad60febcb4b6179c0d90d034e7c3c4681000";
+    const TC65: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff2c02456bbd141df048dbf1843be6d5fef402483314c2af547b361a09f3319489eaede43404df9faf634c1298d678b5261c808b0be3726013e3900";
+
+    #[test]
+    fn wycheproof_unused_r_bits_are_refused() {
+        let (pk, msg) = (unhex(PK), unhex(MSG));
+        for (tc, hex) in [(63, TC63), (64, TC64), (65, TC65)] {
+            let sig = unhex(hex);
+            assert_eq!(
+                verify_eddsa(&pk, &msg, &sig),
+                Err(CKR_SIGNATURE_INVALID),
+                "Wycheproof ed448 tcId {tc}: a set unused bit of R must be rejected"
+            );
+        }
+    }
+
+    /// Positive control: Wycheproof ed448_test.json group 0, tcId 5 — a VALID
+    /// signature under the same key over the same message ("123400"), whose R
+    /// has only the x sign bit set in its last byte. It must keep verifying,
+    /// so the refusal above is about the unused bits, not the key or message.
+    const TC5_VALID: &str = "5db94c53101f521f6c1f43b60ea4d7e06fbd49c2e8afaf4fcc289e645e0880a87b8e55858df4cf2291a7303ffda446b82a117b4dd408cff28060a05236fc9c1682b0e55b60a082c9a57bffe61ef4dda5ce65df539805122b3a09a05976d41ad68ab52df85428152c57da93531e5d16920e00";
+
+    #[test]
+    fn wycheproof_valid_signature_same_key_still_verifies() {
+        assert_eq!(verify_eddsa(&unhex(PK), &unhex(MSG), &unhex(TC5_VALID)), Ok(()));
+    }
+
+    /// The rule itself, applied by all three Ed448 verifiers (plain, ctx, ph)
+    /// before any curve arithmetic: byte 56 of the signature is R's last byte,
+    /// and only its top bit (bit 455, the x sign) may be set.
+    #[test]
+    fn unused_r_bits_rule() {
+        let mut sig = unhex(TC5_VALID);
+        assert!(ed448_r_unused_bits_clear(&sig));
+        for bit in 0..7 {
+            sig[56] = 0x80 | (1 << bit);
+            assert!(!ed448_r_unused_bits_clear(&sig), "bit {} of R's last byte", 448 + bit);
+        }
+        assert!(!ed448_r_unused_bits_clear(&sig[..113]), "wrong length is not a clean encoding");
+    }
 }
