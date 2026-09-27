@@ -6993,6 +6993,40 @@ fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
     }
 }
 
+/// PKCS#11 v3.2 §5.18.4 (C_UnwrapKey; §5.18.7 C_UnwrapKeyAuthenticated
+/// defers to it): "If any length conflict occurs between the key type of the
+/// unwrapped key, the output from the unwrapping mechanism, or the specified
+/// CKA_VALUE_LEN, then the function SHALL return CKR_WRAPPED_KEY_LEN_RANGE."
+///
+/// Called on the fully resolved attribute set (template + engine defaults),
+/// so an omitted CKA_KEY_TYPE is checked as the CKK_AES the engine defaults
+/// it to. Reuses the C_DeriveKey length rule, [`secret_key_len_ok`]: AES
+/// 16/24/32, AES-XTS 32/64, ChaCha20 32, any non-empty value for the
+/// variable-length types. Only secret keys whose type is in
+/// [`SECRET_KEY_TYPES`] are checked; any other secret key type keeps its
+/// previous unchecked behaviour rather than being newly refused here.
+fn unwrap_secret_len_check(
+    attrs: &HashMap<u32, Vec<u8>>,
+    class: Option<u32>,
+) -> Result<(), u32> {
+    if class != Some(CKO_SECRET_KEY) {
+        return Ok(());
+    }
+    let key_type = match attrs
+        .get(&CKA_KEY_TYPE)
+        .filter(|v| v.len() >= 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+    {
+        Some(kt) if SECRET_KEY_TYPES.contains(&kt) => kt,
+        _ => return Ok(()),
+    };
+    let len = attrs.get(&CKA_VALUE).map_or(0, |v| v.len());
+    if !secret_key_len_ok(key_type, len as u32) {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
+    Ok(())
+}
+
 /// E5 (2026-09-25) — the CKA_KEY_TYPE values a keyed mechanism accepts, from
 /// each mechanism's "Allowed key types" / key-type text in PKCS#11 v3.2
 /// chapter 6. `None` means the engine does not check the key type at init
@@ -10918,6 +10952,12 @@ unsafe fn parse_sp800_108_segments(
     // wasm32 and 24 on LP64 — the same hazard as any single struct, applied
     // once per element.
     let stride = ck_param::prf_data_param::LAYOUT.size();
+    // Tables 199–201 (§6.42.3–§6.42.5) each say of CK_SP800_108_DKM_LENGTH,
+    // and Tables 200–201 of CK_SP800_108_COUNTER: "If specified, only one
+    // instance of this type may be specified." A second instance is invalid
+    // mechanism input (§5.1.6 CKR_MECHANISM_PARAM_INVALID) in every mode.
+    let mut seen_dkm_length = false;
+    let mut seen_counter = false;
     for i in 0..num_segs.min(64) {
         let seg = ParamReader::new(
             p_segs.add(i * stride),
@@ -11015,6 +11055,10 @@ unsafe fn parse_sp800_108_segments(
                 if !allow_explicit_counter {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
+                // Tables 200/201 — at most one instance.
+                if std::mem::replace(&mut seen_counter, true) {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
                 // Same wire shape as ITERATION_VARIABLE: pValue →
                 // CK_SP800_108_COUNTER_FORMAT.
                 let cf = ParamReader::new(
@@ -11032,7 +11076,11 @@ unsafe fn parse_sp800_108_segments(
                 out.push(Sp800Seg::Counter(le, (width_bits / 8) as usize));
             }
             t if t == CK_SP800_108_DKM_LENGTH => {
-                // pValue → CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
+                // Tables 199–201 — at most one instance, in all three modes.
+                if std::mem::replace(&mut seen_dkm_length, true) {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                // pValue →CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
                 // bLittleEndian: CK_BBOOL, ulWidthInBits: CK_ULONG }.
                 let df = ParamReader::new(
                     val_ptr,
@@ -13630,6 +13678,10 @@ pub fn C_UnwrapKey(
             .get(&CKA_CLASS)
             .filter(|v| v.len() >= 4)
             .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        // §5.18.4 — unwrapped length vs key type; see unwrap_secret_len_check.
+        if let Err(rv) = unwrap_secret_len_check(&attrs, unwrapped_class) {
+            return rv;
+        }
         if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
@@ -14050,6 +14102,10 @@ pub fn C_UnwrapKeyAuthenticated(
             .get(&CKA_CLASS)
             .filter(|v| v.len() >= 4)
             .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        // §5.18.4 — unwrapped length vs key type; see unwrap_secret_len_check.
+        if let Err(rv) = unwrap_secret_len_check(&attrs, unwrapped_class) {
+            return rv;
+        }
         if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
@@ -28678,9 +28734,9 @@ mod negative_rule_probes_2d {
     //! FFI entry points. Each asserted test states the SPEC-CORRECT outcome,
     //! so a failure is an engine gap; genuine gaps are `#[ignore]`d with a
     //! "2.D probe: GAP" reason so the suite stays green and
-    //! `-- --ignored` reproduces them. Probes 11 and 12 only RECORD what the
-    //! engine does (eprintln), because those rules are "probe first, then
-    //! decide". Run with:
+    //! `-- --ignored` reproduces them. Probe 11 only RECORDS what the engine
+    //! does (eprintln), because that rule is "probe first, then decide";
+    //! probe 12 started that way and now asserts the refusal. Run with:
     //!   cargo test --lib negative_rule_probes_2d -- --include-ignored --nocapture
     use super::*;
     use crate::native::test_lock;
@@ -28973,7 +29029,6 @@ mod negative_rule_probes_2d {
     /// may be specified." Expected CKR_MECHANISM_PARAM_INVALID (generic,
     /// §5.1.6; the tables name no code).
     #[test]
-    #[ignore = "2.D probe: GAP — two CK_SP800_108_DKM_LENGTH params return CKR_OK in all three SP 800-108 modes"]
     fn p04_dkm_length_at_most_one_instance() {
         let _guard = test_lock::acquire();
         let s = setup();
@@ -29002,7 +29057,6 @@ mod negative_rule_probes_2d {
     /// CKR_WRAPPED_KEY_LEN_RANGE." §6.58.2 Table 254: ChaCha20 "Key length is
     /// fixed at 256 bits."
     #[test]
-    #[ignore = "2.D probe: GAP — C_UnwrapKey makes a 16-byte CKK_CHACHA20 key (CKR_OK), not CKR_WRAPPED_KEY_LEN_RANGE"]
     fn p05_unwrap_length_conflicts_with_key_type() {
         let _guard = test_lock::acquire();
         let s = setup();
@@ -29042,6 +29096,113 @@ mod negative_rule_probes_2d {
             );
         }
         assert_eq!(rv, CKR_WRAPPED_KEY_LEN_RANGE, "16 bytes unwrapped into CKK_CHACHA20");
+        assert_eq!(h, 0, "no handle on failure");
+    }
+
+    /// AES-KW-wrap a CKK_GENERIC_SECRET of `n` bytes, then C_UnwrapKey it as a
+    /// secret key of `key_type`; returns the unwrap rv.
+    fn unwrap_as(s: u32, kek: u32, n: usize, key_type: u32) -> u32 {
+        let target = secret_key(s, CKK_GENERIC_SECRET, &vec![0xa5u8; n], &[CKA_EXTRACTABLE]);
+        let mut mech: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+        let mut wrapped = vec![0u8; n + 16];
+        let mut wlen = wrapped.len() as u32;
+        assert_eq!(
+            C_WrapKey(s, mech.as_mut_ptr() as *mut u8, kek, target, wrapped.as_mut_ptr(), &mut wlen),
+            CKR_OK,
+            "setup: wrap {n} bytes"
+        );
+        let (class, kt) = (CKO_SECRET_KEY as usize, key_type as usize);
+        let mut t = tmpl(&[
+            (CKA_CLASS, &class as *const _ as *const u8, US),
+            (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+        ]);
+        let mut h = 0u32;
+        C_UnwrapKey(
+            s,
+            mech.as_mut_ptr() as *mut u8,
+            kek,
+            wrapped.as_mut_ptr(),
+            wlen,
+            t.as_mut_ptr() as *mut u8,
+            2,
+            &mut h,
+        )
+    }
+
+    /// Same §5.18.4 rule for the other fixed-length secret key types the
+    /// engine's length table covers (AES §6.12: 128/192/256-bit; AES-XTS
+    /// §6.13: two AES keys), with positive controls for each legal length.
+    #[test]
+    fn p05b_unwrap_length_vs_aes_and_aes_xts() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let kek = secret_key(s, CKK_AES, &[0x5au8; 16], &[CKA_WRAP, CKA_UNWRAP]);
+        for (n, kt, want) in [
+            (16, CKK_AES, CKR_OK),
+            (24, CKK_AES, CKR_OK),
+            (32, CKK_AES, CKR_OK),
+            (40, CKK_AES, CKR_WRAPPED_KEY_LEN_RANGE),
+            (32, CKK_AES_XTS, CKR_OK),
+            (64, CKK_AES_XTS, CKR_OK),
+            (16, CKK_AES_XTS, CKR_WRAPPED_KEY_LEN_RANGE),
+            (48, CKK_AES_XTS, CKR_WRAPPED_KEY_LEN_RANGE),
+            (32, CKK_CHACHA20, CKR_OK),
+            (24, CKK_GENERIC_SECRET, CKR_OK),
+        ] {
+            assert_eq!(unwrap_as(s, kek, n, kt), want, "{n} bytes into key type {kt:#x}");
+        }
+    }
+
+    /// C_UnwrapKeyAuthenticated (§5.18.7) builds its key the same way, so the
+    /// §5.18.4 length rule applies to it too.
+    #[test]
+    fn p05c_unwrap_authenticated_length_conflicts_with_key_type() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let kek = secret_key(s, CKK_AES, &[0x5au8; 16], &[CKA_WRAP, CKA_UNWRAP]);
+        let target = secret_key(s, CKK_AES, &[0xa5u8; 16], &[CKA_EXTRACTABLE]);
+        let iv = [0x24u8; 12];
+        // CK_GCM_PARAMS { pIv, ulIvLen, ulIvBits, pAAD, ulAADLen, ulTagBits }
+        let mut gcm: [usize; 6] = [iv.as_ptr() as usize, iv.len(), 96, 0, 0, 128];
+        let mut mech: [usize; 3] =
+            [CKM_AES_GCM as usize, gcm.as_mut_ptr() as usize, std::mem::size_of_val(&gcm)];
+        let mut wrapped = vec![0u8; 64];
+        let mut wlen = wrapped.len() as u32;
+        assert_eq!(
+            C_WrapKeyAuthenticated(
+                s,
+                mech.as_mut_ptr() as *mut u8,
+                kek,
+                target,
+                std::ptr::null_mut(),
+                0,
+                wrapped.as_mut_ptr(),
+                &mut wlen,
+            ),
+            CKR_OK,
+            "setup: GCM-wrap a 16-byte key"
+        );
+        for (kt, want) in [(CKK_AES, CKR_OK), (CKK_CHACHA20, CKR_WRAPPED_KEY_LEN_RANGE)] {
+            let (class, ktv) = (CKO_SECRET_KEY as usize, kt as usize);
+            let mut t = tmpl(&[
+                (CKA_CLASS, &class as *const _ as *const u8, US),
+                (CKA_KEY_TYPE, &ktv as *const _ as *const u8, US),
+            ]);
+            let mut h = 0u32;
+            let rv = C_UnwrapKeyAuthenticated(
+                s,
+                mech.as_mut_ptr() as *mut u8,
+                kek,
+                wrapped.as_mut_ptr(),
+                wlen,
+                t.as_mut_ptr() as *mut u8,
+                2,
+                std::ptr::null_mut(),
+                0,
+                &mut h,
+            );
+            assert_eq!(rv, want, "16 bytes GCM-unwrapped into key type {kt:#x}");
+        }
     }
 
     // ── 6. CKF_SERIAL_SESSION always set ────────────────────────────────────
@@ -29250,23 +29411,23 @@ mod negative_rule_probes_2d {
         }
     }
 
-    // ── 12. Two CK_SP800_108_COUNTER (OBSERVED) ─────────────────────────────
+    // ── 12. At most one CK_SP800_108_COUNTER ────────────────────────────────
 
     /// v3.2 §6.42.4 Table 200 and §6.42.5 Table 201, CK_SP800_108_COUNTER:
     /// "If specified, only one instance of this type may be specified."
-    /// Probe-first: record the engine's answer to two instances. Not asserted.
+    /// Expected CKR_MECHANISM_PARAM_INVALID (generic, §5.1.6; the tables name
+    /// no code). Was an observation until the engine enforced it.
     #[test]
-    fn p12_observe_two_counter_params() {
+    fn p12_two_counter_params_refused() {
         let _guard = test_lock::acquire();
         let s = setup();
         for mode in [Mode::Feedback, Mode::DoublePipeline] {
             let (one, _) = derive(s, mode, &[Seg::IterNull, Seg::Counter, Seg::Bytes(b"ctx")]);
+            assert_eq!(one, CKR_OK, "{mode:?}: positive control with one COUNTER");
             let (two, h) =
                 derive(s, mode, &[Seg::IterNull, Seg::Counter, Seg::Bytes(b"ctx"), Seg::Counter]);
-            eprintln!(
-                "2.D p12 OBSERVED {mode:?}: one COUNTER -> {one:#x}; two COUNTER -> rv={two:#x} \
-                 handle={h}"
-            );
+            assert_eq!(two, CKR_MECHANISM_PARAM_INVALID, "{mode:?}: two COUNTER instances");
+            assert_eq!(h, 0, "{mode:?}: no handle on failure");
         }
     }
 }
