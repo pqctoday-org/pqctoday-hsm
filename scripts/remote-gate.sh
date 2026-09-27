@@ -24,8 +24,13 @@
 #   5. Only then is the local marker written, with `host=<label>` added to
 #      its flags and the commit, tree and remote recorded in it.
 #
-# The remote host needs: git, bash, python3, node/npm (on GATE_REMOTE_PATH),
-# docker CLI, and a `pqc-rust` container built from
+# The remote host needs: git, bash, python3, docker CLI, node/npm, and a
+# rustup toolchain with the wasm32 targets plus wasm-pack / wasm-bindgen —
+# several gate steps run on the HOST, not in the container (the wasm CACP
+# smoke builds with host cargo when one exists, and a Homebrew cargo without
+# wasm32 fails it). Kept under $HOME/<GATE_REMOTE_BASE>/tools so nothing
+# global on the remote changes; versions match the local host's. And a
+# `pqc-rust` container built from
 # scripts/gate-container/Dockerfile with $HOME/<GATE_REMOTE_BASE> mounted at
 # /ag. Equivalence with the local container is measured, not assumed: run the
 # same commit both ways and compare.
@@ -44,7 +49,9 @@ done
 SSH_KEY="${GATE_REMOTE_SSH_KEY:-$HOME/.ssh/pqc-appliance_ed25519}"
 REMOTE_BASE="${GATE_REMOTE_BASE:-ag-gate}"          # under the remote $HOME; mounted at /ag
 REMOTE_NAME="${GATE_REMOTE_DIR:-pqctoday-hsm-remote}" # one persistent checkout (warm build caches)
-REMOTE_PATH="${GATE_REMOTE_PATH:-\$HOME/$REMOTE_BASE/tools/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin}"
+REMOTE_TOOLS="\$HOME/$REMOTE_BASE/tools"
+REMOTE_PATH="${GATE_REMOTE_PATH:-$REMOTE_TOOLS/cargo/bin:$REMOTE_TOOLS/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin}"
+REMOTE_ENV="export PATH=$REMOTE_PATH RUSTUP_HOME=$REMOTE_TOOLS/rustup CARGO_HOME=$REMOTE_TOOLS/cargo"
 HOST_LABEL="${GATE_HOST_LABEL:-${HOST#*@}}"
 RDIR="\$HOME/$REMOTE_BASE/$REMOTE_NAME"
 
@@ -94,7 +101,7 @@ verify_remote_tree "before the run"
 
 # ── run the gate there ──────────────────────────────────────────────────────
 say "running local-gate.sh ${GATE_FLAGS[*]+${GATE_FLAGS[*]}} on $HOST"
-rsh "cd $RDIR && export PATH=$REMOTE_PATH && AG_CONTAINER_ROOT=/ag/$REMOTE_NAME bash scripts/local-gate.sh ${GATE_FLAGS[*]+${GATE_FLAGS[*]}}"
+rsh "cd $RDIR && $REMOTE_ENV && AG_CONTAINER_ROOT=/ag/$REMOTE_NAME bash scripts/local-gate.sh ${GATE_FLAGS[*]+${GATE_FLAGS[*]}}"
 RC=$?
 [[ $RC -eq 0 ]] || die "remote gate FAILED (exit $RC) — no marker written"
 
