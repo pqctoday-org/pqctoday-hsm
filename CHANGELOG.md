@@ -94,6 +94,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so the measured operation is unchanged). Verified by running the full
   matrix against that engine: 262/262 rows, no zero-op points.
 
+- **C++ engine: a malformed curve name in `CKA_EC_PARAMS` crashed the engine,
+  and unusable EC parameters returned `CKR_GENERAL_ERROR`.**
+  - A `PrintableString` whose length runs past the bytes supplied (for example
+    `13 05 41`) was passed to `strcmp` as a NULL pointer, a crash reachable
+    from `C_GenerateKeyPair` and from importing an Edwards or Montgomery key.
+    It is now refused.
+  - Both key-pair generators now answer with the two codes PKCS#11 v3.2 §6.3
+    names, the same line the Rust engine draws:
+    - `CKR_CURVE_NOT_SUPPORTED` for a well-formed curve identifier this engine
+      does not implement;
+    - `CKR_DOMAIN_PARAMS_INVALID` for a value that is not a valid
+      representation (truncated, implicitCA `NULL`, other tags, or a curve name
+      given to the Weierstrass generator, which does not take that form).
+  - Proof: with the old engine code the new test crashes the C++ test binary
+    (segmentation fault); with the fix it passes.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
