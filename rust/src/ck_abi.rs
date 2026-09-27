@@ -2931,7 +2931,7 @@ mod tests {
     /// CTR path is used to justify the engine's own CTR path.
     #[test]
     fn aes_ctr_counter_bits_confines_the_increment_to_the_low_field() {
-        use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+        use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
         let _guard = crate::native::test_lock::acquire();
         let key = unhex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4");
         let cb: [u8; 16] = unhex("a0a1a2a3a4a5a6a7a8a9aaabfffffffe").try_into().unwrap();
@@ -2939,12 +2939,12 @@ mod tests {
 
         // Independent expectation: counter blocks with only the low 32 bits
         // advancing, 0xfffffffe → ffffffff → 00000000 → 00000001.
-        let cipher = aes::Aes256::new(GenericArray::from_slice(&key));
+        let cipher = aes::Aes256::new_from_slice(&key).expect("32-byte test key");
         let mut expect = Vec::new();
         for low in [0xfffffffeu32, 0xffffffff, 0x00000000, 0x00000001] {
             let mut blk = cb;
             blk[12..16].copy_from_slice(&low.to_be_bytes());
-            let mut ga = *GenericArray::from_slice(&blk);
+            let mut ga = Block::<aes::Aes256>::from(blk);
             cipher.encrypt_block(&mut ga);
             expect.extend_from_slice(&ga);
         }

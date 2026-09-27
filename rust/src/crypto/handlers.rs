@@ -1926,19 +1926,19 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
             use cmac::Mac as _;
             let tag = match key_bytes.len() {
                 16 => {
-                    let mut m = cmac::Cmac::<aes::Aes128>::new_from_slice(key_bytes)
+                    let mut m = cmac::Cmac::<aes08::Aes128>::new_from_slice(key_bytes)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     m.update(msg);
                     m.finalize().into_bytes().to_vec()
                 }
                 24 => {
-                    let mut m = cmac::Cmac::<aes::Aes192>::new_from_slice(key_bytes)
+                    let mut m = cmac::Cmac::<aes08::Aes192>::new_from_slice(key_bytes)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     m.update(msg);
                     m.finalize().into_bytes().to_vec()
                 }
                 32 => {
-                    let mut m = cmac::Cmac::<aes::Aes256>::new_from_slice(key_bytes)
+                    let mut m = cmac::Cmac::<aes08::Aes256>::new_from_slice(key_bytes)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     m.update(msg);
                     m.finalize().into_bytes().to_vec()
