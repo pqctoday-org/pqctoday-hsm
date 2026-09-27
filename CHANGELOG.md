@@ -136,6 +136,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   agreement. All ten call sites now refuse a non-contributory result with the
   code their X448 counterpart already returns.
 
+- **Rust engine: Ed448 verification accepted signatures whose R sets unused
+  bits.** In Ed448's 57-byte point encoding, bits 448 to 454 must be zero
+  (RFC 8032 §5.2.2). The curve library ignores them, so a signature crafted
+  over a modified R verified. Wycheproof `ed448_test.json` tcIds 63, 64 and 65
+  (`InvalidEncoding`) returned `CKR_OK`; the C++ engine already refused them.
+  All three Ed448 verifiers (plain, context, pre-hash) now reject such an R
+  with `CKR_SIGNATURE_INVALID`. Wycheproof tcId 5, a valid signature under the
+  same key, still verifies.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
