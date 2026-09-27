@@ -52,6 +52,7 @@ mod kmip;
 mod measure;
 mod pkcs11;
 mod transport;
+mod xof;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -80,6 +81,9 @@ enum Command {
     Kmip(kmip::KmipArgs),
     /// Measure the gRPC/REST PKCS#11 remoting arms (sandbox-bench-transport-arms-plan-08242026.md WP4).
     Transport(transport::TransportArgs),
+    /// SHAKE128/256 throughput OUTSIDE PKCS#11 (v3.2 has no SHAKE digest
+    /// mechanism); rows are labelled `access_path = "rust-sha3-direct"`.
+    Xof(xof::XofArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -406,6 +410,9 @@ fn main() -> Result<()> {
     }
     if let Some(Command::Transport(args)) = &cli.command {
         return transport::run(args);
+    }
+    if let Some(Command::Xof(args)) = &cli.command {
+        return xof::run(args);
     }
     if cli.list_algorithms {
         return list_algorithms(&cli);
