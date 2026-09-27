@@ -5897,7 +5897,7 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
 /// rather than failing one. PKCS#11 v3.2 (and the v3.3 draft) has no dedicated
 /// return code for it — CKR_CURVE_NOT_SUPPORTED exists only for EC — so the
 /// generic code is used and its meaning documented here. Lifting the cap was
-/// explored and declined; see `nist_oaep_small_e_decrypts_wide_e_refused_as_expected`.
+/// explored and declined; see `nist_oaep_small_e_decrypts_through_the_engine_wide_e_refused`.
 fn synthesize_rsa_private_pkcs8(attrs: &mut Attributes) -> Result<(), u32> {
     let read_u32 = |a: &Attributes, t: u32| -> Option<u32> {
         a.get(&t)
@@ -8786,6 +8786,18 @@ fn oaep_padding(hash_alg: u32, mgf: u32, label: &[u8]) -> Result<rsa::Oaep, u32>
         (CKM_SHA512, CKG_MGF1_SHA256) => oaep!(sha2::Sha512, sha2::Sha256),
         (CKM_SHA512, CKG_MGF1_SHA384) => oaep!(sha2::Sha512, sha2::Sha384),
         (CKM_SHA512, CKG_MGF1_SHA512) | (CKM_SHA512, 0) => oaep!(sha2::Sha512, sha2::Sha512),
+        // §6.1.8 leaves hashAlg open ("mechanism ID of the message digest
+        // algorithm"), and Table 40 defines MGF1 for each of these. The C++
+        // engine accepts exactly these matched pairs (MechParamCheckRSAPKCSOAEP);
+        // Rust used to stop at SHA-256/384/512, so NIST's SHA-1 OAEP vectors (and
+        // any SHA-224 / SHA-3 caller) got CKR_MECHANISM_PARAM_INVALID here.
+        // SP 800-56B rev 2 still permits SHA-1 in OAEP.
+        (CKM_SHA_1, CKG_MGF1_SHA1) => oaep!(sha1::Sha1, sha1::Sha1),
+        (CKM_SHA224, CKG_MGF1_SHA224) => oaep!(sha2::Sha224, sha2::Sha224),
+        (CKM_SHA3_224, CKG_MGF1_SHA3_224) => oaep!(sha3::Sha3_224, sha3::Sha3_224),
+        (CKM_SHA3_256, CKG_MGF1_SHA3_256) => oaep!(sha3::Sha3_256, sha3::Sha3_256),
+        (CKM_SHA3_384, CKG_MGF1_SHA3_384) => oaep!(sha3::Sha3_384, sha3::Sha3_384),
+        (CKM_SHA3_512, CKG_MGF1_SHA3_512) => oaep!(sha3::Sha3_512, sha3::Sha3_512),
         _ => return Err(CKR_MECHANISM_PARAM_INVALID),
     })
 }
@@ -9319,7 +9331,7 @@ pub fn C_Encrypt(
                 out
             }
             CKM_AES_CBC_PAD => {
-                use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+                use aes::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
                 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
                 type Aes192CbcEnc = cbc::Encryptor<aes::Aes192>;
                 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
@@ -9328,7 +9340,7 @@ pub fn C_Encrypt(
                 buf[..plaintext.len()].copy_from_slice(plaintext);
                 match key_bytes.len() {
                     16 => match Aes128CbcEnc::new_from_slices(&key_bytes, &iv) {
-                        Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
+                        Ok(cipher) => match cipher.encrypt_padded::<Pkcs7>(&mut buf, plaintext.len()) {
                             Ok(ct) => ct.to_vec(),
                             Err(_) => return CKR_FUNCTION_FAILED,
                         },
@@ -9336,14 +9348,14 @@ pub fn C_Encrypt(
                     },
                     // E11 — AES-192 is inside the advertised 16..32 range.
                     24 => match Aes192CbcEnc::new_from_slices(&key_bytes, &iv) {
-                        Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
+                        Ok(cipher) => match cipher.encrypt_padded::<Pkcs7>(&mut buf, plaintext.len()) {
                             Ok(ct) => ct.to_vec(),
                             Err(_) => return CKR_FUNCTION_FAILED,
                         },
                         Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                     },
                     32 => match Aes256CbcEnc::new_from_slices(&key_bytes, &iv) {
-                        Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
+                        Ok(cipher) => match cipher.encrypt_padded::<Pkcs7>(&mut buf, plaintext.len()) {
                             Ok(ct) => ct.to_vec(),
                             Err(_) => return CKR_FUNCTION_FAILED,
                         },
@@ -9461,7 +9473,7 @@ pub fn C_Encrypt(
                             Ok(c) => c,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                         };
-                        Xts128::<Aes128>::new(k1, k2).encrypt_sector(&mut buf, tweak);
+                        Xts128::<Aes128>::new(k1, k2).encrypt_sector(&mut buf, tweak.into());
                     }
                     64 => {
                         let k1 = match Aes256::new_from_slice(&key_bytes[..32]) {
@@ -9472,7 +9484,7 @@ pub fn C_Encrypt(
                             Ok(c) => c,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                         };
-                        Xts128::<Aes256>::new(k1, k2).encrypt_sector(&mut buf, tweak);
+                        Xts128::<Aes256>::new(k1, k2).encrypt_sector(&mut buf, tweak.into());
                     }
                     _ => return CKR_KEY_SIZE_RANGE,
                 }
@@ -9560,16 +9572,15 @@ pub fn C_Encrypt(
             }
             CKM_CHACHA20_POLY1305 => {
                 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::{Aead, Payload}};
-                use chacha20poly1305::aead::generic_array::GenericArray;
                 if key_bytes.len() != 32 {
                     return CKR_KEY_SIZE_RANGE;
                 }
                 if iv.len() != 12 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
-                let nonce = GenericArray::from_slice(&iv);
-                match cipher.encrypt(nonce, Payload { msg: plaintext, aad: &aad }) {
+                let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes).expect("32-byte key checked above");
+                let nonce = chacha20poly1305::Nonce::try_from(iv.as_slice()).expect("12-byte nonce checked above");
+                match cipher.encrypt(&nonce, Payload { msg: plaintext, aad: &aad }) {
                     Ok(ct) => ct,
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
@@ -9981,14 +9992,14 @@ pub fn C_Decrypt(
                 out
             }
             CKM_AES_CBC_PAD => {
-                use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+                use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
                 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
                 type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
                 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
                 let mut buf = ciphertext.to_vec();
                 let pt_slice: &[u8] = match key_bytes.len() {
                     16 => match Aes128CbcDec::new_from_slices(&key_bytes, &iv) {
-                        Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                        Ok(cipher) => match cipher.decrypt_padded::<Pkcs7>(&mut buf) {
                             Ok(pt) => pt,
                             Err(_) => return CKR_FUNCTION_FAILED,
                         },
@@ -9996,14 +10007,14 @@ pub fn C_Decrypt(
                     },
                     // E11 — AES-192 is inside the advertised 16..32 range.
                     24 => match Aes192CbcDec::new_from_slices(&key_bytes, &iv) {
-                        Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                        Ok(cipher) => match cipher.decrypt_padded::<Pkcs7>(&mut buf) {
                             Ok(pt) => pt,
                             Err(_) => return CKR_FUNCTION_FAILED,
                         },
                         Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                     },
                     32 => match Aes256CbcDec::new_from_slices(&key_bytes, &iv) {
-                        Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                        Ok(cipher) => match cipher.decrypt_padded::<Pkcs7>(&mut buf) {
                             Ok(pt) => pt,
                             Err(_) => return CKR_FUNCTION_FAILED,
                         },
@@ -10117,7 +10128,7 @@ pub fn C_Decrypt(
                             Ok(c) => c,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                         };
-                        Xts128::<Aes128>::new(k1, k2).decrypt_sector(&mut buf, tweak);
+                        Xts128::<Aes128>::new(k1, k2).decrypt_sector(&mut buf, tweak.into());
                     }
                     64 => {
                         let k1 = match Aes256::new_from_slice(&key_bytes[..32]) {
@@ -10128,7 +10139,7 @@ pub fn C_Decrypt(
                             Ok(c) => c,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                         };
-                        Xts128::<Aes256>::new(k1, k2).decrypt_sector(&mut buf, tweak);
+                        Xts128::<Aes256>::new(k1, k2).decrypt_sector(&mut buf, tweak.into());
                     }
                     _ => return CKR_KEY_SIZE_RANGE,
                 }
@@ -11232,9 +11243,9 @@ fn sp800_108_double_pipeline_kbkdf(
             sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_512>>(base_key, segs, key_len)
         }
         CKM_AES_CMAC => match base_key.len() {
-            16 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes128>>(base_key, segs, key_len),
-            24 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes192>>(base_key, segs, key_len),
-            32 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes256>>(base_key, segs, key_len),
+            16 => sp800_108_run_double_pipeline::<cmac::Cmac<aes08::Aes128>>(base_key, segs, key_len),
+            24 => sp800_108_run_double_pipeline::<cmac::Cmac<aes08::Aes192>>(base_key, segs, key_len),
+            32 => sp800_108_run_double_pipeline::<cmac::Cmac<aes08::Aes256>>(base_key, segs, key_len),
             _ => Err(CKR_KEY_SIZE_RANGE),
         },
         _ => Err(CKR_MECHANISM_PARAM_INVALID),
@@ -11278,9 +11289,9 @@ fn sp800_108_counter_kbkdf(
         }
         // AES-CMAC PRF — the AES variant is fixed by the base key length.
         CKM_AES_CMAC => match base_key.len() {
-            16 => sp800_108_run_counter::<cmac::Cmac<aes::Aes128>>(base_key, segs, key_len),
-            24 => sp800_108_run_counter::<cmac::Cmac<aes::Aes192>>(base_key, segs, key_len),
-            32 => sp800_108_run_counter::<cmac::Cmac<aes::Aes256>>(base_key, segs, key_len),
+            16 => sp800_108_run_counter::<cmac::Cmac<aes08::Aes128>>(base_key, segs, key_len),
+            24 => sp800_108_run_counter::<cmac::Cmac<aes08::Aes192>>(base_key, segs, key_len),
+            32 => sp800_108_run_counter::<cmac::Cmac<aes08::Aes256>>(base_key, segs, key_len),
             _ => Err(CKR_KEY_SIZE_RANGE),
         },
         _ => Err(CKR_MECHANISM_PARAM_INVALID),
@@ -11332,9 +11343,9 @@ fn sp800_108_feedback_kbkdf(
         }
         // AES-CMAC PRF — the AES variant is fixed by the base key length.
         CKM_AES_CMAC => match base_key.len() {
-            16 => sp800_108_run_feedback::<cmac::Cmac<aes::Aes128>>(base_key, iv, segs, key_len),
-            24 => sp800_108_run_feedback::<cmac::Cmac<aes::Aes192>>(base_key, iv, segs, key_len),
-            32 => sp800_108_run_feedback::<cmac::Cmac<aes::Aes256>>(base_key, iv, segs, key_len),
+            16 => sp800_108_run_feedback::<cmac::Cmac<aes08::Aes128>>(base_key, iv, segs, key_len),
+            24 => sp800_108_run_feedback::<cmac::Cmac<aes08::Aes192>>(base_key, iv, segs, key_len),
+            32 => sp800_108_run_feedback::<cmac::Cmac<aes08::Aes256>>(base_key, iv, segs, key_len),
             _ => Err(CKR_KEY_SIZE_RANGE),
         },
         _ => Err(CKR_MECHANISM_PARAM_INVALID),
@@ -11611,7 +11622,7 @@ pub fn C_DeriveKey(
             // padding (or truncating) a short input would hand the caller a
             // key derived from bytes they did not supply.
             CKM_AES_ECB_ENCRYPT_DATA | CKM_AES_CBC_ENCRYPT_DATA => {
-                use aes::cipher::{BlockEncryptMut, KeyIvInit, KeyInit, BlockEncrypt};
+                use aes::cipher::{BlockModeEncrypt, KeyIvInit, KeyInit, BlockCipherEncrypt};
                 let base_val = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_KEY_HANDLE_INVALID,
@@ -11670,7 +11681,7 @@ pub fn C_DeriveKey(
                                 Err(_) => return CKR_KEY_SIZE_RANGE,
                             };
                             for blk in out.chunks_mut(16) {
-                                c.encrypt_block(blk.into());
+                                c.encrypt_block(blk.try_into().expect("16-byte chunk, same as the old GenericArray conversion"));
                             }
                         } else {
                             let c = match cbc::Encryptor::<$aes>::new_from_slices(&base_val, &iv) {
@@ -11679,7 +11690,7 @@ pub fn C_DeriveKey(
                             };
                             let mut enc = c;
                             for blk in out.chunks_mut(16) {
-                                enc.encrypt_block_mut(blk.into());
+                                enc.encrypt_block(blk.try_into().expect("16-byte chunk, same as the old GenericArray conversion"));
                             }
                         }
                     }};
@@ -12481,7 +12492,7 @@ fn wrap_with_trusted_violation(h_wrapping_key: u32, h_key: u32) -> bool {
 unsafe fn aes_cbc_encrypt_wrap(kek: &[u8], iv: &[u8], data: &[u8], pad: bool) -> Result<Vec<u8>, u32> {
     use aes::cipher::{
         block_padding::{NoPadding, Pkcs7},
-        BlockEncryptMut, KeyIvInit,
+        BlockModeEncrypt, KeyIvInit,
     };
     if iv.len() != 16 {
         return Err(CKR_MECHANISM_PARAM_INVALID);
@@ -12501,9 +12512,9 @@ unsafe fn aes_cbc_encrypt_wrap(kek: &[u8], iv: &[u8], data: &[u8], pad: bool) ->
             let c = <cbc::Encryptor<$t>>::new_from_slices(kek, iv)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let ct = if pad {
-                c.encrypt_padded_mut::<Pkcs7>(&mut buf, data.len())
+                c.encrypt_padded::<Pkcs7>(&mut buf, data.len())
             } else {
-                c.encrypt_padded_mut::<NoPadding>(&mut buf, data.len())
+                c.encrypt_padded::<NoPadding>(&mut buf, data.len())
             }
             .map_err(|_| CKR_FUNCTION_FAILED)?;
             ct.to_vec()
@@ -12521,7 +12532,7 @@ unsafe fn aes_cbc_encrypt_wrap(kek: &[u8], iv: &[u8], data: &[u8], pad: bool) ->
 unsafe fn aes_cbc_decrypt_unwrap(kek: &[u8], iv: &[u8], ct: &[u8], pad: bool) -> Result<Vec<u8>, u32> {
     use aes::cipher::{
         block_padding::{NoPadding, Pkcs7},
-        BlockDecryptMut, KeyIvInit,
+        BlockModeDecrypt, KeyIvInit,
     };
     if iv.len() != 16 {
         return Err(CKR_MECHANISM_PARAM_INVALID);
@@ -12535,9 +12546,9 @@ unsafe fn aes_cbc_decrypt_unwrap(kek: &[u8], iv: &[u8], ct: &[u8], pad: bool) ->
             let c = <cbc::Decryptor<$t>>::new_from_slices(kek, iv)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let pt = if pad {
-                c.decrypt_padded_mut::<Pkcs7>(&mut buf)
+                c.decrypt_padded::<Pkcs7>(&mut buf)
             } else {
-                c.decrypt_padded_mut::<NoPadding>(&mut buf)
+                c.decrypt_padded::<NoPadding>(&mut buf)
             }
             .map_err(|_| CKR_WRAPPED_KEY_INVALID)?;
             pt.to_vec()
@@ -13163,47 +13174,25 @@ pub fn C_WrapKey(
             })
             }
         } else if is_kwp {
-            use aes::cipher::generic_array::GenericArray;
             // AES-KWP (RFC 5649) — supports arbitrary-length data
             if key_to_wrap.is_empty() {
                 return CKR_DATA_INVALID;
             }
-            let result = match wrapping_key.len() {
-                16 => aes_kw::KekAes128::new(GenericArray::from_slice(&wrapping_key))
-                    .wrap_with_padding_vec(&key_to_wrap),
-                24 => aes_kw::KekAes192::new(GenericArray::from_slice(&wrapping_key))
-                    .wrap_with_padding_vec(&key_to_wrap),
-                32 => aes_kw::KekAes256::new(GenericArray::from_slice(&wrapping_key))
-                    .wrap_with_padding_vec(&key_to_wrap),
-                _ => return CKR_WRAPPING_KEY_SIZE_RANGE, // §5.18.3 (E7)
-            };
-            match result {
+            match crate::crypto::aeskw::kwp_wrap(&wrapping_key, &key_to_wrap) {
                 Ok(v) => v,
-                Err(_) => return CKR_FUNCTION_FAILED,
+                Err(crate::crypto::aeskw::KwError::KekLen) => return CKR_WRAPPING_KEY_SIZE_RANGE, // §5.18.3 (E7)
+                Err(crate::crypto::aeskw::KwError::Failed) => return CKR_FUNCTION_FAILED,
             }
         } else {
-            use aes::cipher::generic_array::GenericArray;
             // AES-KW (RFC 3394) — requires data to be multiple of 8 and >= 16
             if key_to_wrap.len() % 8 != 0 || key_to_wrap.len() < 16 {
                 return CKR_DATA_INVALID;
             }
-            let mut buf = vec![0u8; key_to_wrap.len() + 8];
-            let wrap_ok = match wrapping_key.len() {
-                16 => aes_kw::KekAes128::new(GenericArray::from_slice(&wrapping_key))
-                    .wrap(&key_to_wrap, &mut buf)
-                    .is_ok(),
-                24 => aes_kw::KekAes192::new(GenericArray::from_slice(&wrapping_key))
-                    .wrap(&key_to_wrap, &mut buf)
-                    .is_ok(),
-                32 => aes_kw::KekAes256::new(GenericArray::from_slice(&wrapping_key))
-                    .wrap(&key_to_wrap, &mut buf)
-                    .is_ok(),
-                _ => return CKR_WRAPPING_KEY_SIZE_RANGE, // §5.18.3 (E7)
-            };
-            if !wrap_ok {
-                return CKR_FUNCTION_FAILED;
+            match crate::crypto::aeskw::kw_wrap(&wrapping_key, &key_to_wrap) {
+                Ok(v) => v,
+                Err(crate::crypto::aeskw::KwError::KekLen) => return CKR_WRAPPING_KEY_SIZE_RANGE, // §5.18.3 (E7)
+                Err(crate::crypto::aeskw::KwError::Failed) => return CKR_FUNCTION_FAILED,
             }
-            buf
         };
 
         if p_wrapped_key.is_null() {
@@ -13427,52 +13416,30 @@ pub fn C_UnwrapKey(
             }
             }
         } else if is_kwp {
-            use aes::cipher::generic_array::GenericArray;
             // AES-KWP (RFC 5649) — ciphertext must be ≥ 16 bytes and a
             // multiple of the 8-byte semiblock. §5.18.4 / §6.16 —
             // length violations are CKR_WRAPPED_KEY_LEN_RANGE.
             if wrapped_data.len() < 16 || wrapped_data.len() % 8 != 0 {
                 return CKR_WRAPPED_KEY_LEN_RANGE;
             }
-            let result = match unwrapping_key.len() {
-                16 => aes_kw::KekAes128::new(GenericArray::from_slice(&unwrapping_key))
-                    .unwrap_with_padding_vec(wrapped_data),
-                24 => aes_kw::KekAes192::new(GenericArray::from_slice(&unwrapping_key))
-                    .unwrap_with_padding_vec(wrapped_data),
-                32 => aes_kw::KekAes256::new(GenericArray::from_slice(&unwrapping_key))
-                    .unwrap_with_padding_vec(wrapped_data),
-                _ => return CKR_UNWRAPPING_KEY_SIZE_RANGE, // §5.18.4 (E7)
-            };
-            match result {
+            match crate::crypto::aeskw::kwp_unwrap(&unwrapping_key, wrapped_data) {
                 Ok(v) => v,
+                Err(crate::crypto::aeskw::KwError::KekLen) => return CKR_UNWRAPPING_KEY_SIZE_RANGE, // §5.18.4 (E7)
                 // RFC 5649 ICV/padding check failed — the wrapped key is
                 // corrupt or keyed wrong: CKR_WRAPPED_KEY_INVALID.
-                Err(_) => return CKR_WRAPPED_KEY_INVALID,
+                Err(crate::crypto::aeskw::KwError::Failed) => return CKR_WRAPPED_KEY_INVALID,
             }
         } else {
-            use aes::cipher::generic_array::GenericArray;
             // AES-KW (RFC 3394) — ciphertext is (n+1) 8-byte semiblocks, n ≥ 2.
             if wrapped_data.len() < 24 || wrapped_data.len() % 8 != 0 {
                 return CKR_WRAPPED_KEY_LEN_RANGE;
             }
-            let mut buf = vec![0u8; wrapped_data.len() - 8];
-            let unwrap_ok = match unwrapping_key.len() {
-                16 => aes_kw::KekAes128::new(GenericArray::from_slice(&unwrapping_key))
-                    .unwrap(wrapped_data, &mut buf)
-                    .is_ok(),
-                24 => aes_kw::KekAes192::new(GenericArray::from_slice(&unwrapping_key))
-                    .unwrap(wrapped_data, &mut buf)
-                    .is_ok(),
-                32 => aes_kw::KekAes256::new(GenericArray::from_slice(&unwrapping_key))
-                    .unwrap(wrapped_data, &mut buf)
-                    .is_ok(),
-                _ => return CKR_UNWRAPPING_KEY_SIZE_RANGE, // §5.18.4 (E7)
-            };
-            if !unwrap_ok {
+            match crate::crypto::aeskw::kw_unwrap(&unwrapping_key, wrapped_data) {
+                Ok(v) => v,
+                Err(crate::crypto::aeskw::KwError::KekLen) => return CKR_UNWRAPPING_KEY_SIZE_RANGE, // §5.18.4 (E7)
                 // RFC 3394 integrity (IV) check failed: CKR_WRAPPED_KEY_INVALID.
-                return CKR_WRAPPED_KEY_INVALID;
+                Err(crate::crypto::aeskw::KwError::Failed) => return CKR_WRAPPED_KEY_INVALID,
             }
-            buf
         };
         let key_len = key_value.len() as u32;
 
@@ -13736,9 +13703,9 @@ pub fn C_WrapKeyAuthenticated(
         };
 
         // AES-GCM encrypt, binding the associated data into the tag.
-        use aes_gcm::aead::generic_array::GenericArray;
         use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::Aead, aead::Payload};
-        let nonce = GenericArray::from_slice(&iv);
+        // iv_len == 12 is enforced above, so this conversion cannot fail.
+        let nonce = aes_gcm::Nonce::<aes_gcm::aead::consts::U12>::try_from(iv.as_slice()).expect("12-byte IV checked above");
         let payload = Payload {
             msg: key_to_wrap.as_slice(),
             aad: aad.as_slice(),
@@ -13749,14 +13716,14 @@ pub fn C_WrapKeyAuthenticated(
                     Ok(c) => c,
                     Err(_) => return CKR_FUNCTION_FAILED,
                 };
-                cipher.encrypt(nonce, payload)
+                cipher.encrypt(&nonce, payload)
             }
             32 => {
                 let cipher = match Aes256Gcm::new_from_slice(&wrapping_key) {
                     Ok(c) => c,
                     Err(_) => return CKR_FUNCTION_FAILED,
                 };
-                cipher.encrypt(nonce, payload)
+                cipher.encrypt(&nonce, payload)
             }
             _ => return CKR_KEY_TYPE_INCONSISTENT,
         };
@@ -13856,9 +13823,9 @@ pub fn C_UnwrapKeyAuthenticated(
         let wrapped_data = std::slice::from_raw_parts(p_wrapped_key, ul_wrapped_key_len as usize);
 
         // AES-GCM decrypt, verifying the associated data against the tag.
-        use aes_gcm::aead::generic_array::GenericArray;
         use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::Aead, aead::Payload};
-        let nonce = GenericArray::from_slice(&iv);
+        // iv_len == 12 is enforced above, so this conversion cannot fail.
+        let nonce = aes_gcm::Nonce::<aes_gcm::aead::consts::U12>::try_from(iv.as_slice()).expect("12-byte IV checked above");
         let payload = Payload {
             msg: wrapped_data,
             aad: aad.as_slice(),
@@ -13869,14 +13836,14 @@ pub fn C_UnwrapKeyAuthenticated(
                     Ok(c) => c,
                     Err(_) => return CKR_FUNCTION_FAILED,
                 };
-                cipher.decrypt(nonce, payload)
+                cipher.decrypt(&nonce, payload)
             }
             32 => {
                 let cipher = match Aes256Gcm::new_from_slice(&unwrapping_key) {
                     Ok(c) => c,
                     Err(_) => return CKR_FUNCTION_FAILED,
                 };
-                cipher.decrypt(nonce, payload)
+                cipher.decrypt(&nonce, payload)
             }
             _ => return CKR_KEY_TYPE_INCONSISTENT,
         };
@@ -27592,23 +27559,75 @@ mod rsa_private_component_import_tests {
     /// network-facing KMIP server. Recorded as an expected failure.
     ///
     /// The two keys with a small exponent must go all the way through: import
-    /// from components, then decrypt NIST's ciphertext to NIST's plaintext.
+    /// from components via C_CreateObject's path, then C_DecryptInit/C_Decrypt
+    /// NIST's ciphertext to NIST's plaintext. Both are OAEP SHA-1 (tgId 3), so
+    /// this also pins oaep_padding's SHA-1 arm. (An earlier version decrypted
+    /// with the rsa crate directly, which proved the key material but not the
+    /// engine, and so missed that the engine refused SHA-1 OAEP outright.)
     /// The exact counts are pinned so a change to the corpus or to the crate's
     /// cap fails here and forces the decision to be revisited.
+    /// Every OAEP hash the C++ engine accepts must map here too. NIST's vectors
+    /// only cover SHA-1 and SHA-512, so each matched pair is round-tripped
+    /// (encrypt, then decrypt with the same padding), and a mismatched
+    /// SHA-1/SHA-3 pairing is still refused.
     #[test]
-    fn nist_oaep_small_e_decrypts_wide_e_refused_as_expected() {
+    fn oaep_padding_covers_every_hash_the_cpp_engine_accepts() {
+        let sk = key();
+        let pk = rsa::RsaPublicKey::from(sk);
+        let msg = b"oaep hash coverage";
+        for (h, m) in [
+            (CKM_SHA_1, CKG_MGF1_SHA1),
+            (CKM_SHA224, CKG_MGF1_SHA224),
+            (CKM_SHA256, CKG_MGF1_SHA256),
+            (CKM_SHA384, CKG_MGF1_SHA384),
+            (CKM_SHA512, CKG_MGF1_SHA512),
+            (CKM_SHA3_224, CKG_MGF1_SHA3_224),
+            (CKM_SHA3_256, CKG_MGF1_SHA3_256),
+            (CKM_SHA3_384, CKG_MGF1_SHA3_384),
+            (CKM_SHA3_512, CKG_MGF1_SHA3_512),
+        ] {
+            let enc = oaep_padding(h, m, b"").unwrap_or_else(|e| panic!("hash 0x{h:x}: refused 0x{e:x}"));
+            let ct = pk.encrypt(&mut OsRng, enc, msg).expect("encrypt");
+            let dec = oaep_padding(h, m, b"").unwrap();
+            assert_eq!(sk.decrypt(dec, &ct).expect("decrypt"), msg, "hash 0x{h:x}");
+        }
+        assert_eq!(
+            oaep_padding(CKM_SHA_1, CKG_MGF1_SHA3_256, b"").err(),
+            Some(CKR_MECHANISM_PARAM_INVALID)
+        );
+    }
+
+    #[test]
+    fn nist_oaep_small_e_decrypts_through_the_engine_wide_e_refused() {
+        let _guard = crate::native::test_lock::acquire();
+        // A session of its own: C_DecryptInit/C_Decrypt state is keyed by
+        // session handle.
+        const S: u32 = 0x5434_1002;
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
         let v: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/acvp/rsa_oaep_test.json"))
                 .expect("vector json");
         let (mut decrypted, mut refused) = (0usize, 0usize);
         for g in v["testGroups"].as_array().expect("testGroups") {
             let hash = g["hashAlg"].as_str().expect("hashAlg");
+            let (hash_alg, mgf) = match hash {
+                "SHA-1" => (CKM_SHA_1, CKG_MGF1_SHA1),
+                "SHA2-512" => (CKM_SHA512, CKG_MGF1_SHA512),
+                other => panic!("unmapped OAEP hash {other}"),
+            };
             for t in g["tests"].as_array().expect("tests") {
                 let tc = t["tcId"].as_u64().unwrap_or(0);
                 let f = |k: &str| unhex(t[k].as_str().expect(k));
                 let mut a = Attributes::new();
                 a.insert(CKA_CLASS, ulong(CKO_PRIVATE_KEY));
                 a.insert(CKA_KEY_TYPE, ulong(CKK_RSA));
+                a.insert(CKA_TOKEN, vec![0]);
+                a.insert(CKA_PRIVATE, vec![0]);
+                a.insert(CKA_DECRYPT, vec![1]);
                 for (attr, k) in [
                     (CKA_MODULUS, "n"),
                     (CKA_PUBLIC_EXPONENT, "e"),
@@ -27623,23 +27642,38 @@ mod rsa_private_component_import_tests {
                 }
                 // e >= 2^33  <=>  bits >= 34 (the crate's cap is 2^33 - 1).
                 let wide = rsa::BigUint::from_bytes_be(&f("e")).bits() > 33;
-                match synthesize_rsa_private_pkcs8(&mut a) {
-                    Ok(()) => {
+                match create_object_from_attrs(S, a) {
+                    Ok(h) => {
                         assert!(
                             !wide,
                             "tc{tc}: a wide exponent was ACCEPTED — the rsa crate's cap \
                              may have changed; revisit the expected-failure decision"
                         );
-                        let sk = rsa::RsaPrivateKey::from_pkcs8_der(&a[&CKA_VALUE])
-                            .expect("synthesised pkcs8");
+                        // The engine's PKCS#11 path, not the rsa crate directly:
+                        // CK_RSA_PKCS_OAEP_PARAMS at native width, empty label
+                        // (CKZ_DATA_SPECIFIED, NULL, 0).
+                        let params: [usize; 5] =
+                            [hash_alg as usize, mgf as usize, CKZ_DATA_SPECIFIED as usize, 0, 0];
+                        let mut m: [usize; 3] = [
+                            CKM_RSA_PKCS_OAEP as usize,
+                            params.as_ptr() as usize,
+                            std::mem::size_of_val(&params),
+                        ];
+                        assert_eq!(
+                            C_DecryptInit(S, m.as_mut_ptr() as *mut u8, h),
+                            CKR_OK,
+                            "tc{tc}: C_DecryptInit ({hash})"
+                        );
                         let ct = f("ct");
-                        let pt = match hash {
-                            "SHA-1" => sk.decrypt(rsa::Oaep::new::<sha1::Sha1>(), &ct),
-                            "SHA2-512" => sk.decrypt(rsa::Oaep::new::<sha2::Sha512>(), &ct),
-                            other => panic!("tc{tc}: unmapped OAEP hash {other}"),
-                        }
-                        .unwrap_or_else(|e| panic!("tc{tc}: OAEP decrypt failed: {e}"));
-                        assert_eq!(pt, f("pt"), "tc{tc}: plaintext mismatch vs NIST");
+                        let mut out = vec![0u8; 512];
+                        let mut out_len = out.len() as u32;
+                        assert_eq!(
+                            C_Decrypt(S, ct.as_ptr() as *mut u8, ct.len() as u32, out.as_mut_ptr(), &mut out_len),
+                            CKR_OK,
+                            "tc{tc}: C_Decrypt ({hash})"
+                        );
+                        out.truncate(out_len as usize);
+                        assert_eq!(out, f("pt"), "tc{tc}: plaintext mismatch vs NIST");
                         decrypted += 1;
                     }
                     Err(rv) => {
@@ -27650,8 +27684,8 @@ mod rsa_private_component_import_tests {
                 }
             }
         }
-        assert_eq!(decrypted, 2, "small-exponent NIST keys decrypted end to end");
-        assert_eq!(refused, 18, "wide-exponent NIST keys refused as expected");
+        assert_eq!(decrypted, 2, "small-exponent NIST keys decrypted by C_Decrypt");
+        assert_eq!(refused, 18, "wide-exponent NIST keys refused at import as expected");
     }
 
     const SESSION: u32 = 0x5434_1001;
@@ -27700,6 +27734,11 @@ mod rsa_private_component_import_tests {
     /// agree: both refuse at import with CKR_ATTRIBUTE_VALUE_INVALID.
     #[test]
     fn wide_e_blob_is_refused_at_import() {
+        // Touches the engine's global state (initialised flag, session table),
+        // so it takes the same lock as every other test that does; without it,
+        // a parallel `cargo test` could interleave with a test that finalizes
+        // and re-initialises the engine.
+        let _guard = crate::native::test_lock::acquire();
         setup();
         let (der, _) = nist_wide_e_pkcs8();
         assert!(

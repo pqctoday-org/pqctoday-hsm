@@ -8,6 +8,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
+  the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
+  flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
+  `--cfg aes_armv8` (and `polyval` 0.6, GCM's GHASH, only under
+  `--cfg polyval_armv8`), so every aarch64 build that forgot the flags ran the
+  constant-time *software* AES while the core's AESE/AESMC/PMULL sat idle.
+  `aes` 0.9 and `polyval` 0.7 select the hardware backends by default (runtime
+  HWCAP detection, software fallback), so the failure mode is gone. Verified on
+  the artefact of a build with **no RUSTFLAGS at all**: 46 `aes` 0.9
+  hardware-backend symbols and 5 `polyval` 0.7 intrinsics symbols linked, zero
+  `polyval` software symbols. Measured effect of hardware AES (same engine,
+  A-B-A-B, SHA-256 control flat): AES-CBC 16 KiB 7.4–12.9×, AES-GCM 3.0–5.8×
+  on KV260, i.MX 95 and M4 Pro.
+
+  Crates: `aes` 0.9, `aes-gcm` 0.11, `aes-kw` 0.3, `cbc` 0.2, `ctr` 0.10,
+  `xts-mode` 0.6, `ghash` 0.6, `chacha20` 0.10 (`legacy` feature for the 64-bit
+  nonce variant), `chacha20poly1305` 0.11. The three lockfiles (`rust/`,
+  `kmip/`, `remoting/`) change only in that family.
+
+  **One exception, deliberately: AES-CMAC stays on `cmac` 0.7 with its own
+  aliased `aes` 0.8** (`aes08`). `cmac` 0.8 implements `digest` 0.11's `Mac`,
+  while the SP 800-108 KDF helpers are generic over one `Mac` trait shared with
+  HMAC on `digest` 0.10 — moving CMAC means moving the whole digest-0.10 stack
+  (`sha2`, `sha3`, `hmac`, `hkdf`, and the patched SLH-DSA/LMS/XMSS crates),
+  which is a separate, larger migration. Until then CMAC is the one AES user
+  that still needs `--cfg aes_armv8` for its hardware path.
+
+  The eight AES key-wrap sites (four in `ffi`, four in `native`) now go through
+  one helper, `crypto::aeskw`, because `aes-kw` 0.3 replaced the `*_vec` methods
+  with caller-sized buffers and split KW/KWP into separate types. The helper
+  reports only *why* a wrap failed (KEK length vs operation); every site keeps
+  its own precondition checks and its own `CKR_*` mapping unchanged, because
+  `ffi` and `native` deliberately return different codes for the same failure.
+  Buffer sizes follow what `aes-kw` 0.3's code actually checks (one of its doc
+  comments is looser than the code). Every former `GenericArray::from_slice`
+  site is either a length-matched key (now `new_from_slice(..).expect(..)`) or a
+  length-checked block/nonce (now `try_from(..)`), preserving the old
+  panic-on-mismatch semantics without the now-deprecated constructors; the
+  encrypted object store's nonce conversions map to its existing `CryptoError`
+  rather than panic.
+
+  **Consumers must update in lockstep:** the ARMv8 artefact gates in
+  pqctoday-cacp (`meta-pqc-hsm/conf/pqc-rust-armv8-crypto.inc`) and the bench
+  sidecar (`pqctoday-sandbox` `Dockerfile.bench-arm64`) match `polyval` 0.6
+  symbols, which no longer exist. They must accept `polyval` 0.7's
+  `backend::intrinsics` (and `aes` 0.9's hardware symbols) before any build
+  pins an engine that includes this change.
+
 ### Fixed
 
 - **Both engines: imported EC public keys are now validated
@@ -34,6 +84,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
       independently in Python.
     - With the checks disabled, C++ accepted all of them, and so did the
       Rust validator.
+- **Rust engine: RSA-OAEP with SHA-1, SHA-224 and SHA-3 was refused.** The
+  engine only accepted SHA-256, SHA-384 and SHA-512, so every other hash got
+  `CKR_MECHANISM_PARAM_INVALID` at `C_EncryptInit` / `C_DecryptInit` /
+  `C_WrapKey` / `C_UnwrapKey`. That included NIST's own SHA-1 OAEP vectors,
+  although PKCS#11 v3.2 leaves the hash open and SP 800-56B rev 2 allows
+  SHA-1. The C++ engine already accepted all nine hashes, each with its
+  matching MGF1, and the Rust engine now does too. The NIST OAEP test now
+  decrypts through `C_DecryptInit` / `C_Decrypt`. Before, it called the RSA
+  library directly, which proved the imported key material but not the
+  engine; that gap is how the refusal went unnoticed (reported by a parallel
+  review session).
 
 - **`bench-harness`: RSA-PSS now passes `CK_RSA_PKCS_PSS_PARAMS`, so the
   benchmark runs again against the current engine.** The hash-specific PSS

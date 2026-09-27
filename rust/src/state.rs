@@ -1728,7 +1728,7 @@ pub fn read_bool_attr(attrs: &Attributes, attr_type: u32) -> bool {
 /// - Generic secret (HMAC): first 3 bytes of SHA-256(key_value)
 /// - Asymmetric keys (public/private): first 3 bytes of SHA-256(CKA_VALUE)
 pub fn compute_kcv(attrs: &mut Attributes) {
-    use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
     use sha2::{Digest, Sha256};
 
     let class = attrs
@@ -1752,22 +1752,22 @@ pub fn compute_kcv(attrs: &mut Attributes) {
             match key_type {
                 CKK_AES => {
                     // AES-ECB encrypt a 16-byte zero block, take first 3 bytes
-                    let zero_block = GenericArray::default();
+                    let zero_block = Block::<aes::Aes128>::default();
                     match key_value.len() {
                         16 => {
-                            let cipher = aes::Aes128::new(GenericArray::from_slice(&key_value));
+                            let cipher = aes::Aes128::new_from_slice(&key_value).expect("key length matched above");
                             let mut block = zero_block;
                             cipher.encrypt_block(&mut block);
                             block[..3].to_vec()
                         }
                         24 => {
-                            let cipher = aes::Aes192::new(GenericArray::from_slice(&key_value));
+                            let cipher = aes::Aes192::new_from_slice(&key_value).expect("key length matched above");
                             let mut block = zero_block;
                             cipher.encrypt_block(&mut block);
                             block[..3].to_vec()
                         }
                         32 => {
-                            let cipher = aes::Aes256::new(GenericArray::from_slice(&key_value));
+                            let cipher = aes::Aes256::new_from_slice(&key_value).expect("key length matched above");
                             let mut block = zero_block;
                             cipher.encrypt_block(&mut block);
                             block[..3].to_vec()
