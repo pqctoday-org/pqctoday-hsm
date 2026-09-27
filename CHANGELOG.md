@@ -231,9 +231,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   published in SLIP-10 test vector 1.
 
 - **Rust engine: LMS signatures with a 24-byte hash and Winternitz w=1 were
-  wrong.** The LMOTS checksum shift depends on both w and the hash size
-  (RFC 8554 §4.1), but the bundled `hbs-lms` crate used the 32-byte values for
-  every hash. For `LMOTS_SHA256_N24_W1` and `LMOTS_SHAKE_N24_W1` it rejected
+  wrong (correctness fix to the vendored `hbs-lms`, `rust/hbs-lms-patched`).**
+  The LMOTS checksum left shift is `ls = 16 − v·w` (RFC 8554 §4.1), which
+  depends on both w and the hash size n, but the crate used the 32-byte values
+  for every hash; it now computes `ls` from the formula. For `LMOTS_SHA256_N24_W1` and `LMOTS_SHAKE_N24_W1` it rejected
   valid NIST signatures, and signed with the same wrong checksum, so its
   signatures would not verify anywhere else. All other LMS parameter sets were
   unaffected. The hub offers only the W4 and W8 variants of the 24-byte sets.
