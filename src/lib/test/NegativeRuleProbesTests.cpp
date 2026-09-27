@@ -681,3 +681,94 @@ void NegativeRuleProbesTests::testP12ObserveTwoCounterParams()
 		CPPUNIT_ASSERT_MESSAGE(obs, true); // recorded, never fails
 	}
 }
+
+// CK_SP800_108_DKM_LENGTH in all three SP 800-108 modes, both methods, widths
+// 8/16/32/64 and both byte orders (plan 2.D, p04). Until 2026-09-27 this engine
+// skipped the field entirely, deriving different bytes from the spec and from
+// the Rust engine under CKR_OK. Oracle: an independent Python reference written
+// from PKCS#11 v3.2 §6.42 / NIST SP 800-108 (HMAC-SHA256, key 0x0b*32, fixed
+// input "dkm-label", 42-byte output, feedback IV empty). NIST ACVP has no
+// DKM-length vectors. The Rust engine's dkm_length_reference_tests pins the
+// same 24 values — the cross-engine byte match.
+void NegativeRuleProbesTests::testDkmLengthMatchesReference()
+{
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, login(hSession, m_initializedTokenSlotID, m_userPin1, m_userPin1Length));
+
+	struct V { CK_MECHANISM_TYPE mech; CK_ULONG method; CK_ULONG width; CK_BBOOL le; const char* hex; };
+	static const V vecs[] = {
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 8, CK_FALSE, "116609ac4d2d7960af94e3fe089959ec66b9b4550226ded1877029f8d622e7cc5e96e0a0ef230c292967" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 16, CK_TRUE, "c0e3cb82ea48581546a89154bbecf9d9c1162e8e1bd77268467173c610122a219f433cb1d2af792134bd" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 32, CK_FALSE, "2968a086903a5bdc5c4fe4b1aab292d86fb42303542990ad82544fec1c97c299cd435803ebd267ac2314" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 64, CK_TRUE, "bdb77c3565707b931551ef04aab39e57208949afabe28ebde72b1e2033c221141211ea6f1b62d231719d" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 8, CK_FALSE, "58c5400989d378291880cad48d368974ae19941158846ffe3e6cafe9d2806660c888569115dc3bbd3f5d" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 16, CK_TRUE, "1d7bbfc7be8d4ab4ac23c0d1c6c2a6cd9ec5bef507994cb0a4d25f3fad1c2e17374caa747e54a73a9ec0" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 32, CK_FALSE, "235c202255b58966676d649fd8e18f540c6512fc3a86e939129ff2226ab94931408392067140cb6b74f4" },
+		{ CKM_SP800_108_COUNTER_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 64, CK_TRUE, "2f76a30ff2be8f42c52f79926f2c87053838422cc7193092ba4aee95af52b64ab00e0731c55f4e545b6e" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 8, CK_FALSE, "30b1292a96cb61e9609ba4c565f87e206d52690102c4da13aa739b2212cd89d914b13e163385e27f2b6c" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 16, CK_TRUE, "dd4d4cffb9d40b7a56a66110633daef6a05c8edac473c63900a799801e90d8a41524707d4c8e22607117" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 32, CK_FALSE, "e3561de9888a3b3302c84ba1a4a7103a207514116619192534c97616730a93226d4b8aad8fc513a8b485" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 64, CK_TRUE, "34d61a57e703883764bc954338c102970632b1eb262051ae05f2ac03efddb415da0f1519cebff976f2ac" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 8, CK_FALSE, "1b51da43f48f6a43d90dd7e79af474bf016eb9b5595c81096ba7635e1cc500ed036f94445dc368f5308a" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 16, CK_TRUE, "d82dc7cb5e4a4da0152a9bcf30bb5abd36fc90bff1356ad5dc7d5a4add7199a81b718720e3e6b87d944e" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 32, CK_FALSE, "a43be4ebc17a4459856d50d2e84678814a39ff0919bd2260a61317bde6f2b4643c7fcd84af7877cd6f0c" },
+		{ CKM_SP800_108_FEEDBACK_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 64, CK_TRUE, "c8fc228568bffd6904b8bedf2e09bf316fc312fbe6ae02ae80a09e71336633df28c0b66a1a7f09847f75" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 8, CK_FALSE, "14b13e163385e27f2b6c8df28d123e505249f270baf93b1c81db2de76b9601dde7013b4999da4356de1d" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 16, CK_TRUE, "1524707d4c8e22607117e5c2e13e86b5a15e8272cb686e0b0026fd6fc5abdc2fbc9ab8f358feb0ed7005" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 32, CK_FALSE, "6d4b8aad8fc513a8b4855a5e8c741442b732d86ed37737b9bb5bfb0bd9f010b5b9d6218679518f350da7" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 64, CK_TRUE, "da0f1519cebff976f2ac910c984113d737321969402fa1990630fb7f1897556027e84b1a9a87cc7b4318" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 8, CK_FALSE, "036f94445dc368f5308a37a93f86b7971a344f84bce7a1ea74e2c43ee70c885f682c9958e8e87a4389b3" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 16, CK_TRUE, "1b718720e3e6b87d944e41086637032802d99c7dee85532c3ea446f85ac8bbb301213a383b3544974fe5" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 32, CK_FALSE, "3c7fcd84af7877cd6f0ccb9813add7516b3de37a40976bbacb7f6a824f624db2fa7e5e4971debea58b45" },
+		{ CKM_SP800_108_DOUBLE_PIPELINE_KDF, CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 64, CK_TRUE, "28c0b66a1a7f09847f75edea6492a25d7623dfd105b8e181ec48f7f1225b0e7368bf71a9fae902cc0835" },
+	};
+	CK_BYTE key[32];
+	memset(key, 0x0b, sizeof(key));
+	CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+	CK_KEY_TYPE kt = CKK_GENERIC_SECRET;
+	CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+	CK_ATTRIBUTE baseT[] = {
+		{ CKA_CLASS, &cls, sizeof(cls) }, { CKA_KEY_TYPE, &kt, sizeof(kt) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_DERIVE, &bTrue, sizeof(bTrue) },
+		{ CKA_VALUE, key, sizeof(key) },
+	};
+	CK_OBJECT_HANDLE hBase = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_CreateObject(hSession, baseT, 5, &hBase) ));
+
+	static CK_BYTE label[] = { 'd','k','m','-','l','a','b','e','l' };
+	for (const V& v : vecs)
+	{
+		CK_SP800_108_COUNTER_FORMAT cf = { CK_FALSE, 32 };
+		CK_SP800_108_DKM_LENGTH_FORMAT df = { v.method, v.le, v.width };
+		CK_PRF_DATA_PARAM segs[3];
+		if (v.mech == CKM_SP800_108_COUNTER_KDF)
+			segs[0] = { CK_SP800_108_ITERATION_VARIABLE, &cf, sizeof(cf) };
+		else
+			segs[0] = { CK_SP800_108_ITERATION_VARIABLE, NULL_PTR, 0 };
+		segs[1] = { CK_SP800_108_BYTE_ARRAY, label, sizeof(label) };
+		segs[2] = { CK_SP800_108_DKM_LENGTH, &df, sizeof(df) };
+		CK_SP800_108_KDF_PARAMS kp = { CKM_SHA256_HMAC, 3, segs, 0, NULL_PTR };
+		CK_SP800_108_FEEDBACK_KDF_PARAMS fp = { CKM_SHA256_HMAC, 3, segs, 0, NULL_PTR, 0, NULL_PTR };
+		CK_MECHANISM m = { v.mech, NULL_PTR, 0 };
+		if (v.mech == CKM_SP800_108_FEEDBACK_KDF) { m.pParameter = &fp; m.ulParameterLen = sizeof(fp); }
+		else { m.pParameter = &kp; m.ulParameterLen = sizeof(kp); }
+		CK_ULONG outLen = 42;
+		CK_ATTRIBUTE dt[] = {
+			{ CKA_CLASS, &cls, sizeof(cls) }, { CKA_KEY_TYPE, &kt, sizeof(kt) },
+			{ CKA_VALUE_LEN, &outLen, sizeof(outLen) }, { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+			{ CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) }, { CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+		};
+		CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+		std::string what = std::string("mech=") + std::to_string(v.mech) + " method=" + std::to_string(v.method) +
+		                   " width=" + std::to_string(v.width) + " le=" + std::to_string((int)v.le);
+		CK_RV rv = CRYPTOKI_F_PTR( C_DeriveKey(hSession, &m, hBase, dt, 6, &h) );
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(what, (CK_RV)CKR_OK, rv);
+		CK_BYTE val[64];
+		CK_ATTRIBUTE va = { CKA_VALUE, val, sizeof(val) };
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(what, (CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, h, &va, 1) ));
+		std::string got;
+		static const char* d = "0123456789abcdef";
+		for (CK_ULONG i = 0; i < va.ulValueLen; i++) { got += d[val[i] >> 4]; got += d[val[i] & 15]; }
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(what + ": DKM bytes differ from the reference", std::string(v.hex), got);
+	}
+}

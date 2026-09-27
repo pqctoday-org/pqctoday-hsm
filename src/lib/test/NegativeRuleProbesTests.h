@@ -27,6 +27,7 @@ class NegativeRuleProbesTests : public TestsBase
 	CPPUNIT_TEST(testP10MessageSignVerifyInitRequireUsageFlag);
 	CPPUNIT_TEST(testP11ObserveMissingIterationVariable);
 	CPPUNIT_TEST(testP12ObserveTwoCounterParams);
+	CPPUNIT_TEST(testDkmLengthMatchesReference);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -42,6 +43,7 @@ public:
 	void testP10MessageSignVerifyInitRequireUsageFlag();
 	void testP11ObserveMissingIterationVariable();
 	void testP12ObserveTwoCounterParams();
+	void testDkmLengthMatchesReference();
 };
 
 #endif // !_SOFTHSM_V2_NEGATIVERULEPROBESTESTS_H

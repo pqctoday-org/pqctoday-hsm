@@ -331,6 +331,89 @@ static CK_ULONG hssTotalSignatures(unsigned levels, const param_set_t* lmType)
 //   • present with invalid value → CKR_ATTRIBUTE_VALUE_INVALID
 // validMin/validMax bound the accepted CKP_* range for the family (the CKP_*
 // enums are dense per pkcs11t.h §CKP).
+// PKCS#11 v3.2 §5.18.4: C_UnwrapKey "SHALL return CKR_WRAPPED_KEY_LEN_RANGE"
+// when the unwrapped key's length does not suit the key type in the template.
+// It used to create a 16-byte CKK_CHACHA20 key (plan 2.D, p05). Same rule as
+// the Rust engine's unwrap_secret_len_check: fixed-length types are checked,
+// other secret keys must merely be non-empty.
+static bool unwrappedSecretLenOk(CK_KEY_TYPE keyType, size_t len)
+{
+	switch (keyType)
+	{
+		case CKK_AES:      return len == 16 || len == 24 || len == 32;
+		case CKK_AES_XTS:  return len == 32 || len == 64;
+		case CKK_CHACHA20: return len == 32;
+		default:           return len > 0;
+	}
+}
+
+// PKCS#11 v3.2 §6.42 (Tables 198-201): the encoded L for a
+// CK_SP800_108_DKM_LENGTH data parameter. The field "identifies the location
+// of the DKM length in the constructed PRF input data"; until 2026-09-27 all
+// three C++ SP 800-108 handlers skipped it, so a caller who supplied one got a
+// derivation WITHOUT it — different key bytes from the spec and from the Rust
+// engine, under CKR_OK (gap-closure plan 2.D). This mirrors the Rust engine's
+// parse_sp800_108_segments exactly: SUM_OF_KEYS is the requested key length
+// in bits; SUM_OF_SEGMENTS rounds that up to whole PRF outputs; the width is
+// 8/16/32/64 bits, big- or little-endian. The value is constant across rounds,
+// so callers insert it as a literal segment.
+static size_t sp800108PrfOutLen(CK_MECHANISM_TYPE prf, size_t baseKeyLen)
+{
+	switch (prf)
+	{
+		case CKM_SHA_1_HMAC:      return 20;
+		case CKM_SHA224_HMAC:     return 28;
+		case CKM_SHA256_HMAC:     return 32;
+		case CKM_SHA384_HMAC:     return 48;
+		case CKM_SHA512_HMAC:     return 64;
+		case CKM_SHA512_224_HMAC: return 28;
+		case CKM_SHA512_256_HMAC: return 32;
+		case CKM_SHA3_224_HMAC:   return 28;
+		case CKM_SHA3_256_HMAC:   return 32;
+		case CKM_SHA3_384_HMAC:   return 48;
+		case CKM_SHA3_512_HMAC:   return 64;
+		case CKM_AES_CMAC:
+			return (baseKeyLen == 16 || baseKeyLen == 24 || baseKeyLen == 32) ? 16 : 0;
+		default:                  return 0;
+	}
+}
+
+static CK_RV sp800108DkmLength(const CK_PRF_DATA_PARAM* dp, CK_ULONG keyLen, CK_MECHANISM_TYPE prf,
+                               size_t baseKeyLen, ByteString& out)
+{
+	if (dp->pValue == NULL_PTR || dp->ulValueLen != sizeof(CK_SP800_108_DKM_LENGTH_FORMAT))
+		return CKR_MECHANISM_PARAM_INVALID;
+	const CK_SP800_108_DKM_LENGTH_FORMAT* f = (const CK_SP800_108_DKM_LENGTH_FORMAT*)dp->pValue;
+	CK_ULONG width = f->ulWidthInBits;
+	if (width != 8 && width != 16 && width != 32 && width != 64)
+		return CKR_MECHANISM_PARAM_INVALID;
+	unsigned long long lBits;
+	if (f->dkmLengthMethod == CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS)
+	{
+		lBits = (unsigned long long)keyLen * 8;
+	}
+	else if (f->dkmLengthMethod == CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS)
+	{
+		size_t prfOut = sp800108PrfOutLen(prf, baseKeyLen);
+		if (prfOut == 0) return CKR_MECHANISM_PARAM_INVALID;
+		size_t segments = (keyLen + prfOut - 1) / prfOut;
+		if (segments == 0) segments = 1;
+		lBits = (unsigned long long)(segments * prfOut) * 8;
+	}
+	else
+	{
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	size_t wb = width / 8;
+	out.resize(wb);
+	for (size_t i = 0; i < wb; i++)
+	{
+		unsigned char b = (unsigned char)((lBits >> (8 * i)) & 0xff);
+		if (f->bLittleEndian) out[i] = b; else out[wb - 1 - i] = b;
+	}
+	return CKR_OK;
+}
+
 static CK_RV extractParameterSet(CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
                                  CK_ULONG validMin, CK_ULONG validMax,
                                  CK_ULONG& parameterSetOut)
@@ -2482,6 +2565,12 @@ CK_RV SoftHSM::C_UnwrapKey
 			return rv;
 	}
 
+	if (objClass == CKO_SECRET_KEY && !unwrappedSecretLenOk(keyType, keydata.size()))
+	{
+		keydata.wipe();
+		return CKR_WRAPPED_KEY_LEN_RANGE;
+	}
+
 	// C1 (2026-09-06) — §5.18.4: "The CKA_EXTRACTABLE attribute is by default
 	// set to CK_TRUE" for an unwrapped key. P11AttrExtractable::setDefault()
 	// hard-codes CK_FALSE for every creation path, so without this a conforming
@@ -2867,6 +2956,11 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	
 	// Fix Issue 44: OSSLEVPSymmetricAlgorithm dumps the entire AES-GCM plaintext in decryptFinal
 	keydata = discarded;
+	if (objClass == CKO_SECRET_KEY && !unwrappedSecretLenOk(keyType, keydata.size()))
+	{
+		keydata.wipe();
+		return CKR_WRAPPED_KEY_LEN_RANGE; // §5.18.4, same rule as C_UnwrapKey
+	}
 	discarded.wipe();
 
 	// Build the secret-key creation template (mirrors C_UnwrapKey pattern)
@@ -3675,6 +3769,7 @@ CK_RV SoftHSM::C_DeriveKey
 		};
 		std::vector<KbkSeg> kbkSegs;
 		bool kbkHaveCounter = false;
+		bool kbkSeenDkm = false;
 		for (CK_ULONG i = 0; i < kp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &kp->pDataParams[i];
@@ -3721,8 +3816,28 @@ CK_RV SoftHSM::C_DeriveKey
 					kbkHaveCounter = true;
 					break;
 				}
+				case CK_SP800_108_COUNTER:
+					// Table 199: "This data field type is invalid for this KDF
+					// type." It used to be silently skipped (plan 2.D, p03);
+					// the Rust engine already refused it.
+					ERROR_MSG("CKM_SP800_108_COUNTER_KDF: CK_SP800_108_COUNTER is invalid in counter mode");
+					return CKR_MECHANISM_PARAM_INVALID;
+				case CK_SP800_108_DKM_LENGTH:
+				{
+					// "If specified, only one instance of this type may be specified."
+					if (kbkSeenDkm) return CKR_MECHANISM_PARAM_INVALID;
+					kbkSeenDkm = true;
+					KbkSeg s;
+					s.isCounter = false;
+					s.le = false;
+					s.widthBytes = 0;
+					CK_RV dkmRv = sp800108DkmLength(dp, kbkKeyLen, kp->prfType, kbkIKM.size(), s.bytes);
+					if (dkmRv != CKR_OK) return dkmRv;
+					kbkSegs.push_back(s);
+					break;
+				}
 				default:
-					break; // COUNTER, DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // KEY_HANDLE (additional derived keys) not supported — skip
 			}
 		}
 		// No ITERATION_VARIABLE supplied at all: keep this engine's historical
@@ -4069,6 +4184,7 @@ CK_RV SoftHSM::C_DeriveKey
 		};
 		std::vector<FbkSeg> fbkSegs;
 		bool fbkHaveIterVar = false;
+		bool fbkSeenCounter = false, fbkSeenDkm = false;
 		for (CK_ULONG i = 0; i < fp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &fp->pDataParams[i];
@@ -4086,6 +4202,11 @@ CK_RV SoftHSM::C_DeriveKey
 					}
 					break;
 				case CK_SP800_108_COUNTER:
+					// Table 200: "If specified, only one instance of this type
+					// may be specified." A second one used to be mixed in
+					// (plan 2.D, p12; the Rust engine refuses it too).
+					if (fbkSeenCounter) return CKR_MECHANISM_PARAM_INVALID;
+					fbkSeenCounter = true;
 					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
@@ -4115,8 +4236,21 @@ CK_RV SoftHSM::C_DeriveKey
 					fbkHaveIterVar = true;
 					break;
 				}
+				case CK_SP800_108_DKM_LENGTH:
+				{
+					if (fbkSeenDkm) return CKR_MECHANISM_PARAM_INVALID;
+					fbkSeenDkm = true;
+					FbkSeg s;
+					s.kind = 0;
+					s.le = false;
+					s.widthBytes = 0;
+					CK_RV dkmRv = sp800108DkmLength(dp, fbkKeyLen, fp->prfType, fbkIKM.size(), s.bytes);
+					if (dkmRv != CKR_OK) return dkmRv;
+					fbkSegs.push_back(s);
+					break;
+				}
 				default:
-					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // KEY_HANDLE (additional derived keys) not supported — skip
 			}
 		}
 		// No ITERATION_VARIABLE supplied: K(i-1) goes first, which is this
@@ -4454,8 +4588,9 @@ CK_RV SoftHSM::C_DeriveKey
 			unsigned   widthBytes;
 		};
 		std::vector<DpSeg> dpSegs;
-		ByteString dpFixedInput;   // A(0): byte-array segments only
+		ByteString dpFixedInput;   // A(0): the fixed segments (byte arrays, DKM length) in order
 		bool dpHaveIterVar = false;
+		bool dpSeenCounter = false, dpSeenDkm = false;
 		for (CK_ULONG i = 0; i < dpp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dpm = &dpp->pDataParams[i];
@@ -4474,6 +4609,9 @@ CK_RV SoftHSM::C_DeriveKey
 					}
 					break;
 				case CK_SP800_108_COUNTER:
+					// Table 201: only one instance (plan 2.D, p12).
+					if (dpSeenCounter) return CKR_MECHANISM_PARAM_INVALID;
+					dpSeenCounter = true;
 					if (dpm->pValue != NULL_PTR && dpm->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dpm->pValue;
@@ -4500,8 +4638,25 @@ CK_RV SoftHSM::C_DeriveKey
 					dpHaveIterVar = true;
 					break;
 				}
+				case CK_SP800_108_DKM_LENGTH:
+				{
+					// A literal part of FixedInputData, so it also enters A(0),
+					// in its position — exactly as the Rust engine's
+					// sp800_108_fixed_only does.
+					if (dpSeenDkm) return CKR_MECHANISM_PARAM_INVALID;
+					dpSeenDkm = true;
+					DpSeg s;
+					s.kind = 0;
+					s.le = false;
+					s.widthBytes = 0;
+					CK_RV dkmRv = sp800108DkmLength(dpm, dpKeyLen, dpp->prfType, dpIKM.size(), s.bytes);
+					if (dkmRv != CKR_OK) return dkmRv;
+					dpSegs.push_back(s);
+					dpFixedInput += s.bytes;
+					break;
+				}
 				default:
-					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // KEY_HANDLE (additional derived keys) not supported — skip
 			}
 		}
 		// No ITERATION_VARIABLE supplied: A(i) goes first, the prior layout.
