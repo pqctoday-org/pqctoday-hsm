@@ -246,6 +246,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   m/0H signs with `CKM_EDDSA`; its signature verifies under the public key
   published in SLIP-10 test vector 1.
 
+- **Rust engine: LMS signatures with a 24-byte hash and Winternitz w=1 were
+  wrong (correctness fix to the vendored `hbs-lms`, `rust/hbs-lms-patched`).**
+  The LMOTS checksum left shift is `ls = 16 − v·w` (RFC 8554 §4.1), which
+  depends on both w and the hash size n, but the crate used the 32-byte values
+  for every hash; it now computes `ls` from the formula. For `LMOTS_SHA256_N24_W1` and `LMOTS_SHAKE_N24_W1` it rejected
+  valid NIST signatures, and signed with the same wrong checksum, so its
+  signatures would not verify anywhere else. All other LMS parameter sets were
+  unaffected. The hub offers only the W4 and W8 variants of the 24-byte sets.
+  All 320 NIST LMS signature-verification cases now pass.
+
 - **Rust engine: SP 800-108 key derivation accepted a repeated DKM length
   field.** PKCS#11 v3.2 (Tables 199–201) allows at most one
   `CK_SP800_108_DKM_LENGTH` entry in the data parameters. A request with two
