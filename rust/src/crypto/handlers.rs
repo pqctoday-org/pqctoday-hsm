@@ -2222,6 +2222,59 @@ fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// Public-key validation for an imported EC-family public key, run by
+/// C_CreateObject before the object exists (CKR_PUBLIC_KEY_INVALID, §5.1.6).
+/// `point` is the bare encoding: SEC1 for the Weierstrass curves, the RFC 8032
+/// / RFC 7748 bytes for Edwards / Montgomery.
+///
+/// - P-224/256/384/521, secp256k1: SEC1 decode, which rejects a coordinate
+///   outside [0, p) and a point not on the curve. These curves have cofactor
+///   1, so any on-curve point other than the identity (which SEC1 cannot
+///   encode in the forms accepted here) generates the full prime-order group.
+/// - Ed25519 / Ed448: the encoding must be canonical (it re-encodes to the same
+///   bytes), decode to a curve point, and lie in the prime-order subgroup
+///   (L*Q = identity) without being the identity. A check for "small order"
+///   alone is not enough: a MIXED-order point (prime-order part plus a
+///   torsion part) is not small-order and still fails L*Q = identity.
+/// - X25519 / X448: RFC 7748 accepts every u-coordinate of the right length,
+///   so only the length is checked.
+///
+/// A curve this function does not know is left to the existing paths (Ok).
+pub fn validate_ec_public_point(curve: u32, point: &[u8]) -> Result<(), u32> {
+    let bad = Err(CKR_PUBLIC_KEY_INVALID);
+    match curve {
+        CURVE_P224 => p224::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P256 => p256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P384 => p384::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P521 => p521::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_K256 => k256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_ED25519 => {
+            let Ok(bytes) = <[u8; 32]>::try_from(point) else { return bad };
+            let c = curve25519_dalek::edwards::CompressedEdwardsY(bytes);
+            match c.decompress() {
+                Some(q) if q.compress() == c && q.is_torsion_free() && !q.is_small_order() => Ok(()),
+                _ => bad,
+            }
+        }
+        CURVE_ED448 => {
+            let Ok(bytes) = <[u8; 57]>::try_from(point) else { return bad };
+            let c = ed448_goldilocks::CompressedEdwardsY(bytes);
+            // decompress() itself rejects off-curve points and any point with a
+            // torsion component (it tests is_torsion_free).
+            match Option::<ed448_goldilocks::AffinePoint>::from(c.decompress()) {
+                // Compare the DECODED point with the identity: the crate's
+                // CompressedEdwardsY::IDENTITY is all zeros, not RFC 8032's
+                // encoding of the identity (y = 1).
+                Some(q) if q.compress().0 == bytes && q != ed448_goldilocks::AffinePoint::IDENTITY => Ok(()),
+                _ => bad,
+            }
+        }
+        CURVE_X25519 => if point.len() == 32 { Ok(()) } else { bad },
+        CURVE_X448 => if point.len() == 56 { Ok(()) } else { bad },
+        _ => Ok(()),
+    }
+}
+
 /// (field bytes, order bits) for the curves CKM_PQCTODAY_ECDSA_EXPLICIT_K
 /// supports. `None` for any other curve — including 0, the "curve unknown"
 /// value C_CreateObject leaves for an undecodable CKA_EC_PARAMS, which is

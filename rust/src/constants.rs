@@ -39,6 +39,11 @@ pub const CKR_DOMAIN_PARAMS_INVALID: u32 = 0x0000_0130;
 /// PKCS#11 v3.2 §6.3 — the CKA_EC_PARAMS decoded cleanly and names a curve
 /// this token does not implement (W1/W2/C2, 2026-08-13).
 pub const CKR_CURVE_NOT_SUPPORTED: u32 = 0x0000_0140;
+/// PKCS#11 v3.2 §5.1.6 — "The public key fails a public key validation. For
+/// example, an EC public key fails the public key validation specified in
+/// Section 5.2.2 of [ANSI X9.62]. This error code may be returned by
+/// C_CreateObject, when the public key is created ...".
+pub const CKR_PUBLIC_KEY_INVALID: u32 = 0x0000_01b9;
 /// PKCS#11 v3.2 §5.2 — returned by the NULL-mechanism cancel form of a
 /// `C_*Init` function when the active operation cannot be cancelled (C2).
 pub const CKR_OPERATION_CANCEL_FAILED: u32 = 0x0000_0202;
