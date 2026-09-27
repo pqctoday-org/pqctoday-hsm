@@ -419,7 +419,8 @@ fn classical_encapsulate(
                     let peer: [u8; 32] = point.as_slice().try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
                     let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
                     let eph_pub = x25519_dalek::PublicKey::from(&eph);
-                    let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+                    let ss = crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer)))
+                        .ok_or(CKR_ARGUMENTS_BAD)?;
                     Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
                 }
                 56 => {
@@ -506,7 +507,8 @@ fn classical_decapsulate(
                     }
                     let eph_pub: [u8; 32] = ciphertext.try_into().map_err(|_| CKR_WRAPPED_KEY_LEN_RANGE)?;
                     let secret = x25519_dalek::StaticSecret::from(arr);
-                    let ss = secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub));
+                    let ss = crate::crypto::handlers::x25519_contributory(secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub)))
+                        .ok_or(CKR_ARGUMENTS_BAD)?;
                     Ok(ss.as_bytes().to_vec())
                 }
                 56 => {

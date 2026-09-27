@@ -105,6 +105,42 @@ extern "C" {
 #include "HDWalletDerivation.h"
 #include "SlotManager.h"
 #include "odd.h"
+#include "OSSLUtil.h"
+
+// PKCS#11 v3.2 §6.3 — the return code for CKA_EC_PARAMS a generator cannot
+// use, once it has established that it cannot use them. The line is the one
+// the Rust engine draws (decode_ec_params, rust/src/crypto/handlers.rs):
+//   - exactly ONE complete DER value naming something this engine does not
+//     implement is an unsupported CURVE: an OBJECT IDENTIFIER, an explicit
+//     ECParameters SEQUENCE, or (where the generator accepts §6.3.10's
+//     curveName form at all) a PrintableString curve name;
+//   - anything else — a truncated or over-long value, trailing bytes, the
+//     forbidden implicitCA NULL, another tag, or a curveName handed to a
+//     generator that does not take that form — is an invalid or unsupported
+//     REPRESENTATION, CKR_DOMAIN_PARAMS_INVALID.
+// These values used to fall through to CKR_GENERAL_ERROR, which tells the
+// caller nothing about what to change.
+static CK_RV unusableEcParamsRv(const ByteString& params, bool acceptsCurveName)
+{
+	const size_t n = params.size();
+	const unsigned char* b = params.const_byte_str();
+	// One TLV with a short-form length that spans the whole value exactly.
+	// Named-curve OIDs and names are far below 128 bytes.
+	if (n >= 2 && (b[1] & 0x80) == 0 && n == 2 + (size_t)b[1])
+	{
+		switch (b[0])
+		{
+			case 0x06: // OBJECT IDENTIFIER
+			case 0x30: // explicit ECParameters
+				return CKR_CURVE_NOT_SUPPORTED;
+			case 0x13: // PrintableString curveName
+				return acceptsCurveName ? CKR_CURVE_NOT_SUPPORTED : CKR_DOMAIN_PARAMS_INVALID;
+			default:
+				break;
+		}
+	}
+	return CKR_DOMAIN_PARAMS_INVALID;
+}
 
 // Compute asymmetric key check value: SHA-256(keyValue) → first 3 bytes.
 // Used for RSA, EC, EdDSA, ML-DSA, ML-KEM, SLH-DSA public and private keys.
@@ -5943,6 +5979,16 @@ CK_RV SoftHSM::generateEC
 		return CKR_TEMPLATE_INCOMPLETE;
 	}
 
+	// Refuse, with the §6.3 code, parameters OpenSSL cannot turn into a curve
+	// group — before generation, where the failure would be CKR_GENERAL_ERROR.
+#ifdef WITH_ECC
+	{
+		EC_GROUP* grp = OSSL::byteString2grp(params);
+		if (grp == NULL) return unusableEcParamsRv(params, false);
+		EC_GROUP_free(grp);
+	}
+#endif
+
 	// Set the parameters
 	ECParameters p;
 	p.setEC(params);
@@ -6217,6 +6263,18 @@ CK_RV SoftHSM::generateED
 	CK_ULONG edKeyGenMech = (edKeyType == CKK_EC_MONTGOMERY)
 		? (CK_ULONG)CKM_EC_MONTGOMERY_KEY_PAIR_GEN
 		: (CK_ULONG)CKM_EC_EDWARDS_KEY_PAIR_GEN;
+
+	// Refuse, with the §6.3 code, parameters that name no Edwards/Montgomery
+	// curve this engine implements — before generation, where the failure
+	// would be CKR_GENERAL_ERROR. This generator accepts both §6.3.10 forms.
+#ifdef WITH_EDDSA
+	{
+		int nid = OSSL::byteString2oid(params);
+		if (nid != EVP_PKEY_ED25519 && nid != EVP_PKEY_ED448 &&
+		    nid != EVP_PKEY_X25519 && nid != EVP_PKEY_X448)
+			return unusableEcParamsRv(params, true);
+	}
+#endif
 
 	// Set the parameters
 	ECParameters p;

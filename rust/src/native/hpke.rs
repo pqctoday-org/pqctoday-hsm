@@ -264,7 +264,8 @@ fn ec_ephemeral_dh(curve: Curve, peer_point: &[u8], forced_scalar: Option<&[u8]>
                 None => x25519_dalek::StaticSecret::random_from_rng(&mut rng),
             };
             let eph_pub = x25519_dalek::PublicKey::from(&eph);
-            let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer_arr));
+            let ss = crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer_arr)))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
             Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
         }
         Curve::X448 => {
@@ -317,7 +318,8 @@ fn ec_static_dh(curve: Curve, my_scalar: &[u8], peer_point: &[u8]) -> Result<Vec
             let arr: [u8; 32] = my_scalar.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let peer_arr: [u8; 32] = peer_point.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             let secret = x25519_dalek::StaticSecret::from(arr);
-            let ss = secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_arr));
+            let ss = crate::crypto::handlers::x25519_contributory(secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_arr)))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
             Ok(ss.as_bytes().to_vec())
         }
         Curve::X448 => {

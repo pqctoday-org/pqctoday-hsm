@@ -131,6 +131,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so the measured operation is unchanged). Verified by running the full
   matrix against that engine: 262/262 rows, no zero-op points.
 
+- **Local gate: the Rust PKCS#11 conformance step built wasm with a 2 MiB
+  stack, while the shipped bundle uses 8 MiB.** So the gate checked a
+  configuration nobody ships. With 2 MiB, the ACVP wasm harness crashes at
+  SLH-DSA-192f with `memory access out of bounds` (a wasm stack overflow);
+  with 8 MiB it runs through. The gate step and the documented manual build
+  commands now use 8 MiB, the value `rust/build-wasm-bundle.sh` ships. The
+  `.wasm` file size is unchanged; initial memory grows from 2.6 to 8.6 MiB.
+
+- **Rust engine: `CKM_BIP32_MASTER_DERIVE` advertised a 32-byte seed but
+  accepted any length.** The advertised range was a constraint the engine did
+  not enforce, the same defect the C++ engine fixed in `b9cc607c`. The Rust
+  engine now matches it: it advertises 16 to 64 bytes (BIP-32 allows 128 to
+  512 bits, and 64 bytes is what BIP-39 produces), refuses any other length
+  with `CKR_KEY_SIZE_RANGE`, and wipes the seed on that path. Both ends of the
+  range are pinned with BIP-32's own test vectors 1 (16-byte seed) and 2
+  (64-byte seed). `CKM_BIP32_CHILD_DERIVE` stays at 32/32, the parent's
+  private scalar.
+
+- **C++ engine: a malformed curve name in `CKA_EC_PARAMS` crashed the engine,
+  and unusable EC parameters returned `CKR_GENERAL_ERROR`.**
+  - A `PrintableString` whose length runs past the bytes supplied (for example
+    `13 05 41`) was passed to `strcmp` as a NULL pointer, a crash reachable
+    from `C_GenerateKeyPair` and from importing an Edwards or Montgomery key.
+    It is now refused.
+  - Both key-pair generators now answer with the two codes PKCS#11 v3.2 §6.3
+    names, the same line the Rust engine draws:
+    - `CKR_CURVE_NOT_SUPPORTED` for a well-formed curve identifier this engine
+      does not implement;
+    - `CKR_DOMAIN_PARAMS_INVALID` for a value that is not a valid
+      representation (truncated, implicitCA `NULL`, other tags, or a curve name
+      given to the Weierstrass generator, which does not take that form).
+  - Proof: with the old engine code the new test crashes the C++ test binary
+    (segmentation fault); with the fix it passes.
+
+- **Rust engine: Ed25519ph and Ed448ph still dropped the context through
+  `C_Sign` and `C_Verify`.** #276 fixed the signing and verifying functions,
+  but the PKCS#11 entry points never passed them the context. The parameter
+  parser read `CK_EDDSA_PARAMS`' context only for `CKM_EDDSA`, and a
+  `phFlag = TRUE` call has already become `CKM_EDDSA_PH` by then. So every
+  pre-hash call signed with an empty context and returned `CKR_OK`. The hub's
+  ACVP harness measured 8 NIST pre-hash cases producing the wrong signature on
+  the wasm engine. Every NIST pre-hash vector in the repository now
+  byte-matches through `C_Sign` and verifies through `C_Verify`, for both
+  `phFlag = TRUE` and `CKM_EDDSA_PH`.
+- **Rust engine: X25519 accepted low-order peer points.** Such a point makes
+  the shared secret all zeros whatever the private key is. RFC 7748 §6.1 says
+  to check for that, and RFC 9180 (HPKE) requires it. X448 already refused
+  these points; X25519 did not, in `C_DeriveKey`, `C_EncapsulateKey`,
+  `C_DecapsulateKey`, HPKE, the X25519MLKEM768 hybrid, or the KMIP key
+  agreement. All ten call sites now refuse a non-contributory result with the
+  code their X448 counterpart already returns.
+
+- **Rust engine: Ed448 verification accepted signatures whose R sets unused
+  bits.** In Ed448's 57-byte point encoding, bits 448 to 454 must be zero
+  (RFC 8032 §5.2.2). The curve library ignores them, so a signature crafted
+  over a modified R verified. Wycheproof `ed448_test.json` tcIds 63, 64 and 65
+  (`InvalidEncoding`) returned `CKR_OK`; the C++ engine already refused them.
+  All three Ed448 verifiers (plain, context, pre-hash) now reject such an R
+  with `CKR_SIGNATURE_INVALID`. Wycheproof tcId 5, a valid signature under the
+  same key, still verifies.
+
+- **Rust engine: the generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA`
+  ignored their hedge variant and context.** Their `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  was read only for its `hash` field. So `CKH_DETERMINISTIC_REQUIRED` still
+  signed hedged: the hub measured two different SLH-DSA signatures for the
+  same digest on all 12 parameter sets, and the same happened for ML-DSA. A
+  caller's context was also dropped, so the signature was made with an empty
+  one. Both are now honoured, through `C_Sign` and `C_SignMessage`. The
+  hash-specific `CKM_HASH_*_<hash>` mechanisms were not affected.
+
 ### Added
 
 - **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
