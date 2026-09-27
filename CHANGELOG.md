@@ -133,6 +133,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Two gates can now run side by side in one container.** An audit of every
+  `local-gate.sh` step found three KMIP tests writing to temporary paths that
+  were the same in every run (`kmip_d1_reopen.db`, `pqc-admin-test-<tag>`,
+  `kem-interop-<tag>`), so a second gate running them at the same time shared
+  or deleted the first one's files: run in two processes at once, the SQLite
+  reopen test failed 43 times in 80 (0 in 40 alone). These paths now include
+  the process id (0 failures in 80). The wasm smoke step's build log moved
+  from a shared `/tmp` file into the worktree. Every other listener already
+  used an OS-assigned port and every other temporary path was already
+  unique.
+
 - **Two KMIP conformance replays could not run in one container.** The
   replay started each test's server on the same fixed sequence of ports in
   every run, so a second gate (or a server left over from a stopped one)

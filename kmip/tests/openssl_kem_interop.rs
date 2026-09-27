@@ -63,7 +63,8 @@ fn deps() -> Deps {
 
 /// Per-test scratch dir under the system temp.
 fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("kem-interop-{tag}"));
+    // Per-process: another gate in the same container runs these tags too.
+    let d = std::env::temp_dir().join(format!("kem-interop-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("mkdir");
     d
