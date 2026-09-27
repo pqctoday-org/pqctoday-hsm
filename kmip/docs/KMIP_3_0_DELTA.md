@@ -139,7 +139,7 @@ corresponding re-extraction.
 
 ## 7. KMIP 3.0 KAT cross-check (2026-06-07)
 
-Walked the 102 KMIP 3.0 test cases (`kat/oasis-kmip-3.0/{mandatory,optional}/*.xml`)
+Walked the 102 KMIP 3.0 test cases (`conformance/oasis_corpus/{mandatory,optional}/*.xml`)
 and cross-referenced every symbolic name they reference against our
 extraction:
 
@@ -148,7 +148,7 @@ extraction:
 | Tag names | 140 unique | 140 / 140 (100%) | All matched after acronym-aware comparison (CRT, IV, MAC, PKCS#11, RNG, CN are correctly extracted as written in the spec). |
 | `Operation` enum values | 61 unique | 61 / 61 (100%) | All 61 KAT ops map cleanly to one of the 64 entries we extracted. |
 | `CryptographicAlgorithm` enum values | 7 unique | 5 / 7 direct, 7 / 7 modulo notation | Notation differences only: KAT writes `DES3` vs spec text `3DES`; KAT writes `HMAC_SHA256` vs spec text `HMAC-SHA256`. Both refer to the same codepoints. |
-| Any PQC algorithm | **0 unique** | n/a | **The published OASIS KMIP 3.0 KAT corpus contains zero test cases referencing any PQC algorithm** (`grep -rliE "ML.KEM\|ML.DSA\|SLH.DSA\|Kyber\|Dilithium" kat/oasis-kmip-3.0/` → 0 hits). Cross-check of PQC codepoints against KMIP 3.0 KAT is impossible: that ground truth does not exist yet. |
+| Any PQC algorithm | **0 unique** | n/a | **The published OASIS KMIP 3.0 KAT corpus contains zero test cases referencing any PQC algorithm** (`grep -rliE "ML.KEM\|ML.DSA\|SLH.DSA\|Kyber\|Dilithium" conformance/oasis_corpus/` → 0 hits). Cross-check of PQC codepoints against KMIP 3.0 KAT is impossible: that ground truth does not exist yet. |
 
 Conclusion: the extractor's correctness is validated against every concrete
 symbolic name the KMIP 3.0 KAT actually uses. The PQC codepoint correctness

@@ -47,7 +47,7 @@ artifact. There is no automation for this; it is a manual trigger. When it appea
 ## Use
 
 - **KMIP 3.0 spec (CSD02)** — authoritative source for tag/enum/operation codepoints. The derived tag/enum artifact is `oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (extracted from the CSD02 HTML; the prior extraction is kept as `kmip-spec-3.0-tags-enums-from-2023-11-30.json`). The `§6.1.x` operation tables for both baselines live in `kmip-spec-3.0-section61-headings.json` and drive the citation-drift guard.
-- **KMIP 3.0 profiles ZIP (CSD02)** — bundles the OASIS-published conformance test cases (extracted into `../kat/oasis-kmip-3.0/`; the replay corpus is `../conformance/oasis_corpus/`).
+- **KMIP 3.0 profiles ZIP (CSD02)** — bundles the OASIS-published conformance test cases (extracted into `../conformance/oasis_corpus/`, the corpus the replay harness loads; a duplicate copy under `../kat/oasis-kmip-3.0/` was removed 2026-09-27).
 - **KMIP 2.1 OS** — fallback reference for legacy-mode clients.
 - **PKCS#11 v3.2** — referenced from `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md` for vendor mech allocation rationale.
 

@@ -6993,6 +6993,40 @@ fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
     }
 }
 
+/// PKCS#11 v3.2 §5.18.4 (C_UnwrapKey; §5.18.7 C_UnwrapKeyAuthenticated
+/// defers to it): "If any length conflict occurs between the key type of the
+/// unwrapped key, the output from the unwrapping mechanism, or the specified
+/// CKA_VALUE_LEN, then the function SHALL return CKR_WRAPPED_KEY_LEN_RANGE."
+///
+/// Called on the fully resolved attribute set (template + engine defaults),
+/// so an omitted CKA_KEY_TYPE is checked as the CKK_AES the engine defaults
+/// it to. Reuses the C_DeriveKey length rule, [`secret_key_len_ok`]: AES
+/// 16/24/32, AES-XTS 32/64, ChaCha20 32, any non-empty value for the
+/// variable-length types. Only secret keys whose type is in
+/// [`SECRET_KEY_TYPES`] are checked; any other secret key type keeps its
+/// previous unchecked behaviour rather than being newly refused here.
+fn unwrap_secret_len_check(
+    attrs: &HashMap<u32, Vec<u8>>,
+    class: Option<u32>,
+) -> Result<(), u32> {
+    if class != Some(CKO_SECRET_KEY) {
+        return Ok(());
+    }
+    let key_type = match attrs
+        .get(&CKA_KEY_TYPE)
+        .filter(|v| v.len() >= 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+    {
+        Some(kt) if SECRET_KEY_TYPES.contains(&kt) => kt,
+        _ => return Ok(()),
+    };
+    let len = attrs.get(&CKA_VALUE).map_or(0, |v| v.len());
+    if !secret_key_len_ok(key_type, len as u32) {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
+    Ok(())
+}
+
 /// E5 (2026-09-25) — the CKA_KEY_TYPE values a keyed mechanism accepts, from
 /// each mechanism's "Allowed key types" / key-type text in PKCS#11 v3.2
 /// chapter 6. `None` means the engine does not check the key type at init
@@ -10918,6 +10952,12 @@ unsafe fn parse_sp800_108_segments(
     // wasm32 and 24 on LP64 — the same hazard as any single struct, applied
     // once per element.
     let stride = ck_param::prf_data_param::LAYOUT.size();
+    // Tables 199–201 (§6.42.3–§6.42.5) each say of CK_SP800_108_DKM_LENGTH,
+    // and Tables 200–201 of CK_SP800_108_COUNTER: "If specified, only one
+    // instance of this type may be specified." A second instance is invalid
+    // mechanism input (§5.1.6 CKR_MECHANISM_PARAM_INVALID) in every mode.
+    let mut seen_dkm_length = false;
+    let mut seen_counter = false;
     for i in 0..num_segs.min(64) {
         let seg = ParamReader::new(
             p_segs.add(i * stride),
@@ -11015,6 +11055,10 @@ unsafe fn parse_sp800_108_segments(
                 if !allow_explicit_counter {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
+                // Tables 200/201 — at most one instance.
+                if std::mem::replace(&mut seen_counter, true) {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
                 // Same wire shape as ITERATION_VARIABLE: pValue →
                 // CK_SP800_108_COUNTER_FORMAT.
                 let cf = ParamReader::new(
@@ -11032,7 +11076,11 @@ unsafe fn parse_sp800_108_segments(
                 out.push(Sp800Seg::Counter(le, (width_bits / 8) as usize));
             }
             t if t == CK_SP800_108_DKM_LENGTH => {
-                // pValue → CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
+                // Tables 199–201 — at most one instance, in all three modes.
+                if std::mem::replace(&mut seen_dkm_length, true) {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                // pValue →CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
                 // bLittleEndian: CK_BBOOL, ulWidthInBits: CK_ULONG }.
                 let df = ParamReader::new(
                     val_ptr,
@@ -13632,6 +13680,10 @@ pub fn C_UnwrapKey(
             .get(&CKA_CLASS)
             .filter(|v| v.len() >= 4)
             .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        // §5.18.4 — unwrapped length vs key type; see unwrap_secret_len_check.
+        if let Err(rv) = unwrap_secret_len_check(&attrs, unwrapped_class) {
+            return rv;
+        }
         if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
@@ -14052,6 +14104,10 @@ pub fn C_UnwrapKeyAuthenticated(
             .get(&CKA_CLASS)
             .filter(|v| v.len() >= 4)
             .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        // §5.18.4 — unwrapped length vs key type; see unwrap_secret_len_check.
+        if let Err(rv) = unwrap_secret_len_check(&attrs, unwrapped_class) {
+            return rv;
+        }
         if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
@@ -28779,5 +28835,816 @@ mod eddsa_ph_context_ffi_tests {
             }
         }
         assert!(checked >= 20, "expected the NIST pre-hash vectors, ran {checked}");
+    }
+}
+
+#[cfg(test)]
+mod negative_rule_probes_2d {
+    //! 2.D probes — twelve PKCS#11 v3.2 rules driven through the real `C_*`
+    //! FFI entry points. Each asserted test states the SPEC-CORRECT outcome,
+    //! so a failure is an engine gap; genuine gaps are `#[ignore]`d with a
+    //! "2.D probe: GAP" reason so the suite stays green and
+    //! `-- --ignored` reproduces them. Probe 11 only RECORDS what the engine
+    //! does (eprintln), because that rule is "probe first, then decide";
+    //! probe 12 started that way and now asserts the refusal. Run with:
+    //!   cargo test --lib negative_rule_probes_2d -- --include-ignored --nocapture
+    use super::*;
+    use crate::native::test_lock;
+
+    const US: usize = std::mem::size_of::<usize>();
+    /// CK_UNAVAILABLE_INFORMATION at native CK_ULONG width.
+    const UNAVAILABLE: usize = usize::MAX;
+    /// docs/refs/pkcs11t-canonical-v3.2.h:497 (not declared in constants.rs).
+    const CKA_LABEL: u32 = 0x0000_0003;
+
+    // P-256 private scalar d = 1, so the public point Q = G (SP 800-186 §3.2.1.3).
+    const OID_P256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    const P256_GX: &str = "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296";
+    const P256_GY: &str = "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    /// Fresh engine, initialised token, logged-in USER R/W session.
+    fn setup() -> u32 {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so-pin", "user-pin", "probes-2d")
+                .unwrap();
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        session
+    }
+
+    fn tmpl(attrs: &[(u32, *const u8, usize)]) -> Vec<usize> {
+        attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect()
+    }
+
+    fn try_create(session: u32, attrs: &[(u32, *const u8, usize)]) -> (u32, u32) {
+        let mut t = tmpl(attrs);
+        let mut h = 0u32;
+        let rv = C_CreateObject(session, t.as_mut_ptr() as *mut u8, attrs.len() as u32, &mut h);
+        (rv, h)
+    }
+
+    fn create(session: u32, attrs: &[(u32, *const u8, usize)]) -> u32 {
+        let (rv, h) = try_create(session, attrs);
+        assert_eq!(rv, CKR_OK, "C_CreateObject setup failed: {rv:#x}");
+        h
+    }
+
+    /// Session secret key of `key_type` with CKA_VALUE = `value` and the
+    /// given boolean attributes set TRUE.
+    fn secret_key(session: u32, key_type: u32, value: &[u8], true_flags: &[u32]) -> u32 {
+        let (class, kt) = (CKO_SECRET_KEY as usize, key_type as usize);
+        let t = [1u8];
+        let f = [0u8];
+        let mut attrs: Vec<(u32, *const u8, usize)> = vec![
+            (CKA_CLASS, &class as *const _ as *const u8, US),
+            (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+            (CKA_TOKEN, f.as_ptr(), 1),
+            (CKA_VALUE, value.as_ptr(), value.len()),
+        ];
+        for flag in true_flags {
+            attrs.push((*flag, t.as_ptr(), 1));
+        }
+        create(session, &attrs)
+    }
+
+    fn get_attr(session: u32, h: u32, attr: u32) -> (u32, Vec<u8>) {
+        let mut t: [usize; 3] = [attr as usize, 0, 0];
+        let rv = C_GetAttributeValue(session, h, t.as_mut_ptr() as *mut u8, 1);
+        if rv != CKR_OK {
+            return (rv, vec![]);
+        }
+        let mut buf = vec![0u8; t[2]];
+        t[1] = buf.as_mut_ptr() as usize;
+        let rv = C_GetAttributeValue(session, h, t.as_mut_ptr() as *mut u8, 1);
+        buf.truncate(t[2]);
+        (rv, buf)
+    }
+
+    // ── SP 800-108 FFI plumbing ─────────────────────────────────────────────
+
+    #[derive(Clone, Copy, Debug)]
+    enum Mode {
+        Counter,
+        Feedback,
+        DoublePipeline,
+    }
+
+    /// One CK_PRF_DATA_PARAM.
+    #[derive(Clone, Copy)]
+    enum Seg {
+        /// Counter-mode ITERATION_VARIABLE: pValue -> CK_SP800_108_COUNTER_FORMAT.
+        IterCounter,
+        /// Feedback / double-pipeline ITERATION_VARIABLE: pValue NULL, len 0.
+        IterNull,
+        /// CK_SP800_108_COUNTER: pValue -> CK_SP800_108_COUNTER_FORMAT.
+        Counter,
+        /// CK_SP800_108_DKM_LENGTH (SUM_OF_KEYS, big-endian, 32 bits).
+        Dkm,
+        Bytes(&'static [u8]),
+    }
+
+    /// Run C_DeriveKey for `mode` over `segs` against a fresh 32-byte generic
+    /// secret base key (CKA_DERIVE=TRUE); returns (rv, new handle).
+    fn derive(session: u32, mode: Mode, segs: &[Seg]) -> (u32, u32) {
+        let base = secret_key(session, CKK_GENERIC_SECRET, &[0x42u8; 32], &[CKA_DERIVE]);
+        // CK_SP800_108_COUNTER_FORMAT { bLittleEndian=FALSE, ulWidthInBits=32 }
+        let counter_fmt: [usize; 2] = [0, 32];
+        // CK_SP800_108_DKM_LENGTH_FORMAT { SUM_OF_KEYS, FALSE, 32 }
+        let dkm_fmt: [usize; 3] = [CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS as usize, 0, 32];
+        let mut arr: Vec<[usize; 3]> = segs
+            .iter()
+            .map(|s| match s {
+                Seg::IterCounter => [
+                    CK_SP800_108_ITERATION_VARIABLE as usize,
+                    counter_fmt.as_ptr() as usize,
+                    std::mem::size_of_val(&counter_fmt),
+                ],
+                Seg::IterNull => [CK_SP800_108_ITERATION_VARIABLE as usize, 0, 0],
+                Seg::Counter => [
+                    CK_SP800_108_COUNTER as usize,
+                    counter_fmt.as_ptr() as usize,
+                    std::mem::size_of_val(&counter_fmt),
+                ],
+                Seg::Dkm => [
+                    CK_SP800_108_DKM_LENGTH as usize,
+                    dkm_fmt.as_ptr() as usize,
+                    std::mem::size_of_val(&dkm_fmt),
+                ],
+                Seg::Bytes(b) => [CK_SP800_108_BYTE_ARRAY as usize, b.as_ptr() as usize, b.len()],
+            })
+            .collect();
+        let iv = [0x11u8; 16];
+        // CK_SP800_108_KDF_PARAMS (counter / double pipeline) or
+        // CK_SP800_108_FEEDBACK_KDF_PARAMS, additional-keys tail = 0/NULL.
+        let mut params: Vec<usize> = match mode {
+            Mode::Counter | Mode::DoublePipeline => {
+                vec![CKM_SHA256_HMAC as usize, arr.len(), arr.as_mut_ptr() as usize, 0, 0]
+            }
+            Mode::Feedback => vec![
+                CKM_SHA256_HMAC as usize,
+                arr.len(),
+                arr.as_mut_ptr() as usize,
+                iv.len(),
+                iv.as_ptr() as usize,
+                0,
+                0,
+            ],
+        };
+        let mech_type = match mode {
+            Mode::Counter => CKM_SP800_108_COUNTER_KDF,
+            Mode::Feedback => CKM_SP800_108_FEEDBACK_KDF,
+            Mode::DoublePipeline => CKM_SP800_108_DOUBLE_PIPELINE_KDF,
+        };
+        let mut mech: [usize; 3] =
+            [mech_type as usize, params.as_mut_ptr() as usize, params.len() * US];
+        let value_len: usize = 32;
+        let mut t = tmpl(&[(CKA_VALUE_LEN, &value_len as *const _ as *const u8, US)]);
+        let mut h = 0u32;
+        let rv = C_DeriveKey(
+            session,
+            mech.as_mut_ptr() as *mut u8,
+            base,
+            t.as_mut_ptr() as *mut u8,
+            1,
+            &mut h,
+        );
+        (rv, h)
+    }
+
+    // ── 1. CKA_UNIQUE_ID ────────────────────────────────────────────────────
+
+    /// v3.2 §4.4.1: "Any time a new object is created, a value for
+    /// CKA_UNIQUE_ID MUST be generated by the token ... values generated MUST
+    /// be unique across all objects visible to any particular session ...
+    /// Any attempt to modify the CKA_UNIQUE_ID attribute of an existing object
+    /// or to specify the value of the CKA_UNIQUE_ID attribute in the template
+    /// for an operation that creates one or more objects MUST fail. Operations
+    /// failing for this reason return the error code CKR_ATTRIBUTE_READ_ONLY."
+    #[test]
+    fn p01_unique_id_generated_unique_and_read_only() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let h1 = secret_key(s, CKK_GENERIC_SECRET, &[1u8; 32], &[]);
+        let h2 = secret_key(s, CKK_GENERIC_SECRET, &[1u8; 32], &[]);
+        let (rv1, id1) = get_attr(s, h1, CKA_UNIQUE_ID);
+        let (rv2, id2) = get_attr(s, h2, CKA_UNIQUE_ID);
+        assert_eq!((rv1, rv2), (CKR_OK, CKR_OK), "CKA_UNIQUE_ID must be readable");
+        assert!(!id1.is_empty() && !id2.is_empty(), "CKA_UNIQUE_ID must be generated");
+        assert_ne!(id1, id2, "two identical objects must get different CKA_UNIQUE_IDs");
+
+        // Supplied in a creation template -> CKR_ATTRIBUTE_READ_ONLY, no object.
+        let (class, kt) = (CKO_SECRET_KEY as usize, CKK_GENERIC_SECRET as usize);
+        let v = [2u8; 32];
+        let forged = b"forged-unique-id";
+        let (rv, h) = try_create(
+            s,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, US),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+                (CKA_VALUE, v.as_ptr(), v.len()),
+                (CKA_UNIQUE_ID, forged.as_ptr(), forged.len()),
+            ],
+        );
+        assert_eq!(rv, CKR_ATTRIBUTE_READ_ONLY, "template-supplied CKA_UNIQUE_ID");
+        assert_eq!(h, 0, "no object handle may be returned on failure");
+
+        // Modifying it on an existing object -> CKR_ATTRIBUTE_READ_ONLY.
+        let mut t = tmpl(&[(CKA_UNIQUE_ID, forged.as_ptr(), forged.len())]);
+        assert_eq!(
+            C_SetAttributeValue(s, h1, t.as_mut_ptr() as *mut u8, 1),
+            CKR_ATTRIBUTE_READ_ONLY,
+            "C_SetAttributeValue on CKA_UNIQUE_ID"
+        );
+        assert_eq!(get_attr(s, h1, CKA_UNIQUE_ID).1, id1, "CKA_UNIQUE_ID must be unchanged");
+    }
+
+    // ── 2. CKA_TRUSTED is SO-only ───────────────────────────────────────────
+
+    /// v3.2 §4.2 Table 13 footnote 10 ("Can only be set to CK_TRUE by the SO
+    /// user"), applied to CKA_TRUSTED in the certificate (§4.6.2 Table 21),
+    /// public-key and secret-key attribute tables; §4.6.2 also says "The
+    /// CKA_TRUSTED attribute cannot be set to CK_TRUE by an application."
+    /// Neither names a return code; §4.1.1 rule 3 gives
+    /// CKR_ATTRIBUTE_READ_ONLY for a value on an attribute that is read-only
+    /// "under certain circumstances", which is the code asserted here.
+    #[test]
+    fn p02_trusted_true_refused_in_user_session() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        assert!(!crate::state::session_is_so(s), "precondition: USER session");
+        let (class, kt) = (CKO_SECRET_KEY as usize, CKK_AES as usize);
+        let v = [3u8; 16];
+        let (rv, h) = try_create(
+            s,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, US),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+                (CKA_VALUE, v.as_ptr(), v.len()),
+                (CKA_TRUSTED, [1u8].as_ptr(), 1),
+            ],
+        );
+        assert_eq!(rv, CKR_ATTRIBUTE_READ_ONLY, "C_CreateObject CKA_TRUSTED=TRUE as USER");
+        assert_eq!(h, 0);
+
+        let h = secret_key(s, CKK_AES, &v, &[]);
+        let mut t = tmpl(&[(CKA_TRUSTED, [1u8].as_ptr(), 1)]);
+        assert_eq!(
+            C_SetAttributeValue(s, h, t.as_mut_ptr() as *mut u8, 1),
+            CKR_ATTRIBUTE_READ_ONLY,
+            "C_SetAttributeValue CKA_TRUSTED=TRUE as USER"
+        );
+        assert_eq!(get_attr(s, h, CKA_TRUSTED).1, vec![0u8], "CKA_TRUSTED must stay FALSE");
+
+        // OBSERVED only (not asserted): footnote 10 restricts setting TRUE;
+        // an explicit CKA_TRUSTED=FALSE from a USER is not forbidden by it.
+        let (rv_false, _) = try_create(
+            s,
+            &[
+                (CKA_CLASS, &class as *const _ as *const u8, US),
+                (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+                (CKA_VALUE, v.as_ptr(), v.len()),
+                (CKA_TRUSTED, [0u8].as_ptr(), 1),
+            ],
+        );
+        eprintln!("2.D p02 OBSERVED: USER C_CreateObject with CKA_TRUSTED=FALSE -> {rv_false:#x}");
+    }
+
+    // ── 3. CK_SP800_108_COUNTER invalid in counter mode ─────────────────────
+
+    /// v3.2 §6.42.3 Table 199: CK_SP800_108_COUNTER "This data field type is
+    /// invalid for this KDF type." No specific CKR is named; §5.1.6's
+    /// CKR_MECHANISM_PARAM_INVALID is the applicable generic code.
+    #[test]
+    fn p03_counter_mode_rejects_counter_data_param() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let (ok, _) = derive(s, Mode::Counter, &[Seg::IterCounter, Seg::Bytes(b"label")]);
+        assert_eq!(ok, CKR_OK, "positive control: well-formed counter-mode derive");
+        let (rv, h) =
+            derive(s, Mode::Counter, &[Seg::IterCounter, Seg::Counter, Seg::Bytes(b"label")]);
+        assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID, "CK_SP800_108_COUNTER in counter mode");
+        assert_eq!(h, 0);
+    }
+
+    // ── 4. At most one CK_SP800_108_DKM_LENGTH ──────────────────────────────
+
+    /// v3.2 §6.42.3 Table 199, §6.42.4 Table 200, §6.42.5 Table 201, each for
+    /// CK_SP800_108_DKM_LENGTH: "If specified, only one instance of this type
+    /// may be specified." Expected CKR_MECHANISM_PARAM_INVALID (generic,
+    /// §5.1.6; the tables name no code).
+    #[test]
+    fn p04_dkm_length_at_most_one_instance() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let mut results = Vec::new();
+        for (mode, iter) in [
+            (Mode::Counter, Seg::IterCounter),
+            (Mode::Feedback, Seg::IterNull),
+            (Mode::DoublePipeline, Seg::IterNull),
+        ] {
+            let (one, _) = derive(s, mode, &[iter, Seg::Bytes(b"ctx"), Seg::Dkm]);
+            assert_eq!(one, CKR_OK, "{mode:?}: positive control with one DKM_LENGTH");
+            let (two, _) = derive(s, mode, &[iter, Seg::Dkm, Seg::Bytes(b"ctx"), Seg::Dkm]);
+            eprintln!("2.D p04 {mode:?}: two DKM_LENGTH -> {two:#x}");
+            results.push((mode, two));
+        }
+        for (mode, rv) in results {
+            assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID, "{mode:?}: two DKM_LENGTH instances");
+        }
+    }
+
+    // ── 5. C_UnwrapKey length vs key type ───────────────────────────────────
+
+    /// v3.2 §5.18.4: "If any length conflict occurs between the key type of
+    /// the unwrapped key, the output from the unwrapping mechanism, or the
+    /// specified CKA_VALUE_LEN, then the function SHALL return
+    /// CKR_WRAPPED_KEY_LEN_RANGE." §6.58.2 Table 254: ChaCha20 "Key length is
+    /// fixed at 256 bits."
+    #[test]
+    fn p05_unwrap_length_conflicts_with_key_type() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let kek = secret_key(s, CKK_AES, &[0x5au8; 16], &[CKA_WRAP, CKA_UNWRAP]);
+        let target = secret_key(s, CKK_AES, &[0xa5u8; 16], &[CKA_EXTRACTABLE]);
+        let mut mech: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+        let mut wrapped = vec![0u8; 64];
+        let mut wlen = wrapped.len() as u32;
+        assert_eq!(
+            C_WrapKey(s, mech.as_mut_ptr() as *mut u8, kek, target, wrapped.as_mut_ptr(), &mut wlen),
+            CKR_OK,
+            "setup: wrap a 16-byte key"
+        );
+        wrapped.truncate(wlen as usize);
+        assert_eq!(wrapped.len(), 24, "AES-KW of 16 bytes is 24 bytes");
+
+        let (class, kt) = (CKO_SECRET_KEY as usize, CKK_CHACHA20 as usize);
+        let mut t = tmpl(&[
+            (CKA_CLASS, &class as *const _ as *const u8, US),
+            (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+        ]);
+        let mut h = 0u32;
+        let rv = C_UnwrapKey(
+            s,
+            mech.as_mut_ptr() as *mut u8,
+            kek,
+            wrapped.as_mut_ptr(),
+            wrapped.len() as u32,
+            t.as_mut_ptr() as *mut u8,
+            2,
+            &mut h,
+        );
+        if rv == CKR_OK {
+            eprintln!(
+                "2.D p05 OBSERVED: CKR_OK; new CKK_CHACHA20 key CKA_VALUE_LEN bytes = {:?}",
+                get_attr(s, h, CKA_VALUE_LEN).1
+            );
+        }
+        assert_eq!(rv, CKR_WRAPPED_KEY_LEN_RANGE, "16 bytes unwrapped into CKK_CHACHA20");
+        assert_eq!(h, 0, "no handle on failure");
+    }
+
+    /// AES-KW-wrap a CKK_GENERIC_SECRET of `n` bytes, then C_UnwrapKey it as a
+    /// secret key of `key_type`; returns the unwrap rv.
+    fn unwrap_as(s: u32, kek: u32, n: usize, key_type: u32) -> u32 {
+        let target = secret_key(s, CKK_GENERIC_SECRET, &vec![0xa5u8; n], &[CKA_EXTRACTABLE]);
+        let mut mech: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+        let mut wrapped = vec![0u8; n + 16];
+        let mut wlen = wrapped.len() as u32;
+        assert_eq!(
+            C_WrapKey(s, mech.as_mut_ptr() as *mut u8, kek, target, wrapped.as_mut_ptr(), &mut wlen),
+            CKR_OK,
+            "setup: wrap {n} bytes"
+        );
+        let (class, kt) = (CKO_SECRET_KEY as usize, key_type as usize);
+        let mut t = tmpl(&[
+            (CKA_CLASS, &class as *const _ as *const u8, US),
+            (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+        ]);
+        let mut h = 0u32;
+        C_UnwrapKey(
+            s,
+            mech.as_mut_ptr() as *mut u8,
+            kek,
+            wrapped.as_mut_ptr(),
+            wlen,
+            t.as_mut_ptr() as *mut u8,
+            2,
+            &mut h,
+        )
+    }
+
+    /// Same §5.18.4 rule for the other fixed-length secret key types the
+    /// engine's length table covers (AES §6.12: 128/192/256-bit; AES-XTS
+    /// §6.13: two AES keys), with positive controls for each legal length.
+    #[test]
+    fn p05b_unwrap_length_vs_aes_and_aes_xts() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let kek = secret_key(s, CKK_AES, &[0x5au8; 16], &[CKA_WRAP, CKA_UNWRAP]);
+        for (n, kt, want) in [
+            (16, CKK_AES, CKR_OK),
+            (24, CKK_AES, CKR_OK),
+            (32, CKK_AES, CKR_OK),
+            (40, CKK_AES, CKR_WRAPPED_KEY_LEN_RANGE),
+            (32, CKK_AES_XTS, CKR_OK),
+            (64, CKK_AES_XTS, CKR_OK),
+            (16, CKK_AES_XTS, CKR_WRAPPED_KEY_LEN_RANGE),
+            (48, CKK_AES_XTS, CKR_WRAPPED_KEY_LEN_RANGE),
+            (32, CKK_CHACHA20, CKR_OK),
+            (24, CKK_GENERIC_SECRET, CKR_OK),
+        ] {
+            assert_eq!(unwrap_as(s, kek, n, kt), want, "{n} bytes into key type {kt:#x}");
+        }
+    }
+
+    /// C_UnwrapKeyAuthenticated (§5.18.7) builds its key the same way, so the
+    /// §5.18.4 length rule applies to it too.
+    #[test]
+    fn p05c_unwrap_authenticated_length_conflicts_with_key_type() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let kek = secret_key(s, CKK_AES, &[0x5au8; 16], &[CKA_WRAP, CKA_UNWRAP]);
+        let target = secret_key(s, CKK_AES, &[0xa5u8; 16], &[CKA_EXTRACTABLE]);
+        let iv = [0x24u8; 12];
+        // CK_GCM_PARAMS { pIv, ulIvLen, ulIvBits, pAAD, ulAADLen, ulTagBits }
+        let mut gcm: [usize; 6] = [iv.as_ptr() as usize, iv.len(), 96, 0, 0, 128];
+        let mut mech: [usize; 3] =
+            [CKM_AES_GCM as usize, gcm.as_mut_ptr() as usize, std::mem::size_of_val(&gcm)];
+        let mut wrapped = vec![0u8; 64];
+        let mut wlen = wrapped.len() as u32;
+        assert_eq!(
+            C_WrapKeyAuthenticated(
+                s,
+                mech.as_mut_ptr() as *mut u8,
+                kek,
+                target,
+                std::ptr::null_mut(),
+                0,
+                wrapped.as_mut_ptr(),
+                &mut wlen,
+            ),
+            CKR_OK,
+            "setup: GCM-wrap a 16-byte key"
+        );
+        for (kt, want) in [(CKK_AES, CKR_OK), (CKK_CHACHA20, CKR_WRAPPED_KEY_LEN_RANGE)] {
+            let (class, ktv) = (CKO_SECRET_KEY as usize, kt as usize);
+            let mut t = tmpl(&[
+                (CKA_CLASS, &class as *const _ as *const u8, US),
+                (CKA_KEY_TYPE, &ktv as *const _ as *const u8, US),
+            ]);
+            let mut h = 0u32;
+            let rv = C_UnwrapKeyAuthenticated(
+                s,
+                mech.as_mut_ptr() as *mut u8,
+                kek,
+                wrapped.as_mut_ptr(),
+                wlen,
+                t.as_mut_ptr() as *mut u8,
+                2,
+                std::ptr::null_mut(),
+                0,
+                &mut h,
+            );
+            assert_eq!(rv, want, "16 bytes GCM-unwrapped into key type {kt:#x}");
+        }
+    }
+
+    // ── 6. CKF_SERIAL_SESSION always set ────────────────────────────────────
+
+    /// v3.2 §3.3 Table 7: CKF_SERIAL_SESSION "should always be set to true";
+    /// §5.6.1: "the CKF_SERIAL_SESSION bit MUST always be set" (for
+    /// C_OpenSession). C_GetSessionInfo is §5.6.4.
+    #[test]
+    fn p06_session_info_serial_flag_always_set() {
+        let _guard = test_lock::acquire();
+        let rw = setup();
+        let mut ro = 0u32;
+        assert_eq!(
+            C_OpenSession(0, CKF_SERIAL_SESSION, std::ptr::null_mut(), std::ptr::null_mut(), &mut ro),
+            CKR_OK
+        );
+        for (name, h, want_rw) in [("RW", rw, true), ("RO", ro, false)] {
+            // CK_SESSION_INFO as this ffi writes it: slotID, state, flags, ulDeviceError.
+            let mut info = [0u32; 8];
+            assert_eq!(C_GetSessionInfo(h, info.as_mut_ptr() as *mut u8), CKR_OK, "{name}");
+            let flags = info[2];
+            assert_ne!(flags & CKF_SERIAL_SESSION, 0, "{name}: CKF_SERIAL_SESSION must be set");
+            assert_eq!(flags & CKF_RW_SESSION != 0, want_rw, "{name}: CKF_RW_SESSION");
+        }
+    }
+
+    // ── 7. Every listed slot answers C_GetSlotInfo ──────────────────────────
+
+    /// v3.2 §5.5.1: "All slots which C_GetSlotList reports MUST be able to be
+    /// queried as valid slots by C_GetSlotInfo."
+    #[test]
+    fn p07_every_listed_slot_answers_get_slot_info() {
+        let _guard = test_lock::acquire();
+        let _s = setup();
+        for token_present in [0u8, 1u8] {
+            let mut count = 0u32;
+            assert_eq!(C_GetSlotList(token_present, std::ptr::null_mut(), &mut count), CKR_OK);
+            assert!(count >= 1, "at least one slot");
+            let mut slots = vec![0u32; count as usize];
+            assert_eq!(C_GetSlotList(token_present, slots.as_mut_ptr(), &mut count), CKR_OK);
+            slots.truncate(count as usize);
+            for slot in slots {
+                let mut info = [0u8; 104];
+                assert_eq!(
+                    C_GetSlotInfo(slot, info.as_mut_ptr()),
+                    CKR_OK,
+                    "tokenPresent={token_present}: C_GetSlotInfo({slot})"
+                );
+            }
+        }
+    }
+
+    // ── 8. ulValueLen ignored on input for a size query ─────────────────────
+
+    /// v3.2 §5.7.5 step 3: "if the pValue field has the value NULL_PTR, then
+    /// the ulValueLen field is modified to hold the exact length of the
+    /// specified attribute for the object." The input ulValueLen plays no
+    /// part in that case.
+    #[test]
+    fn p08_size_query_ignores_input_value_len() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let h = secret_key(s, CKK_GENERIC_SECRET, &[7u8; 32], &[]);
+        let label = b"probe-label";
+        let mut t = tmpl(&[(CKA_LABEL, label.as_ptr(), label.len())]);
+        assert_eq!(C_SetAttributeValue(s, h, t.as_mut_ptr() as *mut u8, 1), CKR_OK);
+        for garbage in [0usize, 1, 0xdead_beef, UNAVAILABLE] {
+            let mut q: [usize; 3] = [CKA_LABEL as usize, 0, garbage];
+            assert_eq!(
+                C_GetAttributeValue(s, h, q.as_mut_ptr() as *mut u8, 1),
+                CKR_OK,
+                "size query with input ulValueLen={garbage:#x}"
+            );
+            assert_eq!(q[2], label.len(), "input ulValueLen={garbage:#x}: exact length out");
+        }
+    }
+
+    // ── 9. C_GetAttributeValue continues past an invalid type ───────────────
+
+    /// v3.2 §5.7.5 step 2 (invalid attribute -> ulValueLen =
+    /// CK_UNAVAILABLE_INFORMATION, call returns CKR_ATTRIBUTE_TYPE_INVALID)
+    /// and "the call MUST nonetheless have processed every attribute in the
+    /// template ... Each attribute in the template whose value can be
+    /// returned ... will be returned".
+    #[test]
+    fn p09_get_attribute_value_continues_after_invalid_type() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let h = secret_key(s, CKK_GENERIC_SECRET, &[8u8; 32], &[]);
+        let label = b"L9";
+        let mut t = tmpl(&[(CKA_LABEL, label.as_ptr(), label.len())]);
+        assert_eq!(C_SetAttributeValue(s, h, t.as_mut_ptr() as *mut u8, 1), CKR_OK);
+
+        const BOGUS: u32 = 0x7fff_0f0f; // not a v3.2 attribute, below CKA_VENDOR_DEFINED
+        let mut label_buf = [0u8; 16];
+        let mut bogus_buf = [0xeeu8; 16];
+        let mut class_buf = [0u8; 8];
+        let mut q: [usize; 9] = [
+            CKA_LABEL as usize,
+            label_buf.as_mut_ptr() as usize,
+            label_buf.len(),
+            BOGUS as usize,
+            bogus_buf.as_mut_ptr() as usize,
+            bogus_buf.len(),
+            CKA_CLASS as usize,
+            class_buf.as_mut_ptr() as usize,
+            class_buf.len(),
+        ];
+        let rv = C_GetAttributeValue(s, h, q.as_mut_ptr() as *mut u8, 3);
+        assert_eq!(rv, CKR_ATTRIBUTE_TYPE_INVALID);
+        assert_eq!(q[2], label.len(), "valid attribute before the bad one: length");
+        assert_eq!(&label_buf[..label.len()], label, "valid attribute before the bad one: value");
+        assert_eq!(q[5], UNAVAILABLE, "invalid attribute: CK_UNAVAILABLE_INFORMATION");
+        assert_eq!(bogus_buf, [0xeeu8; 16], "invalid attribute's buffer untouched");
+        assert!(q[8] > 0 && q[8] <= class_buf.len(), "valid attribute after the bad one: length");
+        assert_eq!(class_buf[0] as u32, CKO_SECRET_KEY, "valid attribute after the bad one: value");
+    }
+
+    // ── 10. CKA_SIGN / CKA_VERIFY at message-based init ─────────────────────
+
+    /// v3.2 §5.14.1: "The CKA_SIGN attribute of the signature key ... MUST be
+    /// CK_TRUE." §5.16.1: "The CKA_VERIFY attribute of the verification key
+    /// ... MUST be CK_TRUE." Code: CKR_KEY_FUNCTION_NOT_PERMITTED (§5.1.6).
+    #[test]
+    fn p10_message_sign_verify_init_require_usage_flag() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        let mut d = vec![0u8; 32];
+        d[31] = 1;
+        let mut sec1 = vec![0x04];
+        sec1.extend(unhex(P256_GX));
+        sec1.extend(unhex(P256_GY));
+        let mut point = vec![0x04, sec1.len() as u8];
+        point.extend(&sec1);
+        let (cpriv, cpub, kt) =
+            (CKO_PRIVATE_KEY as usize, CKO_PUBLIC_KEY as usize, CKK_EC as usize);
+        let f = [0u8];
+
+        let priv_key = |sign: u8| {
+            let b = [sign];
+            create(
+                s,
+                &[
+                    (CKA_CLASS, &cpriv as *const _ as *const u8, US),
+                    (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+                    (CKA_TOKEN, f.as_ptr(), 1),
+                    (CKA_SIGN, b.as_ptr(), 1),
+                    (CKA_EC_PARAMS, OID_P256.as_ptr(), OID_P256.len()),
+                    (CKA_VALUE, d.as_ptr(), d.len()),
+                ],
+            )
+        };
+        let pub_key = |verify: u8| {
+            let b = [verify];
+            create(
+                s,
+                &[
+                    (CKA_CLASS, &cpub as *const _ as *const u8, US),
+                    (CKA_KEY_TYPE, &kt as *const _ as *const u8, US),
+                    (CKA_TOKEN, f.as_ptr(), 1),
+                    (CKA_VERIFY, b.as_ptr(), 1),
+                    (CKA_EC_PARAMS, OID_P256.as_ptr(), OID_P256.len()),
+                    (CKA_EC_POINT, point.as_ptr(), point.len()),
+                ],
+            )
+        };
+        let mech = || [CKM_ECDSA as usize, 0usize, 0usize];
+
+        // Positive controls: flag TRUE -> CKR_OK.
+        let mut m = mech();
+        assert_eq!(C_MessageSignInit(s, m.as_mut_ptr() as *mut u8, priv_key(1)), CKR_OK);
+        assert_eq!(C_MessageSignFinal(s), CKR_OK);
+        let mut m = mech();
+        assert_eq!(C_MessageVerifyInit(s, m.as_mut_ptr() as *mut u8, pub_key(1)), CKR_OK);
+        assert_eq!(C_MessageVerifyFinal(s), CKR_OK);
+
+        // Flag FALSE -> CKR_KEY_FUNCTION_NOT_PERMITTED.
+        let mut m = mech();
+        assert_eq!(
+            C_MessageSignInit(s, m.as_mut_ptr() as *mut u8, priv_key(0)),
+            CKR_KEY_FUNCTION_NOT_PERMITTED,
+            "C_MessageSignInit with CKA_SIGN=FALSE"
+        );
+        let mut m = mech();
+        assert_eq!(
+            C_MessageVerifyInit(s, m.as_mut_ptr() as *mut u8, pub_key(0)),
+            CKR_KEY_FUNCTION_NOT_PERMITTED,
+            "C_MessageVerifyInit with CKA_VERIFY=FALSE"
+        );
+    }
+
+    // ── 11. ITERATION_VARIABLE absent (OBSERVED) ────────────────────────────
+
+    /// v3.2 §6.42.3 Table 199, §6.42.4 Table 200, §6.42.5 Table 201:
+    /// CK_SP800_108_ITERATION_VARIABLE "This data field type is mandatory."
+    /// Probe-first: record the engine's answer when it is absent. Not asserted.
+    #[test]
+    fn p11_observe_missing_iteration_variable() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        for mode in [Mode::Counter, Mode::Feedback, Mode::DoublePipeline] {
+            let (rv, h) = derive(s, mode, &[Seg::Bytes(b"label-and-context")]);
+            eprintln!(
+                "2.D p11 OBSERVED {mode:?}: no ITERATION_VARIABLE -> rv={rv:#x} handle={h}"
+            );
+        }
+    }
+
+    // ── 12. At most one CK_SP800_108_COUNTER ────────────────────────────────
+
+    /// v3.2 §6.42.4 Table 200 and §6.42.5 Table 201, CK_SP800_108_COUNTER:
+    /// "If specified, only one instance of this type may be specified."
+    /// Expected CKR_MECHANISM_PARAM_INVALID (generic, §5.1.6; the tables name
+    /// no code). Was an observation until the engine enforced it.
+    #[test]
+    fn p12_two_counter_params_refused() {
+        let _guard = test_lock::acquire();
+        let s = setup();
+        for mode in [Mode::Feedback, Mode::DoublePipeline] {
+            let (one, _) = derive(s, mode, &[Seg::IterNull, Seg::Counter, Seg::Bytes(b"ctx")]);
+            assert_eq!(one, CKR_OK, "{mode:?}: positive control with one COUNTER");
+            let (two, h) =
+                derive(s, mode, &[Seg::IterNull, Seg::Counter, Seg::Bytes(b"ctx"), Seg::Counter]);
+            assert_eq!(two, CKR_MECHANISM_PARAM_INVALID, "{mode:?}: two COUNTER instances");
+            assert_eq!(h, 0, "{mode:?}: no handle on failure");
+        }
+    }
+}
+
+#[cfg(test)]
+mod dkm_length_reference_tests {
+    //! CK_SP800_108_DKM_LENGTH in all three SP 800-108 modes, both methods,
+    //! widths 8/16/32/64 and both byte orders, against an INDEPENDENT Python
+    //! reference written from PKCS#11 v3.2 §6.42 / NIST SP 800-108 (HMAC-SHA256,
+    //! key 0x0b*32, fixed input "dkm-label", 42-byte output; feedback IV empty).
+    //! NIST ACVP has no DKM-length vectors (ACVP folds L into fixedData), so
+    //! this reference is the oracle; the C++ engine's
+    //! NegativeRuleProbesTests::testDkmLengthMatchesReference pins the same 24
+    //! values, which is the cross-engine byte-match (plan 2.D, p04).
+    use super::*;
+    use crate::native::test_lock;
+
+    const US: usize = std::mem::size_of::<usize>();
+    const LABEL: &[u8] = b"dkm-label";
+    const VECTORS: &[(&str, u32, usize, bool, &str)] = &[
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 8, false, "116609ac4d2d7960af94e3fe089959ec66b9b4550226ded1877029f8d622e7cc5e96e0a0ef230c292967"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 16, true, "c0e3cb82ea48581546a89154bbecf9d9c1162e8e1bd77268467173c610122a219f433cb1d2af792134bd"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 32, false, "2968a086903a5bdc5c4fe4b1aab292d86fb42303542990ad82544fec1c97c299cd435803ebd267ac2314"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 64, true, "bdb77c3565707b931551ef04aab39e57208949afabe28ebde72b1e2033c221141211ea6f1b62d231719d"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 8, false, "58c5400989d378291880cad48d368974ae19941158846ffe3e6cafe9d2806660c888569115dc3bbd3f5d"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 16, true, "1d7bbfc7be8d4ab4ac23c0d1c6c2a6cd9ec5bef507994cb0a4d25f3fad1c2e17374caa747e54a73a9ec0"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 32, false, "235c202255b58966676d649fd8e18f540c6512fc3a86e939129ff2226ab94931408392067140cb6b74f4"),
+        ("counter", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 64, true, "2f76a30ff2be8f42c52f79926f2c87053838422cc7193092ba4aee95af52b64ab00e0731c55f4e545b6e"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 8, false, "30b1292a96cb61e9609ba4c565f87e206d52690102c4da13aa739b2212cd89d914b13e163385e27f2b6c"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 16, true, "dd4d4cffb9d40b7a56a66110633daef6a05c8edac473c63900a799801e90d8a41524707d4c8e22607117"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 32, false, "e3561de9888a3b3302c84ba1a4a7103a207514116619192534c97616730a93226d4b8aad8fc513a8b485"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 64, true, "34d61a57e703883764bc954338c102970632b1eb262051ae05f2ac03efddb415da0f1519cebff976f2ac"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 8, false, "1b51da43f48f6a43d90dd7e79af474bf016eb9b5595c81096ba7635e1cc500ed036f94445dc368f5308a"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 16, true, "d82dc7cb5e4a4da0152a9bcf30bb5abd36fc90bff1356ad5dc7d5a4add7199a81b718720e3e6b87d944e"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 32, false, "a43be4ebc17a4459856d50d2e84678814a39ff0919bd2260a61317bde6f2b4643c7fcd84af7877cd6f0c"),
+        ("feedback", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 64, true, "c8fc228568bffd6904b8bedf2e09bf316fc312fbe6ae02ae80a09e71336633df28c0b66a1a7f09847f75"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 8, false, "14b13e163385e27f2b6c8df28d123e505249f270baf93b1c81db2de76b9601dde7013b4999da4356de1d"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 16, true, "1524707d4c8e22607117e5c2e13e86b5a15e8272cb686e0b0026fd6fc5abdc2fbc9ab8f358feb0ed7005"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 32, false, "6d4b8aad8fc513a8b4855a5e8c741442b732d86ed37737b9bb5bfb0bd9f010b5b9d6218679518f350da7"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS, 64, true, "da0f1519cebff976f2ac910c984113d737321969402fa1990630fb7f1897556027e84b1a9a87cc7b4318"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 8, false, "036f94445dc368f5308a37a93f86b7971a344f84bce7a1ea74e2c43ee70c885f682c9958e8e87a4389b3"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 16, true, "1b718720e3e6b87d944e41086637032802d99c7dee85532c3ea446f85ac8bbb301213a383b3544974fe5"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 32, false, "3c7fcd84af7877cd6f0ccb9813add7516b3de37a40976bbacb7f6a824f624db2fa7e5e4971debea58b45"),
+        ("double_pipeline", CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS, 64, true, "28c0b66a1a7f09847f75edea6492a25d7623dfd105b8e181ec48f7f1225b0e7368bf71a9fae902cc0835"),
+    ];
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn dkm_length_matches_independent_reference_in_all_modes() {
+        let _g = test_lock::acquire();
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session = crate::native::session::bootstrap_default_token(0, "so", "user", "dkm-ref").unwrap();
+        let key = [0x0bu8; 32];
+        let (class, kt) = (CKO_SECRET_KEY as usize, CKK_GENERIC_SECRET as usize);
+        let base_t: Vec<usize> = [
+            (CKA_CLASS, &class as *const _ as usize, US),
+            (CKA_KEY_TYPE, &kt as *const _ as usize, US),
+            (CKA_TOKEN, [0u8].as_ptr() as usize, 1),
+            (CKA_DERIVE, [1u8].as_ptr() as usize, 1),
+            (CKA_VALUE, key.as_ptr() as usize, key.len()),
+        ]
+        .iter()
+        .flat_map(|(t, p, l)| [*t as usize, *p, *l])
+        .collect();
+        let mut base = 0u32;
+        assert_eq!(C_CreateObject(session, base_t.as_ptr() as *mut u8, 5, &mut base), CKR_OK);
+        for (mode, method, width, le, want) in VECTORS {
+            let counter_fmt: [usize; 2] = [0, 32];
+            let dkm_fmt: [usize; 3] = [*method as usize, *le as usize, *width];
+            let first = if *mode == "counter" {
+                [CK_SP800_108_ITERATION_VARIABLE as usize, counter_fmt.as_ptr() as usize, std::mem::size_of_val(&counter_fmt)]
+            } else {
+                [CK_SP800_108_ITERATION_VARIABLE as usize, 0, 0]
+            };
+            let mut segs: Vec<[usize; 3]> = vec![
+                first,
+                [CK_SP800_108_BYTE_ARRAY as usize, LABEL.as_ptr() as usize, LABEL.len()],
+                [CK_SP800_108_DKM_LENGTH as usize, dkm_fmt.as_ptr() as usize, std::mem::size_of_val(&dkm_fmt)],
+            ];
+            let (mech_type, mut params): (u32, Vec<usize>) = match *mode {
+                "counter" => (CKM_SP800_108_COUNTER_KDF, vec![CKM_SHA256_HMAC as usize, 3, segs.as_mut_ptr() as usize, 0, 0]),
+                "feedback" => (CKM_SP800_108_FEEDBACK_KDF, vec![CKM_SHA256_HMAC as usize, 3, segs.as_mut_ptr() as usize, 0, 0, 0, 0]),
+                _ => (CKM_SP800_108_DOUBLE_PIPELINE_KDF, vec![CKM_SHA256_HMAC as usize, 3, segs.as_mut_ptr() as usize, 0, 0]),
+            };
+            let mut mech: [usize; 3] = [mech_type as usize, params.as_mut_ptr() as usize, params.len() * US];
+            let out_len: usize = 42;
+            let (sc, gk) = (CKO_SECRET_KEY as usize, CKK_GENERIC_SECRET as usize);
+            let mut t: Vec<usize> = [
+                (CKA_CLASS, &sc as *const _ as usize, US),
+                (CKA_KEY_TYPE, &gk as *const _ as usize, US),
+                (CKA_VALUE_LEN, &out_len as *const _ as usize, US),
+                (CKA_TOKEN, [0u8].as_ptr() as usize, 1),
+                (CKA_EXTRACTABLE, [1u8].as_ptr() as usize, 1),
+                (CKA_SENSITIVE, [0u8].as_ptr() as usize, 1),
+            ]
+            .iter()
+            .flat_map(|(t, p, l)| [*t as usize, *p, *l])
+            .collect();
+            let mut h = 0u32;
+            let rv = C_DeriveKey(session, mech.as_mut_ptr() as *mut u8, base, t.as_mut_ptr() as *mut u8, 6, &mut h);
+            assert_eq!(rv, CKR_OK, "{mode} method={method} width={width} le={le}");
+            let got = OBJECTS.with(|o| o.borrow().get(&h).and_then(|a| a.get(&CKA_VALUE).cloned())).unwrap();
+            assert_eq!(got, unhex(want), "{mode} method={method} width={width} le={le}: DKM bytes differ from the reference");
+        }
     }
 }

@@ -80,8 +80,7 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 
 | Directory | Source | Files | Purpose |
 |---|---|---|---|
-| `oasis-kmip-3.0/mandatory/` | OASIS KMIP Profiles v3.0 ZIP, extracted from `kmip-profiles-v3.0.zip` (2023-11-30) | 95 | OASIS-published mandatory conformance test cases for KMIP 3.0 protocol (classical-only) |
-| `oasis-kmip-3.0/optional/` | Same source | 7 | Optional KMIP 3.0 conformance tests (AKLC, CS-RNG, OMOS, SKLC) |
+| `../conformance/oasis_corpus/{mandatory,optional}/` | OASIS KMIP Profiles v3.0 ZIP, extracted from `kmip-profiles-v3.0.zip` (2023-11-30) | 95 + 7 | OASIS-published KMIP 3.0 conformance test cases (classical-only). Held in `conformance/`, where the replay harness loads them; the byte-identical copy that used to live here as `oasis-kmip-3.0/` was removed 2026-09-27 |
 | `oasis-kmip-2.1/` | Download on demand | — (dir not present) | KMIP 2.1 fallback test cases (created only when downloaded for legacy-mode validation) |
 | `ttlv-wire/` | Shipped | 6 `.bin` + `manifest.json` | KMIP 3.0 PQC-specific TTLV byte vectors (hand-crafted, codec round-trip) |
 | `ml-kem/` | Copy of `pqctoday-hub/src/data/acvp/mlkem_test.json` — real NIST ACVP-Server sample data, byte-verified (2026-08-24 WS-6/K-3; see the file's own `_provenance` block) | 1 | NIST ACVP ML-KEM-512/768/1024 vectors |
@@ -128,7 +127,7 @@ or "cross-validated" — self-consistency is the entire evidence base.
 | OASIS specification PDF | ✅ yes | `../spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf` |
 | OASIS specification HTML | ✅ yes | `../spec/oasis-kmip-3.0/kmip-spec-v3.0.html` |
 | OASIS profiles document | ✅ yes | `../spec/oasis-kmip-3.0/kmip-profiles-v3.0.pdf` |
-| OASIS conformance test cases (classical) | ✅ yes (bundled inside the profiles ZIP, not the testcases directory) | `oasis-kmip-3.0/mandatory/` + `optional/` |
+| OASIS conformance test cases (classical) | ✅ yes (bundled inside the profiles ZIP, not the testcases directory) | `../conformance/oasis_corpus/mandatory/` + `optional/` |
 | OASIS PQC test cases | ❌ **not published** | gap — KMIP 3.0 spec adds PQC algorithm IDs but OASIS hasn't shipped corresponding test vectors |
 | Conformance suite size | 102 tests | (1,452 in the 2025 OASIS interop event uses additional vendor-contributed vectors not in the public ZIP) |
 
@@ -161,7 +160,7 @@ The `-30` suffix marks KMIP 3.0; `-M-` denotes mandatory; `-O-` optional.
 
 ## Adding a new vector
 
-1. Decide the algorithm family (or `oasis-kmip-3.0/` for protocol-level vectors).
+1. Decide the algorithm family (protocol-level OASIS transcripts live in `../conformance/oasis_corpus/`).
 2. Drop the file into the right directory.
 3. Update this README's provenance table.
 4. Regenerate `manifest.sha256` — `find . -type f \( -name "*.json" -o -name "*.xml" \) | sort | xargs shasum -a 256 > manifest.sha256`.
