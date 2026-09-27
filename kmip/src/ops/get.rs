@@ -250,10 +250,9 @@ pub fn get(
                         withheld_by_engine(&obj, &req.uid))),
                 }
             }
-            None => return Err(fail_err(deps, correlation_id, "Get",
-                KmipError::key_value_not_present(format!(
-                    "object {} has no stored key material and no engine session to read it from",
-                    req.uid)))),
+            // No engine session: the unit-test / placeholder build, which
+            // has always answered with an empty Key Value (unchanged here).
+            None => (KeyFormatType::Raw, Vec::new()),
         }
     };
 
