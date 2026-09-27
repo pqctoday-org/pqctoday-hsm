@@ -436,6 +436,14 @@ static CK_RV checkECPublicKeyPoint(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType
 			key->setEC(params);
 			key->setA(point);
 			ok = (key->getOSSLKey() != NULL);
+			// OpenSSL builds an Edwards key from any 32/57 bytes: it checks
+			// neither that they decode to a curve point nor the subgroup
+			// (EVP_PKEY_public_check returns 1 for any correct-length EdDSA
+			// key). isInPrimeOrderSubgroup does RFC 8032 strict decoding and
+			// L*Q = identity. Montgomery (X25519/X448) keys have no such
+			// requirement: RFC 7748 accepts every u-coordinate.
+			if (ok && keyType == CKK_EC_EDWARDS)
+				ok = key->isInPrimeOrderSubgroup();
 			eddsa->recyclePublicKey(key);
 		}
 		CryptoFactory::i()->recycleAsymmetricAlgorithm(eddsa);

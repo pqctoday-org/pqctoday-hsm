@@ -8,6 +8,182 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **AES, AES-GCM, AES key wrap, AES-CTR/CBC/XTS and ChaCha20/Poly1305 move to
+  the RustCrypto cipher-0.5 generation — hardware AES on ARM with no build
+  flag.** `aes` 0.8 compiled its ARMv8 AES backend only under
+  `--cfg aes_armv8` (and `polyval` 0.6, GCM's GHASH, only under
+  `--cfg polyval_armv8`), so every aarch64 build that forgot the flags ran the
+  constant-time *software* AES while the core's AESE/AESMC/PMULL sat idle.
+  `aes` 0.9 and `polyval` 0.7 select the hardware backends by default (runtime
+  HWCAP detection, software fallback), so the failure mode is gone. Verified on
+  the artefact of a build with **no RUSTFLAGS at all**: 46 `aes` 0.9
+  hardware-backend symbols and 5 `polyval` 0.7 intrinsics symbols linked, zero
+  `polyval` software symbols. Measured effect of hardware AES (same engine,
+  A-B-A-B, SHA-256 control flat): AES-CBC 16 KiB 7.4–12.9×, AES-GCM 3.0–5.8×
+  on KV260, i.MX 95 and M4 Pro.
+
+  Crates: `aes` 0.9, `aes-gcm` 0.11, `aes-kw` 0.3, `cbc` 0.2, `ctr` 0.10,
+  `xts-mode` 0.6, `ghash` 0.6, `chacha20` 0.10 (`legacy` feature for the 64-bit
+  nonce variant), `chacha20poly1305` 0.11. The three lockfiles (`rust/`,
+  `kmip/`, `remoting/`) change only in that family.
+
+  **One exception, deliberately: AES-CMAC stays on `cmac` 0.7 with its own
+  aliased `aes` 0.8** (`aes08`). `cmac` 0.8 implements `digest` 0.11's `Mac`,
+  while the SP 800-108 KDF helpers are generic over one `Mac` trait shared with
+  HMAC on `digest` 0.10 — moving CMAC means moving the whole digest-0.10 stack
+  (`sha2`, `sha3`, `hmac`, `hkdf`, and the patched SLH-DSA/LMS/XMSS crates),
+  which is a separate, larger migration. Until then CMAC is the one AES user
+  that still needs `--cfg aes_armv8` for its hardware path.
+
+  The eight AES key-wrap sites (four in `ffi`, four in `native`) now go through
+  one helper, `crypto::aeskw`, because `aes-kw` 0.3 replaced the `*_vec` methods
+  with caller-sized buffers and split KW/KWP into separate types. The helper
+  reports only *why* a wrap failed (KEK length vs operation); every site keeps
+  its own precondition checks and its own `CKR_*` mapping unchanged, because
+  `ffi` and `native` deliberately return different codes for the same failure.
+  Buffer sizes follow what `aes-kw` 0.3's code actually checks (one of its doc
+  comments is looser than the code). Every former `GenericArray::from_slice`
+  site is either a length-matched key (now `new_from_slice(..).expect(..)`) or a
+  length-checked block/nonce (now `try_from(..)`), preserving the old
+  panic-on-mismatch semantics without the now-deprecated constructors; the
+  encrypted object store's nonce conversions map to its existing `CryptoError`
+  rather than panic.
+
+  **Consumers must update in lockstep:** the ARMv8 artefact gates in
+  pqctoday-cacp (`meta-pqc-hsm/conf/pqc-rust-armv8-crypto.inc`) and the bench
+  sidecar (`pqctoday-sandbox` `Dockerfile.bench-arm64`) match `polyval` 0.6
+  symbols, which no longer exist. They must accept `polyval` 0.7's
+  `backend::intrinsics` (and `aes` 0.9's hardware symbols) before any build
+  pins an engine that includes this change.
+
+### Fixed
+
+- **Both engines: imported EC public keys are now validated
+  (`CKR_PUBLIC_KEY_INVALID`).**
+  - **Rust:** no imported EC public key was checked before. Off-curve and
+    out-of-range points were accepted for P-224, P-256, P-384, P-521,
+    secp256k1, Ed25519 and Ed448.
+  - **C++:** it has checked the NIST curves since #274, but Edwards keys went
+    unchecked, because OpenSSL builds an Edwards key from any
+    correct-length bytes.
+  - **What is now checked:**
+    - NIST-curve keys must lie on the curve with in-range coordinates.
+    - Edwards keys must have a canonical encoding, lie on the curve, not be
+      the identity, and lie in the prime-order subgroup (L·Q = identity).
+    - That last check is not the same as rejecting small-order points: a
+      mixed-order point is not small-order, but still carries a torsion
+      component.
+  - **Evidence:**
+    - NIST ACVP KeyVer vectors (`tests/acvp/ec_keyver_test.json`), 20 cases,
+      now pass verdict-exact in both engines.
+    - NIST publishes no small-order or mixed-order case, so the identity,
+      order-8, mixed-order and non-canonical Edwards cases are
+      byte-identical constants in both engines' tests, computed
+      independently in Python.
+    - With the checks disabled, C++ accepted all of them, and so did the
+      Rust validator.
+- **C++ engine: about 1 in 256 BIP32 derivations failed with
+  `CKR_FUNCTION_FAILED`.** `setECPrivateKey` decided whether a 32- or 48-byte
+  key was a raw EC scalar or a PKCS#8 blob partly by checking whether its first
+  byte was `0x30`, the DER SEQUENCE tag. A random scalar starts with `0x30`
+  about once in 256, and such a key failed to decode. That broke the
+  `CKM_BIP32_MASTER_DERIVE` and `CKM_BIP32_CHILD_DERIVE` paths, and the
+  raw-scalar unwrap path used by GSMA SUCI flows. The size alone now decides: a
+  PKCS#8 EC key is never 32 or 48 bytes. It surfaced as an intermittent
+  failure of `testBip32ChildDeriveAdvertisesItsParentKeySize`; a new test pins
+  it with a seed whose master key starts with `0x30`.
+- **Rust engine: RSA-OAEP with SHA-1, SHA-224 and SHA-3 was refused.** The
+  engine only accepted SHA-256, SHA-384 and SHA-512, so every other hash got
+  `CKR_MECHANISM_PARAM_INVALID` at `C_EncryptInit` / `C_DecryptInit` /
+  `C_WrapKey` / `C_UnwrapKey`. That included NIST's own SHA-1 OAEP vectors,
+  although PKCS#11 v3.2 leaves the hash open and SP 800-56B rev 2 allows
+  SHA-1. The C++ engine already accepted all nine hashes, each with its
+  matching MGF1, and the Rust engine now does too. The NIST OAEP test now
+  decrypts through `C_DecryptInit` / `C_Decrypt`. Before, it called the RSA
+  library directly, which proved the imported key material but not the
+  engine; that gap is how the refusal went unnoticed (reported by a parallel
+  review session).
+
+- **`bench-harness`: RSA-PSS now passes `CK_RSA_PKCS_PSS_PARAMS`, so the
+  benchmark runs again against the current engine.** The hash-specific PSS
+  mechanisms require that structure (PKCS#11 v3.2 §6.1.11), and since
+  conformance decision E9/D6 (2026-09-25) the engine enforces it — an absent
+  struct is `CKR_MECHANISM_PARAM_INVALID`. The harness had relied on the old
+  fallback to defaults, so every run that included RSA-PSS now died during
+  provisioning (`C_SignInit(RSA-PSS-2048)`, rv=0x71) — found by the first
+  benchmark run against engine `d1f74a52`. It now sends hashAlg/mgf matching
+  the mechanism's digest and sLen = digest length (what the old default used,
+  so the measured operation is unchanged). Verified by running the full
+  matrix against that engine: 262/262 rows, no zero-op points.
+
+### Added
+
+- **`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`), both engines: ECDSA with a
+  caller-supplied nonce — a deliberate key-recovery primitive for teaching.**
+
+  Signs a digest, exactly like `CKM_ECDSA`, but uses the k given as the
+  mechanism parameter instead of generating one. With k and one signature,
+  anyone recovers the private key (d = r⁻¹(s·k − z) mod n), which is the
+  lesson the mechanism exists to show; `SECURITY.md` describes the risk and how
+  to turn it off per key (`CKA_ALLOWED_MECHANISMS`) or per C++ token
+  (`slots.mechanisms`). Sign only, single-part, P-256 / P-384 / P-521.
+  k must be exactly the order's byte length with 1 ≤ k < n, else
+  `CKR_MECHANISM_PARAM_INVALID` at `C_SignInit`. A P-224 key gets
+  `CKR_KEY_SIZE_RANGE` and any other curve `CKR_KEY_TYPE_INCONSISTENT`.
+
+  It also makes NIST's ECDSA SigGen vectors checkable at all. They are
+  random-k, so (r, s) can only be reproduced when k is an input. 40 ACVP-Server
+  cases (P-256, P-384 and P-521, including SHA-512 on P-256 for digest
+  truncation) now byte-match in both engines. Rust uses RustCrypto's
+  `ecdsa::hazmat::sign_prehashed`. The C++ engine uses OpenSSL's BN and
+  EC_POINT API directly, since OpenSSL 3.x has no public way to sign with a
+  given k.
+
+- **`bench-harness`: AES and SHA-2/SHA-3 measurement cells.**
+
+  The benchmark measured only asymmetric work — signatures, key agreement,
+  KEMs, RSA key transport — so the symmetric and hashing cost that carries bulk
+  traffic had no row. It now measures `AES-{128,256}-{CBC,GCM}` encryption and
+  `SHA-256/384/512` + `SHA3-256/512` digests, each at **64 B, 1 KiB and
+  16 KiB** (31 new cells; 131 per leg with `--include-slow`). The data size is
+  part of the algorithm name (`AES-256-GCM-16KB`) because symmetric throughput
+  depends on message size in a way an asymmetric operation's does not, and
+  every consumer of the JSONL keys a series by `algorithm` alone. 16 KiB is TLS
+  1.3's maximum record size (RFC 8446 §5.1).
+
+  New `pkcs11.rs` wrappers, each checked against `ffi.rs`'s dispatch before
+  use: `C_GenerateKey` (`CKA_VALUE_LEN` is required for `CKM_AES_KEY_GEN` and
+  read at native `CK_ULONG` width), a mode-aware symmetric
+  `C_EncryptInit`/`C_DecryptInit` (CBC takes a bare 16-byte IV; GCM takes six
+  native-width `CK_GCM_PARAMS` fields), and `C_DigestInit`/`C_Digest`. The
+  existing `encrypt_init` builds `CK_RSA_PKCS_OAEP_PARAMS` unconditionally, so
+  the symmetric path is separate. Symmetric and digest workers allocate their
+  buffers once (`encrypt_into`/`digest_into`, one FFI call per op) — at 64 B a
+  per-operation allocation would be a visible share of what the row reports.
+  GCM nonces are unique per (worker, operation), since workers share a
+  tenant's key.
+
+  **SHAKE is not measurable here, by construction**: PKCS#11 v3.2 defines no
+  SHAKE digest mechanism and `C_DigestInit` answers `CKR_MECHANISM_INVALID`
+  for it. SHA-3 is that family's row; the `SLH-DSA-SHAKE-*` signature rows
+  remain the real SHAKE workload.
+
+  First results (2026-09-26): at 64 B every algorithm on a board costs about
+  the same — the call path dominates — while at 16 KiB SHA-256 is 4–8× SHA-3 on
+  Cortex-A53/A55 (SHA-256 instructions present, none for SHA-3). They also
+  exposed that the engine's **AES ran its software backend on every aarch64
+  target**: `aes 0.8` and `polyval 0.6` include their ARMv8 backends only under
+  `--cfg aes_armv8` / `--cfg polyval_armv8`, which no build set. With both
+  flags, A-B-A-B on the same boards: AES-CBC 16 KiB **7.4–12.9×**, AES-GCM
+  **3.0–5.8×**, with ACVP-AES-GCM-1.0 (60 cases) and the SP 800-38A KATs
+  passing. The flags live in the appliance recipes (pqctoday-cacp#36) and the
+  bench sidecar (pqctoday-sandbox#83), not here: Yocto always exports
+  `RUSTFLAGS`, which would silently override a `.cargo/config.toml` entry.
+  GCM's smaller gain is consistent with `GcmState` feeding GHASH one byte at a
+  time once AES itself is fast — not yet measured.
+
 ## [0.31.0] — 2026-09-25
 
 ### Added

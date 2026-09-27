@@ -1,0 +1,195 @@
+{
+ "algorithm": "ECDSA+EDDSA",
+ "mode": "keyVer",
+ "_provenance": {
+  "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ECDSA-KeyVer-FIPS186-5/internalProjection.json",
+  "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+  "retrieved": "2026-09-26",
+  "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+  "source_sha256": "b8c47508838e8fb9f57eac1fbfda75a4f0b7d340e3a685bc667a19fc8c8c4aaa",
+  "note": "NIST ACVP KeyVer (SP 800-56A public-key validation) for the curves both engines implement. Verdicts are NIST's own (testPassed/reason). Second source: https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/EDDSA-KeyVer-1.0/internalProjection.json (sha256 46bc373003ed7c5ee2780587ea7518ea6952b0be1cb467f8632163debf591fc8). The private key d is dropped: KeyVer tests the public key only.",
+  "selection": "Groups for P-224, P-256, P-384, P-521 (ECDSA-KeyVer-FIPS186-5) and ED-25519, ED-448 (EDDSA-KeyVer-1.0), all tests; fields verbatim except d removed."
+ },
+ "testGroups": [
+  {
+   "source": "ECDSA-KeyVer-FIPS186-5",
+   "tgId": 1,
+   "curve": "P-224",
+   "testType": "AFT",
+   "tests": [
+    {
+     "tcId": 1,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "qx": "F91BAE4B064040C9FDC9023EB55641EC02EDD29F260F998D22039E50",
+     "qy": "418B65902A00A304D24D753F5BDBDC7FA0BB14104B2F42A244A6A66F"
+    },
+    {
+     "tcId": 2,
+     "testPassed": false,
+     "reason": "x or y out of range",
+     "qx": "FA5C7B21EF2E5BC3280D6786CEB77511817530F8ED4FEBC152FB1A08",
+     "qy": "01A125BC8811CD09EFBF3F59CB789E7B6068AB636B92F8AACBF56903CA"
+    },
+    {
+     "tcId": 3,
+     "testPassed": true,
+     "reason": "none",
+     "qx": "34DDFE808D863E28DA01BCBDAA68325D1E565BF8C816836EFFF48F0B",
+     "qy": "158A9894836A740716E340181AC0429D4B287B18ED4592BAC18D4DB7"
+    }
+   ]
+  },
+  {
+   "source": "ECDSA-KeyVer-FIPS186-5",
+   "tgId": 2,
+   "curve": "P-256",
+   "testType": "AFT",
+   "tests": [
+    {
+     "tcId": 4,
+     "testPassed": true,
+     "reason": "none",
+     "qx": "7E01D79021449D59C97CE27DD7221110ACFD86BFC11255058981EA2D20ECA111",
+     "qy": "EADA8CDBAE1835A6CB19F3D36F91C0B30394808DC3A9FAA3333D9DEB8E7E7CEB"
+    },
+    {
+     "tcId": 5,
+     "testPassed": false,
+     "reason": "x or y out of range",
+     "qx": "0153E4349D53D820D44172A0424D82D8A2570A60C9A81819C974FB79A49786B967",
+     "qy": "5B8BA4EDFC093EAE4CBB88E09C88909B57066B9C35F4FD8A274C52522322FF52"
+    },
+    {
+     "tcId": 6,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "qx": "618CF3688603AE38589C95AFF36ED517EA4AD327A295BBDBBD88202DDBA4B980",
+     "qy": "CD5E352F7F7ED94515EA7EEF8AC8191F792DD34F0BEDF8034C29EB462E92EDE3"
+    }
+   ]
+  },
+  {
+   "source": "ECDSA-KeyVer-FIPS186-5",
+   "tgId": 3,
+   "curve": "P-384",
+   "testType": "AFT",
+   "tests": [
+    {
+     "tcId": 7,
+     "testPassed": false,
+     "reason": "x or y out of range",
+     "qx": "379EF74D6803EE0A6CF3303BCAF06CE7082632BE5D59124D89C1F92AAEE8C4BA2B8341E6DFA610F4688122D4C880EB82",
+     "qy": "015E804D2F627C9690673314611E22987BB9183E166F6549620897698F3F1BD0426AA395192F77254DDF84CA00CD9DACAE"
+    },
+    {
+     "tcId": 8,
+     "testPassed": true,
+     "reason": "none",
+     "qx": "FBD76D79F50928C6920FCFF70BBB4A7788B24F7E2F36EC00CFBFD0AFFE16925A76B06A22F5D7B240D7B183AE1509A45B",
+     "qy": "ACA995C43F87D79D8B93BB1DAB70EF76F4129873B3BEC31A1A39CD66076FB7C18993CFB971FFD5FDE29EC8251D098F72"
+    },
+    {
+     "tcId": 9,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "qx": "A5723B5E82CF703E93DC73A43A3A30D76858C3DCE6CDE2CE75B981F04CD3E9D08C2695581C3ACA21E72C0490A10B71FE",
+     "qy": "EF24BB74C339ED8C19B2D95BBFFF39BB1542426DF0B6BD68BF6A3890FA858ABED668A8E4EB9E838BD535E5F75D564AA1"
+    }
+   ]
+  },
+  {
+   "source": "ECDSA-KeyVer-FIPS186-5",
+   "tgId": 4,
+   "curve": "P-521",
+   "testType": "AFT",
+   "tests": [
+    {
+     "tcId": 10,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "qx": "002F7C2CB2AED780A5A38942972014C3D415844DECA89236341CC044F545461D178270DB628B47E9D70F9D77806AC66B4918CC063F719863FDBDAA16AE18DC1F1E0B",
+     "qy": "002CA61A47CB546AE3E50B54C07D85E24AE6CFEF4ED41BDC39DD8F5B89D768DAA05A7AF26E5E9B50B2320A8CD2FE89C6E7F16F46774E61981924041743433D1EA572"
+    },
+    {
+     "tcId": 11,
+     "testPassed": false,
+     "reason": "x or y out of range",
+     "qx": "035CB1098807803F8BFA7EB3A70E43097F6FECAFC39C77A7E53029BA189F37C9F400034693198630DB207B98DFDEDBA248FB02D88FC395A2CF5867BAC50E86FE0EB2",
+     "qy": "0138942DDC06B6482AFD2593BE835DA7FBAA6FEF7C8973BF45003348290761585F0E1BCCE52DD729D04358C13EF46F3009E3A1D2A9715F141AF5CABF7455C05F67E2"
+    },
+    {
+     "tcId": 12,
+     "testPassed": true,
+     "reason": "none",
+     "qx": "01E70C8B3B501B9537FD0A182DDF9A1244D5F6885E1BA03EB23E6A5B0B558BE03CDF0B282F72BEEDCC9417CEDEA7CB6C6188E567105A5CB0FD89648FB6A55148B891",
+     "qy": "00B1949040F8C34F8F201EE63C1A203BA01154FA02EF9A80BA1F8D2A6438FE73EAD16B9A7867A8AAB03559C80948A08B8B44E90DF90B94ED8F0CE3062EC98BE7290A"
+    }
+   ]
+  },
+  {
+   "source": "EDDSA-KeyVer-1.0",
+   "tgId": 1,
+   "curve": "ED-25519",
+   "testType": "AFT",
+   "tests": [
+    {
+     "tcId": 1,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "q": "5BC0D8831F8D7FB200E32DAF36C54BF2808E69D40BD48BD915DF585B2696C166"
+    },
+    {
+     "tcId": 2,
+     "testPassed": true,
+     "reason": "none",
+     "q": "CF1BD87814E4113E9CAB4D5B95A4F85EA04BAC9EB70053023B1D201A85225072"
+    },
+    {
+     "tcId": 3,
+     "testPassed": true,
+     "reason": "none",
+     "q": "EB0E59A5D0EC784B3EFC7E5A86DFBD244789E5B384A652A43DC0968974E83571"
+    },
+    {
+     "tcId": 4,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "q": "FBB4F7945F521A5CB169883477E9DFAFA14767FD4D973D8FD3667C46253F5943"
+    }
+   ]
+  },
+  {
+   "source": "EDDSA-KeyVer-1.0",
+   "tgId": 2,
+   "curve": "ED-448",
+   "testType": "AFT",
+   "tests": [
+    {
+     "tcId": 5,
+     "testPassed": true,
+     "reason": "none",
+     "q": "D74E406880F2BD2950D8AC5593AAC612D945EA7CA08DC1EF6BE7FE0BB61C3B0DDA563ED2B545919937B3174CB9826698F575B15DAC6B642A80"
+    },
+    {
+     "tcId": 6,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "q": "8DE82D8611D23882CEFC1C3BD13C1E5E3BAC0D1AAE908FFF0B0A5431B90BEF715F1160073C919B886BBDAF156FA051CA37022E8118B260FF00"
+    },
+    {
+     "tcId": 7,
+     "testPassed": true,
+     "reason": "none",
+     "q": "BC17476D69799F0CDAAF4D730FBD7BE9078DE04A1B90A91938E994FFF14C029214DE2FD97D75A0A973BC106C6AF465D44C2EE0D32D4D4CBB00"
+    },
+    {
+     "tcId": 8,
+     "testPassed": false,
+     "reason": "point not on curve",
+     "q": "480B6575633FEFAF3635EFA2294F2CBF1E8D49F6BC0CD8B8F5A91A0A59922BE33CDD837A3ACCAA419970CBE4A21A062CF37F839931CF17EE80"
+    }
+   ]
+  }
+ ]
+}

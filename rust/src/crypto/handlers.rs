@@ -1926,19 +1926,19 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
             use cmac::Mac as _;
             let tag = match key_bytes.len() {
                 16 => {
-                    let mut m = cmac::Cmac::<aes::Aes128>::new_from_slice(key_bytes)
+                    let mut m = cmac::Cmac::<aes08::Aes128>::new_from_slice(key_bytes)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     m.update(msg);
                     m.finalize().into_bytes().to_vec()
                 }
                 24 => {
-                    let mut m = cmac::Cmac::<aes::Aes192>::new_from_slice(key_bytes)
+                    let mut m = cmac::Cmac::<aes08::Aes192>::new_from_slice(key_bytes)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     m.update(msg);
                     m.finalize().into_bytes().to_vec()
                 }
                 32 => {
-                    let mut m = cmac::Cmac::<aes::Aes256>::new_from_slice(key_bytes)
+                    let mut m = cmac::Cmac::<aes08::Aes256>::new_from_slice(key_bytes)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     m.update(msg);
                     m.finalize().into_bytes().to_vec()
@@ -2219,6 +2219,176 @@ fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
         let mut padded = vec![0u8; field - digest.len()];
         padded.extend_from_slice(&digest);
         padded
+    }
+}
+
+/// Public-key validation for an imported EC-family public key, run by
+/// C_CreateObject before the object exists (CKR_PUBLIC_KEY_INVALID, §5.1.6).
+/// `point` is the bare encoding: SEC1 for the Weierstrass curves, the RFC 8032
+/// / RFC 7748 bytes for Edwards / Montgomery.
+///
+/// - P-224/256/384/521, secp256k1: SEC1 decode, which rejects a coordinate
+///   outside [0, p) and a point not on the curve. These curves have cofactor
+///   1, so any on-curve point other than the identity (which SEC1 cannot
+///   encode in the forms accepted here) generates the full prime-order group.
+/// - Ed25519 / Ed448: the encoding must be canonical (it re-encodes to the same
+///   bytes), decode to a curve point, and lie in the prime-order subgroup
+///   (L*Q = identity) without being the identity. A check for "small order"
+///   alone is not enough: a MIXED-order point (prime-order part plus a
+///   torsion part) is not small-order and still fails L*Q = identity.
+/// - X25519 / X448: RFC 7748 accepts every u-coordinate of the right length,
+///   so only the length is checked.
+///
+/// A curve this function does not know is left to the existing paths (Ok).
+pub fn validate_ec_public_point(curve: u32, point: &[u8]) -> Result<(), u32> {
+    let bad = Err(CKR_PUBLIC_KEY_INVALID);
+    match curve {
+        CURVE_P224 => p224::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P256 => p256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P384 => p384::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_P521 => p521::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_K256 => k256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        CURVE_ED25519 => {
+            let Ok(bytes) = <[u8; 32]>::try_from(point) else { return bad };
+            let c = curve25519_dalek::edwards::CompressedEdwardsY(bytes);
+            match c.decompress() {
+                Some(q) if q.compress() == c && q.is_torsion_free() && !q.is_small_order() => Ok(()),
+                _ => bad,
+            }
+        }
+        CURVE_ED448 => {
+            let Ok(bytes) = <[u8; 57]>::try_from(point) else { return bad };
+            let c = ed448_goldilocks::CompressedEdwardsY(bytes);
+            // decompress() itself rejects off-curve points and any point with a
+            // torsion component (it tests is_torsion_free).
+            match Option::<ed448_goldilocks::AffinePoint>::from(c.decompress()) {
+                // Compare the DECODED point with the identity: the crate's
+                // CompressedEdwardsY::IDENTITY is all zeros, not RFC 8032's
+                // encoding of the identity (y = 1).
+                Some(q) if q.compress().0 == bytes && q != ed448_goldilocks::AffinePoint::IDENTITY => Ok(()),
+                _ => bad,
+            }
+        }
+        CURVE_X25519 => if point.len() == 32 { Ok(()) } else { bad },
+        CURVE_X448 => if point.len() == 56 { Ok(()) } else { bad },
+        _ => Ok(()),
+    }
+}
+
+/// (field bytes, order bits) for the curves CKM_PQCTODAY_ECDSA_EXPLICIT_K
+/// supports. `None` for any other curve — including 0, the "curve unknown"
+/// value C_CreateObject leaves for an undecodable CKA_EC_PARAMS, which is
+/// deliberately not guessed to be P-256 here.
+fn explicit_k_curve(curve: u32) -> Option<(usize, usize)> {
+    match curve {
+        CURVE_P256 => Some((32, 256)),
+        CURVE_P384 => Some((48, 384)),
+        CURVE_P521 => Some((66, 521)),
+        _ => None,
+    }
+}
+
+/// FIPS 186-5 §6.4.1 step 2: z is the leftmost min(N, hashlen) bits of the
+/// input, N the bit length of n — returned zero-padded to the field width so
+/// the ecdsa hazmat layer reduces it as-is. Byte-level truncation alone (what
+/// `fit_digest_to_curve` does) is exact only when N is a multiple of 8; on
+/// P-521 a 66-byte input would keep 528 bits instead of 521.
+fn bits2int_field(input: &[u8], order_bits: usize, field_len: usize) -> Vec<u8> {
+    let take = input.len().min(order_bits.div_ceil(8));
+    let mut v = input[..take].to_vec();
+    let excess = (v.len() * 8).saturating_sub(order_bits);
+    if excess > 0 {
+        let mut carry = 0u8;
+        for b in v.iter_mut() {
+            let next = *b << (8 - excess);
+            *b = (*b >> excess) | carry;
+            carry = next;
+        }
+    }
+    let mut out = vec![0u8; field_len - v.len()];
+    out.extend_from_slice(&v);
+    out
+}
+
+/// CKM_PQCTODAY_ECDSA_EXPLICIT_K's parameter check, run at C_SignInit so a
+/// bad k is CKR_MECHANISM_PARAM_INVALID there (§5.13.1) rather than a failure
+/// at C_Sign: k must be exactly the order's byte length and 1 <= k < n.
+/// A key on a curve the mechanism does not cover is refused with one of the
+/// two key codes §5.13.1 lists for C_SignInit: CKR_KEY_SIZE_RANGE for P-224
+/// (below the advertised 256-bit minimum), CKR_KEY_TYPE_INCONSISTENT for any
+/// other curve (secp256k1). CKR_CURVE_NOT_SUPPORTED is not used: §6.3 scopes
+/// it to creating, generating, deriving or unwrapping a key.
+pub fn ecdsa_explicit_k_check(curve: u32, k: &[u8]) -> Result<(), u32> {
+    use p256::elliptic_curve::{Field, PrimeField};
+    let (field_len, _) = explicit_k_curve(curve).ok_or(if curve == CURVE_P224 {
+        CKR_KEY_SIZE_RANGE
+    } else {
+        CKR_KEY_TYPE_INCONSISTENT
+    })?;
+    if k.len() != field_len {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    macro_rules! in_range {
+        ($crv:ident) => {{
+            let s = Option::<$crv::Scalar>::from($crv::Scalar::from_repr(
+                $crv::FieldBytes::clone_from_slice(k),
+            ));
+            matches!(s, Some(s) if !bool::from(s.is_zero()))
+        }};
+    }
+    let ok = match curve {
+        CURVE_P256 => in_range!(p256),
+        CURVE_P384 => in_range!(p384),
+        _ => in_range!(p521),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CKR_MECHANISM_PARAM_INVALID)
+    }
+}
+
+/// ECDSA with the caller's nonce: (r, s) with R = k·G, r = x(R) mod n,
+/// s = k⁻¹(z + r·d) mod n (FIPS 186-5 §6.4.1 steps 3-9 with k supplied rather
+/// than generated). A deliberate key-recovery primitive — see SECURITY.md.
+/// `input` is the caller's digest, conditioned by bits2int exactly like
+/// CKM_ECDSA; the result is r || s, each the order's byte length.
+pub fn sign_ecdsa_explicit_k(
+    curve: u32,
+    sk_bytes: &[u8],
+    input: &[u8],
+    k: &[u8],
+) -> Result<Vec<u8>, u32> {
+    use p256::elliptic_curve::PrimeField;
+    ecdsa_explicit_k_check(curve, k)?;
+    let Some((field_len, order_bits)) = explicit_k_curve(curve) else {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    };
+    let z = bits2int_field(input, order_bits, field_len);
+    macro_rules! sign_with {
+        ($crv:ident, $Curve:ty) => {{
+            let d = $crv::SecretKey::from_slice(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?
+                .to_nonzero_scalar();
+            let k = Option::<$crv::Scalar>::from($crv::Scalar::from_repr(
+                $crv::FieldBytes::clone_from_slice(k),
+            ))
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            let (sig, _) = ecdsa::hazmat::sign_prehashed::<$Curve, _>(
+                d.as_ref(),
+                k,
+                &$crv::FieldBytes::clone_from_slice(&z),
+            )
+            // r = 0 or s = 0: FIPS 186-5 says pick another k; with a fixed k
+            // there is no other, so the signature cannot be produced.
+            .map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok(sig.to_bytes().to_vec())
+        }};
+    }
+    match curve {
+        CURVE_P256 => sign_with!(p256, p256::NistP256),
+        CURVE_P384 => sign_with!(p384, p384::NistP384),
+        _ => sign_with!(p521, p521::NistP521),
     }
 }
 
@@ -2567,7 +2737,35 @@ fn sign_ed25519_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u
     Ok(sig)
 }
 
-pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+/// Ed25519ph / Ed448ph (RFC 8032 §5.1 / §5.2).
+///
+/// `context` is `CK_EDDSA_PARAMS.pContextData`. It is a REQUIRED parameter
+/// rather than an `Option` with a default on purpose: until 2026-09-26 both
+/// call sites passed `None` unconditionally, so a caller that supplied a
+/// context got a signature over the WRONG scheme — the context is bound into
+/// the dom2/dom4 prefix fed to both hash calls, so ignoring it changes the
+/// signed message while still returning CKR_OK and a structurally valid
+/// signature. Nothing observable told the caller. Making the argument
+/// mandatory means a new call site has to decide rather than inherit a silent
+/// default.
+///
+/// PKCS#11 v3.2 Table 73 lists Ed25519ph/Ed448ph with Mechanism Param
+/// *Required* and Context Data *Optional*, and v3.2 delegates the scheme
+/// itself to RFC 8032 — so an empty context is the legitimate no-context case
+/// and must stay byte-identical to the previous behaviour, which is why the
+/// empty case still passes `None` rather than `Some(&[])`. Those are NOT the
+/// same construction: `Some(&[])` would still take dalek's context path.
+///
+/// Unlike Ed25519**ctx** above, this needs no hand-rolled dom2: dalek's
+/// `sign_prehashed` hardcodes the Ed25519ph flag byte whenever a context is
+/// given, which is precisely what pre-hash mode wants. That same hardcoding is
+/// what forced `sign_ed25519_ctx` to be written out by hand.
+pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    // RFC 8032 caps the context at 255 bytes; same check as sign_eddsa_ctx.
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let ctx_opt = if context.is_empty() { None } else { Some(context) };
     match sk_bytes.len() {
         32 => {
             use sha2::Digest;
@@ -2575,7 +2773,7 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
             key_bytes.copy_from_slice(sk_bytes);
             let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             let prehash = sha2::Sha512::new().chain_update(msg);
-            sk.sign_prehashed(prehash, None)
+            sk.sign_prehashed(prehash, ctx_opt)
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
@@ -2591,7 +2789,7 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
             let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
-            sk.sign_prehashed(None, prehash)
+            sk.sign_prehashed(ctx_opt, prehash)
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
@@ -3653,7 +3851,20 @@ fn verify_ed25519_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[
     }
 }
 
-pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
+/// Verify twin of [`sign_eddsa_ph`]. `context` is mandatory for the same
+/// reason: a verify that silently drops the context would reject signatures
+/// this engine's own signer produces for the same mechanism and parameters,
+/// which is the failure mode the ECDSA_SHA1 digest-mismatch bug had.
+pub fn verify_eddsa_ph(
+    pk_bytes: &[u8],
+    msg: &[u8],
+    sig_bytes: &[u8],
+    context: &[u8],
+) -> Result<(), u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let ctx_opt = if context.is_empty() { None } else { Some(context) };
     match pk_bytes.len() {
         32 => {
             use sha2::Digest;
@@ -3664,7 +3875,7 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
             let prehash = sha2::Sha512::new().chain_update(msg);
-            vk.verify_prehashed(prehash, None, &sig)
+            vk.verify_prehashed(prehash, ctx_opt, &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         57 => {
@@ -3679,7 +3890,7 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
             let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
-            vk.verify_prehashed(&sig, None, prehash)
+            vk.verify_prehashed(&sig, ctx_opt, prehash)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -3689,6 +3900,132 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Ed25519ph / Ed448ph with a NON-EMPTY context (2026-09-26).
+    ///
+    /// `sign_eddsa_ph` and `verify_eddsa_ph` passed `None` for the context
+    /// unconditionally, so `CK_EDDSA_PARAMS.pContextData` was accepted and
+    /// silently discarded. RFC 8032 binds the context into the dom2/dom4
+    /// prefix fed to BOTH hash calls, so the engine returned CKR_OK and a
+    /// structurally valid signature over a DIFFERENT scheme than the caller
+    /// selected. Nothing observable distinguished it.
+    ///
+    /// The vectors these assertions run on were already checked into
+    /// `tests/acvp/` — NIST ACVP EDDSA-SigGen-1.0 pre-hash groups, 10 Ed25519ph
+    /// and 10 Ed448ph cases, every one independently re-verified against
+    /// OpenSSL 3.6.3 through OSSL_SIGNATURE_PARAM_INSTANCE +
+    /// OSSL_SIGNATURE_PARAM_CONTEXT_STRING before adoption. **No test loaded
+    /// them.** The defect did not survive for want of evidence; it survived
+    /// because the evidence was orphaned. That is worth stating plainly,
+    /// because it is a different failure than a missing corpus and it is not
+    /// fixed by adding vectors.
+    ///
+    /// Signature equality is asserted, not just verify-accepts: a sign/verify
+    /// pair that drops the context on both sides round-trips perfectly against
+    /// itself while disagreeing with every other implementation — the same
+    /// self-consistent-but-wrong shape as the CKM_ECDSA_SHA1 digest mismatch.
+    #[test]
+    fn eddsa_ph_binds_context_matching_nist_acvp_vectors() {
+        for (json, want_scheme, sk_len) in [
+            (
+                include_str!("../../../tests/acvp/eddsa_test.json"),
+                "Ed25519ph",
+                32usize,
+            ),
+            (
+                include_str!("../../../tests/acvp/eddsa_ed448_test.json"),
+                "Ed448ph",
+                57usize,
+            ),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+            let sets = v["vectorSets"].as_array().expect("vectorSets");
+            let mut checked = 0usize;
+            let mut with_ctx = 0usize;
+            for set in sets {
+                if set["scheme"].as_str() != Some(want_scheme) {
+                    continue;
+                }
+                for t in set["tests"].as_array().expect("tests") {
+                    let d = unhex(t["d"].as_str().expect("d"));
+                    let q = unhex(t["q"].as_str().expect("q"));
+                    let msg = unhex(t["message"].as_str().expect("message"));
+                    let ctx = unhex(t["context"].as_str().unwrap_or(""));
+                    let want = unhex(t["signature"].as_str().expect("signature"));
+                    let id = t["id"].as_str().unwrap_or("?");
+                    assert_eq!(d.len(), sk_len, "{want_scheme} {id}: seed length");
+
+                    let got = sign_eddsa_ph(&d, &msg, &ctx)
+                        .unwrap_or_else(|e| panic!("{want_scheme} {id}: sign failed 0x{e:x}"));
+                    assert_eq!(
+                        got, want,
+                        "{want_scheme} {id}: signature mismatch with a {}-byte context \
+                         — the context is not reaching the dom2/dom4 prefix",
+                        ctx.len()
+                    );
+                    verify_eddsa_ph(&q, &msg, &got, &ctx)
+                        .unwrap_or_else(|e| panic!("{want_scheme} {id}: verify failed 0x{e:x}"));
+
+                    // A different context MUST produce a different signature,
+                    // and the original signature MUST NOT verify under it.
+                    // Without this, an implementation that ignores the context
+                    // still passes everything above.
+                    let mut other = ctx.clone();
+                    other.push(0xAA);
+                    if other.len() <= 255 {
+                        let got_other = sign_eddsa_ph(&d, &msg, &other).expect("sign other ctx");
+                        assert_ne!(
+                            got_other, got,
+                            "{want_scheme} {id}: changing the context did not change the \
+                             signature — the context is being ignored"
+                        );
+                        assert!(
+                            verify_eddsa_ph(&q, &msg, &got, &other).is_err(),
+                            "{want_scheme} {id}: signature verified under the WRONG context"
+                        );
+                    }
+
+                    checked += 1;
+                    if !ctx.is_empty() {
+                        with_ctx += 1;
+                    }
+                }
+            }
+            // Reachability: an assertion loop that ran zero times proves
+            // nothing, and a corpus of empty contexts would not exercise the
+            // defect at all.
+            assert!(checked > 0, "{want_scheme}: no vectors were exercised");
+            assert!(
+                with_ctx > 0,
+                "{want_scheme}: every vector had an EMPTY context, so this test \
+                 cannot detect a dropped context"
+            );
+        }
+    }
+
+    /// RFC 8032 caps the context at 255 bytes; 256 must be rejected as a
+    /// parameter error rather than truncated or passed through.
+    #[test]
+    fn eddsa_ph_rejects_oversized_context() {
+        let seed = [7u8; 32];
+        let too_long = vec![0u8; 256];
+        assert_eq!(
+            sign_eddsa_ph(&seed, b"msg", &too_long),
+            Err(CKR_MECHANISM_PARAM_INVALID)
+        );
+        assert_eq!(
+            sign_eddsa_ph(&seed, b"msg", &vec![0u8; 255]).map(|_| ()),
+            Ok(()),
+            "255 bytes is the documented maximum and must be accepted"
+        );
+    }
 
     /// X1 follow-up (2026-09-07). Every hash-composite ECDSA mechanism this
     /// engine advertises must ROUND-TRIP: the digest `sign_ecdsa` computes
