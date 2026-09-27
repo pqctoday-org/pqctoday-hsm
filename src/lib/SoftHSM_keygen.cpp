@@ -6161,6 +6161,10 @@ CK_RV SoftHSM::generateEC
 		return CKR_TEMPLATE_INCOMPLETE;
 	}
 
+	// Exactly one DER value (plan 3.B′): OpenSSL decodes a valid OID's prefix
+	// and ignores trailing bytes, which used to be accepted.
+	if (!isSingleDerValue(params.const_byte_str(), params.size())) return CKR_DOMAIN_PARAMS_INVALID;
+
 	// Refuse, with the §6.3 code, parameters OpenSSL cannot turn into a curve
 	// group — before generation, where the failure would be CKR_GENERAL_ERROR.
 #ifdef WITH_ECC
@@ -6445,6 +6449,8 @@ CK_RV SoftHSM::generateED
 	CK_ULONG edKeyGenMech = (edKeyType == CKK_EC_MONTGOMERY)
 		? (CK_ULONG)CKM_EC_MONTGOMERY_KEY_PAIR_GEN
 		: (CK_ULONG)CKM_EC_EDWARDS_KEY_PAIR_GEN;
+
+	if (!isSingleDerValue(params.const_byte_str(), params.size())) return CKR_DOMAIN_PARAMS_INVALID; // plan 3.B′
 
 	// Refuse, with the §6.3 code, parameters that name no Edwards/Montgomery
 	// curve this engine implements — before generation, where the failure

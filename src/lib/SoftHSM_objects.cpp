@@ -535,6 +535,21 @@ static CK_RV checkMLKEMKeyValue(CK_OBJECT_CLASS objClass,
 	return CKR_OK;
 }
 
+bool isSingleDerValue(const unsigned char* p, size_t n)
+{
+	if (p == NULL || n < 2) return false;
+	size_t hdr = 2, len = p[1];
+	if (p[1] & 0x80)
+	{
+		size_t nb = p[1] & 0x7f;
+		if (nb == 0 || nb > 3 || n < 2 + nb) return false; // no indefinite / oversized lengths
+		len = 0;
+		for (size_t i = 0; i < nb; i++) len = (len << 8) | p[2 + i];
+		hdr = 2 + nb;
+	}
+	return n == hdr + len;
+}
+
 CK_RV checkKeyLength(CK_KEY_TYPE keyType, size_t byteLen)
 {
 	switch (keyType) {
@@ -1538,6 +1553,15 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 	if (op == OBJECT_OP_CREATE &&
 	    (keyType == CKK_EC || keyType == CKK_EC_EDWARDS || keyType == CKK_EC_MONTGOMERY))
 	{
+		// Plan 3.B′: CKA_EC_PARAMS must be exactly one DER value (§6.3,
+		// CKR_DOMAIN_PARAMS_INVALID) — same rule as both key generators and
+		// the Rust engine's decode_ec_params.
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			if (pTemplate[i].type == CKA_EC_PARAMS && pTemplate[i].pValue != NULL_PTR &&
+			    !isSingleDerValue((const unsigned char*)pTemplate[i].pValue, pTemplate[i].ulValueLen))
+				return CKR_DOMAIN_PARAMS_INVALID;
+		}
 		rv = checkECPublicKeyPoint(objClass, keyType, pTemplate, ulCount);
 		if (rv != CKR_OK) return rv;
 	}
