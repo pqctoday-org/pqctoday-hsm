@@ -42,10 +42,16 @@ CPPUNIT_TEST_SUITE_REGISTRATION(EcParamsErrorTests);
 
 namespace {
 
+// TestsBase::setUp leaves the SO logged in on the token, so a USER login in
+// the same library instance answers CKR_USER_ANOTHER_ALREADY_LOGGED_IN.
+// Re-initialise first (the pattern AcvpEcKeyVerTests uses).
 CK_RV login(CK_SESSION_HANDLE& hSession, CK_SLOT_ID slot,
             CK_UTF8CHAR_PTR pin, CK_ULONG pinLen)
 {
-	CK_RV rv = CRYPTOKI_F_PTR( C_OpenSession(slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
+	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
+	CK_RV rv = CRYPTOKI_F_PTR( C_Initialize(NULL_PTR) );
+	if (rv != CKR_OK) return rv;
+	rv = CRYPTOKI_F_PTR( C_OpenSession(slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
 	                                        NULL_PTR, NULL_PTR, &hSession) );
 	if (rv != CKR_OK) return rv;
 	return CRYPTOKI_F_PTR( C_Login(hSession, CKU_USER, pin, pinLen) );

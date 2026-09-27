@@ -123,11 +123,12 @@ extern "C" {
 static CK_RV unusableEcParamsRv(const ByteString& params, bool acceptsCurveName)
 {
 	const size_t n = params.size();
+	const unsigned char* b = params.const_byte_str();
 	// One TLV with a short-form length that spans the whole value exactly.
 	// Named-curve OIDs and names are far below 128 bytes.
-	if (n >= 2 && (params[1] & 0x80) == 0 && n == 2 + (size_t)params[1])
+	if (n >= 2 && (b[1] & 0x80) == 0 && n == 2 + (size_t)b[1])
 	{
-		switch (params[0])
+		switch (b[0])
 		{
 			case 0x06: // OBJECT IDENTIFIER
 			case 0x30: // explicit ECParameters
