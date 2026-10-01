@@ -699,6 +699,16 @@ bash scripts/local-gate.sh --cpp --openssl-provider   # + this guide's ctest run
 bash scripts/local-gate.sh --all        # everything (pre-release)
 ```
 
+The gate's Rust steps build in the shared `pqc-cargo-target` volume
+(`/cargo-target` in the `pqc-rust` container), one build dir per worktree
+under `/cargo-target/worktrees/`. Before any build step the gate runs
+`scripts/prune-cargo-target.sh`, which keeps that volume at or under
+`CARGO_TARGET_CAP_GB` GiB (default 100; `0` disables) by deleting whole
+worktree build dirs, least recently used first. It never deletes the current
+run's dir, a dir modified in the last 180 minutes, the main tree's cache, or
+`/cargo-target/release/wasm-pack`; if that is not enough it only warns and
+prints the manual command. Pruning never fails the gate.
+
 ---
 
 ## 11. Key Template Requirements
