@@ -18435,7 +18435,13 @@ mod attr_integrity_ffi_tests {
         store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
         store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_DSA);
         store_ulong(&mut attrs, CKA_PARAMETER_SET, CKP_ML_DSA_65);
-        let raw = vec![0x5Au8; 4032]; // FIPS 204 §5 ML-DSA-65 sk length
+        // A real ML-DSA-65 sk (4032 bytes, FIPS 204 §5). It was 0x5A × 4032
+        // until 2026-09-30, but that is not a private key: every 4-bit s1/s2
+        // field reads 0xA = 10 > 2η = 8, i.e. coefficients outside [−η, η],
+        // which C_CreateObject now refuses (check_imported_ml_dsa_private).
+        let (_, raw) = crate::crypto::handlers::ml_dsa_keygen_from_seed(CKP_ML_DSA_65, &[0x5Au8; 32])
+            .expect("ML-DSA-65 keygen");
+        assert_eq!(raw.len(), 4032);
         attrs.insert(CKA_VALUE, raw.clone());
         let h = create_object_from_attrs(SESSION, attrs).expect("import must succeed");
         assert_eq!(obj_attr(h, CKA_VALUE), Some(raw), "raw-length CKA_VALUE must be untouched");
