@@ -295,6 +295,42 @@ pub unsafe fn get_attr_bytes(template: *mut u8, count: u32, attr_type: u32) -> O
     None
 }
 
+/// [`get_attr_bytes`] for an attribute whose PRESENCE is itself meaningful:
+/// `None` only when `attr_type` is absent from the template. An entry with
+/// `ulValueLen == 0` (or a NULL `pValue`) is returned as `Some` of an EMPTY
+/// value instead of being read as absent, so the caller can refuse it.
+///
+/// Written for `CKA_SEED` in key-pair generation (2026-09-30): there,
+/// absent selects the random path and present selects deterministic
+/// generation from the given seed, so `get_attr_bytes`' "empty means
+/// absent" turned a zero-length seed — a caller error — into a silently
+/// random key (Project Wycheproof ML-DSA "empty private seed"). PKCS#11
+/// v3.2 §4.1.1 rule 2: an invalid value for a valid attribute is
+/// CKR_ATTRIBUTE_VALUE_INVALID, which the callers' length checks now return.
+/// A separate reader rather than a change to `get_attr_bytes`, whose other
+/// callers rely on its current behaviour.
+///
+/// # Safety
+/// As [`get_attr_bytes`].
+pub unsafe fn get_attr_bytes_present(template: *mut u8, count: u32, attr_type: u32) -> Option<Vec<u8>> {
+    if template.is_null() || count > 65536 {
+        return None;
+    }
+    let ptr = template as *mut usize;
+    for i in 0..count {
+        let t = *ptr.add((i * 3) as usize) as u32;
+        if t == attr_type {
+            let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
+            let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
+            if val_ptr.is_null() || val_len == 0 {
+                return Some(Vec::new());
+            }
+            return Some(std::slice::from_raw_parts(val_ptr, val_len).to_vec());
+        }
+    }
+    None
+}
+
 /// True if `attr_type` is a server-managed (read-only) attribute that a caller's
 /// template must never set on a generate/derive/unwrap operation. PKCS#11 v3.2
 /// §4.1.1 / §4.3 Table 13 / §4.9 / §4.10: these are determined by the token, and

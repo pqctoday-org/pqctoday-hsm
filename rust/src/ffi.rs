@@ -2446,13 +2446,16 @@ fn C_GenerateKeyPair_impl(
                 // CKA_SEED (sensitive-material class). CKA_SEED is an attribute
                 // of the private key; the public template is honored as a
                 // fallback rather than silently ignoring an explicit seed.
-                let mut seed = get_attr_bytes(
+                // `get_attr_bytes_present`, not `get_attr_bytes`: a zero-length
+                // CKA_SEED is a present, wrong-length seed (refused below),
+                // not an absent one that selects the random path.
+                let mut seed = get_attr_bytes_present(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
                 )
                 .or_else(|| {
-                    get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                    get_attr_bytes_present(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
                 });
                 if let Some(ref s) = seed {
                     if s.len() != 64 {
@@ -2579,13 +2582,16 @@ fn C_GenerateKeyPair_impl(
                 // `KeyGen::keygen_from_seed`). Read explicitly —
                 // `absorb_template_attrs` skips CKA_SEED (sensitive-material
                 // class). Private-key attribute; public template is a fallback.
-                let mut seed = get_attr_bytes(
+                // `get_attr_bytes_present`, not `get_attr_bytes`: a zero-length
+                // CKA_SEED is a present, wrong-length seed (refused below),
+                // not an absent one that selects the random path.
+                let mut seed = get_attr_bytes_present(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
                 )
                 .or_else(|| {
-                    get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                    get_attr_bytes_present(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
                 });
                 if let Some(ref s) = seed {
                     if s.len() != 32 {
@@ -2718,13 +2724,15 @@ fn C_GenerateKeyPair_impl(
                 // (sensitive-material class). Private-key attribute; public
                 // template is a fallback. Per-param-set length validation
                 // (3n = 48/72/96) lives in the `slh_dsa_keygen!` macro.
-                let seed = get_attr_bytes(
+                // Presence-preserving read, as for ML-DSA/ML-KEM above: a
+                // zero-length seed reaches the macro's 3n length check.
+                let seed = get_attr_bytes_present(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
                 )
                 .or_else(|| {
-                    get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                    get_attr_bytes_present(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
                 });
                 match ps {
                     CKP_SLH_DSA_SHA2_128S => {
@@ -4010,9 +4018,10 @@ fn C_GenerateKeyPair_impl(
                     Ok(a) => a,
                     Err(_) => return CKR_ATTRIBUTE_VALUE_INVALID,
                 };
-                if get_attr_bytes(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
+                // Any CKA_SEED, zero-length included (`get_attr_bytes_present`).
+                if get_attr_bytes_present(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
                     .is_some()
-                    || get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                    || get_attr_bytes_present(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
                         .is_some()
                 {
                     return CKR_ATTRIBUTE_VALUE_INVALID;
@@ -4096,9 +4105,10 @@ fn C_GenerateKeyPair_impl(
                     Ok(ps) => ps,
                     Err(_) => return CKR_ATTRIBUTE_VALUE_INVALID,
                 };
-                if get_attr_bytes(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
+                // Any CKA_SEED, zero-length included (`get_attr_bytes_present`).
+                if get_attr_bytes_present(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
                     .is_some()
-                    || get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                    || get_attr_bytes_present(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
                         .is_some()
                 {
                     return CKR_ATTRIBUTE_VALUE_INVALID;
@@ -6467,6 +6477,59 @@ fn check_imported_slh_dsa_private(attrs: &Attributes) -> Result<(), u32> {
     crate::native::keygen::check_slh_dsa_private_value(ps, value)
 }
 
+/// Reject an ML-DSA private key whose s1 or s2 coefficients lie outside
+/// [−η, η] (FIPS 204 Algorithm 25; see `native::keygen::ml_dsa_sk_range_check`)
+/// at the point it enters the token from outside (`C_CreateObject`,
+/// `C_UnwrapKey`, `C_UnwrapKeyAuthenticated`). Runs AFTER
+/// `normalize_pqc_pkcs8_import`, so a PKCS#8-wrapped key is checked in its
+/// raw form. `Err(CKR_ATTRIBUTE_VALUE_INVALID)` per PKCS#11 v3.2 §4.1.1
+/// rule 2 — such a CKA_VALUE is not the FIPS 204 private key the ML-DSA
+/// private-key table (§6.67.3) requires; the unwrap call sites map it to
+/// CKR_WRAPPED_KEY_INVALID. No-op for any other object, a missing CKA_VALUE,
+/// or an absent/unknown parameter set (left to the existing handling, as
+/// `check_imported_slh_dsa_private` does).
+fn check_imported_ml_dsa_private(attrs: &Attributes) -> Result<(), u32> {
+    let class = crate::state::get_object_attr_u32_from(attrs, CKA_CLASS);
+    let key_type = crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE);
+    if class != Some(CKO_PRIVATE_KEY) || key_type != Some(CKK_ML_DSA) {
+        return Ok(());
+    }
+    let Some(value) = attrs.get(&CKA_VALUE) else {
+        return Ok(());
+    };
+    let ps = crate::state::get_object_param_set_from(attrs);
+    match crate::native::keygen::ml_dsa_sk_range_check(ps, value) {
+        Some(false) => Err(CKR_ATTRIBUTE_VALUE_INVALID),
+        _ => Ok(()),
+    }
+}
+
+/// The same FIPS 204 range check at `C_SignInit`, for an ML-DSA private key
+/// that is ALREADY in the store — imported before the check above existed,
+/// or restored from a snapshot — so it can never sign. Refused with
+/// CKR_KEY_TYPE_INCONSISTENT: listed for C_SignInit (§5.13.1), and the code
+/// this engine already returns when ML-DSA key material cannot be decoded
+/// for signing (`crypto::handlers::sign_ml_dsa`); CKR_KEY_FUNCTION_NOT_PERMITTED
+/// would misstate the cause (§5.1.6: it means the key's attributes forbid
+/// the use). A key that passes costs one pass over its packed s1 ‖ s2 bytes.
+fn check_ml_dsa_signing_key(h_key: u32) -> Result<(), u32> {
+    let verdict = OBJECTS.with(|o| {
+        let store = o.borrow();
+        let attrs = store.get(&h_key)?;
+        if crate::state::get_object_attr_u32_from(attrs, CKA_CLASS) != Some(CKO_PRIVATE_KEY)
+            || crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE) != Some(CKK_ML_DSA)
+        {
+            return None;
+        }
+        let ps = crate::state::get_object_param_set_from(attrs);
+        crate::native::keygen::ml_dsa_sk_range_check(ps, attrs.get(&CKA_VALUE)?)
+    });
+    match verdict {
+        Some(false) => Err(CKR_KEY_TYPE_INCONSISTENT),
+        _ => Ok(()),
+    }
+}
+
 /// FIPS 203 §7.2 (public `ek`) / §7.3 (private `dk`) key input checks for a
 /// `CKK_ML_KEM` object about to be created from caller-supplied bytes. Runs
 /// AFTER `normalize_pqc_pkcs8_import`, so a PKCS#8-wrapped `dk` is checked in
@@ -6675,6 +6738,7 @@ pub(crate) fn create_object_from_attrs(
     if class == Some(CKO_PRIVATE_KEY) {
         normalize_pqc_pkcs8_import(&mut new_attrs)?;
         check_imported_slh_dsa_private(&new_attrs)?;
+        check_imported_ml_dsa_private(&new_attrs)?;
     }
 
     // FIPS 203 §7.2 / §7.3 key input checks on an imported ML-KEM key, run
@@ -7273,6 +7337,11 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         if let Err(rv) =
             check_key_for_mech(h_session, h_key, CKA_SIGN, ck_param::mech(p_mechanism).mechanism)
         {
+            return rv;
+        }
+        // FIPS 204 Algorithm 25 — an ML-DSA private key with s1/s2 out of
+        // range never signs, however it reached the store.
+        if let Err(rv) = check_ml_dsa_signing_key(h_key) {
             return rv;
         }
         let mut mech_type = ck_param::mech(p_mechanism).mechanism;
@@ -13865,6 +13934,11 @@ pub fn C_UnwrapKey(
         if check_imported_slh_dsa_private(&attrs).is_err() {
             return CKR_WRAPPED_KEY_INVALID;
         }
+        // Likewise an ML-DSA private key with s1/s2 out of range (FIPS 204
+        // Algorithm 25; check_imported_ml_dsa_private).
+        if check_imported_ml_dsa_private(&attrs).is_err() {
+            return CKR_WRAPPED_KEY_INVALID;
+        }
 
         *ph_key = allocate_handle_owned(_h_session, attrs);
     }
@@ -14269,6 +14343,11 @@ pub fn C_UnwrapKeyAuthenticated(
 
         // Same SLH-DSA PK.root check as C_UnwrapKey.
         if check_imported_slh_dsa_private(&attrs).is_err() {
+            return CKR_WRAPPED_KEY_INVALID;
+        }
+        // Likewise an ML-DSA private key with s1/s2 out of range (FIPS 204
+        // Algorithm 25; check_imported_ml_dsa_private).
+        if check_imported_ml_dsa_private(&attrs).is_err() {
             return CKR_WRAPPED_KEY_INVALID;
         }
 
@@ -26433,6 +26512,12 @@ mod conformance_v32_tests;
 #[cfg(test)]
 #[path = "mlkem_input_check_tests.rs"]
 mod mlkem_input_check_tests;
+
+/// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
+/// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.
+#[cfg(test)]
+#[path = "wycheproof_mldsa_tests.rs"]
+mod wycheproof_mldsa_tests;
 
 // ── Mechanism-parameter struct widths (2026-08-13) ──────────────────────────
 //
