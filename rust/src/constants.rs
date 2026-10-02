@@ -241,11 +241,19 @@ pub const CKP_HPKE_KEM_DHKEM_X448_HKDF_SHA512: u32 = 0x0021;
 pub const CKP_HPKE_KEM_MLKEM768_P256: u32 = 0x0050;
 pub const CKP_HPKE_KEM_MLKEM1024_P384: u32 = 0x0051;
 pub const CKP_HPKE_KEM_MLKEM768_X25519: u32 = 0x647a;
+/// Pure ML-KEM HPKE KEMs (draft-ietf-hpke-pq-04 §3, Table 2). Private key
+/// = the 64-byte FIPS 203 seed `d ‖ z`.
+pub const CKP_HPKE_KEM_ML_KEM_512: u32 = 0x0040;
+pub const CKP_HPKE_KEM_ML_KEM_768: u32 = 0x0041;
+pub const CKP_HPKE_KEM_ML_KEM_1024: u32 = 0x0042;
 
 /// `CK_HPKE_KDF_TYPE` — equal to RFC 9180 §7.2's `kdf_id`.
 pub const CKD_HPKE_HKDF_SHA256: u32 = 0x0001;
 pub const CKD_HPKE_HKDF_SHA384: u32 = 0x0002;
 pub const CKD_HPKE_HKDF_SHA512: u32 = 0x0003;
+/// One-stage KDF (draft-ietf-hpke-pq-04 §5, Table 1; key schedule per
+/// draft-ietf-hpke-hpke-03 §4.4/§5.1 `LabeledDerive`/`CombineSecrets_OneStage`).
+pub const CKD_HPKE_SHAKE256: u32 = 0x0011;
 
 /// `CK_HPKE_AEAD_TYPE` — equal to RFC 9180 §7.3's `aead_id`.
 pub const CKZ_HPKE_AEAD_128_GCM: u32 = 0x0001;

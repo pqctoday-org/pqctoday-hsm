@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Rust engine: `CKM_HPKE` runs the post-quantum JOSE suites in the token —
+  SHAKE256 one-stage KDF, pure ML-KEM KEMs, seed-format keys.** Needed for
+  draft-ietf-jose-hpke-pq-pqt's HPKE-12 (ML-KEM-768/SHAKE256/AES-256-GCM)
+  and HPKE-9 (MLKEM768-X25519/SHAKE256/AES-256-GCM), which `CKM_HPKE`
+  previously refused with `CKR_MECHANISM_PARAM_INVALID`.
+  (1) `CKD_HPKE_SHAKE256` (0x0011): draft-ietf-hpke-hpke-03 one-stage key
+  schedule (`LabeledDerive`, `CombineSecrets_OneStage`), Base and PSK modes.
+  (2) `CKP_HPKE_KEM_ML_KEM_512/768/1024` (0x0040–0x0042), draft-ietf-hpke-pq-04
+  §3. (3) Seed-format private keys for the pure ML-KEM (64-byte `d ‖ z`) and
+  PQ/T hybrid (32-byte) suites, expanded in the token on each Decap; a
+  `CKA_SEED` in the `CKM_HPKE_KEM_KEY_PAIR_GEN` template imports an existing
+  seed-format key. (4) The test-only `pEphemeralSeed` hook now covers ML-KEM
+  and the hybrids. Verified byte for byte against the draft-ietf-hpke-pq-04
+  vectors (8 in-scope suites, including DeriveKeyPair, Encap, the key
+  schedule, encryptions and exports), the CFRG concrete-hybrid-kems vectors
+  (30), the X-Wing draft vectors (3), the JOSE HPKE-12/HPKE-9 examples
+  (decrypted in-engine) and NIST ACVP SHAKE-256 (41 byte-aligned AFT cases).
+
+### Changed
+
+- **Rust engine: `CKK_HPKE_KEM` hybrid private keys are stored as their
+  32-byte seed** (draft-ietf-hpke-pq-04 SerializePrivateKey) instead of the
+  expanded `dk_PQ ‖ dk_T`; an expanded-form value is refused. These keys are
+  session objects, so no stored key is affected.
+
 ### Fixed
 
 - **Rust engine: ML-DSA private keys with out-of-range s1/s2 are refused, and

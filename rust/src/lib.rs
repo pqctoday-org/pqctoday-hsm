@@ -71,5 +71,9 @@ pub mod state_snapshot;
 // entry points (gap-closure plan 2026-09-25, findings E11-E17).
 #[cfg(test)]
 mod acvp_nist_vectors_tests;
+// Published-vector replay for the CKM_HPKE SHAKE256 / pure ML-KEM /
+// seed-format-key additions (2026-10-01).
+#[cfg(test)]
+mod hpke_pq_vectors_tests;
 
 pub use ffi::*;

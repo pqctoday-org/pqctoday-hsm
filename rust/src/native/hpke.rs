@@ -76,6 +76,9 @@ enum KemShape {
     /// label (draft-irtf-cfrg-concrete-hybrid-kems §4). No Auth interface —
     /// ML-KEM defines no AuthEncap/AuthDecap.
     Hybrid { pq_ps: u32, curve: Curve, label: &'static [u8] },
+    /// Pure ML-KEM (draft-ietf-hpke-pq-04 §3). `ps` is the ML-KEM
+    /// `CKA_PARAMETER_SET`. No Auth interface.
+    MlKem { ps: u32 },
 }
 
 struct KemInfo {
@@ -126,8 +129,62 @@ fn kem_info(kem_id: u32) -> Result<KemInfo, CkRv> {
             },
             n_secret: 32,
         },
+        CKP_HPKE_KEM_ML_KEM_512 => KemInfo { shape: KemShape::MlKem { ps: CKP_ML_KEM_512 }, n_secret: 32 },
+        CKP_HPKE_KEM_ML_KEM_768 => KemInfo { shape: KemShape::MlKem { ps: CKP_ML_KEM_768 }, n_secret: 32 },
+        CKP_HPKE_KEM_ML_KEM_1024 => KemInfo { shape: KemShape::MlKem { ps: CKP_ML_KEM_1024 }, n_secret: 32 },
         _ => return Err(CKR_MECHANISM_PARAM_INVALID),
     })
+}
+
+/// Length of a seed-format private key (`Nsk`, draft-ietf-hpke-pq-04 Tables
+/// 2-3): 64 for pure ML-KEM (`d ‖ z`), 32 for the PQ/T hybrids. Classical
+/// DHKEM keys keep RFC 9180's scalar format and are not seed-format.
+fn seed_len(shape: &KemShape) -> Option<usize> {
+    match shape {
+        KemShape::MlKem { .. } => Some(64),
+        KemShape::Hybrid { .. } => Some(32),
+        KemShape::Classical { .. } => None,
+    }
+}
+
+// ── One-stage KDF (draft-ietf-hpke-hpke-03 §4.4, draft-ietf-hpke-pq-04 §5) ──
+
+/// `SHAKE256.Derive(ikm, L) = SHAKE256(M = ikm, d = 8L)`.
+fn shake256_derive(ikm: &[u8], l: usize) -> Vec<u8> {
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    let mut h = sha3::Shake256::default();
+    h.update(ikm);
+    let mut out = vec![0u8; l];
+    h.finalize_xof().read(&mut out);
+    out
+}
+
+fn length_prefixed(x: &[u8]) -> Result<Vec<u8>, CkRv> {
+    if x.len() > 0xffff {
+        // draft-ietf-hpke-hpke-03 §7.2.1: 65,535-byte limit for one-stage KDF inputs.
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    Ok([&i2osp2(x.len())[..], x].concat())
+}
+
+/// draft-ietf-hpke-hpke-03 §4.4 `LabeledDerive(ikm, label, context, L)` with
+/// SHAKE256: `Derive(ikm ‖ "HPKE-v1" ‖ suite_id ‖ lengthPrefixed(label) ‖
+/// I2OSP(L, 2) ‖ context, L)`.
+fn labeled_derive(suite_id: &[u8], ikm: &[u8], label: &[u8], context: &[u8], l: usize) -> Result<Vec<u8>, CkRv> {
+    if l > 0xffff {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let labeled = [ikm, HPKE_V1, suite_id, &length_prefixed(label)?, &i2osp2(l)[..], context].concat();
+    Ok(shake256_derive(&labeled, l))
+}
+
+/// draft-ietf-hpke-pq-04 §3/§4 `DeriveKeyPair(ikm)` for the PQ and PQ/T KEMs:
+/// the seed-format private key `SHAKE256.LabeledDerive(ikm, "DeriveKeyPair",
+/// "", Nsk)` under the KEM's own `suite_id` ("KEM" ‖ I2OSP(kem_id, 2)).
+pub fn derive_key_pair_seed(kem_id: u32, ikm: &[u8]) -> Result<Vec<u8>, CkRv> {
+    let info = kem_info(kem_id)?;
+    let nsk = seed_len(&info.shape).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    labeled_derive(&kem_suite_id(kem_id), ikm, b"DeriveKeyPair", &[], nsk)
 }
 
 // ── HKDF (RFC 5869) — LabeledExtract / LabeledExpand (RFC 9180 §4) ─────────
@@ -347,28 +404,42 @@ fn curve_point_len(curve: Curve) -> usize {
 
 // ── ML-KEM (mirrors native::encrypt's encapsulate/decapsulate ML-KEM arm) ──
 
-fn mlkem_encap(ps: u32, ek_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    // HPKE's ML-KEM suites are 768 and 1024 only.
-    if ps != CKP_ML_KEM_768 && ps != CKP_ML_KEM_1024 {
+/// `ML-KEM.Encaps_internal(ek, m)`. `m` is 32 fresh OS bytes (the same single
+/// draw ml-kem's own `encapsulate(rng)` makes) unless `forced_m` is given —
+/// deterministic Encaps for published-vector reproduction ONLY, see
+/// `HpkeParams::ephemeral_seed`.
+fn mlkem_encap(ps: u32, ek_bytes: &[u8], forced_m: Option<&[u8]>) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    if mlkem_ek_len(ps) == 0 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    // One 32-byte OS draw for m (as ml-kem's encapsulate(rng)); then
-    // Encaps_internal on AWS-LC or ml-kem (crate::crypto::handlers).
     let mut m = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut m);
+    match forced_m {
+        Some(f) => m.copy_from_slice(f.get(..32).filter(|_| f.len() == 32).ok_or(CKR_MECHANISM_PARAM_INVALID)?),
+        None => rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut m),
+    }
     crate::crypto::handlers::ml_kem_encaps(ps, ek_bytes, &m)
 }
 
 fn mlkem_decap(ps: u32, dk_bytes: &[u8], ct: &[u8]) -> Result<Vec<u8>, CkRv> {
-    if ps != CKP_ML_KEM_768 && ps != CKP_ML_KEM_1024 {
+    if mlkem_ek_len(ps) == 0 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     crate::crypto::handlers::ml_kem_decaps(ps, dk_bytes, ct)
 }
 
+/// FIPS 203 `KeyGen_internal(d, z)` from the 64-byte seed-format key →
+/// `(ek, expanded dk)`. The expanded key exists only in this call's locals.
+fn mlkem_expand(ps: u32, dz: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    if dz.len() != 64 {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    crate::crypto::handlers::ml_kem_keygen_from_seed(ps, dz).ok_or(CKR_ARGUMENTS_BAD)
+}
+
 fn mlkem_sizes(ps: u32) -> (usize, usize) {
     // (ek/dk-independent ciphertext length, shared-secret length)
     match ps {
+        CKP_ML_KEM_512 => (768, 32),
         CKP_ML_KEM_768 => (1088, 32),
         CKP_ML_KEM_1024 => (1568, 32),
         _ => (0, 0),
@@ -377,9 +448,86 @@ fn mlkem_sizes(ps: u32) -> (usize, usize) {
 
 fn mlkem_ek_len(ps: u32) -> usize {
     match ps {
+        CKP_ML_KEM_512 => 800,
         CKP_ML_KEM_768 => 1184,
         CKP_ML_KEM_1024 => 1568,
         _ => 0,
+    }
+}
+
+// ── Seed-format hybrid keys (draft-irtf-cfrg-concrete-hybrid-kems; the
+//    GENERIC DeriveKeyPair draft-ietf-hpke-pq-04 §4 delegates to) ────────────
+
+/// Bytes of classical seed per component: X25519 takes its 32-byte seed as
+/// the scalar; P-256 rejection-samples 32-byte windows out of 128 bytes; P-384
+/// takes one 48-byte window. Also the classical share of Encap randomness.
+fn classical_seed_len(curve: Curve) -> Result<usize, CkRv> {
+    match curve {
+        Curve::X25519 => Ok(32),
+        Curve::P256 => Ok(128),
+        Curve::P384 => Ok(48),
+        Curve::P521 | Curve::X448 => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Classical component keygen from seed → `(scalar, public point)`. NIST
+/// curves: the first big-endian scalar-sized window that is a valid nonzero
+/// scalar `< n` (rejection sampling); none valid → failure, never reduction.
+fn classical_from_seed(curve: Curve, seed: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    match curve {
+        Curve::X25519 => {
+            let sk = seed.to_vec();
+            let pk = derive_pub_from_priv(curve, &sk)?;
+            Ok((sk, pk))
+        }
+        Curve::P256 | Curve::P384 => {
+            let w = if matches!(curve, Curve::P256) { 32 } else { 48 };
+            for win in seed.chunks_exact(w) {
+                let ok = match curve {
+                    Curve::P256 => p256::SecretKey::from_slice(win).is_ok(),
+                    _ => p384::SecretKey::from_slice(win).is_ok(),
+                };
+                if ok {
+                    let pk = derive_pub_from_priv(curve, win)?;
+                    return Ok((win.to_vec(), pk));
+                }
+            }
+            Err(CKR_FUNCTION_FAILED)
+        }
+        Curve::P521 | Curve::X448 => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Expanded view of a hybrid seed-format key: `SHAKE256(seed, 64 + n_t)` split
+/// as ML-KEM `d ‖ z` (64) ‖ classical seed (n_t). Locals only.
+struct HybridKeys {
+    ek_pq: Vec<u8>,
+    dk_pq: Vec<u8>,
+    sk_t: Vec<u8>,
+    ek_t: Vec<u8>,
+}
+
+fn hybrid_expand(pq_ps: u32, curve: Curve, seed: &[u8]) -> Result<HybridKeys, CkRv> {
+    if seed.len() != 32 {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let n_t = classical_seed_len(curve)?;
+    let xof = shake256_derive(seed, 64 + n_t);
+    let (ek_pq, dk_pq) = mlkem_expand(pq_ps, &xof[..64])?;
+    let (sk_t, ek_t) = classical_from_seed(curve, &xof[64..])?;
+    Ok(HybridKeys { ek_pq, dk_pq, sk_t, ek_t })
+}
+
+/// Public key for a seed-format private key — the KEM's SerializePublicKey
+/// output (`ek` for ML-KEM, `ek_PQ ‖ ek_T` for a hybrid).
+fn public_from_seed(info: &KemInfo, seed: &[u8]) -> Result<Vec<u8>, CkRv> {
+    match &info.shape {
+        KemShape::MlKem { ps } => Ok(mlkem_expand(*ps, seed)?.0),
+        KemShape::Hybrid { pq_ps, curve, .. } => {
+            let k = hybrid_expand(*pq_ps, *curve, seed)?;
+            Ok([k.ek_pq.as_slice(), k.ek_t.as_slice()].concat())
+        }
+        KemShape::Classical { .. } => Err(CKR_MECHANISM_PARAM_INVALID),
     }
 }
 
@@ -406,6 +554,7 @@ fn hybrid_combine(ss_pq: &[u8], ss_t: &[u8], ct_t: &[u8], ek_t: &[u8], label: &[
 fn split_ek(info: &KemInfo, ek_h: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     match &info.shape {
         KemShape::Classical { .. } => Ok((Vec::new(), ek_h.to_vec())),
+        KemShape::MlKem { .. } => Ok((ek_h.to_vec(), Vec::new())),
         KemShape::Hybrid { pq_ps, .. } => {
             let pq_len = mlkem_ek_len(*pq_ps);
             if ek_h.len() <= pq_len {
@@ -416,18 +565,36 @@ fn split_ek(info: &KemInfo, ek_h: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     }
 }
 
-/// Generate a `CKK_HPKE_KEM` key pair for `kem_id`. Hybrid suites generate
-/// both components internally (ML-KEM + classical) via the existing
-/// single-algorithm native keygen, read their values in-engine, then pack
-/// them into ONE composite object per component — the transient component
-/// objects are destroyed immediately after, never exposed as separate
-/// handles (proposal §5.1: a uniform key type across every suite, forced by
-/// `C_DecapsulateKey`'s single `hKey` argument needing to resolve to two
-/// private components for a hybrid KEM).
+/// Generate a `CKK_HPKE_KEM` key pair for `kem_id`.
+///
+/// Classical DHKEM suites: generated via the existing single-algorithm native
+/// keygen; the private `CKA_VALUE` is the RFC 9180 scalar.
+///
+/// Pure ML-KEM and PQ/T hybrid suites: **seed format** (draft-ietf-hpke-pq-04
+/// §3/§4 SerializePrivateKey). The private `CKA_VALUE` is the seed — 64 bytes
+/// (`d ‖ z`) for ML-KEM, 32 bytes for a hybrid — and the expanded component
+/// keys are re-derived inside the engine on every Decap, never stored. A
+/// fresh random seed is drawn unless `seed` is given (`CKA_SEED` in the
+/// private-key template: import of an existing seed-format key, e.g. a JOSE
+/// AKP `priv`, or replay of a published vector's `skRm`).
 pub fn keygen(session: u32, kem_id: u32, cka_id: &[u8], label: &str) -> Result<(u32, u32), CkRv> {
+    keygen_with_seed(session, kem_id, None, cka_id, label)
+}
+
+pub fn keygen_with_seed(
+    session: u32,
+    kem_id: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
     let info = kem_info(kem_id)?;
     let (ek, dk): (Vec<u8>, Vec<u8>) = match &info.shape {
         KemShape::Classical { curve, .. } => {
+            if seed.is_some() {
+                // RFC 9180 classical keys are not seed-format here.
+                return Err(CKR_TEMPLATE_INCONSISTENT);
+            }
             let (pub_h, priv_h) = generate_classical_keypair(session, *curve, cka_id, label)?;
             let ek = read_classical_point(*curve, pub_h)?;
             let dk = get_object_value(priv_h).ok_or(CKR_FUNCTION_FAILED)?;
@@ -435,19 +602,18 @@ pub fn keygen(session: u32, kem_id: u32, cka_id: &[u8], label: &str) -> Result<(
             let _ = super::object::destroy_object(session, priv_h);
             (ek, dk)
         }
-        KemShape::Hybrid { pq_ps, curve, .. } => {
-            let (mlkem_pub, mlkem_priv) =
-                super::keygen::generate_ml_kem_keypair(session, *pq_ps, cka_id, label)?;
-            let ek_pq = get_object_value(mlkem_pub).ok_or(CKR_FUNCTION_FAILED)?;
-            let dk_pq = get_object_value(mlkem_priv).ok_or(CKR_FUNCTION_FAILED)?;
-            let (c_pub, c_priv) = generate_classical_keypair(session, *curve, cka_id, label)?;
-            let ek_t = read_classical_point(*curve, c_pub)?;
-            let dk_t = get_object_value(c_priv).ok_or(CKR_FUNCTION_FAILED)?;
-            let _ = super::object::destroy_object(session, mlkem_pub);
-            let _ = super::object::destroy_object(session, mlkem_priv);
-            let _ = super::object::destroy_object(session, c_pub);
-            let _ = super::object::destroy_object(session, c_priv);
-            ([ek_pq.as_slice(), ek_t.as_slice()].concat(), [dk_pq.as_slice(), dk_t.as_slice()].concat())
+        KemShape::MlKem { .. } | KemShape::Hybrid { .. } => {
+            let nsk = seed_len(&info.shape).ok_or(CKR_FUNCTION_FAILED)?;
+            let sk = match seed {
+                Some(s) if s.len() == nsk => s.to_vec(),
+                Some(_) => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
+                None => {
+                    let mut s = vec![0u8; nsk];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut s);
+                    s
+                }
+            };
+            (public_from_seed(&info, &sk)?, sk)
         }
     };
 
@@ -464,7 +630,7 @@ pub fn keygen(session: u32, kem_id: u32, cka_id: &[u8], label: &str) -> Result<(
     store_bool(&mut pub_attrs, CKA_TOKEN, false);
     store_bool(&mut pub_attrs, CKA_PRIVATE, false);
     store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
-    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+    store_bool(&mut pub_attrs, CKA_LOCAL, seed.is_none());
     let pub_handle = allocate_handle_owned(session, pub_attrs);
 
     let mut prv_attrs: Attributes = HashMap::new();
@@ -478,7 +644,7 @@ pub fn keygen(session: u32, kem_id: u32, cka_id: &[u8], label: &str) -> Result<(
     store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
     store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
     store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
-    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, seed.is_none());
     let priv_handle = allocate_handle_owned(session, prv_attrs);
 
     Ok((pub_handle, priv_handle))
@@ -552,6 +718,40 @@ fn key_schedule(
     Ok(KeyScheduleOutput { key, base_nonce, exporter_secret })
 }
 
+/// draft-ietf-hpke-hpke-03 §5.1 `KeySchedule` with `CombineSecrets_OneStage`:
+/// `secret = LabeledDerive(lengthPrefixed(psk) ‖ lengthPrefixed(shared_secret),
+/// "secret", mode ‖ lengthPrefixed(psk_id) ‖ lengthPrefixed(info), Nk+Nn+Nh)`,
+/// split as key ‖ base_nonce ‖ exporter_secret.
+#[allow(clippy::too_many_arguments)]
+fn key_schedule_one_stage(
+    sid: &[u8],
+    mode: u32,
+    shared_secret: &[u8],
+    info: &[u8],
+    psk: &[u8],
+    psk_id: &[u8],
+    aead_nk_nn: Option<(usize, usize)>,
+    n_h: usize,
+) -> Result<KeyScheduleOutput, CkRv> {
+    // hpke-hpke-03 Table 1 defines only mode_base and mode_psk.
+    if mode != CKZ_HPKE_MODE_BASE && mode != CKZ_HPKE_MODE_PSK {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let got_psk = !psk.is_empty();
+    if got_psk != !psk_id.is_empty() || got_psk != (mode == CKZ_HPKE_MODE_PSK) {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let secrets = [length_prefixed(psk)?, length_prefixed(shared_secret)?].concat();
+    let context = [&[mode as u8][..], &length_prefixed(psk_id)?, &length_prefixed(info)?].concat();
+    let (nk, nn) = aead_nk_nn.unwrap_or((0, 0));
+    let secret = labeled_derive(sid, &secrets, b"secret", &context, nk + nn + n_h)?;
+    let (key, base_nonce) = match aead_nk_nn {
+        Some(_) => (Some(secret[..nk].to_vec()), Some(secret[nk..nk + nn].to_vec())),
+        None => (None, None),
+    };
+    Ok(KeyScheduleOutput { key, base_nonce, exporter_secret: secret[nk + nn..].to_vec() })
+}
+
 fn kdf_prf_mech(kdf_id: u32) -> Result<(u32, usize), CkRv> {
     Ok(match kdf_id {
         CKD_HPKE_HKDF_SHA256 => (CKM_SHA256, 32),
@@ -587,10 +787,12 @@ pub struct HpkeParams<'a> {
     /// Auth/AuthPSK, recipient (Decap) side: the sender's static public
     /// point (public — bytes are fine).
     pub sender_static_pub: Option<&'a [u8]>,
-    /// Phase-1 implementation detail (proposal §8 OQ): forces the ephemeral
-    /// classical keypair for byte-exact RFC 9180 Appendix A vector
-    /// reproduction. Classical KEM IDs ONLY — Err for a hybrid `kem_id`.
-    /// MUST NOT be used outside test contexts.
+    /// Forces the Encap randomness for byte-exact reproduction of published
+    /// vectors: the ephemeral classical scalar (DHKEM, RFC 9180 Appendix A),
+    /// ML-KEM's 32-byte `m` (pure ML-KEM, draft-ietf-hpke-pq-04 `ikmE`), or
+    /// `m ‖ classical seed` (PQ/T hybrids, CFRG `randomness`). A wrong length
+    /// is CKR_MECHANISM_PARAM_INVALID. MUST NOT be used outside known-answer
+    /// testing: fixed randomness makes every encapsulation to a key identical.
     pub ephemeral_seed: Option<&'a [u8]>,
 }
 
@@ -717,15 +919,32 @@ pub fn encapsulate(
             if want_auth {
                 return Err(CKR_MECHANISM_PARAM_INVALID);
             }
-            if p.ephemeral_seed.is_some() {
-                return Err(CKR_MECHANISM_PARAM_INVALID); // Phase-1 scope: classical only, see proposal §8
-            }
             let (ek_pq, ek_t) = split_ek(&info, &ek_h)?;
-            let (ct_pq, ss_pq) = mlkem_encap(*pq_ps, &ek_pq)?;
-            let (ct_t, ss_t) = ec_ephemeral_dh(*curve, &ek_t, None)?;
+            // Encap randomness (draft-irtf-cfrg-concrete-hybrid-kems): the
+            // ML-KEM `m` (32) ‖ the classical ephemeral seed. Fresh OS bytes
+            // unless `ephemeral_seed` forces them (published-vector replay).
+            let n_t = classical_seed_len(*curve)?;
+            let rand = match p.ephemeral_seed {
+                Some(r) if r.len() == 32 + n_t => r.to_vec(),
+                Some(_) => return Err(CKR_MECHANISM_PARAM_INVALID),
+                None => {
+                    let mut r = vec![0u8; 32 + n_t];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut r);
+                    r
+                }
+            };
+            let (ct_pq, ss_pq) = mlkem_encap(*pq_ps, &ek_pq, Some(&rand[..32]))?;
+            let (eph_sk, ct_t) = classical_from_seed(*curve, &rand[32..])?;
+            let ss_t = ec_static_dh(*curve, &eph_sk, &ek_t)?;
             let ss_h = hybrid_combine(&ss_pq, &ss_t, &ct_t, &ek_t, label);
             let enc = [ct_pq.as_slice(), ct_t.as_slice()].concat();
             (enc, ss_h)
+        }
+        KemShape::MlKem { ps } => {
+            if want_auth {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            mlkem_encap(*ps, &ek_h, p.ephemeral_seed)?
         }
     };
 
@@ -793,34 +1012,27 @@ pub fn decapsulate(
             if want_auth {
                 return Err(CKR_MECHANISM_PARAM_INVALID);
             }
-            let pq_dk_len = dk_h.len().saturating_sub(match curve {
-                Curve::X25519 => 32,
-                Curve::X448 => 56,
-                Curve::P256 | Curve::P384 | Curve::P521 => {
-                    // classical scalar length equals the curve's field size
-                    match curve {
-                        Curve::P256 => 32,
-                        Curve::P384 => 48,
-                        Curve::P521 => 66,
-                        _ => unreachable!(),
-                    }
-                }
-            });
-            if pq_dk_len == 0 || pq_dk_len > dk_h.len() {
-                return Err(CKR_ARGUMENTS_BAD);
-            }
-            let (dk_pq, dk_t) = (&dk_h[..pq_dk_len], &dk_h[pq_dk_len..]);
+            // Seed-format key: expand in-engine (locals only). A pre-seed
+            // expanded `dk_PQ ‖ dk_T` value is refused here (owner decision D2).
+            let k = hybrid_expand(*pq_ps, *curve, &dk_h)?;
             let pq_ct_len = mlkem_sizes(*pq_ps).0;
             if enc.len() <= pq_ct_len {
                 return Err(CKR_ARGUMENTS_BAD);
             }
             let (ct_pq, ct_t) = enc.split_at(pq_ct_len);
-            let ss_pq = mlkem_decap(*pq_ps, dk_pq, ct_pq)?;
-            let ss_t = ec_static_dh(*curve, dk_t, ct_t)?;
-            // RFC 9180 §4.1 / the CG combiner both need only ek_T, derived
-            // from dk_T — ek_PQ is not a combiner operand (Table 1, §6.1).
-            let ek_t = derive_pub_from_priv(*curve, dk_t)?;
-            hybrid_combine(&ss_pq, &ss_t, ct_t, &ek_t, label)
+            let ss_pq = mlkem_decap(*pq_ps, &k.dk_pq, ct_pq)?;
+            let ss_t = ec_static_dh(*curve, &k.sk_t, ct_t)?;
+            hybrid_combine(&ss_pq, &ss_t, ct_t, &k.ek_t, label)
+        }
+        KemShape::MlKem { ps } => {
+            if want_auth {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            let (_ek, dk) = mlkem_expand(*ps, &dk_h)?;
+            if enc.len() != mlkem_sizes(*ps).0 {
+                return Err(CKR_ARGUMENTS_BAD);
+            }
+            mlkem_decap(*ps, &dk, enc)?
         }
     };
 
@@ -834,11 +1046,16 @@ fn finish_encap_decap(
     enc: Vec<u8>,
     exporter_template: Option<Vec<(u32, Vec<u8>)>>,
 ) -> Result<HpkeResult, CkRv> {
-    let (kdf_prf, n_h) = kdf_prf_mech(p.kdf_id)?;
     let sid = hpke_suite_id(p.kem_id, p.kdf_id, p.aead_id);
     let aead_nk_nn = aead_sizes(p.aead_id)?;
 
-    let sched = key_schedule(kdf_prf, &sid, p.mode, shared_secret, p.info, p.psk, p.psk_id, aead_nk_nn, n_h)?;
+    let sched = if p.kdf_id == CKD_HPKE_SHAKE256 {
+        // SHAKE256: Nh = 64 (draft-ietf-hpke-pq-04 Table 1).
+        key_schedule_one_stage(&sid, p.mode, shared_secret, p.info, p.psk, p.psk_id, aead_nk_nn, 64)?
+    } else {
+        let (kdf_prf, n_h) = kdf_prf_mech(p.kdf_id)?;
+        key_schedule(kdf_prf, &sid, p.mode, shared_secret, p.info, p.psk, p.psk_id, aead_nk_nn, n_h)?
+    };
 
     let key_handle = sched.key.map(|k| register_aead_key(session, k, p.aead_id));
     let exporter_handle = if p.aead_id == CKZ_HPKE_AEAD_EXPORT_ONLY {
@@ -883,6 +1100,53 @@ fn derive_pub_from_priv(curve: Curve, scalar: &[u8]) -> Result<Vec<u8>, CkRv> {
             let sk = x448::StaticSecret::from(arr);
             Ok(x448::PublicKey::from(&sk).as_bytes().to_vec())
         }
+    }
+}
+
+// ── Test-only accessors for the published-vector suite
+//    (src/hpke_pq_vectors_tests.rs). Not compiled into the library. ─────────
+
+#[cfg(test)]
+pub(crate) fn shake256_for_test(m: &[u8], l: usize) -> Vec<u8> {
+    shake256_derive(m, l)
+}
+
+#[cfg(test)]
+pub(crate) fn labeled_derive_for_test(sid: &[u8], ikm: &[u8], label: &[u8], ctx: &[u8], l: usize) -> Result<Vec<u8>, CkRv> {
+    labeled_derive(sid, ikm, label, ctx, l)
+}
+
+/// `(key, base_nonce, exporter_secret)` from a published `shared_secret`,
+/// Base mode, through the production one-stage schedule.
+#[cfg(test)]
+pub(crate) fn one_stage_schedule_for_test(
+    kem_id: u32,
+    kdf_id: u32,
+    aead_id: u32,
+    shared_secret: &[u8],
+    info: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), CkRv> {
+    let sid = hpke_suite_id(kem_id, kdf_id, aead_id);
+    let o = key_schedule_one_stage(&sid, CKZ_HPKE_MODE_BASE, shared_secret, info, &[], &[], aead_sizes(aead_id)?, 64)?;
+    Ok((o.key.unwrap_or_default(), o.base_nonce.unwrap_or_default(), o.exporter_secret))
+}
+
+/// The raw KEM shared secret for a PQ or PQ/T private key handle — the same
+/// computation `decapsulate` runs before its key schedule.
+#[cfg(test)]
+pub(crate) fn kem_shared_secret_for_test(session: u32, priv_h: u32, kem_id: u32, enc: &[u8]) -> Result<Vec<u8>, CkRv> {
+    let _ = session;
+    let dk = get_object_value(priv_h).ok_or(CKR_ARGUMENTS_BAD)?;
+    match kem_info(kem_id)?.shape {
+        KemShape::MlKem { ps } => mlkem_decap(ps, &mlkem_expand(ps, &dk)?.1, enc),
+        KemShape::Hybrid { pq_ps, curve, label } => {
+            let k = hybrid_expand(pq_ps, curve, &dk)?;
+            let (ct_pq, ct_t) = enc.split_at(mlkem_sizes(pq_ps).0);
+            let ss_pq = mlkem_decap(pq_ps, &k.dk_pq, ct_pq)?;
+            let ss_t = ec_static_dh(curve, &k.sk_t, ct_t)?;
+            Ok(hybrid_combine(&ss_pq, &ss_t, ct_t, &k.ek_t, label))
+        }
+        KemShape::Classical { .. } => Err(CKR_MECHANISM_PARAM_INVALID),
     }
 }
 
@@ -1230,12 +1494,14 @@ mod tests {
         assert_ne!(r1a.enc, r2.enc, "different seeds must produce different enc");
     }
 
-    /// `ephemeral_seed` is Phase-1-scoped to classical suites only (proposal
-    /// §8 OQ) — a hybrid `kem_id` with a seed must be rejected, not silently
-    /// ignored (which would look "deterministic" for the classical half
-    /// only, a worse failure mode than an outright error).
+    /// Hybrid `ephemeral_seed` (2026-10-01): the hook now covers the PQ/T
+    /// hybrids, but only as the full `m ‖ classical seed` (64 bytes for
+    /// MLKEM768-X25519). A seed of any other length — here the 32-byte shape
+    /// the classical hook takes — must be rejected, not silently truncated or
+    /// applied to one half only. The published-vector replay
+    /// (`hpke_pq_vectors_tests`) covers the accepted length.
     #[test]
-    fn ephemeral_seed_rejected_for_hybrid_kems() {
+    fn ephemeral_seed_wrong_length_rejected_for_hybrid_kems() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
         let (pub_h, _priv_h) = keygen(session, CKP_HPKE_KEM_MLKEM768_X25519, b"\x01", "seed reject test").unwrap();
