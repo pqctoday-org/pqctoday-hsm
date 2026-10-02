@@ -101,6 +101,19 @@ fn locked() -> std::sync::MutexGuard<'static, Cache> {
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 
+/// Bumped whenever a resident entry can disappear: every `clear()` and every
+/// FIFO eviction. Tests compare it before and after a sequence of lookups:
+/// the cache is process-global and `cargo test` runs in parallel with tests
+/// that fire lifecycle events (each `C_InitToken`, `C_DestroyObject`, … calls
+/// `clear()`), so "the second lookup returned the same allocation" is only a
+/// meaningful assertion when no entry could have been dropped in between.
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// See [`EPOCH`]. Tests only.
+pub fn epoch() -> u64 {
+    EPOCH.load(Ordering::SeqCst)
+}
+
 /// `(hits, misses)` since process start (tests prove the cache is on the path).
 pub fn stats() -> (u64, u64) {
     (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
@@ -159,6 +172,7 @@ pub fn get(ps: u32, sk: &[u8]) -> Result<Arc<Expanded>, u32> {
     while c.order.len() >= MAX_ENTRIES {
         let oldest = c.order.remove(0);
         c.map.remove(&oldest);
+        EPOCH.fetch_add(1, Ordering::SeqCst);
     }
     c.order.push(id);
     c.map.insert(id, Arc::clone(&built));
@@ -171,6 +185,7 @@ pub fn clear() {
     let mut c = locked();
     c.map.clear();
     c.order.clear();
+    EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
 /// True when `(ps, sk)` is resident. Tests only.
@@ -213,7 +228,24 @@ mod tests {
     // The cache is process-global and other tests sign ML-DSA concurrently,
     // so each property is proved by allocation identity (`Arc::ptr_eq`) on a
     // key no other test uses, never by `len()`/`stats()` deltas — except the
-    // eviction bound, which runs on a private `Cache`.
+    // eviction bound, which runs on a private `Cache`. A concurrent lifecycle
+    // event still empties the whole map, so "must hit" assertions run inside
+    // `quiescent` (same race as awslc_keycache's tests).
+
+    /// Run `f` until it completes without any `clear()` or eviction happening
+    /// while it ran (see [`EPOCH`]), and return that run's result. Concurrent
+    /// tests fire lifecycle events at any moment; a run they interrupted says
+    /// nothing about the cache, so it is discarded rather than asserted on.
+    fn quiescent<R>(mut f: impl FnMut() -> R) -> R {
+        for _ in 0..200 {
+            let before = epoch();
+            let r = f();
+            if epoch() == before {
+                return r;
+            }
+        }
+        panic!("the cache was cleared during every one of 200 attempts");
+    }
 
     fn a_key(seed: u8) -> Vec<u8> {
         let (_pk, sk) = fips204::ml_dsa_65::KG::keygen_from_seed(&[seed; 32]);
@@ -223,9 +255,12 @@ mod tests {
     #[test]
     fn second_lookup_reuses_the_expanded_key() {
         let sk = a_key(201);
-        let first = get(CKP_ML_DSA_65, &sk).unwrap();
-        let second = get(CKP_ML_DSA_65, &sk).unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
+        let hit = quiescent(|| {
+            let first = get(CKP_ML_DSA_65, &sk).unwrap();
+            let second = get(CKP_ML_DSA_65, &sk).unwrap();
+            Arc::ptr_eq(&first, &second)
+        });
+        assert!(hit, "second lookup must hit the cache");
     }
 
     #[test]
@@ -310,16 +345,22 @@ mod tests {
         let (_pub_a, key_a) =
             native::generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"cache-a", "cache-a").unwrap();
         let bytes_a = crate::state::get_object_value(key_a).unwrap();
-        sign(key_a);
-        assert!(contains(CKP_ML_DSA_65, &bytes_a), "signing made the key resident");
+        let resident = quiescent(|| {
+            sign(key_a);
+            contains(CKP_ML_DSA_65, &bytes_a)
+        });
+        assert!(resident, "signing made the key resident");
         assert_eq!(ffi::C_DestroyObject(session, key_a), CKR_OK);
         assert!(!contains(CKP_ML_DSA_65, &bytes_a), "C_DestroyObject dropped it");
 
         let (_pub_b, key_b) =
             native::generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"cache-b", "cache-b").unwrap();
         let bytes_b = crate::state::get_object_value(key_b).unwrap();
-        sign(key_b);
-        assert!(contains(CKP_ML_DSA_65, &bytes_b));
+        let resident = quiescent(|| {
+            sign(key_b);
+            contains(CKP_ML_DSA_65, &bytes_b)
+        });
+        assert!(resident, "signing made the key resident");
         assert_eq!(ffi::C_Finalize(std::ptr::null_mut()), CKR_OK);
         assert!(!contains(CKP_ML_DSA_65, &bytes_b), "C_Finalize dropped it");
         let _ = native::init();
