@@ -556,6 +556,87 @@ void test_key_attributes() {
 }
 
 
+// A stateful (HSS/XMSS) operation must not leak into the next operation on the
+// same session. Before the Session::resetOp fix (2026-10-02) the session kept
+// mechanism == HSS after C_Verify/C_Sign(CKM_HSS); C_Sign/C_Verify test the
+// stateful mechanisms before the MAC op, so a later HMAC C_Sign returned
+// CKR_KEY_HANDLE_INVALID and C_Verify rejected a correct MAC. Found by the
+// hub's RFC 8554 Appendix F KAT running before its HMAC KATs.
+void test_stateful_then_mac_same_session() {
+    const char* CAT = "HBSProtect";
+    const CK_MECHANISM_TYPE M_HSS_KP = 0x00004032UL;
+    const CK_MECHANISM_TYPE M_HSS    = 0x00004033UL;
+    const CK_KEY_TYPE KT_HSS = 0x00000046UL;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY, secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+
+    // RFC 4231 Test Case 1: HMAC-SHA-256, key = 0x0b x 20, data = "Hi There".
+    CK_BYTE hkey[20]; memset(hkey, 0x0b, sizeof(hkey));
+    CK_BYTE hdata[] = { 'H','i',' ','T','h','e','r','e' };
+    const CK_BYTE expect[32] = {
+        0xb0,0x34,0x4c,0x61,0xd8,0xdb,0x38,0x53,0x5c,0xa8,0xaf,0xce,0xaf,0x0b,0xf1,0x2b,
+        0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7,0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7 };
+    CK_ATTRIBUTE macTmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &secType, sizeof(secType) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_SIGN, &bTrue, sizeof(bTrue) },
+        { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+        { CKA_VALUE, hkey, sizeof(hkey) },
+    };
+    CK_MECHANISM hmac = { CKM_SHA256_HMAC, NULL_PTR, 0 };
+
+    // One HMAC sign + verify round on hSess; returns "" on success, else what failed.
+    auto hmacRound = [&](CK_OBJECT_HANDLE hKey) -> std::string {
+        CK_BYTE mac[64]; CK_ULONG macLen = sizeof(mac);
+        CK_RV rv = fl->C_SignInit(hSess, &hmac, hKey);
+        if (rv != CKR_OK) return "C_SignInit RV=" + std::to_string(rv);
+        rv = fl->C_Sign(hSess, hdata, sizeof(hdata), mac, &macLen);
+        if (rv != CKR_OK) return "C_Sign RV=" + std::to_string(rv);
+        if (macLen != 32 || memcmp(mac, expect, 32) != 0) return "MAC differs from RFC 4231 TC1";
+        rv = fl->C_VerifyInit(hSess, &hmac, hKey);
+        if (rv != CKR_OK) return "C_VerifyInit RV=" + std::to_string(rv);
+        rv = fl->C_Verify(hSess, hdata, sizeof(hdata), (CK_BYTE_PTR)expect, 32);
+        if (rv != CKR_OK) return "C_Verify RV=" + std::to_string(rv);
+        return "";
+    };
+
+    CK_OBJECT_HANDLE hMac = CK_INVALID_HANDLE;
+    CK_RV rv = fl->C_CreateObject(hSess, macTmpl, sizeof(macTmpl) / sizeof(CK_ATTRIBUTE), &hMac);
+    if (rv != CKR_OK) { record_result(CAT, "StatefulThenMac_Setup", "FAIL", "C_CreateObject(HMAC key) RV=" + std::to_string(rv)); return; }
+    std::string before = hmacRound(hMac);
+    if (!before.empty()) { record_result(CAT, "StatefulThenMac_Setup", "FAIL", "HMAC baseline: " + before); return; }
+
+    CK_MECHANISM kp = { M_HSS_KP, NULL_PTR, 0 };
+    CK_ATTRIBUTE pubT[] = {
+        { CKA_CLASS, &pubClass, sizeof(pubClass) }, { CKA_KEY_TYPE, (void*)&KT_HSS, sizeof(KT_HSS) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_VERIFY, &bTrue, sizeof(bTrue) } };
+    CK_ATTRIBUTE privT[] = {
+        { CKA_CLASS, &privClass, sizeof(privClass) }, { CKA_KEY_TYPE, (void*)&KT_HSS, sizeof(KT_HSS) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+        { CKA_SIGN, &bTrue, sizeof(bTrue) } };
+    CK_OBJECT_HANDLE hPub, hPriv;
+    rv = fl->C_GenerateKeyPair(hSess, &kp, pubT, 4, privT, 5, &hPub, &hPriv);
+    if (rv != CKR_OK) { record_result(CAT, "StatefulThenMac_Setup", "FAIL", "HSS keygen RV=" + std::to_string(rv)); return; }
+
+    CK_MECHANISM hss = { M_HSS, NULL_PTR, 0 };
+    CK_BYTE sig[16384]; CK_ULONG sigLen = sizeof(sig);
+    rv = fl->C_SignInit(hSess, &hss, hPriv);
+    if (rv == CKR_OK) rv = fl->C_Sign(hSess, hdata, sizeof(hdata), sig, &sigLen);
+    if (rv != CKR_OK) { record_result(CAT, "StatefulThenMac_Setup", "FAIL", "HSS sign RV=" + std::to_string(rv)); return; }
+    std::string afterSign = hmacRound(hMac);
+    record_result(CAT, "StatefulThenMac_AfterHssSign", afterSign.empty() ? "PASS" : "FAIL",
+                  afterSign.empty() ? "HMAC sign+verify still correct after C_Sign(CKM_HSS) on the same session" : afterSign);
+
+    rv = fl->C_VerifyInit(hSess, &hss, hPub);
+    if (rv == CKR_OK) rv = fl->C_Verify(hSess, hdata, sizeof(hdata), sig, sigLen);
+    if (rv != CKR_OK) { record_result(CAT, "StatefulThenMac_AfterHssVerify", "FAIL", "HSS verify RV=" + std::to_string(rv)); return; }
+    std::string afterVerify = hmacRound(hMac);
+    record_result(CAT, "StatefulThenMac_AfterHssVerify", afterVerify.empty() ? "PASS" : "FAIL",
+                  afterVerify.empty() ? "HMAC sign+verify still correct after C_Verify(CKM_HSS) on the same session" : afterVerify);
+}
+
 void check_key_profile(std::string cat, std::string runName, CK_OBJECT_HANDLE hPub, CK_OBJECT_HANDLE hPriv, bool isKEM) {
     (void)cat; // Avoid unused parameter warning
 
@@ -11195,6 +11276,7 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_value_len(); }
     if (opt_category == "all" || opt_category == "kem-kcv") { refresh_session(); test_kem_check_value(); }
     if (opt_category == "all" || opt_category == "hbs-protect") { refresh_session(); test_hbs_key_protection(); }
+    if (opt_category == "all" || opt_category == "hbs-protect") { refresh_session(); test_stateful_then_mac_same_session(); }
     if (opt_category == "all" || opt_category == "wrap-template") { refresh_session(); test_wrap_template_return_code(); }
     if (opt_category == "all" || opt_category == "xmss-paramset") { refresh_session(); test_xmss_parameter_set(); }
     if (opt_category == "all" || opt_category == "raw-encoding") { refresh_session(); test_kem_ciphertext_and_ec_point_encoding(); }

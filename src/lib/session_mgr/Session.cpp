@@ -317,6 +317,21 @@ void Session::resetOp()
 		macOp = NULL;
 	}
 
+	// The mechanism and the stateful sign/verify key handles belong to the
+	// operation, so they end with it. They used to survive: after a stateful
+	// C_Verify(CKM_HSS) the session kept mechanism == 1000 (HSS), MacSignInit /
+	// MacVerifyInit never overwrite it, and C_Sign / C_Verify test the stateful
+	// mechanisms BEFORE getMacOp() — so every later HMAC operation on that
+	// session was routed into StatefulSign (CKR_KEY_HANDLE_INVALID) or
+	// StatefulVerify (MAC checked as an HSS signature: CKR_SIGNATURE_INVALID).
+	// Found 2026-10-02 by the hub's RFC 8554 Appendix F KAT running before the
+	// HMAC KATs in one session. rearmMessageOp re-runs the full init (which
+	// sets the mechanism again) from the separate message-op fields, so the
+	// message-based APIs are unaffected.
+	mechanism = AsymMech::Unknown;
+	signKeyHandle = CK_INVALID_HANDLE;
+	verifyKeyHandle = CK_INVALID_HANDLE;
+
 	operation = SESSION_OP_NONE;
 	dualOp1 = SESSION_OP_NONE;
 	dualOp2 = SESSION_OP_NONE;
