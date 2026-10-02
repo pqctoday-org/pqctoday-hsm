@@ -131,12 +131,22 @@ Parameter set types (values = the corresponding `kem_id` from [RFC9180] §7.1
 - CKP_HPKE_KEM_MLKEM768_P256            (0x0050)
 - CKP_HPKE_KEM_MLKEM1024_P384           (0x0051)
 - CKP_HPKE_KEM_MLKEM768_X25519          (0x647a)
+- CKP_HPKE_KEM_ML_KEM_512               (0x0040)  — added 2026-10-01
+- CKP_HPKE_KEM_ML_KEM_768               (0x0041)  — added 2026-10-01
+- CKP_HPKE_KEM_ML_KEM_1024              (0x0042)  — added 2026-10-01
 
 **CK_HPKE_KDF_TYPE** / **CK_HPKE_AEAD_TYPE** — likewise equal to the wire
 `kdf_id` / `aead_id` values from [RFC9180] §7.2/§7.3:
 
 - CKD_HPKE_HKDF_SHA256 (0x0001), CKD_HPKE_HKDF_SHA384 (0x0002),
-  CKD_HPKE_HKDF_SHA512 (0x0003)
+  CKD_HPKE_HKDF_SHA512 (0x0003) — two-stage, [RFC9180] KeySchedule
+- CKD_HPKE_SHAKE256 (0x0011) — one-stage ([HPKE-PQ] §5 Table 1), added
+  2026-10-01. Uses draft-ietf-hpke-hpke-03 §4.4 `LabeledDerive` and §5.1
+  `CombineSecrets_OneStage` (Nh = 64). Only `mode_base`/`mode_psk`
+  (hpke-hpke-03 Table 1 reserves 0x02/0x03): Auth/AuthPSK with this KDF is
+  `CKR_MECHANISM_PARAM_INVALID`. psk, psk_id and info are each limited to
+  65,535 bytes (§7.2.1). SHAKE128 and TurboSHAKE128/256 (0x0010, 0x0012,
+  0x0013) are not implemented.
 - CKZ_HPKE_AEAD_128_GCM (0x0001), CKZ_HPKE_AEAD_256_GCM (0x0002),
   CKZ_HPKE_AEAD_CHACHA20POLY1305 (0x0003), CKZ_HPKE_AEAD_EXPORT_ONLY (0xFFFF)
 
@@ -269,8 +279,8 @@ CK_ATTRIBUTE template[] = {
 | Attribute | Data Type | Meaning |
 |---|---|---|
 | CKA_PARAMETER_SET | CK_HPKE_KEM_PARAMETER_SET_TYPE | The KEM suite |
-| CKA_VALUE | Byte array | `dk` — classical: the raw private scalar; hybrid: `dk_PQ ‖ dk_T` |
-| CKA_SEED | Byte array | OPTIONAL, see §8 |
+| CKA_VALUE | Byte array | `dk` — classical: the raw private scalar ([RFC9180] SerializePrivateKey); pure ML-KEM: the 64-byte FIPS 203 seed `d ‖ z`; PQ/T hybrid: the 32-byte seed ([HPKE-PQ] §3/§4 SerializePrivateKey). Seed-format keys are expanded inside the token on each use and the expansion is never stored. **Changed 2026-10-01:** hybrid keys were previously stored expanded as `dk_PQ ‖ dk_T`; that form is no longer accepted. |
+| CKA_SEED | Byte array | Keygen input only (§5.4): imports a seed-format key |
 
 As with `CKM_COMP_KEM`'s private keys, `CKA_PARAMETER_SET` is not specified
 in the private key's own template on `C_GenerateKeyPair` — it is inherited
@@ -285,6 +295,21 @@ pairs internally (ML-KEM + the classical group) and packs them into the
 single composite public/private key objects per §5.1 — the two components
 never need to exist as separate objects/handles from the caller's
 perspective, and, per §7.1, never need to exist outside the token at all.
+
+Pure ML-KEM and PQ/T hybrid suites (2026-10-01): a random seed of `Nsk`
+bytes (64 / 32) is drawn and the key pair derived from it, exactly as
+[HPKE-PQ] §3/§4 `GenerateKeyPair`. A `CKA_SEED` in the private-key template
+(public template as fallback) supplies the seed instead — importing an
+existing seed-format key such as a JOSE AKP `priv`
+(draft-ietf-jose-hpke-pq-pqt) or replaying a published vector's `skRm`. A
+wrong length is `CKR_ATTRIBUTE_VALUE_INVALID`; `CKA_SEED` on a classical
+suite is `CKR_TEMPLATE_INCONSISTENT`. Hybrid seed expansion follows
+[CONCRETE-HYBRID-KEMS]: `SHAKE256(seed, 64 + n_T)` split as ML-KEM `d ‖ z`
+‖ classical seed, where the classical key is the 32-byte seed itself
+(X25519), or the first valid scalar among big-endian 32-byte windows of a
+128-byte seed (P-256) or the one 48-byte window (P-384).
+`DeriveKeyPair(ikm)` ([HPKE-PQ] §3/§4) is `SHAKE256.LabeledDerive(ikm,
+"DeriveKeyPair", "", Nsk)` under suite_id `"KEM" ‖ I2OSP(kem_id, 2)`.
 
 ## 6. Mechanism semantics
 
@@ -363,6 +388,12 @@ each side).
 | MLKEM768_P256 | 32 | 1153 | 1249 | no |
 | MLKEM1024_P384 | 32 | 1665 | 1665 | no |
 | MLKEM768_X25519 | 32 | 1120 | 1216 | no |
+| ML_KEM_512 | 32 | 768 | 800 | no |
+| ML_KEM_768 | 32 | 1088 | 1184 | no |
+| ML_KEM_1024 | 32 | 1568 | 1568 | no |
+
+`Nsk` (seed-format private key): 64 for the pure ML-KEM suites, 32 for the
+PQ/T hybrids ([HPKE-PQ] Tables 2-3).
 
 `Nk`/`Nn`/`Nt` (AEAD) and `Nh` (KDF) are exactly [RFC9180] §7.2/§7.3's
 existing values — this proposal does not redefine them.
@@ -427,6 +458,13 @@ shared secret comes from an approved method.
   hook outside test contexts; the normative text will carry an explicit
   warning to that effect (determinism defeats IND-CCA2 security guarantees
   for real traffic).
+  **Implemented (2026-10-01) as option (a):** `pEphemeralSeed`/
+  `ulEphemeralSeedLen` carries the classical ephemeral scalar (DHKEM), the
+  32-byte ML-KEM `m` (pure ML-KEM, [HPKE-PQ] `ikmE`), or `m ‖ classical seed`
+  (hybrids, [CONCRETE-HYBRID-KEMS] `randomness`: 32+32 X25519, 32+128 P-256,
+  32+48 P-384). Any other length is `CKR_MECHANISM_PARAM_INVALID`. It
+  reproduces the draft-ietf-hpke-pq-04, CFRG concrete-hybrid-kems and X-Wing
+  published vectors byte for byte (`rust/src/hpke_pq_vectors_tests.rs`).
 - Whether `pSenderPk`/`hSenderStaticKey` in Auth/AuthPSK modes should instead
   be unified as a single `hSenderStaticKey`-shaped field that also accepts a
   public-key-only object on the Decap side, rather than two differently-typed

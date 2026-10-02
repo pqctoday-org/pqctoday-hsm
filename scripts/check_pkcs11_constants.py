@@ -321,6 +321,7 @@ PINNED = {
     "CKD_HPKE_HKDF_SHA256": (0x0001, "param-set"),
     "CKD_HPKE_HKDF_SHA384": (0x0002, "param-set"),
     "CKD_HPKE_HKDF_SHA512": (0x0003, "param-set"),
+    "CKD_HPKE_SHAKE256": (0x0011, "param-set"),
     "CKZ_HPKE_AEAD_128_GCM": (0x0001, "param-set"),
     "CKZ_HPKE_AEAD_256_GCM": (0x0002, "param-set"),
     "CKZ_HPKE_AEAD_CHACHA20POLY1305": (0x0003, "param-set"),
@@ -340,6 +341,9 @@ PINNED = {
     "CKP_HPKE_KEM_MLKEM768_P256": (0x0050, "param-set"),
     "CKP_HPKE_KEM_MLKEM1024_P384": (0x0051, "param-set"),
     "CKP_HPKE_KEM_MLKEM768_X25519": (0x647A, "param-set"),
+    "CKP_HPKE_KEM_ML_KEM_512": (0x0040, "param-set"),
+    "CKP_HPKE_KEM_ML_KEM_768": (0x0041, "param-set"),
+    "CKP_HPKE_KEM_ML_KEM_1024": (0x0042, "param-set"),
 }
 
 # Cross-check: drift pins must equal their spec counterpart in the header.

@@ -2375,7 +2375,20 @@ fn C_GenerateKeyPair_impl(
                     Some(p) => p,
                     None => return CKR_TEMPLATE_INCOMPLETE,
                 };
-                match crate::native::hpke::keygen(_h_session, kem_id, &[], "") {
+                // CKA_SEED (private template; public as fallback, same rule as
+                // CKM_ML_KEM_KEY_PAIR_GEN below) imports a seed-format key:
+                // 64-byte `d ‖ z` for the pure ML-KEM suites, 32 bytes for
+                // the PQ/T hybrids (draft-ietf-hpke-pq-04 §3/§4). Length and
+                // suite are validated by native::hpke::keygen_with_seed.
+                let seed = get_attr_bytes_present(
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                    CKA_SEED,
+                )
+                .or_else(|| {
+                    get_attr_bytes_present(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                });
+                match crate::native::hpke::keygen_with_seed(_h_session, kem_id, seed.as_deref(), &[], "") {
                     Ok((pub_h, priv_h)) => {
                         *ph_public_key = pub_h;
                         *ph_private_key = priv_h;
