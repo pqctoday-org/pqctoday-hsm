@@ -258,3 +258,41 @@ void SessionManagerTests::testSessionInfo()
 	rv = sessionManager.closeSession(hSession);
 	CPPUNIT_ASSERT(rv == CKR_OK);
 }
+
+// resetOp() must end everything the operation set, including the mechanism
+// and the stateful key handles. A stale HSS/XMSS mechanism made every later
+// HMAC C_Sign/C_Verify on the same session dispatch to the stateful code path
+// (2026-10-02; see Session::resetOp).
+void SessionManagerTests::testResetOpEndsStatefulState()
+{
+#ifndef _WIN32
+	ObjectStore store("./testdir", DEFAULT_UMASK);
+#else
+	ObjectStore store(".\\testdir", DEFAULT_UMASK);
+#endif
+	SlotManager slotManager(&store);
+	SessionManager sessionManager;
+	Slot* slot = slotManager.getSlot(0);
+	ByteString soPIN((unsigned char*)"1234", 4);
+	CK_UTF8CHAR label[33] = "My test token                   ";
+	CPPUNIT_ASSERT(slot->initToken(soPIN, label) == CKR_OK);
+
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(sessionManager.openSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &hSession) == CKR_OK);
+	std::shared_ptr<Session> session = sessionManager.getSession(hSession);
+	CPPUNIT_ASSERT(session);
+
+	session->setOpType(SESSION_OP_VERIFY);
+	session->setMechanism((AsymMech::Type)1000); // the HSS marker StatefulVerifyInit sets
+	session->setSignKeyHandle(7);
+	session->setVerifyKeyHandle(9);
+
+	session->resetOp();
+
+	CPPUNIT_ASSERT(session->getOpType() == SESSION_OP_NONE);
+	CPPUNIT_ASSERT(session->getMechanism() == AsymMech::Unknown);
+	CPPUNIT_ASSERT(session->getSignKeyHandle() == CK_INVALID_HANDLE);
+	CPPUNIT_ASSERT(session->getVerifyKeyHandle() == CK_INVALID_HANDLE);
+
+	CPPUNIT_ASSERT(sessionManager.closeSession(hSession) == CKR_OK);
+}
