@@ -575,6 +575,21 @@ fn supported_profiles() -> [u32; 4] {
 /// entry — WS-11 Phase 1 widened this from Baseline-only after auditing
 /// Extended/Authentication/Public-Certificates against every condition in
 /// Profiles v3.2 §5.3/§5.4/§5.5 (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
+/// R2 (2026-10-02) — Profiles §5.1 condition 4 / §5.5 condition 5b: every
+/// token carries its CKO_PROFILE objects. Creates them for `slot_id` only if
+/// the slot has none (state loaded from an older build, or a slot created
+/// outside `ensure_slot`).
+pub(crate) fn ensure_profile_objects(slot_id: u32) {
+    let has = OBJECTS.with(|o| {
+        o.borrow().values().any(|a| {
+            get_object_attr_u32_from(a, CKA_CLASS) == Some(CKO_PROFILE) && object_slot_of(a) == slot_id
+        })
+    });
+    if !has {
+        init_profile_objects(slot_id);
+    }
+}
+
 fn init_profile_objects(slot_id: u32) {
     for profile_id in supported_profiles() {
         let mut attrs: Attributes = HashMap::new();
@@ -719,6 +734,85 @@ pub fn reject_stateful_signature_key_override(attrs: &Attributes) -> Result<(), 
     Ok(())
 }
 
+/// R1 (2026-10-02) — the attributes PKCS#11 v3.2 gives a default and §4
+/// says every object of the class therefore possesses. Shared by object
+/// creation (`apply_object_defaults`) and by the two load paths (state-file
+/// snapshot, SQLite rehydrate), which call ONLY this — so loading an object
+/// written by an older build adds exactly these attributes and nothing else.
+/// Only absent attributes are filled.
+pub(crate) fn apply_possessed_defaults(attrs: &mut Attributes, class: u32) {
+    // R1 (2026-10-02) — §4 l.2034-2037: attributes with a default "need
+    // not be specified when creating an object ... Nonetheless, the
+    // object possesses these attributes." C_GetAttributeValue may answer
+    // CKR_ATTRIBUTE_TYPE_INVALID only for an attribute the object does
+    // not possess (§5.7.5), so every defaulted attribute is stored here.
+    // Each entry quotes its table; nothing beyond them is materialised.
+    use crate::native::keygen::{CKA_ID, CKA_LABEL};
+    let empty = |attrs: &mut Attributes, t: u32| {
+        attrs.entry(t).or_default();
+    };
+    // Table 19 (Common Storage Object Attributes): CKA_LABEL "(default
+    // empty)". Figure 1 places Data, Key, Certificate and Domain
+    // parameters under Storage.
+    if matches!(
+        class,
+        CKO_DATA
+            | CKO_CERTIFICATE
+            | CKO_PUBLIC_KEY
+            | CKO_PRIVATE_KEY
+            | CKO_SECRET_KEY
+            | CKO_DOMAIN_PARAMETERS
+    ) {
+        empty(attrs, CKA_LABEL);
+    }
+    // Table 26 (Common Key Attributes): CKA_ID "(default empty)".
+    if matches!(class, CKO_PUBLIC_KEY | CKO_PRIVATE_KEY | CKO_SECRET_KEY) {
+        empty(attrs, CKA_ID);
+    }
+    if class == CKO_CERTIFICATE {
+        // Table 19: CKA_PRIVATE's default "is token-specific". This
+        // engine has always treated an absent CKA_PRIVATE as public
+        // (read_bool_attr), and Profiles §5.5 8a requires certificates
+        // to be findable without login — owner decision 2026-10-02.
+        if !attrs.contains_key(&CKA_PRIVATE) {
+            store_bool(attrs, CKA_PRIVATE, false);
+        }
+        // Table 21 (Common Certificate Object Attributes).
+        if !attrs.contains_key(&CKA_CERTIFICATE_CATEGORY) {
+            store_ulong(attrs, CKA_CERTIFICATE_CATEGORY, CK_CERTIFICATE_CATEGORY_UNSPECIFIED);
+        }
+        for t in [CKA_START_DATE, CKA_END_DATE, CKA_PUBLIC_KEY_INFO] {
+            empty(attrs, t);
+        }
+        // Table 22 (X.509 Certificate Object Attributes) — X.509 is the
+        // only certificate type C_CreateObject accepts.
+        for t in [
+            CKA_ID,
+            CKA_ISSUER,
+            CKA_SERIAL_NUMBER,
+            CKA_URL,
+            CKA_HASH_OF_SUBJECT_PUBLIC_KEY,
+            CKA_HASH_OF_ISSUER_PUBLIC_KEY,
+        ] {
+            empty(attrs, t);
+        }
+        if !attrs.contains_key(&CKA_JAVA_MIDP_SECURITY_DOMAIN) {
+            store_ulong(attrs, CKA_JAVA_MIDP_SECURITY_DOMAIN, CK_SECURITY_DOMAIN_UNSPECIFIED);
+        }
+        // Deliberately absent: CKA_TRUSTED (Table 21 states no default)
+        // and CKA_NAME_HASH_ALGORITHM (Table 22: "If the attribute is not
+        // present then the type defaults to SHA-1").
+    }
+}
+
+/// Load-path entry point for [`apply_possessed_defaults`]: reads the
+/// object's CKA_CLASS; an object without a readable class is left untouched.
+pub(crate) fn backfill_possessed_defaults(attrs: &mut Attributes) {
+    if let Some(class) = get_object_attr_u32_from(attrs, CKA_CLASS) {
+        apply_possessed_defaults(attrs, class);
+    }
+}
+
 fn apply_object_defaults(attrs: &mut Attributes) {
     // §4.4 Table — every storage object has CKA_TOKEN, "CK_TRUE if object is
     // a token object; CK_FALSE if object is a session object. Default is
@@ -750,6 +844,7 @@ fn apply_object_defaults(attrs: &mut Attributes) {
         }
     });
     if let Some(class) = obj_class {
+        apply_possessed_defaults(attrs, class);
         // §4.7 — a trust object's own defaults are spelled out in prose rather
         // than in Table 25: "If CKA_MODIFIABLE is not set in the template, it
         // defaults to CK_TRUE; if CKA_PRIVATE is not set in the template, it
@@ -1946,7 +2041,10 @@ pub fn object_exists(handle: u32) -> bool {
 /// fresh-`CKA_UNIQUE_ID`/handle assignment — the object already has both
 /// from its previous life. Bumps `NEXT_HANDLE` past this handle so a
 /// subsequently created object can never collide with it.
-pub fn rehydrate_insert(handle: u32, attrs: Attributes) {
+pub fn rehydrate_insert(handle: u32, mut attrs: Attributes) {
+    // R1 — an object persisted by an older build lacks the defaulted
+    // attributes; add only those (no-op for current objects).
+    backfill_possessed_defaults(&mut attrs);
     OBJECTS.with(|objs| {
         objs.borrow_mut().insert(handle, attrs);
     });

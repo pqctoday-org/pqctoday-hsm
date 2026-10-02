@@ -662,6 +662,16 @@ pub unsafe extern "C" fn C_Initialize(pInitArgs: CK_VOID_PTR) -> CK_RV {
     if !args.pReserved.is_null() {
         return rv(CKR_ARGUMENTS_BAD);
     }
+    // R5 (2026-10-02) — §5.4.1: "If some, but not all, of the supplied
+    // function pointers to C_Initialize are non-NULL_PTR, then C_Initialize
+    // should return with the value CKR_ARGUMENTS_BAD."
+    let supplied = [args.CreateMutex, args.DestroyMutex, args.LockMutex, args.UnlockMutex]
+        .iter()
+        .filter(|p| !p.is_null())
+        .count();
+    if supplied != 0 && supplied != 4 {
+        return rv(CKR_ARGUMENTS_BAD);
+    }
     rv(crate::ffi::C_Initialize(std::ptr::null_mut()))
 }
 
@@ -2407,6 +2417,28 @@ mod tests {
     use std::mem::size_of;
 
     const PTR: usize = size_of::<*const ()>();
+
+    /// R5 (2026-10-02) — §5.4.1: "If some, but not all, of the supplied
+    /// function pointers to C_Initialize are non-NULL_PTR, then C_Initialize
+    /// should return with the value CKR_ARGUMENTS_BAD."
+    #[test]
+    fn c_initialize_rejects_a_partial_set_of_mutex_callbacks() {
+        let _g = crate::native::test_lock::acquire();
+        let some = 0x1usize as *mut c_void;
+        let null = std::ptr::null_mut();
+        for (c, d, l, u) in [(some, null, null, null), (some, some, some, null), (null, null, null, some)] {
+            let args = CK_C_INITIALIZE_ARGS {
+                CreateMutex: c,
+                DestroyMutex: d,
+                LockMutex: l,
+                UnlockMutex: u,
+                flags: 0,
+                pReserved: std::ptr::null_mut(),
+            };
+            let got = unsafe { C_Initialize(&args as *const _ as CK_VOID_PTR) };
+            assert_eq!(got, rv(CKR_ARGUMENTS_BAD));
+        }
+    }
 
     /// pkcs11.h slot counts, derived from pkcs11f.h's version guards:
     /// 2.40 = C_Initialize..C_WaitForSlotEvent = 68;

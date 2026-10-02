@@ -225,6 +225,9 @@ pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
             let len = c.u32()? as usize;
             attrs.insert(ty, c.take(len)?.to_vec());
         }
+        // R1 (2026-10-02) — a snapshot written by an older build lacks the
+        // attributes §4 says every object possesses; add only those.
+        crate::state::backfill_possessed_defaults(&mut attrs);
         objects.insert(handle, attrs);
     }
 
@@ -247,6 +250,13 @@ pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
     };
     bump(&NEXT_HANDLE, next_handle);
     UNIQUE_ID_COUNTER.fetch_max(unique_id, std::sync::atomic::Ordering::Relaxed);
+    // R2 (2026-10-02) — slots saved by an older build (created through the
+    // C_GetSlotList spare-slot path) have no CKO_PROFILE objects. Done after
+    // the counter bumps so the new objects can't collide with loaded handles.
+    let slots: Vec<u32> = TOKEN_STORE.with(|ts| ts.borrow().keys().copied().collect());
+    for slot in slots {
+        crate::state::ensure_profile_objects(slot);
+    }
     Ok(())
 }
 

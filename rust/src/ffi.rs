@@ -640,7 +640,7 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
     // (sabotage-tested — reverting only this gating did not reproduce
     // any failure). Reported at exactly this confidence, not overclaimed.
     if p_slot_list.is_null() {
-        TOKEN_STORE.with(|ts| {
+        let spare = TOKEN_STORE.with(|ts| {
             let mut store = ts.borrow_mut();
             let all_initialized = store.values().all(|t| t.initialized);
             if all_initialized {
@@ -658,8 +658,18 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
                         user_pin_hash: None,
                     },
                 );
+                Some(next_slot)
+            } else {
+                None
             }
         });
+        // R2 (2026-10-02) — Profiles §5.1 condition 4 / §5.5 condition 5b: the
+        // spare slot's token needs its CKO_PROFILE objects, which only
+        // state::ensure_slot used to create. Called after TOKEN_STORE is
+        // released (it is a Mutex).
+        if let Some(slot) = spare {
+            crate::state::ensure_profile_objects(slot);
+        }
         let count = TOKEN_STORE.with(|ts| ts.borrow().len() as u32);
         unsafe {
             *pul_count = count;
@@ -1336,7 +1346,10 @@ pub fn C_GetTokenInfo(slot_id: u32, p_info: *mut u8) -> u32 {
         std::ptr::copy_nonoverlapping(token.label.as_ptr(), p_info, 32);
         write_fixed_str(p_info, 32, "SoftHSM project", 32);
         write_fixed_str(p_info, 64, "PQCToday", 16);
-        write_fixed_str(p_info, 80, "0001", 16);
+        // R6 (owner decision 2026-10-02, not a v3.2 rule) — serial = slot ID
+        // + 1, so slot 0 keeps its historical "0001" and tokens in different
+        // slots are distinguishable (RFC 7512 `serial=`, p11-kit).
+        write_fixed_str(p_info, 80, &format!("{:04}", u64::from(slot_id) + 1), 16);
 
         let ptr = p_info as *mut u32;
         *ptr.add(24) = flags; // flags @96
@@ -5861,8 +5874,11 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                         std::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val.len());
                         *val_len_ptr = val.len();
                     } else {
-                        // §5.7.5 — record, set length, keep processing the rest.
-                        *val_len_ptr = val.len();
+                        // §5.7.5 case 5 — record, keep processing the rest. R4
+                        // (2026-10-02): "the ulValueLen field is modified to
+                        // hold the value CK_UNAVAILABLE_INFORMATION", not the
+                        // real length.
+                        *val_len_ptr = usize::MAX;
                         had_small = true;
                     }
                 } else {
@@ -10966,7 +10982,17 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
                 let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as usize;
-                if !val_ptr.is_null() && val_len > 0 {
+                // R3 (2026-10-02) — §5.7.7: "an exact byte-for-byte match
+                // with ALL attributes in the template". A zero-length entry
+                // is a filter for an empty value, not a wildcard (it used to
+                // be dropped, widening the search). A NULL pValue with a
+                // non-zero length cannot be honoured: CKR_ARGUMENTS_BAD
+                // (§5.1.6 l.2816), never a silently dropped filter.
+                if val_len == 0 {
+                    match_attrs.push((attr_type, Vec::new()));
+                } else if val_ptr.is_null() {
+                    return CKR_ARGUMENTS_BAD;
+                } else {
                     match_attrs.push((
                         attr_type,
                         std::slice::from_raw_parts(val_ptr, val_len).to_vec(),
@@ -18928,9 +18954,11 @@ mod object_mgmt_ffi_tests {
             set_attribute_values_from_list(SESSION_RW, h, &updates),
             CKR_ATTRIBUTE_READ_ONLY
         );
+        // R1 (2026-10-02): the key possesses CKA_LABEL with its Table 19
+        // default (empty); the rejected template must leave it at that.
         assert_eq!(
             obj_attr(h, crate::native::keygen::CKA_LABEL),
-            None,
+            Some(Vec::new()),
             "valid entry of a failed template must not be applied"
         );
     }
@@ -26525,6 +26553,12 @@ mod mlkem_value_len_ffi_tests {
 #[cfg(test)]
 #[path = "conformance_v32_tests.rs"]
 mod conformance_v32_tests;
+
+/// Slot and certificate discovery remediation suite (2026-10-02) — R1-R6 of
+/// docs/remediation-plan-rust-cert-discovery-10022026.md.
+#[cfg(test)]
+#[path = "cert_discovery_tests.rs"]
+mod cert_discovery_tests;
 
 /// FIPS 203 §7.2/§7.3 ML-KEM input checks vs the NIST ACVP-Server key-check
 /// vectors (2026-09-25) — see the module's own docs.
