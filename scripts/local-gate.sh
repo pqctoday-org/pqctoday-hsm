@@ -71,6 +71,16 @@
 # pqc-rust) which mounts ~/Antigravity → /ag with a prebuilt cargo cache.
 # The --javajce step runs inside a SEPARATE container ($SANDBOX_CONTAINER,
 # default pqc-dev-sandbox) instead — that is where JDK 27 actually lives.
+#
+# Cargo cache size cap (2026-10-01): before any build step, the preflight runs
+# scripts/prune-cargo-target.sh in $RUST_CONTAINER, which keeps the shared
+# /cargo-target volume (pqc-cargo-target) at or under CARGO_TARGET_CAP_GB GiB
+# (default 100; 0 disables) by deleting whole /cargo-target/worktrees/<name>
+# build dirs, least recently used first. It never deletes this run's dir, a
+# dir modified in the last 180 minutes, the main tree's cache or
+# /cargo-target/release/wasm-pack, and it never fails the gate.
+#   CARGO_TARGET_CAP_GB=200 bash scripts/local-gate.sh   # raise the cap
+#   CARGO_TARGET_CAP_GB=0   bash scripts/local-gate.sh   # no pruning
 
 set -uo pipefail
 
@@ -399,6 +409,29 @@ run_step_host "PKCS#11 mechanism ledger (per-CKM_*, both engines)" \
   "cd $ROOT && python3 scripts/check_pkcs11_mechanism_ledger.py"
 
 ensure_container
+
+# Cargo cache size cap (owner decision 2026-10-01). The per-worktree build
+# dirs under /cargo-target/worktrees/ (see CARGO_TARGET_DIR_FOR_RUN above) are
+# ~20 GB each and nothing ever deleted them: the pqc-cargo-target volume grew
+# past 1 TB and was deleted by hand. scripts/prune-cargo-target.sh keeps the
+# volume at or under CARGO_TARGET_CAP_GB (default 100 GiB; 0 disables) by
+# deleting whole worktree build dirs, least recently used first. It never
+# deletes this run's own dir, a dir modified in the last 180 minutes (another
+# gate may be building there), the main tree's cache, or
+# /cargo-target/release/wasm-pack; if that is not enough it only warns. The
+# touch first marks this run's dir as in use, so a concurrent gate's prune
+# leaves it alone even before cargo has written anything. Pruning is not a
+# gate step and can never fail the gate: errors only warn.
+say "preflight: cargo cache size cap (CARGO_TARGET_CAP_GB=${CARGO_TARGET_CAP_GB:-100})"
+docker exec -e CARGO_TARGET_CAP_GB="${CARGO_TARGET_CAP_GB:-100}" "$RUST_CONTAINER" bash -c \
+  "mkdir -p '$CARGO_TARGET_DIR_FOR_RUN' && touch '$CARGO_TARGET_DIR_FOR_RUN/.gate-last-used'; \
+   bash '$AG_CONTAINER_ROOT/scripts/prune-cargo-target.sh' '$CARGO_TARGET_DIR_FOR_RUN'" \
+  || printf '[cargo-cap] WARNING: pruning did not run cleanly; continuing\n' >&2
+
+# The pruning script's own test (temp dir, never the real volume): oldest
+# first, recent/current/wasm-pack kept, 0 disables, under the cap is a no-op.
+run_step "cargo cache cap: prune-cargo-target.sh test" \
+  "bash $AG_CONTAINER_ROOT/tests/test-prune-cargo-target.sh"
 
 # Everything below down to the "join_bg_group" call is one parallel batch:
 # kmip (its own 3 sub-steps, kept sequential WITHIN this lane — same crate,

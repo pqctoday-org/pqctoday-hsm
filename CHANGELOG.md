@@ -10,6 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The local gate caps the shared cargo cache at 100 GiB.** Each worktree's
+  gate run builds in its own dir under `/cargo-target/worktrees/` (~20 GB
+  each), and nothing ever deleted them; the `pqc-cargo-target` volume grew
+  past 1 TB and had to be deleted by hand. `scripts/local-gate.sh` now starts
+  with `scripts/prune-cargo-target.sh`, which deletes whole worktree build
+  dirs, least recently used first, until the volume is at or under the cap.
+  It keeps the current run's dir, any dir modified in the last 180 minutes
+  (another gate may be building there), the main tree's cache and
+  `/cargo-target/release/wasm-pack`, warns instead of deleting more, and never
+  fails the gate. `CARGO_TARGET_CAP_GB` overrides the cap; `0` disables it. A
+  new gate step runs the script's test (`tests/test-prune-cargo-target.sh`).
 - **Rust engine: `CKM_HPKE` runs the post-quantum JOSE suites in the token —
   SHAKE256 one-stage KDF, pure ML-KEM KEMs, seed-format keys.** Needed for
   draft-ietf-jose-hpke-pq-pqt's HPKE-12 (ML-KEM-768/SHAKE256/AES-256-GCM)

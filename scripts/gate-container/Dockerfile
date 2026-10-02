@@ -19,6 +19,16 @@
 #           -v pqc-cargo-registry:/usr/local/cargo/registry \
 #           -v pqc-cargo-git:/usr/local/cargo/git \
 #           pqc-gate:2026-09-27 sleep infinity
+#
+# Size cap on pqc-cargo-target (2026-10-01): local-gate.sh gives each worktree
+# its own build dir, /cargo-target/worktrees/<name> (~20 GB each), and the
+# volume once grew past 1 TB. Every gate run now starts with
+# scripts/prune-cargo-target.sh, which deletes the least recently used
+# worktree build dirs until the volume is at or under CARGO_TARGET_CAP_GB
+# (default 100 GiB; 0 disables). It never deletes /cargo-target/release/
+# wasm-pack (placed below), the main tree's cache, or a dir used in the last
+# 180 minutes; when that is not enough it prints a warning and the manual
+# command to clear the main tree's cache.
 
 # rust:1 as pulled for pqc-rust (rustc 1.96.0, Debian 13 trixie, arm64).
 FROM rust@sha256:c6811167278337db5f3b0234964ced5f538f154a2a20f09ec03721d7411c933d
