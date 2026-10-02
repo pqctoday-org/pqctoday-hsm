@@ -1,10 +1,12 @@
-# Implementation plan: FHE wrapper + PKCS#11 v3.2 vendor extensions (v6)
+# Implementation plan: FHE wrapper + PKCS#11 v3.2 vendor extensions (v7)
 
-Date: 2026-10-02 · Revision: **v6**. The v5 design (non-extractable seeds, live cloning and offline
+Date: 2026-10-02 · Revision: **v7**. The v5 design (non-extractable seeds, live cloning and offline
 backup/restore, manufacturing → device → function certificates, pure PQC Category 3, reuse of
 RATS/LAMPS attestation) is unchanged. v6 re-verified every code, registry, Hub and upstream claim in
 v5 on the evening of 2026-10-02 and corrects what had drifted (§0.1), adds the repository gates a
 new vendor mechanism must pass (§10.1), and lists the v4 text still in the Hub worktree (§9, P7).
+v7 aligns D13 with the HSM plan's owner-selected named replication interface; it does not add an
+FHE-specific export path.
 Reviews: `docs/review-implementation-plan-fhe-wrapper-pkcs11-vendor-2026-10-02.md` and
 `docs/final-challenge-fhe-wrapper-plan-v4-2026-10-02.md`.
 Status: **consolidated implementation proposal; no implementation or runtime validation claimed**.
@@ -21,8 +23,10 @@ FHE plan intentionally remain anchored at `ceddd554` until its own P-1 re-pin.
 
 **PKCS#11 baseline (D13).** The reference is the PKCS#11 v3.2 OASIS Standard
 (`docs/refs/pkcs11-spec-v3.2-os.pdf`), augmented only with pqctoday vendor mechanisms, key types and
-attributes. Existing v3.2 functions remain the ABI constraint; the new vendor replication operations
-must pass the P0B semantic mapping gate (§6.2). Ordinary wrapping never bypasses non-extractability.
+attributes. Existing v3.2 functions remain the ABI for FHE mechanisms. The prerequisite HSM plan's
+replication functions live only in the separately discoverable `PQCTODAY_KEY_REPLICATION_1_0`
+vendor interface returned by standard `C_GetInterface*`; they do not modify
+`CK_FUNCTION_LIST_3_2`. Ordinary wrapping never bypasses non-extractability.
 The v3.3 draft only fills v3.2 gaps, per the repo's standing rule.
 
 Approval scope requested: **P-1 and P0 only.** Nothing in P1 onward starts until the P0 exit gates
@@ -38,6 +42,7 @@ in §9 pass.
 | v4 | Code-checked challenge of v3 (§11.2): closed a seed-custody bypass through the caller-visible KDF; replaced the SO-session backup with a two-step SO-then-user ceremony using a single-use AES-GCM key; limited recovery to the client key (TFHE-rs has no seeded server-key generation); switched the Lattigo scenario to BGV with a Rust port validated against Lattigo in Go; moved CKKS measurements from Poulpy to OpenFHE; kept large public material off the token; allocated vendor IDs in two batches; aligned the Hub flows with engine capabilities |
 | v5 | Supersedes the v4 extractable-seed/SO-wrap ceremony. Consolidates hardware trust hierarchy, Category 3 PQC, dedicated replication of non-extractable seeds, live cloning plus offline backup/restore, RATS/LAMPS evidence reuse, recovery metadata, role provisioning and all FC-1–FC-8 dispositions (§11.3). Historical dispositions below are retained as history, not current requirements |
 | v6 | Verification pass, no design change. Corrected: TFHE-rs 1.8.1 release date, ISO/IEC 28033-3 stage, the RATS draft's name, the `0x80000005`–`0x8000000f` characterization, the LAMPS CSR-attestation status. Recorded: HSM `origin/main` moved past the `ceddd554` baseline; the Hub worktree still carries the v4 wrap ceremony; Lattigo's retry notice is stronger than v5 paraphrased it. Added: §0.1 verification record, §10.1 repository gates, immutable-attribute precedent in §6.2, fixture-reachability rule in §6.5.1. Same day, later: Hub text aligned to v5/v6 by session 0e (`81a2369b`, local); OpenFHE pinned to v1.6.0 |
+| v7 | Aligns with HSM-plan owner decision 10 after the K0A existing-function NO-GO: replication uses a separately discoverable `PQCTODAY_KEY_REPLICATION_1_0` function list. Package create/import are normative; `CloneKey` is a live-clone convenience wrapper. Standard function-list ABI and ordinary wrap refusal remain unchanged |
 
 Owner decisions recorded 2026-10-02:
 
@@ -55,7 +60,7 @@ Owner decisions recorded 2026-10-02:
 | D10 (revised in v5) | Seed backup ceremony | **Hardware hierarchy and authenticated replication.** Operational and backup HSMs participate in manufacturing → device → function trust; live cloning and offline backup/restore are both required in the first delivered version. The v4 SO-created application-visible wrapping key is removed |
 | D11 | Hub labelling | **Per-step engine badge** (in engine today / planned / refused by design / outside the HSM) plus a per-scenario validation target. v4 recorded initial badges in the Hub worktree; v5 hierarchy/cloning descriptions must be updated and verified in P7 |
 | D12 (scope clarified) | Hybrid KEM naming | Existing engine inventory may name ML-KEM-768 + X25519 (`0x647a`); this hybrid is **not selected** for the v5 hierarchy or replication protocol. D15 requires pure PQC |
-| D13 | PKCS#11 reference | **v3.2 OASIS Standard plus pqctoday vendor extensions only** (header note) |
+| D13 | PKCS#11 reference | **v3.2 OASIS Standard plus pqctoday vendor extensions.** FHE mechanisms use standard `C_*` entries. HSM replication uses only the separately named `PQCTODAY_KEY_REPLICATION_1_0` interface discovered with `C_GetInterface*`; it does not extend `CK_FUNCTION_LIST_3_2` |
 | D14 | Certificate hierarchy | **Manufacturing root signs each device certificate directly; device keys sign function certificates.** Applies to operational and backup HSMs. Function purposes include authentication, attestation and cloning/recovery protection |
 | D15 | Cryptographic profile | **Pure PQC, Category 3: ML-DSA-65 signatures and ML-KEM-768 key establishment.** No classical-only or hybrid fallback. AES-256-GCM is the proposed payload protection. This is not a Category 3 claim for the separate TFHE backend |
 | D16 | Attestation model | **Reuse the existing RATS HSM-evidence draft (`draft-ietf-rats-pkix-key-attestation`, "Evidence Encoding for Hardware Security Modules") and the LAMPS CSR-attestation and freshness drafts**, with published PQ certificate profiles (RFC 9881, RFC 9935). Do not invent a replacement evidence format (§6.8). v5 called this draft "RATS HSM evidence" in some places and "RATS PKIX key attestation" in others; both meant this one document |
@@ -83,7 +88,7 @@ What v6 checked, where, and what changed. Line numbers are at `ceddd554`.
 | `pEphemeralSeed` reaches encapsulation with no release guard | `rust/src/ffi.rs:4713-4752`; `rust/src/native/hpke.rs:796,927,947` | Holds |
 | Shipped WASM bundle built with `--features acvp` | `rust/build-wasm-bundle.sh:65-70`; `rust/Cargo.toml` `[features]`; `docs/rust-engine.md:126-145` | Holds |
 | Vendor attributes (`>= 0x8000_0000`) exempt from mutability rules; engine-private range read-only | `rust/src/state.rs:1326-1332`, `ENGINE_PRIVATE_ATTR_BASE = 0xFFFF_0000` at `:1216` | Holds; precedent added to §6.2 |
-| HPKE vectors pinned to draft -04 | `rust/src/hpke_pq_vectors_tests.rs:10,122` | Holds; -05 is current (6 July 2026) |
+| HPKE vectors labelled draft -04 | `rust/src/hpke_pq_vectors_tests.rs:10,122` | **Label was stale, fixture was already -05.** Hash matches upstream commit `6433c8fc`, the official draft-ietf-hpke-pq-05 tag (6 July 2026) |
 | HSM baseline `ceddd554` = `origin/main` | `git fetch` | **Drifted**: `origin/main` is `b8402936` (PRs #312, #314, #313 merged after the review). All line references remain at `ceddd554`; P-1 re-pins (§2) |
 | Hub FHE files untracked; badges per D11 | `pqctoday-hub-cc-fhe-section-1002`, branch `feat/cc-fhe-section-1002` | **Resolved later on 2026-10-02.** Session 0e owns that worktree; the owner chose v5/v6 and told 0e to make the edits. 0e committed all 13 files (9 new, 4 modified) **locally** as `81a2369b767da97387f087e9a0fbb701c4771de1` on top of `83f97d3cf`; it is not pushed. Verified at that commit: no step text calls `C_WrapKey*` on the seed, and `fheHsmCosts.test.ts:58` asserts that; the one-time-wrap, SO-ceremony and `0x647a` text is gone; the KMIP absolutes are scoped to estimates; OpenFHE links are pinned to `v1.6.0`. The remaining `X25519MLKEM768` mentions describe TLS key exchange, not the HSM hierarchy. Badge vocabulary (`engine`, `planned`, `refused`, `outside`) is unchanged |
 | Sandbox 7 commits behind; no FHE material | `pqctoday-sandbox` at `7d18b794` | Holds; `git ls-files` has no OpenFHE/Lattigo/TFHE entries |
@@ -241,20 +246,21 @@ independently; equal numeric offsets in different namespaces are not treated as 
 | `CKM_PQCTODAY_FHE_MP_SHARE` | mechanism | Multiparty protocol shares: public key, relinearization, Galois, refresh, key-switch, partial decryption. Bound to a transcript (§6.4) |
 | `CKA_PQCTODAY_FHE_SCHEME`, `_PARAM_SET`, `_PARAM_HASH`, `_LIBRARY`, `_LINEAGE_ID`, `_PUBLIC_KIND`, `_DECRYPT_POLICY`, `_THRESHOLD`, `_SHARE_INDEX`, `_TRANSCRIPT_STATE` | attributes | See the P0 ABI spec |
 
-**Replication/attestation ABI gate.** P0B specifies vendor operations for enrollment, evidence,
-clone/export-to-peer and authenticated restore, with no assigned numbers here. Candidate mapping:
-`C_DeriveKey` produces bounded public `CKO_DATA` protocol/evidence objects from the relevant base
-key, or installs a protected seed from a recovery-function key and verified package. Source seed
-and authorization handles must be bound and access-checked. Evidence bytes are read with
-`C_GetAttributeValue`; host-provided bytes enter only as parsed mechanism parameters. Internal
-transport keys never get caller-visible usable handles. A seed-based transfer operation, if selected,
-must be explicitly in the immutable seed allowlist. P0B must settle exact function semantics,
-object classes, imported/derived history attributes, capabilities and error behavior against v3.2;
-the candidate mapping is not a conformance claim. If existing functions cannot express it honestly,
-record NO-GO and resolve D13 before implementation, rather than hiding a new API inside ordinary wrap.
+**Replication/attestation ABI gate.** The standalone HSM plan governs this ABI. Its K0A review
+rejected both `C_DeriveKey` and ordinary `C_WrapKey*` as protected-key export paths. Owner decision
+10 selects the separately named `PQCTODAY_KEY_REPLICATION_1_0` interface, discovered through
+standard `C_GetInterfaceList` / `C_GetInterface` without changing `CK_FUNCTION_LIST_3_2`.
+`C_PQCTODAY_CreateReplicationPackage` and `C_PQCTODAY_ImportReplicationPackage` are the normative
+live/offline primitives; `C_PQCTODAY_CloneKey` is only a convenience wrapper when one module can
+address both source and destination sessions. The FHE work adds no FHE-specific replication
+operation or package. It contributes only the FHE key type, immutable FHE policy/provenance
+attributes and the versioned recovery-descriptor extension after the HSM plan's K4 exit. Ordinary
+wrapping continues to refuse `CKA_EXTRACTABLE=false`, and the source seed remains non-extractable.
 
-**The normative ABI spec** (`docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`) is a **P0
-deliverable before production feature code**. Isolated P0A feasibility spikes are allowed. It covers:
+**The normative FHE ABI spec** (`docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`) is a **P0
+deliverable before production feature code**. Isolated P0A feasibility spikes are allowed. It covers
+the FHE mechanisms and objects below; the HSM plan's K0B specification separately governs the
+replication interface, package and state machine:
 - **Encoding:** fixed-width fields for the vendor ABI; standard ASN.1/DER for reused RATS/LAMPS/X.509 objects. No pointer-bearing network messages. Do not re-encode standard evidence into a proprietary format.
 - **Parameters:** an allowlisted parameter registry (no caller-supplied cryptographic parameters), and canonical parameter-set IDs with maximum lengths.
 - **Bounds and versions:** serialization and parameter-hash semantics; maximum input, output and object sizes, checked *before* allocation.
@@ -655,7 +661,7 @@ return code or fixture must satisfy all of them in the same PR.
 | Vector reachability | Every fixture under a `VECTOR_ROOTS` directory must be loaded by a code line (§6.5.1) | `scripts/check_vector_reachability.py` |
 | Shipped-artifact features | F5: the wasm bundle must stop carrying `acvp`; the FHE bundle gets its own feature manifest | `rust/build-wasm-bundle.sh`, `rust/Cargo.toml` |
 | Allocation authority | Batch 1 and batch 2 land in the private authority **before** the constants land here; the manifest's authority sha is updated in the same PR | `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md` |
-| Remoting coverage ledger | Per `C_*` function, not per mechanism; no new row expected because the ABI gate (§6.2) forbids new functions. Confirm at P1 rather than assume | `remoting/REMOTE_P11_V32_COVERAGE.md`, `scripts/check_coverage_ledger.py` |
+| Remoting coverage ledger | The standard v3.2 ledger remains unchanged because `CK_FUNCTION_LIST_3_2` gains no entry. `PQCTODAY_KEY_REPLICATION_1_0` is a separate Rust-only vendor interface and is out of current remoting scope. Record that boundary explicitly rather than claiming the vendor calls have standard remoting coverage; if remoting is later added, give the named interface its own coverage/exclusion record | `remoting/REMOTE_P11_V32_COVERAGE.md`, `scripts/check_coverage_ledger.py` |
 | Two-engine mechanism sets | CLAUDE.md: two engines advertising different mechanism sets is its own hazard, and Rust is a superset of C++ by design. FHE mechanisms widen that superset; the ledger reason is the record, and the Hub badge for the C++ engine is `refused by design`, never `planned` | `CLAUDE.md`, ledger |
 | Full local gate before push | The gate runs in the container, takes the better part of an hour, and is the merge precondition; a subset is not a gate | `scripts/local-gate.sh` |
 
@@ -732,7 +738,7 @@ P1/P2 and optional lane tests supply implementation evidence.
 |---|---|---|
 | FC-1 · Copy/mutation bypass | Remove caller-visible wrapping key; immutable non-extractable seeds and constrained internal replication functions (§6.2, §6.7) | P1 copy, mutation, ordinary-wrap, import and weaker-policy negatives |
 | FC-2 · Independent HPKE randomness hook | Reject both `pEphemeralSeed` and `pReserved` in shipped native/WASM artifacts (F5) | P1 feature-matrix tests and exact consumed artifact hashes |
-| FC-3 · Contradictory derive template | Public-output template specifies public/session object semantics; replication variants must satisfy their own templates, not silently ignore them (§6.2) | P0B existing-function semantic review; P1 allowed and conflicting template tests |
+| FC-3 · Contradictory derive template | Public-output template specifies public/session object semantics; replication import must satisfy the destination template and policy, not silently ignore them (§6.2) | HSM K0B vendor-interface semantic review; P1 allowed and conflicting destination-template tests |
 | FC-4 · SO cannot set private-user policy | SO enrolls immutable public policy before user-private key creation; engine binds its digest and enforces equal-or-stricter restore (§6.3, §6.7) | P1 login/role transitions, unauthorized policy changes and destination-policy tests |
 | FC-5 · Retry binding | Protocol-specific actual public inputs and stable lineage; consumption before output; changed epoch/handle/active subset does not authorize unsafe reuse (§6.4) | Optional P5 protocol review and replay/retry/crash tests against pinned reference guidance |
 | FC-6 · Incomplete recovery descriptor | Authenticate full KDF/backend/serialization/lineage/policy descriptor; retain old generator or prove real migration (§5, §6.7) | P2 source-loss live/offline recovery and old-ciphertext tests; no re-encryption-only migration claim |

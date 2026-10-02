@@ -4,7 +4,7 @@ Published reference vectors replayed by `rust/src/hpke_pq_vectors_tests.rs`. All
 
 | File | Upstream | sha256 |
 |---|---|---|
-| `hpke-pq-test-vectors.json` | https://raw.githubusercontent.com/hpkewg/hpke-pq/6433c8fce0b8b749dfc86c1095081a88698ccfab/test-vectors.json (draft-ietf-hpke-pq-04 Appendix A) | `35c59f4a0132e5631e50ac039d8ca3a72e99f5e92dfd94d45338d6ae243f613c` |
+| `hpke-pq-test-vectors.json` | https://raw.githubusercontent.com/hpkewg/hpke-pq/6433c8fce0b8b749dfc86c1095081a88698ccfab/test-vectors.json (draft-ietf-hpke-pq-05 Appendix A; official `draft-ietf-hpke-pq-05` tag) | `35c59f4a0132e5631e50ac039d8ca3a72e99f5e92dfd94d45338d6ae243f613c` |
 | `cfrg-concrete-hybrid-kems-test-vectors.json` | https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-concrete-hybrid-kems/e76e1939fb5bec71d3d6c206de20ca2c008f1f80/test-vectors.json | `08b47d9fe5c827f7ceb20dd10a59bc853a949d6eaf0ad835405e86d833f92bad` |
 | `xwing-test-vectors.json` | https://raw.githubusercontent.com/dconnolly/draft-connolly-cfrg-xwing-kem/984c2f7a93b8f8d8f8073ebb53f9f4ce50b5babd/spec/test-vectors.json | `409efe197550b22985b4a0419418a0c5f2c2b193426c55bd998399ec8d3e614d` |
 | `jose-hpke-pq-pqt-01-vectors.json` | https://raw.githubusercontent.com/panva/draft-jose-hpke-pq-pqt/47a746533ebb94c4193ee6a4e2f76170a6790335/examples/jose-vectors.json (draft-ietf-jose-hpke-pq-pqt-01 Appendix A). The plaintext is the constant in that commit's `scripts/jwe.js`. | `97e5fd1c5bd417b3af3f8948e8c54914c7c9f544ad786182d18cf15a011bd2c0` |

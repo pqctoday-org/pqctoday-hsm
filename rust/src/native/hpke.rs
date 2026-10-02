@@ -76,7 +76,7 @@ enum KemShape {
     /// label (draft-irtf-cfrg-concrete-hybrid-kems §4). No Auth interface —
     /// ML-KEM defines no AuthEncap/AuthDecap.
     Hybrid { pq_ps: u32, curve: Curve, label: &'static [u8] },
-    /// Pure ML-KEM (draft-ietf-hpke-pq-04 §3). `ps` is the ML-KEM
+    /// Pure ML-KEM (draft-ietf-hpke-pq-05 §3). `ps` is the ML-KEM
     /// `CKA_PARAMETER_SET`. No Auth interface.
     MlKem { ps: u32 },
 }
@@ -136,7 +136,7 @@ fn kem_info(kem_id: u32) -> Result<KemInfo, CkRv> {
     })
 }
 
-/// Length of a seed-format private key (`Nsk`, draft-ietf-hpke-pq-04 Tables
+/// Length of a seed-format private key (`Nsk`, draft-ietf-hpke-pq-05 Tables
 /// 2-3): 64 for pure ML-KEM (`d ‖ z`), 32 for the PQ/T hybrids. Classical
 /// DHKEM keys keep RFC 9180's scalar format and are not seed-format.
 fn seed_len(shape: &KemShape) -> Option<usize> {
@@ -147,7 +147,7 @@ fn seed_len(shape: &KemShape) -> Option<usize> {
     }
 }
 
-// ── One-stage KDF (draft-ietf-hpke-hpke-03 §4.4, draft-ietf-hpke-pq-04 §5) ──
+// ── One-stage KDF (draft-ietf-hpke-hpke-03 §4.4, draft-ietf-hpke-pq-05 §5) ──
 
 /// `SHAKE256.Derive(ikm, L) = SHAKE256(M = ikm, d = 8L)`.
 fn shake256_derive(ikm: &[u8], l: usize) -> Vec<u8> {
@@ -178,7 +178,7 @@ fn labeled_derive(suite_id: &[u8], ikm: &[u8], label: &[u8], context: &[u8], l: 
     Ok(shake256_derive(&labeled, l))
 }
 
-/// draft-ietf-hpke-pq-04 §3/§4 `DeriveKeyPair(ikm)` for the PQ and PQ/T KEMs:
+/// draft-ietf-hpke-pq-05 §3/§4 `DeriveKeyPair(ikm)` for the PQ and PQ/T KEMs:
 /// the seed-format private key `SHAKE256.LabeledDerive(ikm, "DeriveKeyPair",
 /// "", Nsk)` under the KEM's own `suite_id` ("KEM" ‖ I2OSP(kem_id, 2)).
 pub fn derive_key_pair_seed(kem_id: u32, ikm: &[u8]) -> Result<Vec<u8>, CkRv> {
@@ -456,7 +456,7 @@ fn mlkem_ek_len(ps: u32) -> usize {
 }
 
 // ── Seed-format hybrid keys (draft-irtf-cfrg-concrete-hybrid-kems; the
-//    GENERIC DeriveKeyPair draft-ietf-hpke-pq-04 §4 delegates to) ────────────
+//    GENERIC DeriveKeyPair draft-ietf-hpke-pq-05 §4 delegates to) ────────────
 
 /// Bytes of classical seed per component: X25519 takes its 32-byte seed as
 /// the scalar; P-256 rejection-samples 32-byte windows out of 128 bytes; P-384
@@ -570,7 +570,7 @@ fn split_ek(info: &KemInfo, ek_h: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
 /// Classical DHKEM suites: generated via the existing single-algorithm native
 /// keygen; the private `CKA_VALUE` is the RFC 9180 scalar.
 ///
-/// Pure ML-KEM and PQ/T hybrid suites: **seed format** (draft-ietf-hpke-pq-04
+/// Pure ML-KEM and PQ/T hybrid suites: **seed format** (draft-ietf-hpke-pq-05
 /// §3/§4 SerializePrivateKey). The private `CKA_VALUE` is the seed — 64 bytes
 /// (`d ‖ z`) for ML-KEM, 32 bytes for a hybrid — and the expanded component
 /// keys are re-derived inside the engine on every Decap, never stored. A
@@ -789,7 +789,7 @@ pub struct HpkeParams<'a> {
     pub sender_static_pub: Option<&'a [u8]>,
     /// Forces the Encap randomness for byte-exact reproduction of published
     /// vectors: the ephemeral classical scalar (DHKEM, RFC 9180 Appendix A),
-    /// ML-KEM's 32-byte `m` (pure ML-KEM, draft-ietf-hpke-pq-04 `ikmE`), or
+    /// ML-KEM's 32-byte `m` (pure ML-KEM, draft-ietf-hpke-pq-05 `ikmE`), or
     /// `m ‖ classical seed` (PQ/T hybrids, CFRG `randomness`). A wrong length
     /// is CKR_MECHANISM_PARAM_INVALID. MUST NOT be used outside known-answer
     /// testing: fixed randomness makes every encapsulation to a key identical.
@@ -869,6 +869,12 @@ pub fn encapsulate(
     p: &HpkeParams,
     exporter_template: Option<Vec<(u32, Vec<u8>)>>,
 ) -> Result<HpkeResult, CkRv> {
+    // F5 (2026-10-02) — deterministic encapsulation is a KAT/vector hook,
+    // never a production API. Unit tests and explicit ACVP builds retain it;
+    // every normal native/WASM artifact rejects it before touching a key.
+    if p.ephemeral_seed.is_some() && !cfg!(any(test, feature = "acvp")) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
     let access = resolve_session_access(session)?;
     let (can_encap, key_type, ps, ek_h) = with_object_checked(&access, recipient_pub, |attrs| {
         (
@@ -1050,7 +1056,7 @@ fn finish_encap_decap(
     let aead_nk_nn = aead_sizes(p.aead_id)?;
 
     let sched = if p.kdf_id == CKD_HPKE_SHAKE256 {
-        // SHAKE256: Nh = 64 (draft-ietf-hpke-pq-04 Table 1).
+        // SHAKE256: Nh = 64 (draft-ietf-hpke-pq-05 Table 1).
         key_schedule_one_stage(&sid, p.mode, shared_secret, p.info, p.psk, p.psk_id, aead_nk_nn, 64)?
     } else {
         let (kdf_prf, n_h) = kdf_prf_mech(p.kdf_id)?;

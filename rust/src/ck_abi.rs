@@ -187,6 +187,49 @@ pub struct CK_INTERFACE {
 pub type CK_INTERFACE_PTR = *mut CK_INTERFACE;
 pub type CK_INTERFACE_PTR_PTR = *mut CK_INTERFACE_PTR;
 
+/// K0B ABI reservation for the separately discoverable PQCToday protected
+/// key-replication interface. Defining this type does NOT advertise the
+/// interface: it is intentionally absent from `INTERFACES` until the
+/// external attribute/OID allocations and the protocol review are complete.
+/// See docs/proposals/pqctoday-key-replication-interface-1.0.md.
+pub static PQCTODAY_KEY_REPLICATION_INTERFACE_NAME: &[u8] =
+    b"PQCTODAY_KEY_REPLICATION_1_0\0";
+
+#[repr(C)]
+pub struct PQCTODAY_KEY_REPLICATION_FUNCTION_LIST_1_0 {
+    pub version: CK_VERSION,
+    pub C_PQCTODAY_CreateReplicationPackage: unsafe extern "C" fn(
+        CK_SESSION_HANDLE,
+        CK_OBJECT_HANDLE,
+        CK_BYTE_PTR,
+        CK_ULONG,
+        CK_BYTE_PTR,
+        CK_ULONG_PTR,
+    ) -> CK_RV,
+    pub C_PQCTODAY_ImportReplicationPackage: unsafe extern "C" fn(
+        CK_SESSION_HANDLE,
+        CK_BYTE_PTR,
+        CK_ULONG,
+        CK_ATTRIBUTE_PTR,
+        CK_ULONG,
+        CK_OBJECT_HANDLE_PTR,
+        CK_BYTE_PTR,
+        CK_ULONG_PTR,
+    ) -> CK_RV,
+    pub C_PQCTODAY_CloneKey: unsafe extern "C" fn(
+        CK_SESSION_HANDLE,
+        CK_OBJECT_HANDLE,
+        CK_SESSION_HANDLE,
+        CK_BYTE_PTR,
+        CK_ULONG,
+        CK_ATTRIBUTE_PTR,
+        CK_ULONG,
+        CK_OBJECT_HANDLE_PTR,
+        CK_BYTE_PTR,
+        CK_ULONG_PTR,
+    ) -> CK_RV,
+}
+
 /// Native `CK_UNAVAILABLE_INFORMATION` is `(~0UL)` (PKCS#11 v3.2 §4.2);
 /// the engine's wasm ABI uses the 32-bit sentinel `0xFFFF_FFFF`.
 pub const CK_UNAVAILABLE_INFORMATION_NATIVE: CK_ULONG = CK_ULONG::MAX;
@@ -2456,6 +2499,13 @@ mod tests {
         assert_eq!(size_of::<FnListV32Ext>(), PTR * 12);
         // Native CK_INTERFACE: two pointers + CK_ULONG.
         assert_eq!(size_of::<CK_INTERFACE>(), PTR * 2 + size_of::<CK_ULONG>());
+        // Separate version header plus exactly three vendor function slots.
+        // This assertion is independent of (and must never change) the
+        // standard 104-slot list assertion above.
+        assert_eq!(
+            size_of::<PQCTODAY_KEY_REPLICATION_FUNCTION_LIST_1_0>(),
+            PTR * (1 + 3)
+        );
     }
 
     #[test]
@@ -2730,6 +2780,21 @@ mod tests {
                 C_GetInterface(bad.as_mut_ptr(), std::ptr::null_mut(), &mut p, 0),
                 rv(CKR_FUNCTION_FAILED)
             );
+
+            // K0B safety gate: the ABI name/type is frozen, but an incomplete
+            // protected-key service must not be discoverable in a release.
+            let mut replication_name = PQCTODAY_KEY_REPLICATION_INTERFACE_NAME.to_vec();
+            let mut replication_v1 = CK_VERSION { major: 1, minor: 0 };
+            assert_eq!(
+                C_GetInterface(
+                    replication_name.as_mut_ptr(),
+                    &mut replication_v1,
+                    &mut p,
+                    0,
+                ),
+                rv(CKR_FUNCTION_FAILED)
+            );
+            assert!(p.is_null());
         }
     }
 

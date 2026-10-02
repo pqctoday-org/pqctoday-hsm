@@ -2413,7 +2413,7 @@ fn C_GenerateKeyPair_impl(
                 // CKA_SEED (private template; public as fallback, same rule as
                 // CKM_ML_KEM_KEY_PAIR_GEN below) imports a seed-format key:
                 // 64-byte `d ‖ z` for the pure ML-KEM suites, 32 bytes for
-                // the PQ/T hybrids (draft-ietf-hpke-pq-04 §3/§4). Length and
+                // the PQ/T hybrids (draft-ietf-hpke-pq-05 §3/§4). Length and
                 // suite are validated by native::hpke::keygen_with_seed.
                 let seed = get_attr_bytes_present(
                     p_private_key_template,
@@ -12141,6 +12141,27 @@ pub fn C_DeriveKey(
             // PKCS#11 v3.2 §4.11: KCV mandatory on derived secret keys.
             crate::state::compute_kcv(&mut attrs);
 
+            // PKCS#11 v3.2 §5.18.5 — CKA_DERIVE_TEMPLATE on the base key is
+            // an additional template the result must satisfy. The stored
+            // nested template is already flattened by absorb_template_attrs;
+            // compare it against the FINAL attributes so mechanism-contributed
+            // class/type/history values cannot be bypassed by caller input.
+            let derive_permitted = OBJECTS.with(|o| {
+                o.borrow()
+                    .get(&h_base_key)
+                    .map(|base| {
+                        crate::state::key_template_permits(
+                            base,
+                            CKA_DERIVE_TEMPLATE,
+                            &attrs,
+                        )
+                    })
+                    .unwrap_or(false)
+            });
+            if !derive_permitted {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
+
             *ph_key = match ffi_alloc(_h_session, attrs) {
                 Ok(h) => h,
                 Err(rv) => return rv,
@@ -12989,10 +13010,27 @@ pub fn C_DeriveKey(
             store_bool(&mut attrs, CKA_PRIVATE, true);
             absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
         } else {
+            // HSM hierarchy plan F8 — do not silently turn a sensitive base
+            // key into a caller-readable derived key merely because the
+            // template omitted the custody attributes. This is a default,
+            // not a new prohibition: an explicit caller template is still
+            // processed below and CKA_DERIVE_TEMPLATE on the base key remains
+            // the authoritative way to forbid weaker outputs.
+            let sensitive_base = if h_base_key == 0 {
+                false
+            } else {
+                OBJECTS.with(|objects| {
+                    objects
+                        .borrow()
+                        .get(&h_base_key)
+                        .map(|attrs| read_bool_attr(attrs, CKA_SENSITIVE))
+                        .unwrap_or(false)
+                })
+            };
             store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
             store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
-            store_bool(&mut attrs, CKA_EXTRACTABLE, true);
-            store_bool(&mut attrs, CKA_SENSITIVE, false);
+            store_bool(&mut attrs, CKA_EXTRACTABLE, !sensitive_base);
+            store_bool(&mut attrs, CKA_SENSITIVE, sensitive_base);
             store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
             // PKCS#11 v3.2 §4.1 defaults — caller may override via template
             store_bool(&mut attrs, CKA_TOKEN, false);
@@ -13053,6 +13091,24 @@ pub fn C_DeriveKey(
 
             // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
             crate::state::compute_kcv(&mut attrs);
+        }
+
+        if h_base_key != 0 {
+            let derive_permitted = OBJECTS.with(|o| {
+                o.borrow()
+                    .get(&h_base_key)
+                    .map(|base| {
+                        crate::state::key_template_permits(
+                            base,
+                            CKA_DERIVE_TEMPLATE,
+                            &attrs,
+                        )
+                    })
+                    .unwrap_or(false)
+            });
+            if !derive_permitted {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
         }
 
         *ph_key = match ffi_alloc(_h_session, attrs) {
@@ -20301,6 +20357,73 @@ mod return_code_ffi_tests {
             })
             .collect();
         assert_eq!(get_object_value(h_new).unwrap(), expect);
+    }
+
+    /// HSM hierarchy plan F8 — if the caller does not specify custody
+    /// attributes, a derivation from a sensitive base must not default to a
+    /// readable, extractable result. An explicit template and the base key's
+    /// CKA_DERIVE_TEMPLATE remain responsible for any permitted exception.
+    #[test]
+    fn sensitive_base_defaults_derived_key_to_sensitive_non_extractable() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_base = 0x5334_0042;
+        OBJECTS.with(|objects| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, b"sensitive-base".to_vec());
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut attrs, CKA_DERIVE, true);
+            store_bool(&mut attrs, CKA_SENSITIVE, true);
+            store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+            objects.borrow_mut().insert(h_base, attrs);
+        });
+
+        let mut mechanism: [usize; 3] = [CKM_SHA256_KEY_DERIVATION as usize, 0, 0];
+        let mut h_derived = 0;
+        let rv = unsafe {
+            C_DeriveKey(
+                SESSION,
+                mechanism.as_mut_ptr() as *mut u8,
+                h_base,
+                std::ptr::null_mut(),
+                0,
+                &mut h_derived,
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        let attrs = OBJECTS.with(|objects| objects.borrow().get(&h_derived).cloned().unwrap());
+        assert!(read_bool_attr(&attrs, CKA_SENSITIVE));
+        assert!(!read_bool_attr(&attrs, CKA_EXTRACTABLE));
+
+        // This hardening is a default, not a blanket ban. With no restrictive
+        // CKA_DERIVE_TEMPLATE on the base, an explicit caller template keeps
+        // the pre-existing PKCS #11 behavior.
+        let sensitive_false = 0u8;
+        let extractable_true = 1u8;
+        let mut template: [usize; 6] = [
+            CKA_SENSITIVE as usize,
+            &sensitive_false as *const u8 as usize,
+            1,
+            CKA_EXTRACTABLE as usize,
+            &extractable_true as *const u8 as usize,
+            1,
+        ];
+        let mut h_explicit = 0;
+        let rv = unsafe {
+            C_DeriveKey(
+                SESSION,
+                mechanism.as_mut_ptr() as *mut u8,
+                h_base,
+                template.as_mut_ptr() as *mut u8,
+                2,
+                &mut h_explicit,
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        let attrs = OBJECTS.with(|objects| objects.borrow().get(&h_explicit).cloned().unwrap());
+        assert!(!read_bool_attr(&attrs, CKA_SENSITIVE));
+        assert!(read_bool_attr(&attrs, CKA_EXTRACTABLE));
     }
 
     /// The second key must carry CKA_DERIVE — else CKR_KEY_FUNCTION_NOT_PERMITTED

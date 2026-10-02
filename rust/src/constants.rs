@@ -243,7 +243,7 @@ pub const CKP_HPKE_KEM_DHKEM_X448_HKDF_SHA512: u32 = 0x0021;
 pub const CKP_HPKE_KEM_MLKEM768_P256: u32 = 0x0050;
 pub const CKP_HPKE_KEM_MLKEM1024_P384: u32 = 0x0051;
 pub const CKP_HPKE_KEM_MLKEM768_X25519: u32 = 0x647a;
-/// Pure ML-KEM HPKE KEMs (draft-ietf-hpke-pq-04 §3, Table 2). Private key
+/// Pure ML-KEM HPKE KEMs (draft-ietf-hpke-pq-05 §3, Table 2). Private key
 /// = the 64-byte FIPS 203 seed `d ‖ z`.
 pub const CKP_HPKE_KEM_ML_KEM_512: u32 = 0x0040;
 pub const CKP_HPKE_KEM_ML_KEM_768: u32 = 0x0041;
@@ -253,7 +253,7 @@ pub const CKP_HPKE_KEM_ML_KEM_1024: u32 = 0x0042;
 pub const CKD_HPKE_HKDF_SHA256: u32 = 0x0001;
 pub const CKD_HPKE_HKDF_SHA384: u32 = 0x0002;
 pub const CKD_HPKE_HKDF_SHA512: u32 = 0x0003;
-/// One-stage KDF (draft-ietf-hpke-pq-04 §5, Table 1; key schedule per
+/// One-stage KDF (draft-ietf-hpke-pq-05 §5, Table 1; key schedule per
 /// draft-ietf-hpke-hpke-03 §4.4/§5.1 `LabeledDerive`/`CombineSecrets_OneStage`).
 pub const CKD_HPKE_SHAKE256: u32 = 0x0011;
 
@@ -386,8 +386,8 @@ pub const CKA_WRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0211;
 /// `C_UnwrapKey`; a caller template contradicting it is
 /// `CKR_TEMPLATE_INCONSISTENT`.
 pub const CKA_UNWRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0212;
-/// §5.18.3 — the derive counterpart. Defined for completeness of the array
-/// attribute family; not enforced by any derive path yet.
+/// §5.18.5 — the derive counterpart. The Rust engine enforces it against the
+/// final attributes of every derived object before allocating a handle.
 pub const CKA_DERIVE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0213;
 /// KEM counterpart of [`CKA_WRAP_TEMPLATE`], on the ENCAPSULATING key:
 /// "an attribute set that will be compared against the attributes of the key

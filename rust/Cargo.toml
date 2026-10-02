@@ -98,6 +98,12 @@ phase-profile = [
 name = "awslc_pq_bench"
 required-features = ["awslc-pq"]
 
+[[test]]
+# Uses the established downstream-test reset hook because both spikes exercise
+# the process-global token store with distinct test ceremonies.
+name = "hierarchy_attestation_spikes"
+required-features = ["test-support"]
+
 [dependencies]
 wasm-bindgen = "0.2.117"
 js-sys = "0.3.69"
@@ -353,6 +359,13 @@ sha2 = { version = "0.10.8", features = ["asm"] }
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
 # the internalProjection.json vector files shipped with the patched forks).
 serde_json = "1"
+# K0A hierarchy/attestation spikes. These are the same RustCrypto versions
+# already resolved for the workspace's KMIP certificate code, promoted only
+# to this crate's test graph; they do not enter shipped native/WASM artifacts.
+x509-cert = { version = "0.2", default-features = false, features = ["builder"] }
+der = { version = "0.7", features = ["oid", "alloc", "std"] }
+spki07 = { package = "spki", version = "0.7", features = ["alloc"] }
+const-oid = { version = "0.9", features = ["db"] }
 # Cross-validation oracle only (Phase 0.9/0.6 of the FrodoKEM/McEliece/HQC plan) —
 # native liboqs bindings, dev-dependency only so it never has to cross the wasm32
 # target; the engine's shipping crypto never depends on this.

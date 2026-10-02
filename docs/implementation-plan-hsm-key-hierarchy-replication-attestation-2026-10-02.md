@@ -1,7 +1,15 @@
 # Implementation plan: HSM key hierarchy, key replication and attestation (Rust engine)
 
-Date: 2026-10-02 · Revision: **v1**
-Status: **proposal; no implementation or runtime validation claimed.** Docs only. Owner decisions 1–8 recorded in §11; decision 9 open.
+Date: 2026-10-02 · Revision: **v4 (educational OID profile selected)**
+Status: **K0A complete; its existing-function replication mapping was NO-GO. Owner decision 10
+resolves that blocker with a separately discoverable PQCToday vendor interface. K1 prerequisites
+are implemented and the 23-step full local gate passes. A K0B working ABI/wire
+specification now pins locally reserved private-authority PKCS #11 values and the RFC 5612
+documentation-only OID profile selected by owner decision 11. The authority commits are not yet
+upstream. K2–K5 may use the dummy values only in an explicitly enabled local educational profile;
+independent protocol review and real production OIDs remain mandatory before any production or
+interoperability claim.**
+Owner decisions 1–8, 10 and 11 are recorded in §11; decision 9 is open.
 Owner request (relayed by the coordinator, 16:26 CDT, "proceed with default options"): extract the
 key-hierarchy, cloning/backup-restore and attestation design from the FHE wrapper plan v6 into a
 standalone `pqctoday-hsm` plan that is delivered first and that FHE then uses.
@@ -18,16 +26,24 @@ Source documents (same directory):
 
 | # | Decision | Consequence in this plan |
 |---|---|---|
-| K1 (1a) | **General HSM features for any protected key**, FHE seeds as the first consumer | Covers ML-DSA and ML-KEM private keys, AES and generic secret keys, and the FHE seed type once the FHE plan allocates it. **Excluded:** stateful hash-based signature keys (LMS/HSS, XMSS/XMSS^MT), threshold-FHE shares, and the device issuer/function keys themselves. Each needs a separate state-consistency design; duplicating them can cause one-time-key reuse or split protocol state |
+| K1 (1a) | **General HSM framework, with explicit per-key profiles**, FHE seeds as the first follow-on consumer | The initial v1 profile covers ML-DSA-65 and ML-KEM-768 private keys plus AES-128/192/256. Generic secrets and other parameter sets need later encoding/validation profiles; FHE P1 adds the seed type only after HSM K4. **Excluded:** stateful hash-based signature keys (LMS/HSS, XMSS/XMSS^MT), threshold-FHE shares, and the device issuer/function keys themselves. Each needs a separate state-consistency design; duplicating them can cause one-time-key reuse or split protocol state |
 | K2 (2a) | **Rust engine only** (`softhsmrustv3`), native and browser/WASM | Out of scope, recorded as such: the C++ engine, KMIP/CACP, the PKCS#11 remoting services, and the protocol wrappers (`JavaJCE*`, OpenSSL provider, `openssh-pkcs11`, `openpgp`, `openmls-provider`, `strongswan-pkcs11`) |
 | K3 (3a) | **Software first**, with a clearly labelled **test manufacturing CA**; no hardware claims | A later, separately gated phase (K6) binds device identity to board hardware roots (i.MX 95, KV260). Until then every artefact says "software token / test hierarchy" |
 | K4 (4a) | **Separate plan, delivered first**, with its own phases and exit gates | The FHE plan's P1 now depends on this plan's K4 exit (§9). The FHE plan keeps only FHE-specific work: the seed key type, its recovery descriptor and its policy |
 
-Adopted unchanged from the FHE plan:
-- **D13:** PKCS#11 v3.2 OS plus pqctoday vendor extensions only. No new `C_*` functions. Ordinary wrapping never bypasses non-extractability.
+Adopted from the FHE plan, with D13 revised by owner decision 10 after K0A:
+- **D13 (revised):** PKCS#11 v3.2 OS remains the standard ABI. Replication is exposed only through
+  a separately named `PQCTODAY_KEY_REPLICATION_1_0` vendor interface discovered with the standard
+  `C_GetInterface` / `C_GetInterfaceList` functions. It does not change or append to
+  `CK_FUNCTION_LIST_3_2`. Ordinary `C_WrapKey` and `C_WrapKeyAuthenticated` never bypass
+  non-extractability.
 - **D14:** a manufacturing root signs each device certificate directly, and device keys sign function certificates. This applies to operational and backup HSMs alike.
 - **D15:** pure PQC at Category 3: ML-DSA-65 signatures, ML-KEM-768 key establishment, AES-256-GCM payload protection. No classical-only or hybrid fallback.
 - **D16:** reuse the RATS HSM-evidence draft and the LAMPS CSR-attestation and freshness drafts, with RFC 9881 and RFC 9935 certificate profiles. No invented evidence format.
+- **D17:** use `1.3.6.1.4.1.32473.20261002` beneath RFC 5612's documentation PEN for disposable
+  educational certificates and fixtures only. Do not apply for an IANA PEN now, do not put owner
+  contact details in the repository, and reject the documentation subtree outside the explicit
+  educational profile.
 
 D1 (educational emulator, no production claim) and D5 (KMIP out of scope) carry over as well.
 
@@ -51,7 +67,7 @@ A certificate chain from the test manufacturing CA proves which **software insta
 | Capability | State | Evidence |
 |---|---|---|
 | ML-DSA-65 sign/verify, ML-KEM-768 encap/decap, AES-GCM, SHA-384 | Present | `rust/src/constants.rs`; AWS-LC PQ path `rust/src/crypto/awslc_pq.rs` |
-| HPKE in-token, pure ML-KEM KEMs `0x0040`–`0x0042`, HKDF-SHA384 and SHAKE256 KDFs | Present. Vectors pinned to draft-ietf-hpke-pq-04; -05 is current | `CKM_HPKE` `0x80000014`; `rust/src/hpke_pq_vectors_tests.rs` |
+| HPKE in-token, pure ML-KEM KEMs `0x0040`–`0x0042`, HKDF-SHA384 and SHAKE256 KDFs | Present. Fixture hash matches upstream commit `6433c8fc`, the official draft-ietf-hpke-pq-05 tag | `CKM_HPKE` `0x80000014`; `rust/src/hpke_pq_vectors_tests.rs` |
 | HPKE output key | Fixed template: sensitive, non-extractable, encrypt/decrypt only, no `CKA_WRAP` | `rust/src/native/hpke.rs:810` (`register_aead_key`) |
 | HPKE deterministic-randomness hook | `pEphemeralSeed` reaches encapsulation with **no release guard** | `rust/src/ffi.rs:4831-4870`; `rust/src/native/hpke.rs:796,927,947` |
 | ACVP RNG hook in shipped WASM | `build-wasm-bundle.sh` always builds `--features acvp`; the feature lets non-null `C_Initialize.pReserved` seed the RNG | `rust/build-wasm-bundle.sh:65-70`; hook at `rust/src/ffi.rs:298` |
@@ -76,13 +92,14 @@ A certificate chain from the test manufacturing CA proves which **software insta
 
 | Key class | Replicable in v1? | Notes |
 |---|---|---|
-| AES / generic secret keys | Yes | Value plus full attribute set |
-| ML-KEM-768 private key (+ its public key object) | Yes | The package carries the stored private-key encoding (seed form or expanded, whichever the object holds; `CKA_SEED` if present) and the public key. P0B fixes which encodings are accepted |
-| ML-DSA-65 private key (+ public key object) | Yes | As for ML-KEM. Category 3 sets are the tested baseline; other parameter sets follow the same path if P0B allows them |
-| FHE seed (`CKK_PQCTODAY_FHE`, allocated by the FHE plan) | Yes, first consumer | Carries the FHE recovery descriptor as an opaque, authenticated, type-specific extension (FHE plan §5) |
+| AES-128/192/256 secret keys | Yes | The package carries the raw 16/24/32-byte key only inside authenticated ciphertext, plus the allowlisted attributes |
+| Generic secret keys | **No in initial v1** | A later profile must define accepted lengths, uses and type-specific validation rather than treating arbitrary bytes as an AES-equivalent key |
+| ML-KEM-768 private key (+ its public key object) | Yes | K0B fixes one representation: the 2,400-byte FIPS 203 decapsulation key plus the 1,184-byte encapsulation key. `CKA_SEED` is not replicated |
+| ML-DSA-65 private key (+ public key object) | Yes | K0B fixes the 4,032-byte FIPS 204 signing key plus the 1,952-byte verification key. Other parameter sets require a later profile |
+| FHE seed (`CKK_PQCTODAY_FHE`, allocated by the FHE plan) | **Follow-on after HSM K4** | FHE P1 adds it as a new replicable class and carries the recovery descriptor as an authenticated type-specific extension; it is not in the initial three-class HSM v1 acceptance matrix |
 | LMS/HSS, XMSS/XMSS^MT | **No** | State lives in engine-private attributes precisely to stop rewind; a copy is a rewind |
 | Threshold-FHE shares | **No** | One-shot transcript state (FHE plan §6.4) |
-| Device issuer, attestation, package-signing, recovery-recipient keys | **No** | Device identity is never copied; backup tokens get their own |
+| Device issuer, peer-authentication, attestation, package-signing, recovery-recipient and receipt-signing keys | **No** | Device identity and function authority are never copied; backup tokens get their own |
 | Keys with `CKA_TRUSTED=true` | Value yes, trust no | Trust is a per-token SO decision; the destination SO re-marks it |
 | Session objects (`CKA_TOKEN=false`) | No | Only token objects |
 | Extractable keys | Not through this feature | They already have standard wrap paths; replication is for keys that cannot use them |
@@ -97,12 +114,16 @@ Test manufacturing CA (ML-DSA-65)    ← host-side tool, outside every token; la
        ├─ Authentication function cert (ML-DSA-65)
        ├─ Attestation function cert (ML-DSA-65; attestation EKU per the RATS draft)
        ├─ Package-signing function cert (ML-DSA-65)
-       └─ Recovery-recipient function cert (ML-KEM-768, keyEncipherment, RFC 9935)
+       ├─ Recovery-recipient function cert (ML-KEM-768, keyEncipherment, RFC 9935)
+       └─ Receipt-signing function cert (ML-DSA-65)
           All function certs signed inside the token by the device key.
 ```
 
 - **Manufacturing step (test tool).** The device key pair is generated inside the token. The test CA signs a device certificate from a CSR that carries attestation of that key (LAMPS CSR attestation). The CA's private key never enters a token. For fixtures, a published test root with a fixed key may be committed under an obviously test name. For runs, a fresh root is generated per run.
 - **Function issuance.** An internal issuer operation creates the function key pairs and signs their certificates. Application `C_Sign` access to the device key is impossible: the device key's allowlist contains only the issuer mechanism.
+- **Revocation.** RFC 5280 issuer boundaries are preserved: the manufacturing-root CRL revokes
+  device certificates, while each device issuer's CRL revokes its function certificates. Both are
+  ML-DSA-65 signed, time/number checked and fail closed under the host-clock limitation.
 - **SO enrollment.** The SO installs the manufacturing trust anchor as a `CKO_CERTIFICATE` with `CKA_TRUSTED=true`, using the existing SO-only rule. The SO also installs domain membership, allowed peers and replication policies as public, immutable objects, plus revocation and rotation data.
 - **User authorization.** The user authorizes each replication of a private key under an enrolled policy. The SO never sees or uses private keys (R7 and `can_access_object`).
 - **Isolation.** Function keys are non-extractable and non-copyable, and their usage attributes are immutable. They are not usable as general signing, decryption or derivation oracles through any application API. This is enforced on the native, FFI, copy, import and attribute-mutation paths.
@@ -110,7 +131,7 @@ Test manufacturing CA (ML-DSA-65)    ← host-side tool, outside every token; la
 
 ## 5. Replication protocol (generic form of FHE plan §6.7)
 
-**Cryptographic profile.** RFC 9180 base mode with draft-ietf-hpke-pq-05, using KEM ML-KEM-768 (`0x0041`) and AES-256-GCM. The KDF is HKDF-SHA384 or SHAKE256; draft -05 allows either, and P0B picks one and records why. ML-DSA-65 signs the package statement. HPKE base mode does not authenticate the sender, so the signature is required. The composition needs an independent protocol review and exact test vectors; it is not a standardized interoperable cloning protocol.
+**Cryptographic profile.** RFC 9180 base mode with draft-ietf-hpke-pq-05, using KEM ML-KEM-768 (`0x0041`) and AES-256-GCM. The KDF is HKDF-SHA384 or SHAKE256; draft -05 allows either, and K0B picks one and records why. ML-DSA-65 signs the package statement. HPKE base mode does not authenticate the sender, so the signature is required. The composition needs an independent protocol review and exact test vectors; it is not a standardized interoperable cloning protocol.
 
 **Bindings.** The canonical, signed package binds:
 - protocol version and operation (clone, backup, restore);
@@ -119,17 +140,30 @@ Test manufacturing CA (ML-DSA-65)    ← host-side tool, outside every token; la
 - the source object's `CKA_UNIQUE_ID` and its full attribute set (class, type, usage, allowlists and templates);
 - the replication-policy digest, the suite, and any type-specific extension (for example the FHE recovery descriptor).
 
-The encapsulation and ciphertext are inside the signed object, and P0B specifies the exact bytes and parser limits.
+The encapsulation and ciphertext are inside the signed object, and K0B specifies the exact bytes and parser limits.
 
 **Randomness.** Encapsulation randomness is engine-generated. Shipped native and WASM builds reject `pEphemeralSeed` and non-null `pReserved` (F5). Test-only known-answer paths are separate builds and are labelled as such.
 
 **State.** Transport secrets never get caller-visible handles. Each session has a sequence/nonce rule, and consumption is durable before any output leaves the token. A sizing call performs no cryptography and consumes nothing. Lost output can be recovered only as the identical cached result. Receipts are authenticated and bound to the package and the installed object. Duplicate installs are detected by transaction ID.
 
-**Destination object.** It gets a new `CKA_UNIQUE_ID` and policy that is equal or stricter. History attributes are engine-assigned, never caller-asserted. Which values the standard history attributes take is open owner decision 1 (§11).
+**Destination object.** It gets a new `CKA_UNIQUE_ID` and policy that is equal or stricter. History
+attributes are engine-assigned, never caller-asserted: per owner decision 1 (§11), `CKA_LOCAL`,
+`CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` are false and
+`CKA_KEY_GEN_MECHANISM` is unavailable; the read-only provenance attribute records protected
+replication history.
 
 **Flows.**
-1. **Live clone.** Both sides authenticate each other with certificates and fresh evidence bound to the recipient key and the challenges. The source seals the key to the destination's recipient key. The destination checks everything before decapsulating, stages the key, installs it atomically and returns a receipt. The source keeps its key; a move operation is out of scope.
-2. **Offline backup.** The same checks as cloning, with a distinct operation label, sealed to an enrolled **backup token's** recovery-recipient key. The package file can be stored offline. A replacement token's new certificate cannot decrypt an old package; only the surviving backup token's recovery key can.
+1. **Live clone.** Both sides authenticate each other with certificates and fresh evidence bound to
+   the recipient key and the challenges. When one module can address both sessions,
+   `C_PQCTODAY_CloneKey` is the convenience call. Otherwise, the coordinator calls
+   `C_PQCTODAY_CreateReplicationPackage` on the source and
+   `C_PQCTODAY_ImportReplicationPackage` on the destination. Both paths execute the same package
+   protocol. The destination checks everything before decapsulating, stages the key, installs it
+   atomically and returns a receipt. The source keeps its key; a move operation is out of scope.
+2. **Offline backup.** `C_PQCTODAY_CreateReplicationPackage` performs the same checks as cloning,
+   with a distinct operation label, and seals to an enrolled **backup token's** recovery-recipient
+   key. The package file can be stored offline. A replacement token's new certificate cannot
+   decrypt an old package; only the surviving backup token's recovery key can import it.
 3. **Restore.** The backup token verifies provenance under the archival-validation policy, then either restores into itself or runs a protected clone to a newly authenticated replacement. The archival policy separates certificate expiry from revocation, defines its time evidence, and fails closed. Source evidence describes the source at backup time only.
 4. **Redundancy and rotation.** Independent packages go to separately enrolled backup tokens. Recovery-key rotation needs a tested continuity ceremony. If every recovery key is lost, the backups cannot be restored, and that is stated.
 
@@ -153,26 +187,70 @@ The encapsulation and ciphertext are inside the signed object, and P0B specifies
 
 **Provenance.** A restored or cloned key reports its real creation path. It never claims to have been generated locally or to be the only copy. Source lineage and provenance are reported separately from current-device claims.
 
-**Missing claims.** Where a claim the plan needs has no standard form, such as replication lineage or an FHE descriptor digest, record the gap. Profile the draft's existing extension mechanism rather than invent a format. Draft OIDs still marked TBD stay placeholders, and P0B freezes an interoperable test OID strategy.
+**Missing claims.** Where a claim the plan needs has no standard form, such as replication lineage or an FHE descriptor digest, record the gap. Profile the draft's existing extension mechanism rather than invent a format. Draft OIDs still marked TBD stay placeholders, and K0B freezes an interoperable test OID strategy.
 
 **Verification.** Both peers verify evidence inside the engine before replication. A host-side verifier library is also provided for tests and the Hub. Unsigned, stale, misbound or wrong-purpose evidence is rejected, and so is any non-PQC chain.
 
-## 7. ABI candidates (no numbers; P0B decides)
+## 7. Vendor replication interface (owner decision 10)
 
-Existing functions only (D13). The candidate mapping is a design starting point, not a conformance claim. P0B runs a semantic review against the v3.2 OS text for each mapping and records GO or NO-GO.
+### 7.1 K0A finding and resolution
 
-| Operation | Candidate function | Base / unwrapping key | Mechanism parameter carries | Output |
-|---|---|---|---|---|
-| Issue function key + cert | `C_DeriveKey` | Device issuer key (allowlist: issuer mechanism only) | Purpose, subject, validity | Function key (non-extractable, non-copyable) + `CKO_CERTIFICATE` |
-| Key evidence | `C_DeriveKey` | Attestation function key | Target key handle, nonce | Public `CKO_DATA` (DER evidence) |
-| Seal for clone/backup | `C_DeriveKey` | Package-signing function key | Target key handle (precedent: `CKM_CONCATENATE_BASE_AND_KEY` passes a second handle), recipient certificate, peer evidence, challenges, transaction ID | Public `CKO_DATA` package |
-| Install from package | `C_UnwrapKey` | Recovery-recipient function key | Package bytes are the wrapped data; policy reference | The restored key. `C_UnwrapKey` is the import side, so it does not touch the source's extractability rule. A paired public key is created from the authenticated public value in the package |
-| Receipt | `C_DeriveKey` or output attribute of install | Authentication function key | Transaction ID | Public `CKO_DATA` receipt |
+K0A checked the original candidates against the published v3.2 OS text. Full evidence is in
+`k0a-hsm-hierarchy-replication-attestation-spike-report-2026-10-02.md`.
+`C_DeriveKey` is not an honest protected-key export operation, while both standard wrap functions
+require `CKA_EXTRACTABLE=true`. PKCS #11 v3.3's current working tree adds no interoperable cloning
+operation and retains that rule. Owner decision 10 therefore selects a dedicated vendor interface;
+it does not weaken or overload the standard functions.
 
-- **Why the target key is not the base key.** `C_DeriveKey` requires `CKA_DERIVE=true` on its base key. Making the replicated ML-DSA or AES key the base would force a derive permission onto it.
-- **Gate on the target key.** The target handle in the parameter is access-checked. It must be eligible (§3), and the replication mechanism must be in its immutable allowlist.
-- **What P0B fills in.** P0B specifies fixed-width parameter layouts, sizes, `C_GetMechanismInfo` values and error codes. It also specifies that a failure leaves no object behind and how the per-type extension slot works.
-- **NO-GO path.** If an existing function cannot express an operation honestly, P0B records NO-GO and asks the owner rather than hiding a new API inside ordinary wrap.
+### 7.2 Discovery and ABI isolation
+
+- Interface name: **`PQCTODAY_KEY_REPLICATION_1_0`**. K0B freezes its exact UTF-8 spelling,
+  version fields and interface flags.
+- Discovery uses standard `C_GetInterfaceList` / `C_GetInterface`.
+- `CK_FUNCTION_LIST_3_2` remains byte-for-byte unchanged. The returned `CK_INTERFACE` points to a
+  separately versioned PQCToday function-list structure.
+- The vendor functions use PKCS #11 scalar, session, object-handle, template and query-then-fill
+  conventions. No host pointer is serialized into a package.
+- Directly exported symbols may be supplied for developer convenience, but callers must be able to
+  use the named interface alone. K0B decides whether those aliases are shipped.
+- This is not claimed as OASIS interoperability. The package format is specified independently so
+  another implementation can adopt it and so the proposal can later be submitted to the OASIS TC.
+
+### 7.3 Operations
+
+The exact C layouts and return-code precedence are K0B deliverables. These logical operations and
+security meanings are fixed now:
+
+| Function | Purpose | Required behavior |
+|---|---|---|
+| `C_PQCTODAY_CreateReplicationPackage` | Source-side export for live clone or offline backup | Takes a source session/key plus a bounded destination request containing recipient chain, recovery key, fresh evidence, challenges, domain, policy and transaction ID. Verifies eligibility and policy inside the engine. Returns only the canonical signed and HPKE-protected package. Sizing calls do no crypto and consume no state; retry returns the identical cached package |
+| `C_PQCTODAY_ImportReplicationPackage` | Destination-side verification and atomic install | Takes a destination session, bounded package and destination template/policy. Verifies source chain, evidence, package signature, recipient binding, transaction ID and policy before decryption. Durably consumes the transaction, atomically installs one protected key and its required public association, and produces a signed receipt. Failure leaves no object or consumed transaction unless the normative crash protocol explicitly says otherwise |
+| `C_PQCTODAY_CloneKey` | Convenience wrapper for live cloning when one module addresses both HSM sessions | Takes source session/key and destination session/request. Executes the same create/import protocol and verifies the receipt. It defines no second package format and cannot weaken either side's checks. Cross-process and browser-worker callers use the two normative operations instead |
+
+The source key remains `CKA_EXTRACTABLE=false`. Eligibility is a separate immutable replication
+policy (§3), not an attribute relaxation. Raw key bytes, transport secrets, function private keys
+and plaintext package contents never cross the FFI boundary.
+
+### 7.4 Standard-function mappings that remain
+
+| Operation | Mapping | Status / constraint |
+|---|---|---|
+| Issue function key + certificate | `C_GenerateKeyPair`, constrained issuer-only `C_Sign`, `C_CreateObject` | Conditional GO. K0B defines cleanup/idempotency because the standard sequence is not atomic |
+| Key evidence | Constrained vendor mechanism through `C_Sign`; host assembles the standard RATS container | GO only if the mechanism recomputes and byte-compares every engine-owned claim and nonce before signing; the attestation key is not a general oracle |
+| Ordinary key wrapping | `C_WrapKey`, `C_WrapKeyAuthenticated` | Unchanged: non-extractable and replication-eligible keys are refused |
+| Ordinary key unwrapping | `C_UnwrapKey`, `C_UnwrapKeyAuthenticated` | Unchanged; not the replication import path |
+
+### 7.5 K0B requirements
+
+K0B specifies the vendor function-list layout, function signatures, parameter structures, two-call
+buffer behavior, fixed-width wire encodings, maximum sizes, version negotiation, return-code
+precedence, role checks, transaction/crash semantics, receipt retrieval, paired-public-key handling,
+audit events and per-type extension slot. It also publishes independent test vectors and records
+that `C_PQCTODAY_CloneKey` is semantically equivalent to the two primitive calls.
+
+The working normative specification is
+`docs/proposals/pqctoday-key-replication-interface-1.0.md`. It remains undiscoverable in production
+until its §12 allocation, review, vector and gate requirements close.
 
 ## 8. Engine prerequisites (moved from FHE plan §10)
 
@@ -200,20 +278,42 @@ F2 and F10 are FHE-specific and stay in the FHE plan.
 | Phase | Work | Exit gate |
 |---|---|---|
 | **K-1 · Freeze inputs** | Commit this plan and the FHE docs (owner-gated). Pin `pqctoday-hsm` main and every draft/RFC revision. Choose the X.509/DER crates and pass the licence/SBOM gate (F6). Record the §11 owner decisions | Pins and decisions recorded; no speculative vendor allocation |
-| **K0A · Spikes** | (a) Build and verify an ML-DSA-65 chain to RFC 9881, including the RFC 9935 ML-KEM leaf; measure the WASM size cost. (b) Encode and decode RATS -07 evidence with test OIDs. (c) Semantic review of the §7 mappings against v3.2. (d) Snapshot cost of device identity and ledger. (e) Reuse of the internal HPKE path with deterministic randomness off | Each spike has a written result; §7 rows marked GO or NO-GO |
-| **K0B · Normative spec** | ABI (mechanisms, parameter layouts, attributes, errors). Object and role model. Certificate and evidence profiles. Replication protocol and package format. Receipts and ledger. Archival-validation policy. Threat model per scope (§1). History-attribute rule. Allocation batch in `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md` | Independent review of the protocol and suite closed; allocation landed in the authority; no open wire, role or security semantics |
-| **K1 · Engine prerequisites** | F1, F3, F5, F8, F13 | Conformance and the full local gate pass; shipped artefacts provably reject both RNG hooks |
+| **K0A · Spikes — complete** | (a) Build and verify an ML-DSA-65 chain to RFC 9881, including the RFC 9935 ML-KEM leaf; measure the WASM size cost. (b) Encode and decode RATS -07 evidence with test OIDs. (c) Semantic review of the §7 mappings against v3.2. (d) Snapshot cost of device identity and ledger. (e) Reuse of the internal HPKE path with deterministic randomness off | Complete in `k0a-hsm-hierarchy-replication-attestation-spike-report-2026-10-02.md`; the existing-function NO-GO is resolved by owner decision 10, not by reinterpreting a standard function |
+| **K0B · Normative spec** | `PQCTODAY_KEY_REPLICATION_1_0` discovery/function-list ABI; the three operations in §7; parameter layouts, attributes and errors. Object and role model. Certificate and evidence profiles. Replication protocol and package format. Receipts and ledger. Archival-validation policy. Threat model per scope (§1). History-attribute rule. PKCS #11 allocation batch locally committed as `36340f93`; dummy educational OID profile locally committed as `f2e5cfa`; authority upstream landing pending | Named interface is discoverable without changing `CK_FUNCTION_LIST_3_2`; primitive and convenience-call equivalence vectors pass; independent review of the protocol and suite is closed; allocation landed upstream in the authority; no open wire, role or security semantics. Production advertisement additionally requires non-documentation OIDs; the explicit local educational profile does not |
+| **K1 · Engine prerequisites — complete** | F1, F3, F5, F8, F13 | Conformance and the full 23-step local gate pass; shipped artefacts provably reject both RNG hooks |
 | **K2 · Hierarchy (native)** | Test manufacturing CA tool; device enrollment with CSR attestation; function issuance; trust-anchor and policy enrollment; F14 | Two token instances (two slots via `SOFTHSMRUST_SLOTS`, and two processes) enroll under one test root; negative tests for wrong purpose, untrusted root, expired or revoked certificates, and SO/user role boundaries |
 | **K3 · Attestation (native)** | Evidence for any key; in-engine and host-side verifiers | Evidence verifies against the chain; tests for stale nonce, misbound key, wrong function and downgrade pass; restored keys report true provenance |
-| **K4 · Replication (native)** | Live clone and offline backup/restore for AES, ML-KEM-768 and ML-DSA-65 keys; F9, F12, F15, F16 | Every acceptance case in §10 passes for all three key classes; the exclusions in §3 are refused with the documented error |
-| **K5 · Browser/WASM** | Same flows in the WASM build. Two token instances in workers; backup as a downloaded file, restore from an uploaded file. On-screen disclosure that this is an emulator with a test hierarchy | Desktop browser matrix passes; the page states the custody limits |
+| **K4 · Replication (native)** | Implement the named vendor interface, package create/import primitives and live-clone wrapper for AES, ML-KEM-768 and ML-DSA-65 keys; F9, F12, F15, F16 | Every acceptance case in §10 passes for all three key classes; `CloneKey` and explicit create/import produce the same installed-key and receipt semantics; exclusions in §3 are refused with the documented error |
+| **K5 · Browser/WASM** | Same flows in the WASM build. Two token instances in workers use create/import; same-module tests also exercise `CloneKey`. Backup is downloaded and restore uploaded. On-screen disclosure says this is an emulator with a test hierarchy | Desktop browser matrix passes; the page states the custody limits |
 | **K6 · Hardware roots (later, separately approved)** | Bind the device identity key to a board root of trust on the i.MX 95 or KV260. Separate scoping document first, using those board programs' own evidence | Only hardware-backed evidence earns hardware claims; nothing in K1–K5 depends on K6 |
 
 **Critical path:** K-1 → K0A → K0B → K1 → K2 → K3 → K4. K5 follows K4. K6 is optional and later.
 
 **FHE dependency:** FHE plan P1 starts only after K4 exits. The FHE seed is then added as one more replicable key class, carrying its recovery descriptor as the type-specific extension (§5).
 
-### 9.1 Repository gates (from FHE plan §10.1, unchanged)
+### 9.1 Hub learning follow-on (after K4)
+
+The Hub integration is one shared learning path inside the existing **PKCS#11
+Playground → Learn** tab, not a new playground and not separate role-specific
+paths. Existing role callouts may adapt the explanation, but every role follows
+the same sequence:
+
+1. hardware key hierarchy and non-extractable-key custody;
+2. key attestation and verification of the manufacturing → device → function chain;
+3. live cloning, including the same-module `CloneKey` convenience operation and
+   its equivalence to explicit package create → transport → import;
+4. offline backup and restore, including policy, receipt, provenance and replay
+   controls; and
+5. one end-to-end exercise covering AES, ML-KEM-768 and ML-DSA-65 keys plus
+   wrong-recipient, tampered-package and replay failures.
+
+Authoring starts only after K4 freezes the ABI and acceptance vectors. The
+lessons consume those vectors and the final engine bundle rather than duplicating
+protocol logic. Browser-only examples must disclose emulator custody limits and
+the educational dummy-OID profile; they must not present dummy identifiers or a
+software token as production hardware attestation.
+
+### 9.2 Repository gates (from FHE plan §10.1, unchanged)
 
 Every PR that adds a vendor constant, attribute, return code or fixture must satisfy all of these in the same PR:
 - the vendor-constant manifest check (`kmip/pkcs11-mech-manifest.json` via `scripts/check_pkcs11_constants.py`; it checks constants even though KMIP is out of scope);
@@ -222,17 +322,28 @@ Every PR that adds a vendor constant, attribute, return code or fixture must sat
 - Rust conformance-report freshness;
 - vector reachability;
 - the allocation authority, which lands before the constants;
+- ABI isolation tests proving `CK_FUNCTION_LIST_3_2` is unchanged and that only the exact supported
+  `PQCTODAY_KEY_REPLICATION_1_0` name/version yields the vendor function list;
+- an explicit remoting-scope record: the standard v3.2 coverage ledger must not claim coverage for
+  the separate Rust-only vendor interface; any future remote transport needs its own reviewed
+  coverage and threat model;
 - the full `scripts/local-gate.sh` before push.
 
 ## 10. Acceptance cases (K4/K5, per replicable key class)
 
 **Positive flows:**
-- live clone;
+- live clone through `C_PQCTODAY_CloneKey` when both sessions share a module;
+- live clone through `CreateReplicationPackage` → transport → `ImportReplicationPackage` across
+  separate processes/workers, with equivalent receipt and installed-key semantics;
 - offline backup, then restore with the source destroyed (a **test instance**, never real data);
 - restore to a new authorized token via the backup token;
 - backup-key rotation with continuity;
 - restricted policy preserved or tightened;
 - the key still works after restore (signature verifies, KEM decapsulates, AES decrypts).
+- `C_GetInterfaceList` / `C_GetInterface` discover exactly the supported replication-interface
+  version, while `CK_FUNCTION_LIST_3_2` size, layout and entries remain unchanged;
+- package size queries consume no nonce, randomness, ledger entry or authorization and a retry
+  returns the byte-identical cached package.
 
 **Negative cases (each must refuse):**
 - ordinary or authenticated wrap of a replicable key;
@@ -253,6 +364,8 @@ Every PR that adds a vendor constant, attribute, return code or fixture must sat
 - an excluded key class (LMS, XMSS, threshold share, device key);
 - a crash before or after the durable commit;
 - concurrent calls on the same transaction.
+- unknown interface name/version, malformed function-list version and attempts to call the
+  replication operations through the standard function list;
 
 **Failure guarantees:**
 - Failures expose no secret and leave no partial object.
@@ -262,7 +375,9 @@ Every PR that adds a vendor constant, attribute, return code or fixture must sat
 
 Recorded 2026-10-02. Decisions 1–8 come from the owner's "proceed" at 16:33 CDT. The coordinator
 session had asked "defaults for 1–8, choose 9" and relayed the answer; it is not a quote of each
-decision. Decision 9 is open.
+decision. Decision 10 is the owner's direct instruction in this session to update the plan with the
+explained vendor-interface proposition. Decision 11 records the owner's direct choice to stay with
+dummy identifiers rather than disclose application contact data. Decision 9 remains open.
 
 | # | Question | Decision |
 |---|---|---|
@@ -270,8 +385,10 @@ decision. Decision 9 is open.
 | 2 | Which keys can be cloned | **Opt-in only.** A key must be bound at creation or import to an SO-enrolled replication policy, through an immutable attribute. Existing keys stay unclonable |
 | 3 | Copy or move | **Copy.** The source keeps its key; there is no move operation in this plan |
 | 4 | Test manufacturing CA | **A host-side test tool, never inside a token.** A fresh root per test run. One published, clearly labelled test root is allowed for fixtures. No production-looking root |
-| 5 | Revocation in the first version | **A simple signed revocation list (CRL) from the test CA, checked fail-closed** |
+| 5 | Revocation in the first version | **Signed X.509 CRLs, checked fail-closed.** K0B applies normal issuer boundaries: the test manufacturing root's CRL covers device certificates, and each device issuer's CRL covers that device's function certificates. A root-only CRL cannot validly revoke leaves issued by a different device issuer |
 | 6 | New dependencies for X.509 and DER | **RustCrypto crates allowed**, subject to the K-1 licence and SBOM gate |
 | 7 | Time source | **Host clock** for certificate validity, with that limitation stated on screen |
 | 8 | Commit and push | **A local commit now** of this file and the three FHE docs on `docs/fhe-wrapper-plan-1002`. The owner's direct instruction in this session to execute this plan satisfies the local-commit gate. **Push and a docs-only PR only after tonight's FHE release**; this instruction does not by itself establish that the release gate has lifted |
 | 9 | Hardware phase: when, and which board first (i.MX 95 or KV260) | **Open.** K6 does not start until this is decided. Nothing in K-1 to K5 depends on it |
+| 10 | Package-export ABI after the K0A semantic NO-GO | **Selected: separate named PQCToday vendor interface.** `PQCTODAY_KEY_REPLICATION_1_0` is discovered through standard `C_GetInterface*` without changing `CK_FUNCTION_LIST_3_2`. `CreateReplicationPackage` and `ImportReplicationPackage` are the normative live/offline primitives; `CloneKey` is a convenience wrapper when one module addresses both sessions. Standard wrapping still refuses non-extractable keys; `C_DeriveKey` is rejected as an export channel |
+| 11 | OID identity while the project is educational | **Use the RFC 5612 dummy profile and do not apply for a PEN now.** The educational root is `1.3.6.1.4.1.32473.20261002`; it is not owned by PQCToday, does not support a production claim, and is rejected unless the local educational profile is explicitly enabled. Personal address, phone and application-contact data must not enter the repository. Production OIDs remain a future gate, not an implied requirement to register now |

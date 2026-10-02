@@ -1481,8 +1481,9 @@ pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
 ///   TRUE→FALSE (the reverse direction is CKR_ATTRIBUTE_READ_ONLY). Flipping
 ///   them does NOT touch CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE, which
 ///   record history;
-/// * vendor stateful-key attrs (≥0x8000_0100) and engine-internal CKA_PRIV_*
-///   (≥0xFFFF_0000) are the engine's own state channel and bypass the policy.
+/// * security-relevant vendor attributes are explicitly read-only; unknown
+///   vendor attributes keep the vendor-defined mutability semantics;
+/// * engine-internal CKA_PRIV_* attributes (≥0xFFFF_0000) are never writable.
 pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -> Result<(), u32> {
     // S4 (2026-08-13) — the ENGINE-PRIVATE range is the engine's own state
     // channel and is never client-writable. Before this, the whole
@@ -1492,8 +1493,27 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
     if attr_type >= ENGINE_PRIVATE_ATTR_BASE {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
-    // Genuine vendor attributes (0x8000_0000..0xFFFF_0000) stay outside
-    // Cryptoki's mutability rules, exactly as the spec says they may.
+    // F13 (2026-10-02) — the public vendor range is not a blanket bypass.
+    // These values bind a key to its derivation domain or stateful-signature
+    // parameter set. Letting a caller rewrite them after creation would make
+    // the object's metadata disagree with its key material. Reserved hierarchy,
+    // policy and provenance attributes must be added here in the same K2/K4
+    // change that introduces their constants, after the private-authority
+    // reservation lands upstream.
+    const IMMUTABLE_VENDOR_ATTRS: &[u32] = &[
+        CKA_BIP32_CHAIN_CODE,
+        CKA_BIP32_CHILD_INDEX,
+        CKA_LMS_PARAM_SET,
+        CKA_LMOTS_PARAM_SET,
+        CKA_XMSS_PARAM_SET,
+        CKA_XMSSMT_PARAM_SET,
+    ];
+    if IMMUTABLE_VENDOR_ATTRS.contains(&attr_type) {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // Other genuine vendor attributes (0x8000_0000..0xFFFF_0000) remain
+    // governed by their vendor definition rather than Cryptoki's standard
+    // attribute table.
     if attr_type >= 0x8000_0000 {
         return Ok(());
     }

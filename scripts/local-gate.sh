@@ -681,9 +681,10 @@ fi
 # on every gate run. Its scope is in its name on purpose — the C++ half needs
 # an Emscripten toolchain that exists nowhere here (plan 2.E), so a name that
 # claimed "the ACVP harness" would reassure about an engine it never loads.
-# It runs against a RELEASE build with the 8 MiB stack and the acvp feature —
-# the configuration rust/build-wasm-bundle.sh ships — built here into the
-# gitignored rust/pkg-acvp/ (the conformance step's rust/pkg is a --dev build,
+# It runs against an explicitly TEST-ONLY release build with the 8 MiB stack
+# and the acvp feature. The shipped build omits that feature; this gate writes
+# to gitignored rust/pkg-acvp/ and never refreshes pkg_bundler/. The conformance
+# step's rust/pkg is a --dev build,
 # on which the SLH-DSA "s" sets take minutes each; release runs the whole
 # harness in about a minute). wasm/rust/ is gitignored and nothing else
 # populates it, so the step stages the two files itself, and installs the

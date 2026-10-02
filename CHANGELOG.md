@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A non-advertised ABI and wire specification for protected replication of
+  non-extractable keys.** `PQCTODAY_KEY_REPLICATION_1_0` is a separate named
+  interface discovered through `C_GetInterface*`; it does not extend
+  `CK_FUNCTION_LIST_3_2` or weaken ordinary wrapping. Package create/import
+  are normative and `CloneKey` is a same-module convenience wrapper. The ABI
+  type is pinned in the Rust engine, but release discovery remains disabled
+  until the locally committed private-authority reservations land upstream,
+  production OIDs are allocated, and protocol review and acceptance vectors
+  close.
 - **The local gate caps the shared cargo cache at 100 GiB.** Each worktree's
   gate run builds in its own dir under `/cargo-target/worktrees/` (~20 GB
   each), and nothing ever deleted them; the `pqc-cargo-target` volume grew
@@ -28,12 +37,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   previously refused with `CKR_MECHANISM_PARAM_INVALID`.
   (1) `CKD_HPKE_SHAKE256` (0x0011): draft-ietf-hpke-hpke-03 one-stage key
   schedule (`LabeledDerive`, `CombineSecrets_OneStage`), Base and PSK modes.
-  (2) `CKP_HPKE_KEM_ML_KEM_512/768/1024` (0x0040–0x0042), draft-ietf-hpke-pq-04
+  (2) `CKP_HPKE_KEM_ML_KEM_512/768/1024` (0x0040–0x0042), draft-ietf-hpke-pq-05
   §3. (3) Seed-format private keys for the pure ML-KEM (64-byte `d ‖ z`) and
   PQ/T hybrid (32-byte) suites, expanded in the token on each Decap; a
   `CKA_SEED` in the `CKM_HPKE_KEM_KEY_PAIR_GEN` template imports an existing
   seed-format key. (4) The test-only `pEphemeralSeed` hook now covers ML-KEM
-  and the hybrids. Verified byte for byte against the draft-ietf-hpke-pq-04
+  and the hybrids. Verified byte for byte against the draft-ietf-hpke-pq-05
   vectors (8 in-scope suites, including DeriveKeyPair, Encap, the key
   schedule, encryptions and exports), the CFRG concrete-hybrid-kems vectors
   (30), the X-Wing draft vectors (3), the JOSE HPKE-12/HPKE-9 examples
@@ -41,12 +50,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Secret-key derivation from a sensitive base now defaults to a sensitive,
+  non-extractable result.** An explicit template can still request a
+  different result when the base key's `CKA_DERIVE_TEMPLATE` permits it.
 - **Rust engine: `CKK_HPKE_KEM` hybrid private keys are stored as their
-  32-byte seed** (draft-ietf-hpke-pq-04 SerializePrivateKey) instead of the
+  32-byte seed** (draft-ietf-hpke-pq-05 SerializePrivateKey) instead of the
   expanded `dk_PQ ‖ dk_T`; an expanded-form value is refused. These keys are
   session objects, so no stored key is affected.
+- **Rust/WASM release builds no longer contain deterministic ACVP hooks.**
+  `build-wasm-bundle.sh` now keeps normal and `--acvp-test` artifacts in
+  separate directories, writes `build-profile.json`, and only a normal
+  release build can refresh `rust/pkg_bundler/`. Normal builds reject both a
+  non-null `C_Initialize.pReserved` and the HPKE `pEphemeralSeed` hook.
 
 ### Fixed
+
+- **Rust engine: `CKA_DERIVE_TEMPLATE` is enforced against the final derived
+  object before allocation.** Mechanism-contributed class, key type and
+  history attributes can no longer bypass the base key's template; a mismatch
+  returns `CKR_TEMPLATE_INCONSISTENT` without publishing a handle.
+- **Rust engine: security-relevant public vendor attributes are explicitly
+  immutable.** BIP32 chain/index and LMS/XMSS parameter-set attributes can no
+  longer bypass `C_SetAttributeValue` policy merely because they are in the
+  vendor range.
 
 - **Rust engine: listing certificates across slots now returns every
   requested attribute.** A black-box audit (5 slots × 20 objects, list slot
