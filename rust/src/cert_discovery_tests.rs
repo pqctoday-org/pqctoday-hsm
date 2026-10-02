@@ -22,6 +22,14 @@ fn setup(session: u32) {
     put_session(session, SLOT, true);
 }
 
+fn set_login(slot: u32, state: LoginState) {
+    TOKEN_STORE.with(|ts| ts.borrow_mut().get_mut(&slot).unwrap().login_state = state);
+}
+
+fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()
+}
+
 /// Session-object X.509 certificate with the minimum template §4.6 allows,
 /// plus `extra` attributes.
 fn create_cert(session: u32, extra: Vec<(u32, Vec<u8>)>) -> u32 {
@@ -146,6 +154,9 @@ fn r1_keys_and_data_objects_possess_empty_label_and_id() {
     let _g = test_lock::acquire();
     let s = 0x2000_0003;
     setup(s);
+    // Secret keys and data objects default to private (R7), so create them
+    // in a user session.
+    set_login(SLOT, LoginState::User);
     let mut key = Tmpl::new(vec![
         (CKA_CLASS, ulong(CKO_SECRET_KEY)),
         (CKA_KEY_TYPE, ulong(CKK_AES)),
@@ -167,7 +178,22 @@ fn r1_keys_and_data_objects_possess_empty_label_and_id() {
     assert_eq!(len_of(s, d, CKA_LABEL), (CKR_OK, 0), "data object CKA_LABEL (Table 19)");
 
     remove_objects(&[k, d]);
+    set_login(SLOT, LoginState::Public);
     drop_session(s);
+}
+
+#[test]
+fn r1_trust_objects_possess_empty_label() {
+    // v3.3 object_classification.md "Storage Objects" lists CKO_TRUST, which
+    // resolves v3.2's ambiguity (§4.4 vs Figure 1) — see is_storage_class.
+    let _g = test_lock::acquire();
+    crate::state::set_initialized(true);
+    let mut attrs: Attributes = std::collections::HashMap::new();
+    crate::state::store_ulong(&mut attrs, CKA_CLASS, CKO_TRUST);
+    attrs.insert(CKA_PRIV_SLOT_ID, SLOT.to_le_bytes().to_vec());
+    let h = crate::state::allocate_handle(attrs);
+    assert_eq!(super::conformance_v32_tests::obj_attr(h, CKA_LABEL), Some(Vec::new()));
+    remove_objects(&[h]);
 }
 
 #[test]
@@ -344,4 +370,172 @@ fn r6_token_serial_numbers_are_distinct_per_slot() {
     };
     assert_eq!(&serial(0)[..], b"0001            ", "slot 0 keeps its historical serial");
     assert_eq!(&serial(SLOT)[..], b"2001            ", "slot {SLOT} reports slot ID + 1");
+}
+
+// ── R7 (owner decision 2026-10-02): C++-parity CKA_PRIVATE defaults on the
+//    C_* creation paths, and Usage Guide Table 3 — no private object outside
+//    a user session. ──
+
+#[test]
+fn r7_private_by_default_classes_need_a_user_session() {
+    let _g = test_lock::acquire();
+    let s = 0x2000_0007;
+    setup(s);
+    set_login(SLOT, LoginState::Public);
+    let aes = || {
+        vec![
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_AES)),
+            (CKA_TOKEN, bbool(false)),
+            (CKA_VALUE, vec![0x42; 16]),
+        ]
+    };
+    let data = || vec![(CKA_CLASS, ulong(CKO_DATA)), (CKA_TOKEN, bbool(false)), (CKA_VALUE, b"x".to_vec())];
+    let mut h = 0u32;
+
+    // Public session: secret key and data object default to private -> refused.
+    for t in [aes(), data()] {
+        let mut t = Tmpl::new(t);
+        assert_eq!(C_CreateObject(s, t.ptr(), t.count(), &mut h), CKR_USER_NOT_LOGGED_IN);
+    }
+    // ... unless the template asks for a public object.
+    let mut t = aes();
+    t.push((CKA_PRIVATE, bbool(false)));
+    let mut t = Tmpl::new(t);
+    assert_eq!(C_CreateObject(s, t.ptr(), t.count(), &mut h), CKR_OK);
+    assert_eq!(value_of(s, h, CKA_PRIVATE), bbool(false));
+    let public_aes = h;
+    // C_GenerateKey takes the same default.
+    let len = ulong(32);
+    let mut gt = Tmpl::new(vec![(CKA_TOKEN, bbool(false)), (CKA_VALUE_LEN, len)]);
+    let mut mech: [usize; 3] = [CKM_AES_KEY_GEN as usize, 0, 0];
+    assert_eq!(
+        C_GenerateKey(s, mech.as_mut_ptr() as *mut u8, gt.ptr(), gt.count(), &mut h),
+        CKR_USER_NOT_LOGGED_IN
+    );
+
+    // User session: same templates succeed and report CKA_PRIVATE = TRUE.
+    set_login(SLOT, LoginState::User);
+    let mut t = Tmpl::new(aes());
+    assert_eq!(C_CreateObject(s, t.ptr(), t.count(), &mut h), CKR_OK);
+    assert_eq!(value_of(s, h, CKA_PRIVATE), bbool(true));
+    let private_aes = h;
+    let mut t = Tmpl::new(data());
+    assert_eq!(C_CreateObject(s, t.ptr(), t.count(), &mut h), CKR_OK);
+    assert_eq!(value_of(s, h, CKA_PRIVATE), bbool(true));
+    let private_data = h;
+
+    // Certificates stay public by default, even in a public session.
+    set_login(SLOT, LoginState::Public);
+    let c = create_cert(s, vec![]);
+    assert_eq!(value_of(s, c, CKA_PRIVATE), bbool(false));
+
+    remove_objects(&[public_aes, private_aes, private_data, c]);
+    drop_session(s);
+}
+
+#[test]
+fn r7_objects_loaded_without_cka_private_stay_public() {
+    let _g = test_lock::acquire();
+    let s = 0x2000_0008;
+    setup(s);
+    set_login(SLOT, LoginState::Public);
+    // A secret key as an older build stored it: no CKA_PRIVATE.
+    let mut attrs: Attributes = std::collections::HashMap::new();
+    crate::state::store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+    crate::state::store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+    attrs.insert(CKA_TOKEN, bbool(true));
+    attrs.insert(CKA_VALUE, vec![0x11; 16]);
+    attrs.insert(CKA_PRIV_SLOT_ID, SLOT.to_le_bytes().to_vec());
+    let h = 0x2000_0F01;
+    crate::state::rehydrate_insert(h, attrs);
+    assert_eq!(value_of(s, h, CKA_PRIVATE), bbool(false), "load records the historical public value");
+    remove_objects(&[h]);
+    drop_session(s);
+}
+
+// ── R8 (owner decision 2026-10-02): SOFTHSMRUST_SLOTS=N ──
+
+#[test]
+fn r8_softhsmrust_slots_brings_n_slots_online_at_initialize() {
+    let _g = test_lock::acquire();
+    crate::state::set_initialized(false);
+    // SAFETY: nextest runs each test in its own process; nothing else reads
+    // the environment concurrently.
+    unsafe { std::env::set_var("SOFTHSMRUST_SLOTS", "4") };
+    let rv = C_Initialize(std::ptr::null_mut());
+    unsafe { std::env::remove_var("SOFTHSMRUST_SLOTS") };
+    assert_eq!(rv, CKR_OK);
+    for slot in 0..4u32 {
+        let mut info = [0u8; 104];
+        assert_eq!(C_GetSlotInfo(slot, info.as_mut_ptr()), CKR_OK, "slot {slot}");
+        let profiles = OBJECTS.with(|o| {
+            o.borrow()
+                .values()
+                .filter(|a| {
+                    crate::state::get_object_attr_u32_from(a, CKA_CLASS) == Some(CKO_PROFILE)
+                        && crate::state::object_slot_of(a) == slot
+                })
+                .count()
+        });
+        assert!(profiles >= 1, "slot {slot} has its CKO_PROFILE objects");
+    }
+
+    // A malformed value fails C_Initialize instead of being ignored.
+    crate::state::set_initialized(false);
+    unsafe { std::env::set_var("SOFTHSMRUST_SLOTS", "four") };
+    let rv = C_Initialize(std::ptr::null_mut());
+    unsafe { std::env::remove_var("SOFTHSMRUST_SLOTS") };
+    assert_eq!(rv, CKR_FUNCTION_FAILED);
+    crate::state::set_initialized(true);
+}
+
+// ── R9 (owner decision 2026-10-02): slotDescription + slot manufacturerID ──
+
+#[test]
+fn r9_slot_description_text() {
+    let _g = test_lock::acquire();
+    crate::state::set_initialized(true);
+    crate::state::ensure_slot(SLOT);
+    let mut info = [0u8; 104];
+    assert_eq!(C_GetSlotInfo(SLOT, info.as_mut_ptr()), CKR_OK);
+    let mut want = [b' '; 64];
+    want[..25].copy_from_slice(b"PQCToday HSM Virtual Slot");
+    assert_eq!(&info[..64], &want[..]);
+    let mut mfr = [b' '; 32];
+    mfr[..8].copy_from_slice(b"PQCToday");
+    assert_eq!(&info[64..96], &mfr[..], "slot manufacturerID");
+}
+
+// ── R10 (§4.6.2 recommendation): CKA_PUBLIC_KEY_INFO from the certificate ──
+
+const PKI_TEST_CERT: &str = "3082017c30820121a00302010202147a94dfa253fbb600a41897063e72b4f923f7e4a3300a06082a8648ce3d04030230133111300f06035504030c08706b692d74657374301e170d3236313030323136333535365a170d3336303932393136333535365a30133111300f06035504030c08706b692d746573743059301306072a8648ce3d020106082a8648ce3d030107034200042165f11fd0765bee4b8b602a2182f8e7d8047be2e4c50c0955b2b50441354bdd482624d9750442485669646dc32b294379f645476401e97550acc459a473e8afa3533051301d0603551d0e041604146a61598030180246bc3914d87c29e86bfd739e95301f0603551d230418301680146a61598030180246bc3914d87c29e86bfd739e95300f0603551d130101ff040530030101ff300a06082a8648ce3d0403020349003046022100d318961fb24f44fdd560c476268be3216b8e595dc6fc96c262230a92ae5b35f9022100dae2f5ca6b4ca776e74effb592166bffb63911e3e9a920bf5fbc761158408ad6";
+/// `openssl x509 -pubkey | openssl pkey -pubin -outform DER` of the cert above.
+const PKI_TEST_SPKI: &str = "3059301306072a8648ce3d020106082a8648ce3d030107034200042165f11fd0765bee4b8b602a2182f8e7d8047be2e4c50c0955b2b50441354bdd482624d9750442485669646dc32b294379f645476401e97550acc459a473e8af";
+
+#[test]
+fn r10_certificate_public_key_info_is_extracted_from_the_certificate() {
+    let _g = test_lock::acquire();
+    let s = 0x2000_0009;
+    setup(s);
+    let mut t = Tmpl::new(vec![
+        (CKA_CLASS, ulong(CKO_CERTIFICATE)),
+        (CKA_CERTIFICATE_TYPE, ulong(CKC_X_509)),
+        (CKA_TOKEN, bbool(false)),
+        (CKA_SUBJECT, vec![0x30, 0x00]),
+        (CKA_VALUE, unhex(PKI_TEST_CERT)),
+    ]);
+    let mut c = 0u32;
+    assert_eq!(C_CreateObject(s, t.ptr(), t.count(), &mut c), CKR_OK);
+    assert_eq!(value_of(s, c, CKA_PUBLIC_KEY_INFO), unhex(PKI_TEST_SPKI), "matches OpenSSL's SPKI");
+
+    // A caller-supplied value wins; an unparseable certificate keeps the
+    // empty Table 21 default.
+    let supplied = create_cert(s, vec![(CKA_PUBLIC_KEY_INFO, vec![0x30, 0x00])]);
+    assert_eq!(value_of(s, supplied, CKA_PUBLIC_KEY_INFO), vec![0x30, 0x00]);
+    let junk = create_cert(s, vec![]);
+    assert_eq!(len_of(s, junk, CKA_PUBLIC_KEY_INFO), (CKR_OK, 0));
+
+    remove_objects(&[c, supplied, junk]);
+    drop_session(s);
 }

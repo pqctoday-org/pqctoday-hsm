@@ -2807,8 +2807,16 @@ mod tests {
         let class = CKO_SECRET_KEY as CK_ULONG;
         let ktype = CKK_AES as CK_ULONG;
         let btrue: u8 = 1;
+        // A public KAT key: this test drives an uninitialized token with no
+        // user to log in, and secret keys default to private (2026-10-02).
+        let bfalse: u8 = 0;
         let ulong = size_of::<CK_ULONG>() as CK_ULONG;
         let mut tmpl = [
+            CK_ATTRIBUTE {
+                attrType: CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+                pValue: &bfalse as *const _ as CK_VOID_PTR,
+                ulValueLen: 1,
+            },
             CK_ATTRIBUTE {
                 attrType: CKA_CLASS as CK_ATTRIBUTE_TYPE,
                 pValue: &class as *const _ as CK_VOID_PTR,

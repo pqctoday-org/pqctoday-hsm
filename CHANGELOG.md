@@ -72,6 +72,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (§5.4.1).
   (R6, owner decision, not a spec rule) a token's serial number is its slot
   ID + 1, so slot 0 keeps `0001` and slots are distinguishable.
+  (R7, owner decision) **behaviour change:** the C_* creation paths use the
+  C++ engine's `CKA_PRIVATE` defaults (Table 19: "token-specific") — TRUE
+  for data objects, private and secret keys, FALSE for certificates and
+  public keys — and refuse a private object outside a user session
+  (`CKR_USER_NOT_LOGGED_IN`, Usage Guide Table 3); before, a public session
+  could create private keys it could not then see. Objects loaded from older
+  state keep their historical public status. (R8) `SOFTHSMRUST_SLOTS=N`
+  brings slots 0..N-1 online at `C_Initialize`. (R9) `slotDescription` is
+  "PQCToday HSM Virtual Slot" and the slot `manufacturerID` "PQCToday". (R10) a certificate's `CKA_PUBLIC_KEY_INFO`
+  is extracted from its `CKA_VALUE` when not supplied (§4.6.2). `CKA_LABEL`
+  also covers `CKO_TRUST` (v3.3 storage-object table resolves v3.2's
+  ambiguity; caught by the differential harness).
 
 - **Rust engine: ML-DSA private keys with out-of-range s1/s2 are refused, and
   a zero-length `CKA_SEED` no longer yields a random key.** Found by Project
