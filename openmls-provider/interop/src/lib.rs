@@ -56,6 +56,12 @@ use openmls_traits::types::Ciphersuite;
 use openmls_traits::OpenMlsProvider;
 use tonic::{Code, Request, Response, Status};
 
+// tonic-build generates this module, so clippy findings here are about the
+// generator's output, not our code. Rust/clippy 1.99 fires
+// clippy::double_must_use on #[async_trait]'s pinned-boxed futures in the
+// generated MlsClient trait (34 errors under -D warnings, CI 2026-10-02).
+// Scoped to the generated module only.
+#[allow(clippy::double_must_use)]
 pub mod mls_client {
     tonic::include_proto!("mls_client");
 }
