@@ -354,6 +354,18 @@ fn mldsa_private_key(p: &MldsaParams, sk: &[u8]) -> Option<Arc<Pkey>> {
         return Some(hit);
     }
     KEY_MISSES.fetch_add(1, Ordering::Relaxed);
+    // FIPS 204 Algorithm 25: an sk whose s1/s2 coefficients lie outside
+    // [−η, η] is not an ML-DSA private key. Refused here, once per key, so
+    // AWS-LC never signs with one whatever its own import does with it; the
+    // caller then falls back to fips204, whose decode refuses it too.
+    let ps = match p.nid {
+        n if n == sys::NID_MLDSA44 => CKP_ML_DSA_44,
+        n if n == sys::NID_MLDSA65 => CKP_ML_DSA_65,
+        _ => CKP_ML_DSA_87,
+    };
+    if crate::native::keygen::ml_dsa_sk_range_check(ps, sk) != Some(true) {
+        return None;
+    }
     // Built outside the lock (milliseconds on an A53); a racing thread may
     // build the same key twice, which costs one import and is harmless.
     let key = Arc::new(Pkey::new(unsafe {

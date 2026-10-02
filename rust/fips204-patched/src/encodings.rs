@@ -3,7 +3,7 @@
 use crate::conversion::{
     bit_pack, bit_unpack, hint_bit_pack, hint_bit_unpack, simple_bit_pack, simple_bit_unpack,
 };
-use crate::helpers::{bit_length, is_in_range};
+use crate::helpers::{bit_length, ensure, is_in_range};
 use crate::types::{R, R0};
 use crate::{D, Q};
 
@@ -195,6 +195,10 @@ pub(crate) fn sk_decode<const K: usize, const L: usize, const SK_LEN: usize>(
         //
         // 3: s1[i] ← BitUnpack(yi, η, η)   ▷ This may lie outside [−η, η], if input is malformed
         s_1[i] = bit_unpack(&sk[start + i * step..start + (i + 1) * step], eta, eta)?;
+        // pqctoday patch (2026-09-30): bit_unpack only bounds each value by its
+        // bitlen(2η)-bit field, i.e. [η − 2^c + 1, η], which every encoding
+        // satisfies; reject the malformed input the line-3 note describes.
+        ensure!(is_in_range(&s_1[i], eta, eta), "Alg 25: s1 out of range");
 
         // 4: end for
     }
@@ -205,6 +209,8 @@ pub(crate) fn sk_decode<const K: usize, const L: usize, const SK_LEN: usize>(
         //
         // 6: s2[i] ← BitUnpack(zi, η, η) ▷ This may lie outside [−η, η], if input is malformed
         s_2[i] = bit_unpack(&sk[start + i * step..start + (i + 1) * step], eta, eta)?;
+        // pqctoday patch (2026-09-30): as for s1 above.
+        ensure!(is_in_range(&s_2[i], eta, eta), "Alg 25: s2 out of range");
 
         // 7: end for
     }

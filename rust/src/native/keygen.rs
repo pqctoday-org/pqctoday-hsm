@@ -2467,6 +2467,58 @@ pub(crate) fn ml_kem_dk_check(parameter_set: u32, dk: &[u8]) -> Option<bool> {
     Some(sha3::Sha3_256::digest(ek).as_slice() == h) // hash check
 }
 
+/// FIPS 204 Algorithm 25 `skDecode` range condition on a candidate expanded
+/// ML-DSA private key `sk`: every coefficient of s1 and s2 lies in [−η, η].
+///
+/// Algorithm 25 lines 3 and 6 decode each s1/s2 polynomial with
+/// `BitUnpack(·, η, η)` (Algorithm 19), which maps an encoded field value x
+/// to η − x, and note that the result "may lie outside [−η, η], if input is
+/// malformed". The field is bitlen(2η) bits wide (3 for η = 2, 4 for η = 4),
+/// so x can reach 7 or 15 while only x ≤ 2η decodes into range. A key built
+/// from such values is not an ML-DSA private key (FIPS 204 §5.1 Algorithm 1
+/// only ever produces s1, s2 ∈ S_η), and signing with it was observed to
+/// succeed (Project Wycheproof `InvalidPrivateKey`, 2026-09-30). The vendored
+/// `fips204` decode only bounded x by its field width, which every value
+/// satisfies; it now rejects these too (`fips204-patched/src/encodings.rs`),
+/// and this check gives the engine the same verdict without a full decode.
+///
+/// t0 needs no check: line 9 decodes it with `BitUnpack(·, 2^{d−1} − 1,
+/// 2^{d−1})` over exactly d = 13 bits, whose every value is in range.
+///
+/// Reads the packed s1 ‖ s2 bytes only (sk = ρ ‖ K ‖ tr ‖ s1 ‖ s2 ‖ t0, the
+/// first 128 bytes being ρ, K and tr), and visits every coefficient without
+/// an early exit. `None` for a parameter set that is not ML-DSA (the caller
+/// owns that complaint) — including 0, which `crypto::handlers` signs as
+/// ML-DSA-65 but whose decode there now refuses an out-of-range key itself;
+/// `Some(false)` for a wrong length or any coefficient out of range.
+pub(crate) fn ml_dsa_sk_range_check(parameter_set: u32, sk: &[u8]) -> Option<bool> {
+    // FIPS 204 Table 1: (η, k, ℓ).
+    let (eta, k, l) = match parameter_set {
+        CKP_ML_DSA_44 => (2u32, 4usize, 4usize),
+        CKP_ML_DSA_65 => (4, 6, 5),
+        CKP_ML_DSA_87 => (2, 8, 7),
+        _ => return None,
+    };
+    let (sk_len, _) = ml_dsa_key_lens(parameter_set)?;
+    if sk.len() != sk_len {
+        return Some(false);
+    }
+    let width: u32 = if eta == 2 { 3 } else { 4 }; // bitlen(2η)
+    let packed = &sk[128..128 + (k + l) * 256 * width as usize / 8];
+    let mask = (1u32 << width) - 1;
+    let (mut acc, mut bits, mut in_range) = (0u32, 0u32, true);
+    for &byte in packed {
+        acc |= u32::from(byte) << bits;
+        bits += 8;
+        while bits >= width {
+            in_range &= (acc & mask) <= 2 * eta;
+            acc >>= width;
+            bits -= width;
+        }
+    }
+    Some(in_range)
+}
+
 /// FIPS 205 §9.1 parameter-set table: `CKP_SLH_DSA_*` → `(sk_len, pk_len)`
 /// = `(4n, 2n)` for n = 16 / 24 / 32. Taken from the `fips205` crate's
 /// per-variant `SK_LEN` / `PK_LEN` — same source keygen serializes from.
@@ -2500,6 +2552,12 @@ fn slh_dsa_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
 /// Caller has already length-checked `bytes`.
 fn validate_ml_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Result<(), CkRv> {
     use fips204::traits::SerDes;
+    // FIPS 204 Algorithm 25: s1/s2 in [−η, η] (see `ml_dsa_sk_range_check`).
+    // Checked here as well as inside the patched fips204 decode below, so the
+    // KMIP register path does not depend on the vendored crate for it.
+    if private && ml_dsa_sk_range_check(parameter_set, bytes) == Some(false) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
     macro_rules! chk {
         ($m:ident) => {{
             if private {

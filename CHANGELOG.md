@@ -24,6 +24,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rust engine: ML-DSA private keys with out-of-range s1/s2 are refused, and
+  a zero-length `CKA_SEED` no longer yields a random key.** Found by Project
+  Wycheproof's ML-DSA sign vectors (9 cases, via the hub's vendored set).
+  (1) `C_CreateObject` accepted an expanded ML-DSA private key whose s1 or s2
+  coefficients lie outside [−η, η] (FIPS 204 Algorithm 25), and `C_Sign`
+  signed with it: the vendored `fips204` decode only bounded each value by its
+  bit-field width. Such a key is now refused with
+  `CKR_ATTRIBUTE_VALUE_INVALID` at `C_CreateObject` (PKCS#11 v3.2 §4.1.1
+  rule 2), with `CKR_WRAPPED_KEY_INVALID` at `C_UnwrapKey` /
+  `C_UnwrapKeyAuthenticated` (§5.18.4) and by KMIP key registration, and a key
+  already in the store is refused at `C_SignInit` / `C_MessageSignInit` with
+  `CKR_KEY_TYPE_INCONSISTENT` (§5.13.1, the code the engine already returns
+  for undecodable ML-DSA key material). The check
+  (`native::keygen::ml_dsa_sk_range_check`) also guards the AWS-LC signing
+  path, and `fips204-patched/src/encodings.rs` `sk_decode` now rejects the
+  same keys, so every fips204 decode refuses them too. t0 needs no check
+  (its 13-bit field is always in range). (2) `get_attr_bytes` reads a
+  zero-length attribute as absent, so `C_GenerateKeyPair` with an empty
+  `CKA_SEED` took the random path for ML-DSA, ML-KEM and SLH-DSA, and the
+  FrodoKEM / Classic McEliece "no seed accepted" checks let it through. A new
+  `get_attr_bytes_present` keeps "present but empty" distinct, so all five
+  sites now return `CKR_ATTRIBUTE_VALUE_INVALID`; `get_attr_bytes` itself is
+  unchanged. New tests (`rust/src/wycheproof_mldsa_tests.rs`) run every case
+  of the six vendored Wycheproof ML-DSA sign files (all valid cases still
+  import or generate and sign byte-exact) and failed on the unfixed code for
+  exactly the 9 Wycheproof cases, plus 27 empty-seed key generations across
+  all five mechanisms. The C++ engine is unchanged: it already refused both
+  (the out-of-range key only at `C_Sign`, with `CKR_GENERAL_ERROR`).
+
 - **bench-harness compiles again, and the local gate now checks it.** The
   composite-key work (#241) added a required `attributes` field to the KMIP
   Encapsulate and Decapsulate requests, and the benchmark harness's three KMIP
