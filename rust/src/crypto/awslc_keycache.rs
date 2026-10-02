@@ -96,6 +96,7 @@ impl Cache {
         while self.order.len() >= MAX_ENTRIES {
             let oldest = self.order.remove(0);
             self.map.remove(&oldest);
+            EPOCH.fetch_add(1, Ordering::SeqCst);
         }
         self.order.push(id);
         self.map.insert(id, Entry::default());
@@ -120,6 +121,19 @@ fn locked() -> std::sync::MutexGuard<'static, Cache> {
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Bumped whenever a resident entry can disappear: every `clear()` and every
+/// FIFO eviction. Tests compare it before and after a sequence of lookups:
+/// the cache is process-global and `cargo test` runs in parallel with tests
+/// that fire lifecycle events (each `C_InitToken`, `C_DestroyObject`, … calls
+/// `clear()`), so "the second lookup returned the same allocation" is only a
+/// meaningful assertion when no entry could have been dropped in between.
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// See [`EPOCH`]. Tests only.
+pub fn epoch() -> u64 {
+    EPOCH.load(Ordering::SeqCst)
+}
 
 /// `(hits, misses)` since process start — used by the tests to prove the
 /// cache is actually on the path rather than silently missing every time.
@@ -182,6 +196,7 @@ pub fn clear() {
     let mut c = locked();
     c.map.clear();
     c.order.clear();
+    EPOCH.fetch_add(1, Ordering::SeqCst);
     drop(c);
     // The ML-DSA keys parsed by `crypto::awslc_pq` follow the same lifetime
     // rule, so every call site that empties this cache empties that one too.
@@ -204,8 +219,27 @@ mod tests {
     // Every property below is therefore proved by ALLOCATION IDENTITY
     // (`Arc::ptr_eq`): if two lookups return the same allocation the second
     // one came from the map, and if they return different allocations it was
-    // rebuilt. That is exactly the property under test and it cannot be
-    // perturbed by a concurrent test touching a different key.
+    // rebuilt. A concurrent test touching a different key cannot perturb
+    // that, but one firing a lifecycle event can: `clear()` empties the whole
+    // map (hsm main CI, 2026-10-02: `every_view_is_cached_independently`
+    // failed on "signer view cached"). "Must hit" assertions therefore run
+    // inside `quiescent`, which discards any run a `clear()` or eviction
+    // interrupted.
+
+    /// Run `f` until it completes without any `clear()` or eviction happening
+    /// while it ran (see [`EPOCH`]), and return that run's result. Concurrent
+    /// tests fire lifecycle events at any moment; a run they interrupted says
+    /// nothing about the cache, so it is discarded rather than asserted on.
+    fn quiescent<R>(mut f: impl FnMut() -> R) -> R {
+        for _ in 0..200 {
+            let before = epoch();
+            let r = f();
+            if epoch() == before {
+                return r;
+            }
+        }
+        panic!("the cache was cleared during every one of 200 attempts");
+    }
 
     fn a_key() -> Vec<u8> {
         use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
@@ -218,9 +252,12 @@ mod tests {
     #[test]
     fn second_lookup_of_the_same_key_reuses_the_parsed_object() {
         let der = a_key();
-        let first = signer(&der).expect("first build");
-        let second = signer(&der).expect("second lookup");
-        assert!(Arc::ptr_eq(&first, &second), "second lookup must hit the cache");
+        let hit = quiescent(|| {
+            let first = signer(&der).expect("first build");
+            let second = signer(&der).expect("second lookup");
+            Arc::ptr_eq(&first, &second)
+        });
+        assert!(hit, "second lookup must hit the cache");
     }
 
     /// Each view is cached independently but under one key entry, and each is
@@ -228,12 +265,19 @@ mod tests {
     #[test]
     fn every_view_is_cached_independently() {
         let der = a_key();
-        let s1 = signer(&der).expect("signer");
-        let o1 = oaep(&der).expect("oaep");
-        let p1 = pkcs1(&der).expect("pkcs1");
-        assert!(Arc::ptr_eq(&s1, &signer(&der).unwrap()), "signer view cached");
-        assert!(Arc::ptr_eq(&o1, &oaep(&der).unwrap()), "oaep view cached");
-        assert!(Arc::ptr_eq(&p1, &pkcs1(&der).unwrap()), "pkcs1 view cached");
+        let (s, o, p) = quiescent(|| {
+            let s1 = signer(&der).expect("signer");
+            let o1 = oaep(&der).expect("oaep");
+            let p1 = pkcs1(&der).expect("pkcs1");
+            (
+                Arc::ptr_eq(&s1, &signer(&der).unwrap()),
+                Arc::ptr_eq(&o1, &oaep(&der).unwrap()),
+                Arc::ptr_eq(&p1, &pkcs1(&der).unwrap()),
+            )
+        });
+        assert!(s, "signer view cached");
+        assert!(o, "oaep view cached");
+        assert!(p, "pkcs1 view cached");
     }
 
     /// Distinct keys must not alias — this is the property that makes keying
@@ -242,11 +286,18 @@ mod tests {
     fn distinct_keys_do_not_alias() {
         let (a, b) = (a_key(), a_key());
         assert_ne!(a, b, "two generated keys differ");
-        let ka = signer(&a).expect("a");
-        let kb = signer(&b).expect("b");
-        assert!(!Arc::ptr_eq(&ka, &kb), "different keys must not share an entry");
-        assert!(Arc::ptr_eq(&ka, &signer(&a).unwrap()), "a still maps to a");
-        assert!(Arc::ptr_eq(&kb, &signer(&b).unwrap()), "b still maps to b");
+        let (distinct, a_hit, b_hit) = quiescent(|| {
+            let ka = signer(&a).expect("a");
+            let kb = signer(&b).expect("b");
+            (
+                !Arc::ptr_eq(&ka, &kb),
+                Arc::ptr_eq(&ka, &signer(&a).unwrap()),
+                Arc::ptr_eq(&kb, &signer(&b).unwrap()),
+            )
+        });
+        assert!(distinct, "different keys must not share an entry");
+        assert!(a_hit, "a still maps to a");
+        assert!(b_hit, "b still maps to b");
     }
 
     /// Hygiene: after a lifecycle event the key material must be gone, so the
