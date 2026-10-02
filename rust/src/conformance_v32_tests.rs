@@ -160,6 +160,9 @@ const S2_SESSION: u32 = 0x5232_0001;
 fn s2_setup() {
     crate::state::set_initialized(true);
     crate::state::ensure_slot(0);
+    // Fixture keys are private by default (C++ parity, 2026-10-02) and
+    // Usage Guide Table 3 needs a user session to create them.
+    crate::state::test_login_user(0);
     put_session(S2_SESSION, 0, true);
 }
 
@@ -688,6 +691,9 @@ const S7_RW: u32 = 0x5737_4002;
 fn s7_setup() {
     crate::state::set_initialized(true);
     crate::state::ensure_slot(0);
+    // Fixture keys are private by default (C++ parity, 2026-10-02) and
+    // Usage Guide Table 3 needs a user session to create them.
+    crate::state::test_login_user(0);
     put_session(S7_RO, 0, false);
     put_session(S7_RW, 0, true);
 }
@@ -1236,6 +1242,9 @@ const W_SESSION: u32 = 0x5721_0001;
 fn w_setup() {
     crate::state::set_initialized(true);
     crate::state::ensure_slot(0);
+    // Fixture keys are private by default (C++ parity, 2026-10-02) and
+    // Usage Guide Table 3 needs a user session to create them.
+    crate::state::test_login_user(0);
     put_session(W_SESSION, 0, true);
 }
 

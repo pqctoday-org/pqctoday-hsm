@@ -114,6 +114,8 @@ pub const CKO_DATA: u32 = 0x0000_0000;
 pub const CKO_CERTIFICATE: u32 = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
+/// §4.12 — domain parameter objects are storage objects (Table 19 applies).
+pub const CKO_DOMAIN_PARAMETERS: u32 = 0x0000_0006;
 pub const CKO_SECRET_KEY: u32 = 0x0000_0004;
 /// Non-storage ("Other Objects") classes. These describe the TOKEN rather
 /// than holding application data, are built in rather than created, and are
@@ -311,6 +313,9 @@ pub const CKA_ALWAYS_AUTHENTICATE: u32 = 0x0000_0202; // PKCS#11 v3.2 — privat
 // (shared with CKO_TRUST, §4.7 Table 25).
 pub const CKA_CERTIFICATE_TYPE: u32 = 0x0000_0080;
 pub const CKA_CERTIFICATE_CATEGORY: u32 = 0x0000_0087;
+/// §4.6.3 Table 22 — X.509 certificate attribute, default CK_SECURITY_DOMAIN_UNSPECIFIED.
+pub const CKA_JAVA_MIDP_SECURITY_DOMAIN: u32 = 0x0000_0088;
+pub const CK_SECURITY_DOMAIN_UNSPECIFIED: u32 = 0;
 pub const CKA_URL: u32 = 0x0000_0089;
 pub const CKA_HASH_OF_SUBJECT_PUBLIC_KEY: u32 = 0x0000_008a;
 pub const CKA_HASH_OF_ISSUER_PUBLIC_KEY: u32 = 0x0000_008b;

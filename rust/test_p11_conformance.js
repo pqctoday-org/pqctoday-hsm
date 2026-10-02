@@ -422,7 +422,10 @@ check('C_GenerateRandom with bogus session → SESSION_HANDLE_INVALID',
   w._C_GenerateRandom(0xdeadbeef, alloc(8), 8), CKR.SESSION_HANDLE_INVALID);
 
 section('R2.4 — key-handle vs permission codes (§5.12.4)');
-const aes = genAes(hS);
+// Explicitly public: secret keys default to CKA_PRIVATE=TRUE (C++ parity,
+// 2026-10-02), and R1.3's C_Logout destroys every private session object
+// (§5.6.10), while this shared key is used by sections after it.
+const aes = genAes(hS, [{ type: CKA.PRIVATE, bool: false }]);
 check('C_GenerateKey(AES-256) → OK', aes.rv, CKR.OK);
 check('C_SignInit with nonexistent key → KEY_HANDLE_INVALID',
   w._C_SignInit(hS, buildMech(CKM.ML_DSA), 0x7fffffff), CKR.KEY_HANDLE_INVALID);
@@ -492,15 +495,19 @@ check('C_DigestFinal retry → OK (op preserved)', w._C_DigestFinal(hS, alloc(32
 section('R1.3 — private-object visibility (§4.4)');
 {
   // PRIVATE=TRUE objects must be invisible while the token is not logged in.
-  w._C_Logout(hS);
+  // Created as TOKEN objects while logged in as USER: a private object can
+  // only be created in a user session (Usage Guide Table 3), and C_Logout
+  // destroys private SESSION objects (§5.6.10), so a token object is what
+  // survives the logout to be (in)visible.
   const tpl = buildTpl([
     { type: CKA.CLASS, ulong: CKO.SECRET_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
     { type: CKA.VALUE, bytes: new Uint8Array(32).fill(5) }, { type: CKA.PRIVATE, bool: true },
-    { type: CKA.LABEL, bytes: new TextEncoder().encode('privobj') },
+    { type: CKA.LABEL, bytes: new TextEncoder().encode('privobj') }, { type: CKA.TOKEN, bool: true },
   ]);
   const hp = alloc(4);
-  check('C_CreateObject(private secret) → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
+  check('C_CreateObject(private secret) → OK', w._C_CreateObject(hS, tpl, 6, hp), CKR.OK);
   const hPriv = readU32(hp);
+  w._C_Logout(hS);
   const out = buildTpl([{ type: CKA.LABEL, bytes: new Uint8Array(16) }]);
   check('C_GetAttributeValue on private obj w/o login → OBJECT_HANDLE_INVALID',
     w._C_GetAttributeValue(hS, hPriv, out, 1), CKR.OBJECT_HANDLE_INVALID);

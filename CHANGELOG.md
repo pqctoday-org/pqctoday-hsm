@@ -48,6 +48,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rust engine: listing certificates across slots now returns every
+  requested attribute.** A black-box audit (5 slots × 20 objects, list slot
+  ID + `CKA_LABEL`/`CKA_SUBJECT`/`CKA_ID` for each `CKO_CERTIFICATE`) found
+  10 of 50 rows failing with `CKR_ATTRIBUTE_TYPE_INVALID`. Fixed, each with a
+  regression test that failed first
+  (`docs/remediation-plan-rust-cert-discovery-10022026.md`):
+  (R1) objects now possess the attributes PKCS#11 v3.2 gives a default (§4:
+  "Nonetheless, the object possesses these attributes") — `CKA_LABEL` on
+  storage objects (Table 19), `CKA_ID` on keys (Table 26), and the Table
+  19/21/22 certificate defaults; objects loaded from a state file or the
+  SQLite store are backfilled. The ledger entries
+  `LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-LABEL`/`-ID` are deleted: they
+  contradicted §4, and C++ already reported these empty.
+  (R2) a slot created by the `C_GetSlotList` size query now carries its
+  `CKO_PROFILE` objects (Profiles §5.1 c.4, §5.5 c.5b); slots 1..N had none.
+  (R3) `C_FindObjectsInit` treats a zero-length template value as "match
+  empty" instead of dropping it, and refuses a NULL value with a non-zero
+  length (`CKR_ARGUMENTS_BAD`) (§5.7.7).
+  (R4) `C_GetAttributeValue` reports `CK_UNAVAILABLE_INFORMATION` for a
+  too-small buffer (§5.7.5 case 5).
+  (R5) native `C_Initialize` refuses a partial set of mutex callbacks
+  (§5.4.1).
+  (R6, owner decision, not a spec rule) a token's serial number is its slot
+  ID + 1, so slot 0 keeps `0001` and slots are distinguishable.
+  (R7, owner decision) **behaviour change:** the C_* creation paths use the
+  C++ engine's `CKA_PRIVATE` defaults (Table 19: "token-specific") — TRUE
+  for data objects, private and secret keys, FALSE for certificates and
+  public keys — and refuse a private object outside a user session
+  (`CKR_USER_NOT_LOGGED_IN`, Usage Guide Table 3); before, a public session
+  could create private keys it could not then see. Objects loaded from older
+  state keep their historical public status. (R8) `SOFTHSMRUST_SLOTS=N`
+  brings slots 0..N-1 online at `C_Initialize`. (R9) `slotDescription` is
+  "PQCToday HSM Virtual Slot" and the slot `manufacturerID` "PQCToday". (R10) a certificate's `CKA_PUBLIC_KEY_INFO`
+  is extracted from its `CKA_VALUE` when not supplied (§4.6.2). `CKA_LABEL`
+  also covers `CKO_TRUST` (v3.3 storage-object table resolves v3.2's
+  ambiguity; caught by the differential harness).
+
 - **Rust engine: ML-DSA private keys with out-of-range s1/s2 are refused, and
   a zero-length `CKA_SEED` no longer yields a random key.** Found by Project
   Wycheproof's ML-DSA sign vectors (9 cases, via the hub's vendored set).

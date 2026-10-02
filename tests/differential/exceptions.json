@@ -159,13 +159,6 @@
       "citation": "PKCS#11 v3.2 §4.8 Key objects, Table 26 Common Key Attributes: CKA_DERIVE is \"CK_TRUE if key supports key derivation (i.e., if other keys can be derived from this one (default CK_FALSE)\", footnote 8 only. §5.7.5 C_GetAttributeValue covers the absence: where \"the object does not possess such an attribute\" the token sets CK_UNAVAILABLE_INFORMATION and \"should return\" CKR_ATTRIBUTE_TYPE_INVALID."
     },
     {
-      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-LABEL",
-      "status": "legal",
-      "path": "*.CKA_LABEL.*",
-      "justification": "Same materialisation convention: C++ returns a zero-length CKA_LABEL where none was supplied, Rust reports the attribute absent.",
-      "citation": "PKCS#11 v3.2 §5.7.5; CKA_LABEL is an optional descriptive attribute."
-    },
-    {
       "id": "LEGAL-USAGE-FLAG-DEFAULT-SIGN",
       "status": "legal",
       "path": "*.CKA_SIGN.*",
@@ -178,13 +171,6 @@
       "path": "*.CKA_WRAP.*",
       "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
       "citation": "PKCS#11 v3.2 Table 13 (§4.2 Common attributes), footnote 9: \"Default value is token-specific, and may depend on the values of other attributes.\" The attribute itself is defined in Table 27 (§4.9 Public key objects) and Table 30 (§4.11 Secret key objects) and carries that footnote. CORRECTED 2026-09-07 (H1): every entry in this family cited \"§4.9 common key attribute table footnote\" — but §4.9 is Public key objects, the common KEY attribute table is Table 26 in §4.8, and the footnote lives in Table 13 in §4.2. Verified against the harness: this flag genuinely differs in VALUE between the engines (C++ 01, Rust 00), so it is a defaults question and footnote 9 is the right rule."
-    },
-    {
-      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ID",
-      "status": "legal",
-      "path": "*.CKA_ID.*",
-      "justification": "C++ materialises every attribute in the object's class table with an empty default; Rust only materialises what it sets. An object need not possess an optional attribute, and CKA_ID was not in these templates.",
-      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: CKR_ATTRIBUTE_TYPE_INVALID is returned 'if the object does not possess such an attribute'. No table makes CKA_ID mandatory."
     },
     {
       "id": "LEGAL-KEM-CAPABILITY-FLAGS-ON-NON-KEM-KEYS",

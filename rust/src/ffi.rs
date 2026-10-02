@@ -275,6 +275,10 @@ pub fn C_GetFunctionList(pp_function_list: *mut u8) -> u32 {
     CKR_OK
 }
 
+/// Upper bound for `SOFTHSMRUST_SLOTS` — an engine guard against a
+/// mistyped value, not a PKCS#11 limit.
+pub const MAX_CONFIGURED_SLOTS: u32 = 256;
+
 #[wasm_bindgen(js_name = _C_Initialize)]
 pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
     // PKCS#11 v3.2 §5.6 — a second C_Initialize without an intervening
@@ -331,6 +335,24 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
             if let Err(rv) = crate::state_snapshot::deserialize_token_state(&buf) {
                 return rv;
             }
+        }
+    }
+    // G7 (owner decision 2026-10-02) — engine configuration, not a PKCS#11
+    // API: SOFTHSMRUST_SLOTS=N brings slots 0..N-1 online (each an
+    // uninitialized token with its CKO_PROFILE objects, via ensure_slot) so a
+    // C client can provision several slots without relying on the
+    // C_GetSlotList spare-slot side effect. Slots already present (e.g. from
+    // SOFTHSMRUST_STATE_FILE) are left untouched. A malformed or out-of-range
+    // value fails C_Initialize (CKR_FUNCTION_FAILED, §5.4.1's list) rather
+    // than being silently ignored.
+    if let Ok(v) = std::env::var("SOFTHSMRUST_SLOTS") {
+        match v.trim().parse::<u32>() {
+            Ok(n) if (1..=MAX_CONFIGURED_SLOTS).contains(&n) => {
+                for slot in 0..n {
+                    crate::state::ensure_slot(slot);
+                }
+            }
+            _ => return CKR_FUNCTION_FAILED,
         }
     }
     crate::state::set_initialized(true);
@@ -640,7 +662,7 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
     // (sabotage-tested — reverting only this gating did not reproduce
     // any failure). Reported at exactly this confidence, not overclaimed.
     if p_slot_list.is_null() {
-        TOKEN_STORE.with(|ts| {
+        let spare = TOKEN_STORE.with(|ts| {
             let mut store = ts.borrow_mut();
             let all_initialized = store.values().all(|t| t.initialized);
             if all_initialized {
@@ -658,8 +680,18 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
                         user_pin_hash: None,
                     },
                 );
+                Some(next_slot)
+            } else {
+                None
             }
         });
+        // R2 (2026-10-02) — Profiles §5.1 condition 4 / §5.5 condition 5b: the
+        // spare slot's token needs its CKO_PROFILE objects, which only
+        // state::ensure_slot used to create. Called after TOKEN_STORE is
+        // released (it is a Mutex).
+        if let Some(slot) = spare {
+            crate::state::ensure_profile_objects(slot);
+        }
         let count = TOKEN_STORE.with(|ts| ts.borrow().len() as u32);
         unsafe {
             *pul_count = count;
@@ -1336,7 +1368,10 @@ pub fn C_GetTokenInfo(slot_id: u32, p_info: *mut u8) -> u32 {
         std::ptr::copy_nonoverlapping(token.label.as_ptr(), p_info, 32);
         write_fixed_str(p_info, 32, "SoftHSM project", 32);
         write_fixed_str(p_info, 64, "PQCToday", 16);
-        write_fixed_str(p_info, 80, "0001", 16);
+        // R6 (owner decision 2026-10-02, not a v3.2 rule) — serial = slot ID
+        // + 1, so slot 0 keeps its historical "0001" and tokens in different
+        // slots are distinguishable (RFC 7512 `serial=`, p11-kit).
+        write_fixed_str(p_info, 80, &format!("{:04}", u64::from(slot_id) + 1), 16);
 
         let ptr = p_info as *mut u32;
         *ptr.add(24) = flags; // flags @96
@@ -2530,8 +2565,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -2670,8 +2710,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -2822,8 +2867,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3008,8 +3058,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3196,8 +3251,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3394,8 +3454,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3538,8 +3603,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3669,8 +3739,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3775,8 +3850,13 @@ fn C_GenerateKeyPair_impl(
                 if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
                     return rv;
                 }
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -3911,8 +3991,13 @@ fn C_GenerateKeyPair_impl(
                 if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
                     return rv;
                 }
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -4009,8 +4094,13 @@ fn C_GenerateKeyPair_impl(
                 if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
                     return rv;
                 }
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -4097,8 +4187,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -4234,8 +4329,13 @@ fn C_GenerateKeyPair_impl(
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
-                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
-                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
                 CKR_OK
             }
 
@@ -4305,7 +4405,9 @@ pub fn C_GenerateKey(
                 store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_CHACHA20);
                 store_ulong(&mut attrs, CKA_VALUE_LEN, 32);
                 store_bool(&mut attrs, CKA_TOKEN, false);
-                store_bool(&mut attrs, CKA_PRIVATE, false);
+                // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+                // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+                store_bool(&mut attrs, CKA_PRIVATE, true);
                 store_bool(&mut attrs, CKA_SENSITIVE, false);
                 store_bool(&mut attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut attrs, CKA_ENCRYPT, true);
@@ -4320,7 +4422,10 @@ pub fn C_GenerateKey(
                 absorb_template_attrs(&mut attrs, p_template, ul_count);
                 finalize_private_key_attrs(&mut attrs);
                 compute_kcv(&mut attrs);
-                *ph_key = allocate_handle_owned(_h_session, attrs);
+                *ph_key = match ffi_alloc(_h_session, attrs) {
+                    Ok(h) => h,
+                    Err(rv) => return rv,
+                };
                 CKR_OK
             }
             CKM_AES_KEY_GEN => {
@@ -4346,7 +4451,9 @@ pub fn C_GenerateKey(
                 store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
                 store_ulong(&mut attrs, CKA_VALUE_LEN, key_len as u32);
                 store_bool(&mut attrs, CKA_TOKEN, false);
-                store_bool(&mut attrs, CKA_PRIVATE, false);
+                // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+                // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+                store_bool(&mut attrs, CKA_PRIVATE, true);
                 store_bool(&mut attrs, CKA_SENSITIVE, false);
                 store_bool(&mut attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut attrs, CKA_ENCRYPT, true);
@@ -4361,7 +4468,10 @@ pub fn C_GenerateKey(
                 absorb_template_attrs(&mut attrs, p_template, ul_count);
                 finalize_private_key_attrs(&mut attrs); // sets CKA_ALWAYS_SENSITIVE + CKA_NEVER_EXTRACTABLE
                 compute_kcv(&mut attrs);
-                *ph_key = allocate_handle_owned(_h_session, attrs);
+                *ph_key = match ffi_alloc(_h_session, attrs) {
+                    Ok(h) => h,
+                    Err(rv) => return rv,
+                };
                 CKR_OK
             }
             CKM_AES_XTS_KEY_GEN => {
@@ -4385,7 +4495,9 @@ pub fn C_GenerateKey(
                 store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES_XTS);
                 store_ulong(&mut attrs, CKA_VALUE_LEN, key_len as u32);
                 store_bool(&mut attrs, CKA_TOKEN, false);
-                store_bool(&mut attrs, CKA_PRIVATE, false);
+                // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+                // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+                store_bool(&mut attrs, CKA_PRIVATE, true);
                 store_bool(&mut attrs, CKA_SENSITIVE, false);
                 store_bool(&mut attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut attrs, CKA_ENCRYPT, true);
@@ -4400,7 +4512,10 @@ pub fn C_GenerateKey(
                 absorb_template_attrs(&mut attrs, p_template, ul_count);
                 finalize_private_key_attrs(&mut attrs);
                 compute_kcv(&mut attrs);
-                *ph_key = allocate_handle_owned(_h_session, attrs);
+                *ph_key = match ffi_alloc(_h_session, attrs) {
+                    Ok(h) => h,
+                    Err(rv) => return rv,
+                };
                 CKR_OK
             }
             CKM_GENERIC_SECRET_KEY_GEN => {
@@ -4440,7 +4555,10 @@ pub fn C_GenerateKey(
                 absorb_template_attrs(&mut attrs, p_template, ul_count);
                 finalize_private_key_attrs(&mut attrs); // sets CKA_ALWAYS_SENSITIVE + CKA_NEVER_EXTRACTABLE
                 compute_kcv(&mut attrs);
-                *ph_key = allocate_handle_owned(_h_session, attrs);
+                *ph_key = match ffi_alloc(_h_session, attrs) {
+                    Ok(h) => h,
+                    Err(rv) => return rv,
+                };
                 CKR_OK
             }
             _ => CKR_MECHANISM_INVALID,
@@ -4855,7 +4973,9 @@ fn C_EncapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
-            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+            // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+            store_bool(&mut ss_attrs, CKA_PRIVATE, true);
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
             // CKA_LOCAL is FALSE above, and CKA_KEY_GEN_MECHANISM "contains a
             // valid value only if the CKA_LOCAL attribute has the value
@@ -4887,7 +5007,10 @@ fn C_EncapsulateKey_impl(
             if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
                 return CKR_KEY_HANDLE_INVALID;
             }
-            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
             return CKR_OK;
         }
 
@@ -5070,7 +5193,9 @@ fn C_EncapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
-            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+            // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+            store_bool(&mut ss_attrs, CKA_PRIVATE, true);
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.8 — KEM keys are not locally generated
             // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see the ML-KEM arm).
             store_ulong(
@@ -5097,7 +5222,10 @@ fn C_EncapsulateKey_impl(
             if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
                 return CKR_KEY_HANDLE_INVALID;
             }
-            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
             return CKR_OK;
         }
 
@@ -5186,7 +5314,9 @@ fn C_EncapsulateKey_impl(
                 store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
                 store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
                 store_bool(&mut ss_attrs, CKA_TOKEN, false);   // PKCS#11 v3.2 §4.1 default
-                store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+                // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+                // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+                store_bool(&mut ss_attrs, CKA_PRIVATE, true);
                 store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
                 // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see above).
                 store_ulong(
@@ -5212,7 +5342,10 @@ fn C_EncapsulateKey_impl(
                 if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
                     return CKR_KEY_HANDLE_INVALID;
                 }
-                *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+                *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                    Ok(h) => h,
+                    Err(rv) => return rv,
+                };
             }};
         }
 
@@ -5401,7 +5534,9 @@ fn C_DecapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
-            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+            // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+            store_bool(&mut ss_attrs, CKA_PRIVATE, true);
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
             // CKA_LOCAL is FALSE above, and CKA_KEY_GEN_MECHANISM "contains a
             // valid value only if the CKA_LOCAL attribute has the value
@@ -5434,7 +5569,10 @@ fn C_DecapsulateKey_impl(
             if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
                 return CKR_TEMPLATE_INCONSISTENT;
             }
-            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
             return CKR_OK;
         }
 
@@ -5560,7 +5698,9 @@ fn C_DecapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
-            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+            // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+            store_bool(&mut ss_attrs, CKA_PRIVATE, true);
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.9 — KEM keys are not locally generated
             // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see the ML-KEM arm).
             store_ulong(
@@ -5586,7 +5726,10 @@ fn C_DecapsulateKey_impl(
             if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
                 return CKR_TEMPLATE_INCONSISTENT;
             }
-            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
             return CKR_OK;
         }
 
@@ -5670,7 +5813,9 @@ fn C_DecapsulateKey_impl(
                 store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
                 store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
                 store_bool(&mut ss_attrs, CKA_TOKEN, false);   // PKCS#11 v3.2 §4.1 default
-                store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+                // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+                // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+                store_bool(&mut ss_attrs, CKA_PRIVATE, true);
                 store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
                 // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see above).
                 store_ulong(
@@ -5696,7 +5841,10 @@ fn C_DecapsulateKey_impl(
                 if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
                     return CKR_TEMPLATE_INCONSISTENT;
                 }
-                *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+                *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                    Ok(h) => h,
+                    Err(rv) => return rv,
+                };
             }};
         }
 
@@ -5861,8 +6009,11 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                         std::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val.len());
                         *val_len_ptr = val.len();
                     } else {
-                        // §5.7.5 — record, set length, keep processing the rest.
-                        *val_len_ptr = val.len();
+                        // §5.7.5 case 5 — record, keep processing the rest. R4
+                        // (2026-10-02): "the ulValueLen field is modified to
+                        // hold the value CK_UNAVAILABLE_INFORMATION", not the
+                        // real length.
+                        *val_len_ptr = usize::MAX;
                         had_small = true;
                     }
                 } else {
@@ -6608,6 +6759,69 @@ fn validate_imported_ec_public_key(attrs: &Attributes) -> Result<(), u32> {
     validate_ec_public_point(curve, bare)
 }
 
+/// The PKCS#11 C_* creation paths allocate through these two: they apply the
+/// class's CKA_PRIVATE default (owner decision 2026-10-02, C++ parity —
+/// state::private_default_for_class) and refuse a private object outside a
+/// user session (Usage Guide Table 3 — state::check_private_object_creation).
+/// The native/KMIP surface keeps calling allocate_handle_owned directly.
+fn ffi_alloc(h_session: u32, mut attrs: Attributes) -> Result<u32, u32> {
+    crate::state::apply_private_default(&mut attrs);
+    crate::state::check_private_object_creation(h_session, &attrs)?;
+    Ok(allocate_handle_owned(h_session, attrs))
+}
+
+/// Key-pair form of [`ffi_alloc`]: BOTH halves are checked before either is
+/// allocated, so a refusal never leaves half a pair behind.
+fn ffi_alloc_key_pair(
+    h_session: u32,
+    mut pub_attrs: Attributes,
+    mut prv_attrs: Attributes,
+) -> Result<(u32, u32), u32> {
+    crate::state::apply_private_default(&mut pub_attrs);
+    crate::state::apply_private_default(&mut prv_attrs);
+    crate::state::check_private_object_creation(h_session, &pub_attrs)?;
+    crate::state::check_private_object_creation(h_session, &prv_attrs)?;
+    Ok((
+        allocate_handle_owned(h_session, pub_attrs),
+        allocate_handle_owned(h_session, prv_attrs),
+    ))
+}
+
+/// §4.6.2 l.2246-2247: "Cryptoki does not enforce the relationship of the
+/// CKA_PUBLIC_KEY_INFO to the public key in the certificate, but does
+/// recommend that the key be extracted from the certificate to create this
+/// value." Returns the DER SubjectPublicKeyInfo of an X.509 certificate
+/// (RFC 5280 §4.1: Certificate ::= SEQUENCE { tbsCertificate SEQUENCE {
+/// [0] version OPTIONAL, serialNumber, signature, issuer, validity,
+/// subject, subjectPublicKeyInfo, ... }, ... }), or None if `cert` does
+/// not parse — the caller then keeps Table 21's empty default.
+fn x509_subject_public_key_info(cert: &[u8]) -> Option<Vec<u8>> {
+    let (tag, cert_body, _) = der_read_tlv(cert)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, tbs, _) = der_read_tlv(cert_body)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let mut rest = tbs;
+    let mut fields: Vec<(u8, &[u8])> = Vec::with_capacity(7);
+    while fields.len() < 7 && !rest.is_empty() {
+        let (tag, _, n) = der_read_tlv(rest)?;
+        fields.push((tag, &rest[..n]));
+        rest = &rest[n..];
+    }
+    let skip = usize::from(fields.first()?.0 == 0xA0);
+    if fields.get(skip)?.0 != 0x02 {
+        return None; // serialNumber must be an INTEGER
+    }
+    let (tag, spki) = *fields.get(skip + 5)?;
+    if tag != 0x30 {
+        return None;
+    }
+    Some(spki.to_vec())
+}
+
 pub(crate) fn create_object_from_attrs(
     h_session: u32,
     mut new_attrs: Attributes,
@@ -6823,7 +7037,17 @@ pub(crate) fn create_object_from_attrs(
     }
     // Compute CKA_CHECK_VALUE (KCV) — PKCS#11 v3.2
     compute_kcv(&mut new_attrs);
-    Ok(allocate_handle_owned(h_session, new_attrs))
+    // §4.6.2 recommendation — derive CKA_PUBLIC_KEY_INFO from the
+    // certificate when the caller did not supply it (unparseable value:
+    // Table 21's empty default applies instead).
+    if get_object_attr_u32_from(&new_attrs, CKA_CLASS) == Some(CKO_CERTIFICATE)
+        && !new_attrs.contains_key(&CKA_PUBLIC_KEY_INFO)
+    {
+        if let Some(spki) = new_attrs.get(&CKA_VALUE).and_then(|v| x509_subject_public_key_info(v)) {
+            new_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+        }
+    }
+    ffi_alloc(h_session, new_attrs)
 }
 
 #[wasm_bindgen(js_name = _C_CreateObject)]
@@ -10966,7 +11190,17 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
                 let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as usize;
-                if !val_ptr.is_null() && val_len > 0 {
+                // R3 (2026-10-02) — §5.7.7: "an exact byte-for-byte match
+                // with ALL attributes in the template". A zero-length entry
+                // is a filter for an empty value, not a wildcard (it used to
+                // be dropped, widening the search). A NULL pValue with a
+                // non-zero length cannot be honoured: CKR_ARGUMENTS_BAD
+                // (§5.1.6 l.2816), never a silently dropped filter.
+                if val_len == 0 {
+                    match_attrs.push((attr_type, Vec::new()));
+                } else if val_ptr.is_null() {
+                    return CKR_ARGUMENTS_BAD;
+                } else {
                     match_attrs.push((
                         attr_type,
                         std::slice::from_raw_parts(val_ptr, val_len).to_vec(),
@@ -11907,7 +12141,10 @@ pub fn C_DeriveKey(
             // PKCS#11 v3.2 §4.11: KCV mandatory on derived secret keys.
             crate::state::compute_kcv(&mut attrs);
 
-            *ph_key = allocate_handle_owned(_h_session, attrs);
+            *ph_key = match ffi_alloc(_h_session, attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
             return CKR_OK;
         }
 
@@ -12747,7 +12984,9 @@ pub fn C_DeriveKey(
             store_ulong(&mut attrs, CKA_CLASS, CKO_DATA);
             store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
             store_bool(&mut attrs, CKA_TOKEN, false);
-            store_bool(&mut attrs, CKA_PRIVATE, false);
+            // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+            // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+            store_bool(&mut attrs, CKA_PRIVATE, true);
             absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
         } else {
             store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
@@ -12757,7 +12996,9 @@ pub fn C_DeriveKey(
             store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
             // PKCS#11 v3.2 §4.1 defaults — caller may override via template
             store_bool(&mut attrs, CKA_TOKEN, false);
-            store_bool(&mut attrs, CKA_PRIVATE, false);
+            // Owner decision 2026-10-02 — C++ parity (SoftHSM_keygen/_kem/derive:
+            // `CK_BBOOL isPrivate = CK_TRUE`); Table 19 leaves it token-specific.
+            store_bool(&mut attrs, CKA_PRIVATE, true);
             absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
             // Server-managed attributes — set AFTER absorb to override any caller-provided values.
             // PKCS#11 v3.2 §4.3 Table 13 — a DERIVED key is NOT locally generated:
@@ -12814,7 +13055,10 @@ pub fn C_DeriveKey(
             crate::state::compute_kcv(&mut attrs);
         }
 
-        *ph_key = allocate_handle_owned(_h_session, attrs);
+        *ph_key = match ffi_alloc(_h_session, attrs) {
+            Ok(h) => h,
+            Err(rv) => return rv,
+        };
     }
     CKR_OK
 }
@@ -13953,7 +14197,10 @@ pub fn C_UnwrapKey(
             return CKR_WRAPPED_KEY_INVALID;
         }
 
-        *ph_key = allocate_handle_owned(_h_session, attrs);
+        *ph_key = match ffi_alloc(_h_session, attrs) {
+            Ok(h) => h,
+            Err(rv) => return rv,
+        };
     }
     CKR_OK
 }
@@ -14364,7 +14611,10 @@ pub fn C_UnwrapKeyAuthenticated(
             return CKR_WRAPPED_KEY_INVALID;
         }
 
-        *ph_key = allocate_handle_owned(_h_session, attrs);
+        *ph_key = match ffi_alloc(_h_session, attrs) {
+            Ok(h) => h,
+            Err(rv) => return rv,
+        };
     }
     CKR_OK
 }
@@ -15128,10 +15378,13 @@ pub fn C_GetSlotInfo(slot_id: u32, p_info: *mut u8) -> u32 {
         let info = std::slice::from_raw_parts_mut(p_info, 104);
         info.fill(b' '); // PKCS#11 padding is spaces for char arrays
         // slotDescription[64] at offset 0
-        let desc = b"SoftHSMv3 Rust WASM Virtual Slot                                ";
+        // Owner decision 2026-10-02 — one text for every build and slot (the
+        // old string said "WASM" on the native build too).
+        let desc = b"PQCToday HSM Virtual Slot                                       ";
         info[0..64].copy_from_slice(&desc[..64]);
         // manufacturerID[32] at offset 64
-        let mfr = b"SoftHSMv3 Rust WASM             ";
+        // Owner decision 2026-10-02 (with slotDescription above).
+        let mfr = b"PQCToday                        ";
         info[64..96].copy_from_slice(&mfr[..32]);
         // flags (4 bytes at offset 96): CKF_TOKEN_PRESENT(1) | CKF_HW_SLOT(0) = 0x01
         info[96] = 0x01;
@@ -15824,6 +16077,13 @@ pub(crate) fn copy_object_from_attrs(
     for (t, v) in template {
         new_attrs.insert(t, v);
     }
+    // A copy carries its source's CKA_PRIVATE (or the template's). A source
+    // from an older build may lack it; such objects were always public.
+    if !new_attrs.contains_key(&CKA_PRIVATE) {
+        store_bool(&mut new_attrs, CKA_PRIVATE, false);
+    }
+    // Usage Guide Table 3 — a private copy needs a user session.
+    crate::state::check_private_object_creation(h_session, &new_attrs)?;
     let handle = allocate_handle_owned(h_session, new_attrs);
     if handle == 0 {
         // NEXT_HANDLE saturated — allocation refused.
@@ -18182,6 +18442,7 @@ mod attr_integrity_ffi_tests {
 
     fn setup() {
         crate::state::set_initialized(true);
+        crate::state::test_login_user(0);
         SESSIONS.with(|s| {
             s.shard(SESSION).insert(
                 SESSION,
@@ -18754,6 +19015,7 @@ mod object_mgmt_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         crate::state::ensure_slot(0);
+        crate::state::test_login_user(0);
         SESSIONS.with(|s| {
                         s.insert(
                 SESSION_RW,
@@ -18928,9 +19190,11 @@ mod object_mgmt_ffi_tests {
             set_attribute_values_from_list(SESSION_RW, h, &updates),
             CKR_ATTRIBUTE_READ_ONLY
         );
+        // R1 (2026-10-02): the key possesses CKA_LABEL with its Table 19
+        // default (empty); the rejected template must leave it at that.
         assert_eq!(
             obj_attr(h, crate::native::keygen::CKA_LABEL),
-            None,
+            Some(Vec::new()),
             "valid entry of a failed template must not be applied"
         );
     }
@@ -19125,6 +19389,9 @@ mod object_mgmt_ffi_tests {
         setup();
         set_so_logged_in(true);
         let mut attrs = aes_import_attrs();
+        // SO sessions have no access to private objects (Usage Guide Table 3):
+        // the trusted source key must be public.
+        store_bool(&mut attrs, CKA_PRIVATE, false);
         store_bool(&mut attrs, CKA_TRUSTED, true);
         let h_trusted = create_object_from_attrs(SESSION_RW, attrs).unwrap();
         assert_eq!(obj_bool(h_trusted, CKA_TRUSTED), Some(true));
@@ -19172,6 +19439,9 @@ mod object_mgmt_ffi_tests {
         setup();
         set_so_logged_in(true);
         let mut attrs = aes_import_attrs();
+        // SO sessions have no access to private objects (Usage Guide Table 3):
+        // the trusted source key must be public.
+        store_bool(&mut attrs, CKA_PRIVATE, false);
         store_bool(&mut attrs, CKA_TRUSTED, true);
         let h_trusted = create_object_from_attrs(SESSION_RW, attrs).unwrap();
 
@@ -19416,6 +19686,8 @@ mod return_code_ffi_tests {
         });
         // Slot 0 token must not be logged in for the login-gate tests.
         TOKEN_STORE.with(|ts| ts.borrow_mut().remove(&77));
+        // Slot 0's user is logged in: fixture keys are private by default.
+        crate::state::test_login_user(0);
     }
 
     /// Install an AES secret key directly in the object store.
@@ -24037,6 +24309,10 @@ mod finalize_object_persistence_ffi_tests {
             (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
             (CKA_KEY_TYPE, &key_type as *const _ as *const u8, std::mem::size_of_val(&key_type)),
             (CKA_TOKEN, [1u8].as_ptr(), 1),
+            // Public: the test is about persistence, and the login does not
+            // survive C_Finalize/C_Initialize (§5.6.2); private is the
+            // default for this class since 2026-10-02.
+            (CKA_PRIVATE, [0u8].as_ptr(), 1),
             (CKA_ID, id_bytes.as_ptr(), id_bytes.len()),
             (CKA_VALUE, value_bytes.as_ptr(), value_bytes.len()),
         ];
@@ -24118,6 +24394,10 @@ mod finalize_object_persistence_ffi_tests {
         let attrs: Vec<(u32, *const u8, usize)> = vec![
             (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
             (CKA_TOKEN, [1u8].as_ptr(), 1),
+            // Public: the test is about persistence, and the login does not
+            // survive C_Finalize/C_Initialize (§5.6.2); private is the
+            // default for this class since 2026-10-02.
+            (CKA_PRIVATE, [0u8].as_ptr(), 1),
             (CKA_LABEL, label.as_ptr(), label.len()),
         ];
         let tmpl: Vec<usize> = attrs
@@ -24142,6 +24422,8 @@ mod finalize_object_persistence_ffi_tests {
         let attrs2: Vec<(u32, *const u8, usize)> = vec![
             (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
             (CKA_LABEL, label2.as_ptr(), label2.len()),
+            // Public: this session is not logged in (2026-10-02 defaults).
+            (CKA_PRIVATE, [0u8].as_ptr(), 1),
         ];
         let tmpl2: Vec<usize> = attrs2
             .iter()
@@ -24381,6 +24663,10 @@ mod find_objects_ordering_ffi_tests {
             let attrs: Vec<(u32, *const u8, usize)> = vec![
                 (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
                 (CKA_TOKEN, [1u8].as_ptr(), 1),
+            // Public: the test is about persistence, and the login does not
+            // survive C_Finalize/C_Initialize (§5.6.2); private is the
+            // default for this class since 2026-10-02.
+            (CKA_PRIVATE, [0u8].as_ptr(), 1),
                 (CKA_LABEL, label.as_ptr(), label.len()),
             ];
             let tmpl: Vec<usize> =
@@ -25823,6 +26109,7 @@ mod ecdh_kem_ffi_tests {
         // lifecycle flag directly (tests hold `test_lock`, so this cannot
         // race the lifecycle dance of the `native::*` tests).
         crate::state::set_initialized(true);
+        crate::state::test_login_user(0);
         SESSIONS.with(|s| {
             s.shard(SESSION)
                 .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
@@ -26526,6 +26813,12 @@ mod mlkem_value_len_ffi_tests {
 #[path = "conformance_v32_tests.rs"]
 mod conformance_v32_tests;
 
+/// Slot and certificate discovery remediation suite (2026-10-02) — R1-R6 of
+/// docs/remediation-plan-rust-cert-discovery-10022026.md.
+#[cfg(test)]
+#[path = "cert_discovery_tests.rs"]
+mod cert_discovery_tests;
+
 /// FIPS 203 §7.2/§7.3 ML-KEM input checks vs the NIST ACVP-Server key-check
 /// vectors (2026-09-25) — see the module's own docs.
 #[cfg(test)]
@@ -26967,6 +27260,8 @@ mod param_struct_width_tests {
             rv_init == CKR_OK || rv_init == CKR_CRYPTOKI_ALREADY_INITIALIZED,
             "C_Initialize: {rv_init:#x}",
         );
+        // Generated private keys need a user session (Usage Guide Table 3).
+        crate::state::test_login_user(0);
         let mut sess: u32 = 0;
         assert_eq!(
             C_OpenSession(
@@ -27156,6 +27451,8 @@ mod param_struct_width_tests {
         let _guard = crate::native::test_lock::acquire();
         let rv_init = C_Initialize(core::ptr::null_mut());
         assert!(rv_init == CKR_OK || rv_init == CKR_CRYPTOKI_ALREADY_INITIALIZED);
+        // Generated private keys need a user session (Usage Guide Table 3).
+        crate::state::test_login_user(0);
         let mut sess: u32 = 0;
         assert_eq!(
             C_OpenSession(
@@ -28723,6 +29020,7 @@ mod rsa_private_component_import_tests {
 
     fn setup() {
         crate::state::set_initialized(true);
+        crate::state::test_login_user(0);
         SESSIONS.with(|s| {
             s.shard(SESSION)
                 .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
