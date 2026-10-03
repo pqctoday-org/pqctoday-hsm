@@ -451,6 +451,7 @@ oqs = { version = "0.10", default-features = false, features = ["kems", "vendore
 # plus rust/vendor/aws-lc-sys-0.44.0-cortex-a5x.patch: Cortex-A53/A55 keep the scalar
 # armv8-mont Montgomery kernel (RSA private ops +21-69% on the boards).
 aws-lc-sys = { path = "vendor/aws-lc-sys-0.44.0" }
+# Local fips204 changes are recorded in fips204-patched/PQCTODAY-PATCHES.md.
 fips204 = { path = "fips204-patched" }
 fips205 = { path = "fips205-patched" }
 ml-kem = { path = "ml-kem-patched" }
