@@ -247,6 +247,12 @@ mod fhe_cmd {
 
     pub fn export(s: u32, lineage: &str, outdir: &str) -> Result<(), String> {
         let seed = replica_by_lineage(s, &read(lineage)?)?;
+        // A restored backup has the seed but no manifest signer yet: make one. Its SPKI differs
+        // from the custodian's, so a compute server pinning the signer must be told on failover.
+        if signer(s, CKO_PRIVATE_KEY).is_err() {
+            eprintln!("note: no manifest signer on this token; generating a new one (new signer SPKI)");
+            gen_signer(s)?;
+        }
         let (signer_priv, signer_pub) = (signer(s, CKO_PRIVATE_KEY)?, signer(s, CKO_PUBLIC_KEY)?);
         let out = PathBuf::from(outdir);
         std::fs::create_dir_all(out.join("crls")).map_err(|e| format!("{}: {e}", out.display()))?;
