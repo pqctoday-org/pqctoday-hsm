@@ -8,6 +8,9 @@
 //!   fhe_custodian init <dir>             persistent token + test root + seed + manifest key
 //!   fhe_custodian export <dir>           public material, manifests, signatures, trust inputs
 //!   fhe_custodian decrypt <dir> <ct.bin> policy-gated decryption → owner output
+//!   fhe_custodian verify-signer [--now <unix>] <dir>…
+//!                                        owner-side K3 check of each export's
+//!                                        manifest signer (public bytes only)
 //!
 //! State lives in <dir>/store (SQLite, encrypted private objects). PINs are
 //! fixed educational values; nothing here is production custody.
@@ -288,6 +291,164 @@ fn cmd_decrypt(dir: &Path, ct: &Path) {
     }
 }
 
+// ── verify-signer: the data owner's K3 check, before pinning a signer ──────
+
+#[derive(Default)]
+struct SignerReport {
+    signer_spki_sha256: String,
+    device_id: String,
+    unique_id: String,
+    evidence_issued_at: u64,
+    chain: Vec<String>,
+    crl_next_update: Vec<(String, u64)>,
+    root_sha256: String,
+    lineage: String,
+    param_hash: String,
+}
+
+fn hexs(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn read(p: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(p).map_err(|e| format!("read {}: {e}", p.display()))
+}
+
+/// Verify one export directory (`<dir>/out` or `<dir>` itself). Public bytes
+/// only: the token is never opened.
+fn verify_signer_dir(dir: &Path, now: u64) -> Result<SignerReport, String> {
+    use der::Decode;
+    use sha2::Digest;
+    let out = if dir.join("out").is_dir() { dir.join("out") } else { dir.to_path_buf() };
+    let evidence = read(&out.join("signer_evidence.der"))?;
+    let spki = read(&out.join("signer_spki.der"))?;
+    let root = read(&out.join("root.der"))?;
+    let manifest = read(&out.join("compressed_server_key.manifest.der"))?;
+    let mut crls = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(out.join("crls")).map_err(|e| format!("crls: {e}"))?.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries.iter().filter(|p| p.extension().is_some_and(|x| x == "der")) {
+        crls.push(read(p)?);
+    }
+    // The evidence nonce binds it to this export (custodian `export`).
+    let nonce: [u8; 32] = sha2::Sha384::digest(&manifest)[..32].try_into().unwrap();
+    let trust = repl::pki::TrustInputs { roots: vec![root.clone()], crls: crls.clone() };
+    // Freshness window (0, now]: the nonce already binds the evidence to THIS
+    // export, so its age is bounded by the export, not by the host clock (the
+    // owner verifies a stored export later). Chain and CRLs are checked at `now`.
+    let claims = repl::evidence::verify_evidence_core(
+        &evidence,
+        &trust,
+        now,
+        repl::Profile::Educational,
+        repl::evidence::EvidenceRole::KeyAttestation,
+        &nonce,
+        Some((0, now)),
+    )
+    .map_err(|r| format!("evidence: {}", r.0))?
+    .claims;
+    // Claims the owner must check on top of the verified signature and chain.
+    let k = &claims.key;
+    let spki_hash: [u8; 48] = sha2::Sha384::digest(&spki).into();
+    if k.public_hash != Some(spki_hash) {
+        return Err("attested key is not signer_spki.der".into());
+    }
+    if k.key_type != CKK_ML_DSA || k.parameter_set != CKP_ML_DSA_65 {
+        return Err("attested key is not ML-DSA-65".into());
+    }
+    if !k.sensitive || k.extractable || !k.never_extractable || !k.local {
+        return Err("attested key is not a token-resident, never-extractable key".into());
+    }
+    let ev = repl::asn1::Evidence::from_der(&evidence).map_err(|_| "evidence DER".to_string())?;
+    let mut chain = Vec::new();
+    if let Some(leaf) = ev.signatures.first().and_then(|s| s.sid.certificate.as_ref()) {
+        chain.push(leaf.tbs_certificate.subject.to_string());
+    }
+    let device = ev.intermediate_certificates.as_ref().and_then(|v| v.first()).ok_or("no device certificate")?;
+    chain.push(device.tbs_certificate.subject.to_string());
+    let root_cert = repl::pki::parse_cert(&root).map_err(|_| "root DER".to_string())?;
+    chain.push(root_cert.tbs_certificate.subject.to_string());
+    // device_id = SHA-256 of the device certificate's SPKI (spec E-03).
+    use der::Encode;
+    let dev_spki = device.tbs_certificate.subject_public_key_info.to_der().map_err(|_| "device SPKI".to_string())?;
+    let dev_id: [u8; 32] = sha2::Sha256::digest(&dev_spki).into();
+    if dev_id != claims.device_id {
+        return Err("device_id claim does not match the device certificate".into());
+    }
+    let mut crl_next_update = Vec::new();
+    for (p, der) in entries.iter().filter(|p| p.extension().is_some_and(|x| x == "der")).zip(&crls) {
+        let c = x509_cert::crl::CertificateList::from_der(der).map_err(|_| format!("CRL DER {}", p.display()))?;
+        let next = c.tbs_cert_list.next_update.as_ref().map(repl::pki::time_secs).unwrap_or(0);
+        crl_next_update.push((p.file_stem().unwrap().to_string_lossy().trim_end_matches(".crl").to_string(), next));
+    }
+    let m = tf::FhePublicManifestV1::from_der(&manifest).map_err(|_| "manifest DER".to_string())?;
+    Ok(SignerReport {
+        signer_spki_sha256: hexs(&sha2::Sha256::digest(&spki)),
+        device_id: hexs(&claims.device_id),
+        unique_id: k.unique_id.clone(),
+        evidence_issued_at: claims.issued_at,
+        chain,
+        crl_next_update,
+        root_sha256: hexs(&sha2::Sha256::digest(&root)),
+        lineage: hexs(m.lineage.as_bytes()),
+        param_hash: hexs(m.param_hash.as_bytes()),
+    })
+}
+
+/// One JSON line per directory; exit 0 only if every directory passes and,
+/// with several, all share one root, one lineage and one parameter hash.
+fn cmd_verify_signer(args: &[String]) -> ! {
+    let mut now = now();
+    let mut dirs = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--now" {
+            now = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                eprintln!("usage: --now <unix seconds>");
+                std::process::exit(2)
+            });
+        } else {
+            dirs.push(PathBuf::from(a));
+        }
+    }
+    if dirs.is_empty() {
+        eprintln!("usage: fhe_custodian verify-signer [--now <unix>] <dir>…");
+        std::process::exit(2);
+    }
+    let mut ok = true;
+    let mut seen: Option<(String, String, String)> = None;
+    for d in &dirs {
+        let mut line = serde_json::json!({ "dir": d.display().to_string(), "now": now });
+        match verify_signer_dir(d, now) {
+            Ok(r) => {
+                let key = (r.root_sha256.clone(), r.lineage.clone(), r.param_hash.clone());
+                let consistent = seen.get_or_insert_with(|| key.clone()) == &key;
+                line["result"] = if consistent { "pass".into() } else { "fail".into() };
+                if !consistent {
+                    line["reason"] = "root, lineage or paramHash differs from the first directory".into();
+                    ok = false;
+                }
+                line["signer_spki_sha256"] = r.signer_spki_sha256.into();
+                line["device_id"] = r.device_id.into();
+                line["unique_id"] = r.unique_id.into();
+                line["evidence_issued_at"] = r.evidence_issued_at.into();
+                line["chain"] = r.chain.into();
+                line["crl_next_update"] = serde_json::Value::Object(r.crl_next_update.into_iter().map(|(k, v)| (k, v.into())).collect());
+                line["root_sha256"] = r.root_sha256.into();
+                line["lineage"] = r.lineage.into();
+                line["param_hash"] = r.param_hash.into();
+            }
+            Err(reason) => {
+                line["result"] = "fail".into();
+                line["reason"] = reason.into();
+                ok = false;
+            }
+        }
+        println!("{line}");
+    }
+    std::process::exit(if ok { 0 } else { 1 })
+}
+
 /// TEST ONLY (`test-support`): encrypt under the owner's client key, so the
 /// decrypt path can be exercised without the compute server.
 #[cfg(feature = "test-support")]
@@ -304,6 +465,9 @@ fn cmd_encrypt_owner(dir: &Path, ty: &str, value: u64, out: &Path) {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(String::as_str) == Some("verify-signer") {
+        cmd_verify_signer(&a[2..]);
+    }
     match (a.get(1).map(String::as_str), a.get(2), a.get(3)) {
         (Some("init"), Some(d), None) => cmd_init(&PathBuf::from(d)),
         (Some("export"), Some(d), None) => cmd_export(&PathBuf::from(d)),
@@ -316,7 +480,7 @@ fn main() {
             &PathBuf::from(&a[5]),
         ),
         _ => {
-            eprintln!("usage: fhe_custodian init|export <dir> | decrypt <dir> <ciphertext.bin>");
+            eprintln!("usage: fhe_custodian init|export <dir> | decrypt <dir> <ciphertext.bin> | verify-signer [--now <unix>] <dir>…");
             std::process::exit(2);
         }
     }
