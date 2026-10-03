@@ -73,7 +73,7 @@ educational-fhe = ["educational-replication", "dep:tfhe"]
 # on. What it routes (and what stays on the Rust crates) is the coverage
 # matrix in src/crypto/awslc_pq.rs. Runtime escape hatch:
 # PQC_AWSLC_PQ_DISABLE=1 puts every call back on fips204 / ml-kem.
-awslc-pq = ["dep:aws-lc-sys"]
+awslc-pq = []
 # ML-KEM KeyGen(d ‖ z) and Encaps(ek, m) on AWS-LC need two functions
 # (EVP_PKEY_keygen_deterministic / EVP_PKEY_encapsulate_deterministic) that
 # are only in aws-lc-sys's per-target `all-bindings` set. That set exists only
@@ -407,7 +407,7 @@ aws-lc-rs = "1"
 # copy. Only the public include/openssl API is used (bindgen'd, prefixed per
 # version), which is the same in both. Widen it when aws-lc-rs moves, and
 # regenerate pqctoday-cacp's Yocto crates.inc whenever the hsm pin moves.
-aws-lc-sys = { version = ">=0.44.0, <0.46.0", optional = true, default-features = false }
+aws-lc-sys = { version = ">=0.44.0, <0.46.0", default-features = false }
 # Multi-core SLH-DSA sign/keygen (fips205-patched `parallel` feature, src/par.rs):
 # independent FORS and hypertree subtrees are built on spare cores, byte-identical
 # output. Threads come from one process-wide budget of available_parallelism():

@@ -1136,6 +1136,7 @@ fn rsa_public_key_from_packed_native(bytes: &[u8]) -> Result<rsa::RsaPublicKey, 
 /// Parse an RSA private key from either PKCS#8 PrivateKeyInfo (KMIP
 /// `KeyFormatType = PKCS_8`) or PKCS#1 raw `RSAPrivateKey` DER (KMIP
 /// `KeyFormatType = PKCS_1`).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn rsa_private_key_from_any_der(bytes: &[u8]) -> Result<rsa::RsaPrivateKey, CkRv> {
     use rsa::pkcs1::DecodeRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
@@ -1220,15 +1221,26 @@ fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> 
         ) {
             return r;
         }
+        // Everything aws-lc-rs declines (a PKCS#1 DER key, a mismatched
+        // hash/MGF pair, a size outside its loader) also runs in AWS-LC —
+        // never the `rsa` crate on native (RUSTSEC-2023-0071).
+        crate::crypto::awslc_rsa::decrypt_oaep_ck(priv_der, ckm(h), ckg(m), params.label.unwrap_or(&[]), ciphertext).map_err(|rv| match rv {
+            CKR_KEY_SIZE_RANGE | CKR_KEY_TYPE_INCONSISTENT => rv,
+            _ => CKR_ENCRYPTED_DATA_INVALID,
+        })
     }
-    let private_key = rsa_private_key_from_any_der(priv_der)?;
-    let padding = oaep_for(params);
-    private_key
-        .decrypt(padding, ciphertext)
-        // PKCS#11 v3.2 §6.13 — OAEP decode failure on RSA decrypt
-        // surfaces as CKR_ENCRYPTED_DATA_INVALID, matching the AES-GCM
-        // branch's tag-failure semantics.
-        .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::crypto::rsa_guard::note_pure_rsa_private_op();
+        let private_key = rsa_private_key_from_any_der(priv_der)?;
+        let padding = oaep_for(params);
+        private_key
+            .decrypt(padding, ciphertext)
+            // PKCS#11 v3.2 §6.13 — OAEP decode failure on RSA decrypt
+            // surfaces as CKR_ENCRYPTED_DATA_INVALID, matching the AES-GCM
+            // branch's tag-failure semantics.
+            .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
+    }
 }
 
 // ── AES-GCM ─────────────────────────────────────────────────────────────────

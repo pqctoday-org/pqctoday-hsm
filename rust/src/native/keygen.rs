@@ -509,7 +509,9 @@ pub fn generate_rsa_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
+    #[cfg(target_arch = "wasm32")]
     use rsa::pkcs8::EncodePrivateKey;
+    #[cfg(target_arch = "wasm32")]
     use rsa::traits::PublicKeyParts;
 
     if !(2048..=4096).contains(&bits) {
@@ -523,7 +525,12 @@ pub fn generate_rsa_keypair(
     let fast: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
     let (sk_der, n_bytes, e_bytes) = match fast {
         Some(t) => t,
+        // Native: sizes aws-lc-rs does not generate (e.g. 2560) still use AWS-LC.
+        #[cfg(not(target_arch = "wasm32"))]
+        None => crate::crypto::awslc_rsa::generate(bits, &[0x01, 0x00, 0x01])?,
+        #[cfg(target_arch = "wasm32")]
         None => {
+            crate::crypto::rsa_guard::note_pure_rsa_private_op();
             let mut rng = rand::rngs::OsRng;
             let private_key = rsa::RsaPrivateKey::new(&mut rng, bits as usize)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;

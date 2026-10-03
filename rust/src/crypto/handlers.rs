@@ -2152,6 +2152,24 @@ pub fn sign_rsa(
     if let Some(r) = crate::crypto::awslc::rsa_sign(mech, sk_bytes, msg, pss_salt_len) {
         return r;
     }
+    // Native: every other RSA signature also runs in AWS-LC (RUSTSEC-2023-0071,
+    // owner decision 2026-10-03) — never the `rsa` crate.
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::crypto::awslc_rsa::sign_mech(mech, sk_bytes, msg, pss_salt_len);
+    #[cfg(target_arch = "wasm32")]
+    sign_rsa_pure(mech, sk_bytes, msg, pss_salt_len)
+}
+
+/// Pure-Rust (`rsa` crate) RSA signing: the wasm32 implementation. Every
+/// private exponentiation here is blinded. Native builds never call it.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn sign_rsa_pure(
+    mech: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    pss_salt_len: Option<usize>,
+) -> Result<Vec<u8>, u32> {
+    crate::crypto::rsa_guard::note_pure_rsa_private_op();
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::signature::SignatureEncoding;
     let private_key =
@@ -2224,9 +2242,13 @@ pub fn sign_rsa(
         CKM_SHA3_512_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_512),
         CKM_SHA3_512_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_512, 64),
         // Raw PKCS#1 v1.5: the caller supplies the bytes (already a DigestInfo
-        // or arbitrary data); no hashing, no DigestInfo prefix.
+        // or arbitrary data); no hashing, no DigestInfo prefix. BLINDED
+        // (`sign_with_rng`), like the macros above: rsa-0.9's `sign` passes
+        // no RNG and so skips blinding of the private exponentiation — the
+        // RUSTSEC-2023-0071 exposure. Output bytes are unchanged (PKCS#1 v1.5
+        // is deterministic); `raw_pkcs1_sign_is_blinded_and_byte_identical`.
         CKM_RSA_PKCS => private_key
-            .sign(rsa::Pkcs1v15Sign::new_unprefixed(), msg)
+            .sign_with_rng(&mut rand::rngs::OsRng, rsa::Pkcs1v15Sign::new_unprefixed(), msg)
             .map_err(|_| CKR_FUNCTION_FAILED),
         _ => Err(CKR_MECHANISM_INVALID),
     }
@@ -2252,6 +2274,25 @@ pub fn sign_rsa_pss_bare(
     digest: &[u8],
     salt_len: usize,
 ) -> Result<Vec<u8>, u32> {
+    // Same hash set as the pure-Rust path; MGF1 uses the same hash.
+    if !matches!(hash_alg, CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_384) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::crypto::awslc_rsa::sign_pss_digest(sk_bytes, hash_alg, hash_alg, salt_len, digest);
+    #[cfg(target_arch = "wasm32")]
+    sign_rsa_pss_bare_pure(hash_alg, sk_bytes, digest, salt_len)
+}
+
+/// Pure-Rust bare PSS (wasm32 only; blinded).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn sign_rsa_pss_bare_pure(
+    hash_alg: u32,
+    sk_bytes: &[u8],
+    digest: &[u8],
+    salt_len: usize,
+) -> Result<Vec<u8>, u32> {
+    crate::crypto::rsa_guard::note_pure_rsa_private_op();
     use rsa::pkcs8::DecodePrivateKey;
     let private_key =
         rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -4482,6 +4523,50 @@ e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b
             assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &a, None), Ok(()), "{name}: verify");
             assert_eq!(a.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
         }
+    }
+
+    /// Raw CKM_RSA_PKCS signing is blinded (`sign_with_rng`) and its bytes are
+    /// unchanged: identical to rsa-0.9's unblinded `sign` reference, and
+    /// deterministic. Before, this arm called the unblinded `sign` directly.
+    #[test]
+    fn raw_pkcs1_sign_is_blinded_and_byte_identical() {
+        use crate::constants::*;
+        use rsa::pkcs8::DecodePrivateKey;
+        let (sk, n, e) = s6_key();
+        let reference = rsa::RsaPrivateKey::from_pkcs8_der(&sk)
+            .unwrap()
+            .sign(rsa::Pkcs1v15Sign::new_unprefixed(), S6_MSG)
+            .unwrap();
+        let a = sign_rsa(CKM_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        let b = sign_rsa(CKM_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        assert_eq!(a, reference, "blinding must not change the signature bytes");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), n.len());
+        let _ = e;
+    }
+
+    /// A key aws-lc-rs will not load (1536 bits) is not an error inside
+    /// `awslc::rsa_sign` (it returns None), and the native policy then
+    /// refuses the private operation with CKR_KEY_SIZE_RANGE (owner decision
+    /// 2026-10-03) instead of signing on the `rsa` crate. The same key still
+    /// VERIFIES (public operations are not restricted).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_sub_2048_private_ops_are_refused_but_public_ops_work() {
+        use crate::constants::*;
+        use rsa::pkcs8::EncodePrivateKey;
+        use rsa::traits::PublicKeyParts;
+        let k = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1536).unwrap();
+        let sk = k.to_pkcs8_der().unwrap().as_bytes().to_vec();
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS, &sk, S6_MSG, None).is_none(), "aws-lc-rs declines without erroring");
+        for mech in [CKM_SHA256_RSA_PKCS, CKM_SHA1_RSA_PKCS, CKM_SHA256_RSA_PKCS_PSS, CKM_RSA_PKCS] {
+            assert_eq!(sign_rsa(mech, &sk, S6_MSG, None), Err(CKR_KEY_SIZE_RANGE), "{mech:#x}");
+        }
+        // Public verify of a signature made OUTSIDE the engine still works.
+        use rsa::signature::{RandomizedSigner, SignatureEncoding};
+        let sig = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(k.clone()).sign_with_rng(&mut rand::rngs::OsRng, S6_MSG).to_vec();
+        let (n, e) = (k.n().to_bytes_be(), k.e().to_bytes_be());
+        assert_eq!(verify_rsa(CKM_SHA256_RSA_PKCS, &n, &e, S6_MSG, &sig, None), Ok(()));
     }
 
     /// §3 Waves 2-3 — the legacy RSA combos (SHA-1, MD5) round-trip, reject

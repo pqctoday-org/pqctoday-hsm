@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Rust engine: RSA private-key operations run only in AWS-LC on the boards
+  and the Mac (RUSTSEC-2023-0071, the "Marvin" timing attack).** Native builds
+  now perform every RSA private-key operation in AWS-LC, whose RSA is blinded
+  and constant-time: signing (all PKCS#1 v1.5 and PSS variants, any salt, raw
+  and bare PSS), decryption and key unwrapping (PKCS#1 v1.5 and OAEP, any
+  hash/MGF pair, PKCS#1 or PKCS#8 keys), sign-recover and key generation. The
+  pure-Rust `rsa` crate no longer runs any of them natively; a test drives every
+  RSA private-key mechanism and fails if it does. Natively, RSA private-key
+  operations and key generation are limited to 2048–8192-bit keys, and other
+  sizes return `CKR_KEY_SIZE_RANGE`. Verification and encryption with smaller
+  or larger public keys still work, and RSA mechanisms now advertise
+  2048–8192 bits. The browser (WASM) build is unchanged apart from one fix
+  below.
+- **Raw `CKM_RSA_PKCS` signing was not blinded** (all builds, including the
+  browser): it now is. Signatures are byte-for-byte unchanged.
+
 ### Fixed
 
 - **FHE browser build no longer panics on first use (educational feature
