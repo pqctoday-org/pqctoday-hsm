@@ -61,8 +61,8 @@ fn put_key(handle: u32, class: u32, key_type: u32, value_len: usize, usage: bool
 
 fn setup() {
     crate::state::set_initialized(true);
-    SESSIONS.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
-    SESSIONS.insert(RO_SESSION, crate::state::SessionState { slot_id: 0, rw_session: false });
+    SESSIONS.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
+    SESSIONS.insert(RO_SESSION, crate::state::SessionState { slot_id: 0, rw_session: false, context: 0 });
     TOKEN_STORE.with(|ts| {
         ts.borrow_mut()
             .entry(0)

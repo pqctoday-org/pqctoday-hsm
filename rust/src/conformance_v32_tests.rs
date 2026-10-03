@@ -62,7 +62,7 @@ pub(crate) fn obj_exists(handle: u32) -> bool {
 pub(crate) fn put_session(h: u32, slot: u32, rw: bool) {
     SESSIONS.with(|s| {
         s.shard(h)
-            .insert(h, crate::state::SessionState { slot_id: slot, rw_session: rw });
+            .insert(h, crate::state::SessionState { slot_id: slot, rw_session: rw, context: 0 });
     });
 }
 

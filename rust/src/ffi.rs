@@ -537,8 +537,12 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // per-slot helper C_CloseAllSessions already uses for exactly this,
     // rather than the blanket `.clear()` that used to sit here.
     let all_slots: Vec<u32> = TOKEN_STORE.with(|ts| ts.borrow().keys().copied().collect());
+    // C1 — every session is gone, so every connection context's login ended
+    // with it; drop the contexts FIRST, so the default context's reset below
+    // sees no other login and re-keys exactly as before C1.
+    crate::app_context::clear_all();
     for slot_id in all_slots {
-        reset_login_state_if_no_sessions(slot_id);
+        reset_login_state_if_no_sessions_in(slot_id, crate::app_context::DEFAULT_CONTEXT);
     }
     // UNLOCKED_MASTER_KEYS is a deliberately separate cache from TOKEN_STORE
     // (see its own doc comment in store/mod.rs) with one job — zeroize on
@@ -778,6 +782,9 @@ pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut 
             token.user_pin_hash = None;
             token.user_pin_salt = None;
             token.login_state = LoginState::Public;
+            // C1 — no session is open (checked above), so no context is
+            // logged in either; drop any stale per-context state for the slot.
+            crate::app_context::registry().reset_slot(slot_id);
             true
         } else {
             false
@@ -837,6 +844,26 @@ pub fn C_OpenSession(
     if ph_session.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
+    // C1 — every C/WASM caller is the default application context.
+    let mut handle = 0u32;
+    let rv = open_session_in_context(slot_id, flags, crate::app_context::DEFAULT_CONTEXT, &mut handle);
+    if rv == CKR_OK {
+        unsafe {
+            *ph_session = handle;
+        }
+    }
+    rv
+}
+
+/// C1 — `C_OpenSession` inside an application context (`0` = default). The
+/// SO/R-O rule is evaluated against THAT context's login state. Connection
+/// contexts use [`crate::app_context::open_session`], which also re-checks the
+/// context is still live after the insert.
+pub(crate) fn open_session_in_context(slot_id: u32, flags: u32, context: u64, out: &mut u32) -> u32 {
+    require_init!();
+    if !crate::app_context::context_is_live(context) {
+        return CKR_ARGUMENTS_BAD;
+    }
     let is_valid_slot = TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id));
     if !is_valid_slot {
         return CKR_SLOT_ID_INVALID;
@@ -851,41 +878,42 @@ pub fn C_OpenSession(
     if (flags & CKF_ASYNC_SESSION) != 0 {
         return CKR_SESSION_ASYNC_NOT_SUPPORTED;
     }
-    // Check if SO is logged in and trying to open a RO session
+    // Check if SO is logged in (in this application context) and trying to
+    // open a RO session.
     let so_logged_in = TOKEN_STORE.with(|ts| {
         ts.borrow()
             .get(&slot_id)
-            .map(|t| t.login_state == LoginState::SO)
+            .map(|t| crate::app_context::registry().login(t, context) == LoginState::SO)
             .unwrap_or(false)
     });
     let rw_session = (flags & CKF_RW_SESSION) != 0;
     if so_logged_in && !rw_session {
         return CKR_SESSION_READ_WRITE_SO_EXISTS;
     }
-    unsafe {
-        let handle = NEXT_SESSION_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        *ph_session = handle;
-        SESSIONS.with(|s| {
-            s.shard(handle).insert(
-                handle,
-                SessionState {
-                    slot_id,
-                    rw_session,
-                },
-            );
-        });
-    }
+    let handle = NEXT_SESSION_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    *out = handle;
+    SESSIONS.with(|s| {
+        s.shard(handle).insert(
+            handle,
+            SessionState {
+                slot_id,
+                rw_session,
+                context,
+            },
+        );
+    });
     CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_CloseSession)]
 pub fn C_CloseSession(h_session: u32) -> u32 {
     require_init!();
-    let slot = crate::state::session_slot(h_session);
-    let existed = SESSIONS.shard(h_session).remove(&h_session).is_some();
-    if !existed {
+    let removed = SESSIONS.shard(h_session).remove(&h_session);
+    let Some(removed) = removed else {
         return CKR_SESSION_HANDLE_INVALID;
-    }
+    };
+    let slot = Some(removed.slot_id);
+    let context = removed.context;
     // PKCS#11 v3.2 §4.4 — session objects die with their creating session.
     crate::state::destroy_session_objects(h_session);
     drop_key_caches();
@@ -914,10 +942,10 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     MESSAGE_VERIFY_ACC.shard(h_session).remove(&h_session);
     SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
     VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
-    // S6 — §5.6.2: when the LAST session on the slot closes, the login state
-    // returns to public.
+    // S6 — §5.6.2: when the application's LAST session on the slot closes,
+    // its login state returns to public (C1: per application context).
     if let Some(slot) = slot {
-        reset_login_state_if_no_sessions(slot);
+        reset_login_state_if_no_sessions_in(slot, context);
     }
     CKR_OK
 }
@@ -932,15 +960,22 @@ pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     if !valid {
         return CKR_SLOT_ID_INVALID;
     }
-    let handles: Vec<u32> = SESSIONS.keys_where(|_, ss| ss.slot_id == slot_id);
+    close_all_sessions_in_context(slot_id, crate::app_context::DEFAULT_CONTEXT);
+    CKR_OK
+}
+
+/// C1 — §5.6.3 "closes all sessions an APPLICATION has with a token": only
+/// the sessions of `context` on the slot. Connection contexts' sessions are
+/// not touched by a native caller's C_CloseAllSessions.
+pub(crate) fn close_all_sessions_in_context(slot_id: u32, context: u64) {
+    let handles: Vec<u32> = SESSIONS.keys_where(|_, ss| ss.slot_id == slot_id && ss.context == context);
     for h in handles {
         let _ = C_CloseSession(h);
     }
     // S6 — §5.6.3 states the reset explicitly for this function. C_CloseSession
     // already performs it when it removes the last session, but a slot with
     // ZERO sessions open must also end up public, so call it unconditionally.
-    reset_login_state_if_no_sessions(slot_id);
-    CKR_OK
+    reset_login_state_if_no_sessions_in(slot_id, context);
 }
 
 /// PKCS#11 v3.0+ §5.6 — cancel active operations selected by `flags`
@@ -1055,6 +1090,8 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
         return CKR_OPERATION_NOT_INITIALIZED;
     }
     let slot_id = session.slot_id;
+    // C1 — the session's application context; every rule below is per context.
+    let context = session.context;
 
     if user_type == CKU_SO && !session.rw_session {
         return CKR_SESSION_READ_ONLY_EXISTS;
@@ -1074,7 +1111,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
     // pattern C_Logout already used correctly). `has_ro` still reads
     // SESSIONS before entering the TOKEN_STORE closure, preserving the
     // existing lock-acquisition order used throughout this file.
-    let has_ro = SESSIONS.any(|_, sess| sess.slot_id == slot_id && !sess.rw_session);
+    let has_ro = SESSIONS.any(|_, sess| sess.slot_id == slot_id && sess.context == context && !sess.rw_session);
     let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
 
     let rv = TOKEN_STORE.with(|ts| {
@@ -1086,14 +1123,28 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
         if !token.initialized {
             return CKR_OPERATION_NOT_INITIALIZED;
         }
+        // C1 — TOKEN_STORE → REGISTRY lock order (see crate::app_context).
+        let mut reg = crate::app_context::registry();
+        let current = reg.login(token, context);
 
-        // Evaluate PKCS#11 v3.2 Exclusivity Boundaries
+        // Evaluate PKCS#11 v3.2 Exclusivity Boundaries (per application context)
         match user_type {
+            CKU_SO | CKU_USER
+                if current == LoginState::Public
+                    && reg.is_pending(slot_id, context)
+                    && reg.other_logged_in(token, context) =>
+            {
+                // C1 — this context logged out while another context stayed
+                // logged in, so its old private handles were never re-keyed.
+                // Logging in again now would revive them (§5.6.10). The
+                // re-key runs when the last login on the slot ends.
+                return CKR_USER_TOO_MANY_TYPES;
+            }
             CKU_SO => {
-                if token.login_state == LoginState::SO {
+                if current == LoginState::SO {
                     return CKR_USER_ALREADY_LOGGED_IN;
                 }
-                if token.login_state == LoginState::User {
+                if current == LoginState::User {
                     return CKR_USER_ANOTHER_ALREADY_LOGGED_IN;
                 }
                 if has_ro {
@@ -1102,13 +1153,13 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
                 if hash_pin(pin_bytes, &token.so_pin_salt) != token.so_pin_hash {
                     return CKR_PIN_INCORRECT;
                 }
-                token.login_state = LoginState::SO;
+                reg.set_login(token, context, LoginState::SO);
             }
             CKU_USER => {
-                if token.login_state == LoginState::User {
+                if current == LoginState::User {
                     return CKR_USER_ALREADY_LOGGED_IN;
                 }
-                if token.login_state == LoginState::SO {
+                if current == LoginState::SO {
                     return CKR_USER_ANOTHER_ALREADY_LOGGED_IN;
                 }
                 let (salt, hash) = match (&token.user_pin_salt, &token.user_pin_hash) {
@@ -1118,7 +1169,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
                 if hash_pin(pin_bytes, &salt) != hash {
                     return CKR_PIN_INCORRECT;
                 }
-                token.login_state = LoginState::User;
+                reg.set_login(token, context, LoginState::User);
             }
             _ => return CKR_USER_TYPE_INVALID,
         }
@@ -1164,28 +1215,26 @@ pub fn C_Logout(h_session: u32) -> u32 {
         None => return CKR_SESSION_HANDLE_INVALID,
     };
     let slot_id = session.slot_id;
-    let mut changed = false;
-    TOKEN_STORE.with(|ts| {
+    let context = session.context;
+    let outcome = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
-        if let Some(token) = store.get_mut(&slot_id) {
-            if token.login_state != LoginState::Public {
-                token.login_state = LoginState::Public;
-                changed = true;
-            }
-        }
+        store
+            .get_mut(&slot_id)
+            .and_then(|token| crate::app_context::logout_locked(token, context))
     });
-    if changed {
-        // S6 (2026-08-13) — §5.6.10. Before this, C_Logout flipped the login
-        // state and returned: every outstanding handle to a private object
-        // kept working the moment a user logged back in, and private session
-        // objects survived. Both are now handled in one pass; see
-        // state::invalidate_private_handles_on_slot for why token objects are
-        // re-keyed rather than marked.
-        crate::state::invalidate_private_handles_on_slot(slot_id);
-        crate::store::clear_unlocked_master_key(slot_id);
-        CKR_OK
-    } else {
-        CKR_USER_NOT_LOGGED_IN
+    match outcome {
+        Some((action, none_left)) => {
+            // S6 (2026-08-13) — §5.6.10. Before this, C_Logout flipped the login
+            // state and returned: every outstanding handle to a private object
+            // kept working the moment a user logged back in, and private session
+            // objects survived. Both are now handled in one pass; see
+            // state::invalidate_private_handles_on_slot for why token objects are
+            // re-keyed rather than marked. C1: the re-key is deferred while
+            // another application context is logged in (crate::app_context).
+            crate::app_context::apply_logout(slot_id, context, action, none_left);
+            CKR_OK
+        }
+        None => CKR_USER_NOT_LOGGED_IN,
     }
 }
 
@@ -1195,26 +1244,21 @@ pub fn C_Logout(h_session: u32) -> u32 {
 /// the slot afterwards was already authenticated. Runs the same private-handle
 /// invalidation C_Logout does, since the application's authenticated context
 /// is equally gone.
-fn reset_login_state_if_no_sessions(slot_id: u32) {
+fn reset_login_state_if_no_sessions_in(slot_id: u32, context: u64) {
     // A3 part 2: invalidate every epoch-validated cache (login/visibility change).
     crate::state::bump_object_epoch();
-    let still_open = SESSIONS.any(|_, ss| ss.slot_id == slot_id);
+    let still_open = SESSIONS.any(|_, ss| ss.slot_id == slot_id && ss.context == context);
     if still_open {
         return;
     }
-    let was_logged_in = TOKEN_STORE.with(|ts| {
+    let outcome = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
-        match store.get_mut(&slot_id) {
-            Some(token) if token.login_state != LoginState::Public => {
-                token.login_state = LoginState::Public;
-                true
-            }
-            _ => false,
-        }
+        store
+            .get_mut(&slot_id)
+            .and_then(|token| crate::app_context::logout_locked(token, context))
     });
-    if was_logged_in {
-        crate::state::invalidate_private_handles_on_slot(slot_id);
-        crate::store::clear_unlocked_master_key(slot_id);
+    if let Some((action, none_left)) = outcome {
+        crate::app_context::apply_logout(slot_id, context, action, none_left);
     }
 }
 
@@ -1254,7 +1298,8 @@ pub fn C_InitPIN(h_session: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
     TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
         if let Some(token) = store.get_mut(&slot_id) {
-            if token.login_state != LoginState::SO {
+            // C1 — the SO login of the calling session's application context.
+            if crate::app_context::registry().login(token, session.context) != LoginState::SO {
                 not_logged_in = true;
                 return;
             }
@@ -1313,10 +1358,11 @@ pub fn C_GetSessionInfo(h_session: u32, p_info: *mut u8) -> u32 {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
+    // C1 — the login state of the session's application context.
     let login_state = TOKEN_STORE.with(|ts| {
         ts.borrow()
             .get(&session.slot_id)
-            .map(|t| t.login_state)
+            .map(|t| crate::app_context::registry().login(t, session.context))
             .unwrap_or(LoginState::Public)
     });
     unsafe {
@@ -16161,7 +16207,9 @@ pub fn C_SetPIN(
             Some(t) => t,
             None => return CKR_GENERAL_ERROR,
         };
-        let rv = match token.login_state {
+        // C1 — the login state of the calling session's application context.
+        let current = crate::app_context::registry().login(token, session.context);
+        let rv = match current {
             LoginState::SO => {
                 if hash_pin(old_pin, &token.so_pin_salt) != token.so_pin_hash {
                     return CKR_PIN_INCORRECT;
@@ -17533,7 +17581,7 @@ mod multipart_ffi_tests {
     fn install_session(h: u32) {
         SESSIONS.with(|s| {
             s.shard(h)
-                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
     }
 
@@ -18316,7 +18364,7 @@ mod abi_hygiene_ffi_tests {
     fn install_session(h: u32) {
         SESSIONS.with(|s| {
             s.shard(h)
-                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
     }
 
@@ -18742,7 +18790,7 @@ mod attr_integrity_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(SESSION).insert(
                 SESSION,
-                crate::state::SessionState { slot_id: 0, rw_session: true },
+                crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 },
             );
         });
     }
@@ -19315,11 +19363,11 @@ mod object_mgmt_ffi_tests {
         SESSIONS.with(|s| {
                         s.insert(
                 SESSION_RW,
-                crate::state::SessionState { slot_id: 0, rw_session: true },
+                crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 },
             );
             s.insert(
                 SESSION_RO,
-                crate::state::SessionState { slot_id: 0, rw_session: false },
+                crate::state::SessionState { slot_id: 0, rw_session: false, context: 0 },
             );
         });
     }
@@ -19538,7 +19586,7 @@ mod object_mgmt_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(SESSION_SLOT9).insert(
                 SESSION_SLOT9,
-                crate::state::SessionState { slot_id: 9, rw_session: true },
+                crate::state::SessionState { slot_id: 9, rw_session: true, context: 0 },
             );
         });
         let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
@@ -19770,7 +19818,7 @@ mod object_mgmt_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(SESSION_SLOT9).insert(
                 SESSION_SLOT9,
-                crate::state::SessionState { slot_id: 9, rw_session: true },
+                crate::state::SessionState { slot_id: 9, rw_session: true, context: 0 },
             );
         });
         let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
@@ -19854,11 +19902,11 @@ mod object_mgmt_ffi_tests {
         SESSIONS.with(|s| {
                         s.insert(
                 PIN_SESSION_RW,
-                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true },
+                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true, context: 0 },
             );
             s.insert(
                 PIN_SESSION_RO,
-                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: false },
+                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: false, context: 0 },
             );
         });
 
@@ -19930,7 +19978,7 @@ mod object_mgmt_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(PIN_SESSION_RW).insert(
                 PIN_SESSION_RW,
-                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true },
+                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true, context: 0 },
             );
         });
         assert_eq!(
@@ -19974,10 +20022,10 @@ mod return_code_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-                        s.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+                        s.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
             s.insert(
                 LOGGED_OUT_SESSION,
-                crate::state::SessionState { slot_id: 77, rw_session: true },
+                crate::state::SessionState { slot_id: 77, rw_session: true, context: 0 },
             );
         });
         // Slot 0 token must not be logged in for the login-gate tests.
@@ -21577,7 +21625,7 @@ mod pqc_vendor_kem_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.shard(SESSION).insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            s.shard(SESSION).insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
         TOKEN_STORE.with(|ts| {
             ts.borrow_mut()
@@ -22223,7 +22271,7 @@ mod hpke_ffi_tests {
     fn setup() {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
-            s.shard(SESSION).insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            s.shard(SESSION).insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
         TOKEN_STORE.with(|ts| {
             ts.borrow_mut()
@@ -23264,7 +23312,7 @@ mod multipart_sign_verify_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(SESSION).insert(
                 SESSION,
-                crate::state::SessionState { slot_id: 0, rw_session: true },
+                crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 },
             );
         });
         // Clean slate for the op state under test.
@@ -23869,7 +23917,7 @@ mod multipart_sign_verify_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(doomed).insert(
                 doomed,
-                crate::state::SessionState { slot_id: 0, rw_session: true },
+                crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 },
             );
         });
         assert_eq!(sign_init(doomed, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
@@ -24019,7 +24067,7 @@ mod message_stream_ffi_tests {
     fn install_session(h: u32) {
         SESSIONS.with(|s| {
             s.shard(h)
-                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
     }
 
@@ -24501,7 +24549,7 @@ mod profile_object_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(SESSION).insert(
                 SESSION,
-                crate::state::SessionState { slot_id: 0, rw_session: true },
+                crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 },
             );
         });
     }
@@ -25015,7 +25063,7 @@ mod find_objects_ordering_ffi_tests {
         SESSIONS.with(|s| {
             s.shard(session).insert(
                 session,
-                crate::state::SessionState { slot_id: 0, rw_session: true },
+                crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 },
             );
         });
 
@@ -26475,7 +26523,7 @@ mod ecdh_kem_ffi_tests {
         crate::state::test_login_user(0);
         SESSIONS.with(|s| {
             s.shard(SESSION)
-                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
     }
 
@@ -26921,7 +26969,7 @@ mod mlkem_value_len_ffi_tests {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
             s.shard(SESSION)
-                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
         TOKEN_STORE.with(|ts| {
             ts.borrow_mut()
@@ -29297,7 +29345,7 @@ mod rsa_private_component_import_tests {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
             s.shard(S)
-                .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
         let v: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/acvp/rsa_oaep_test.json"))
@@ -29386,7 +29434,7 @@ mod rsa_private_component_import_tests {
         crate::state::test_login_user(0);
         SESSIONS.with(|s| {
             s.shard(SESSION)
-                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
     }
 
@@ -29707,7 +29755,7 @@ mod ec_public_key_validation_tests {
         crate::state::set_initialized(true);
         SESSIONS.with(|s| {
             s.shard(S)
-                .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true });
+                .insert(S, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
         });
         let v: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/acvp/ec_keyver_test.json")).unwrap();

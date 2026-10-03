@@ -139,6 +139,11 @@ name = "replication_store"
 required-features = ["educational-replication", "test-support"]
 
 [[test]]
+# C1 — two-context variant of replication_store (per-connection contexts).
+name = "replication_store_contexts"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
 name = "replication_admin_stage"
 required-features = ["educational-replication", "test-support"]
 
