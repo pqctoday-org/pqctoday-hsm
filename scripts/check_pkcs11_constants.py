@@ -328,6 +328,22 @@ PINNED = {
     # Engine-private replication state (0xFFFF00xx: never absorbed from a
     # template, never client-writable) — the binding marker, budget, record
     # role and record payload the replication module alone writes.
+    # FHE custody definitions, batch 1 — pqctoday-priv authority §1.4.5,
+    # PR #148 merged as b80c856b (2026-10-03). Batch 2 (threshold) is not
+    # allocated.
+    "CKK_PQCTODAY_FHE": (0x80000010, "vendor"),
+    "CKK_PQCTODAY_FHE_PUBLIC": (0x80000011, "vendor"),
+    "CKM_PQCTODAY_FHE_KEY_GEN": (0x80000018, "vendor"),
+    "CKM_PQCTODAY_FHE_DERIVE_PUBLIC": (0x80000019, "vendor"),
+    "CKM_PQCTODAY_FHE_DECRYPT": (0x8000001A, "vendor"),
+    "CKM_PQCTODAY_FHE_ENCRYPT": (0x8000001B, "vendor"),
+    "CKA_PQCTODAY_FHE_SCHEME": (0x8000010C, "vendor"),
+    "CKA_PQCTODAY_FHE_PARAM_SET": (0x8000010D, "vendor"),
+    "CKA_PQCTODAY_FHE_PARAM_HASH": (0x8000010E, "vendor"),
+    "CKA_PQCTODAY_FHE_LIBRARY": (0x8000010F, "vendor"),
+    "CKA_PQCTODAY_FHE_LINEAGE_ID": (0x80000110, "vendor"),
+    "CKA_PQCTODAY_FHE_PUBLIC_KIND": (0x80000111, "vendor"),
+    "CKA_PQCTODAY_FHE_DECRYPT_POLICY": (0x80000112, "vendor"),
     "CKA_PRIV_REPL_ROLE": (0xFFFF0008, "vendor"),
     "CKA_PRIV_REPL_BINDING": (0xFFFF0009, "vendor"),
     "CKA_PRIV_REPL_RECORD": (0xFFFF000A, "vendor"),
@@ -814,6 +830,20 @@ VENDOR_PRESENCE = {
     "CKA_PQCTODAY_FUNCTION_PURPOSE": "rust",
     "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE": "rust",
     "CKM_PQCTODAY_SIGN_KEY_ATTESTATION": "rust",
+    # FHE custody (Rust engine only, FHE plan scope).
+    "CKK_PQCTODAY_FHE": "rust",
+    "CKK_PQCTODAY_FHE_PUBLIC": "rust",
+    "CKM_PQCTODAY_FHE_KEY_GEN": "rust",
+    "CKM_PQCTODAY_FHE_DERIVE_PUBLIC": "rust",
+    "CKM_PQCTODAY_FHE_DECRYPT": "rust",
+    "CKM_PQCTODAY_FHE_ENCRYPT": "rust",
+    "CKA_PQCTODAY_FHE_SCHEME": "rust",
+    "CKA_PQCTODAY_FHE_PARAM_SET": "rust",
+    "CKA_PQCTODAY_FHE_PARAM_HASH": "rust",
+    "CKA_PQCTODAY_FHE_LIBRARY": "rust",
+    "CKA_PQCTODAY_FHE_LINEAGE_ID": "rust",
+    "CKA_PQCTODAY_FHE_PUBLIC_KIND": "rust",
+    "CKA_PQCTODAY_FHE_DECRYPT_POLICY": "rust",
     "CKA_STATEFUL_KEY_STATE": "cpp",
     "CKA_LEAF_INDEX": "cpp",
 
