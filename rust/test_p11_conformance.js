@@ -340,13 +340,17 @@ function ecdh1Params(peerPointDer) {
 function deriveSharedSecret(hSession, mech, hPriv, peerPointDer, outLen) {
   const dTpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
     { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET }, { type: CKA.VALUE_LEN, ulong: outLen },
-    { type: CKA.EXTRACTABLE, bool: true }]);
+    // This conformance oracle compares both parties' secret bytes. A private
+    // ECDH base now securely defaults the result to sensitive/non-extractable,
+    // so request the deliberately weaker test fixture explicitly.
+    { type: CKA.SENSITIVE, bool: false }, { type: CKA.EXTRACTABLE, bool: true }]);
   const hd = alloc(4); writeU32(hd, 0);
-  const rv = w._C_DeriveKey(hSession, buildMech(mech, ecdh1Params(peerPointDer)), hPriv, dTpl, 4, hd);
+  const rv = w._C_DeriveKey(hSession, buildMech(mech, ecdh1Params(peerPointDer)), hPriv, dTpl, 5, hd);
   if (rv !== CKR.OK) return { rv };
   const hDerived = readU32(hd);
   const outTpl = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(outLen) }]);
   const rv2 = w._C_GetAttributeValue(hSession, hDerived, outTpl, 1);
+  if (rv2 !== CKR.OK) return { rv: rv2, h: hDerived };
   const value = Buffer.from(new Uint8Array(mem().buffer, readU32(outTpl + 4), readU32(outTpl + 8)));
   return { rv: rv2, h: hDerived, value };
 }

@@ -198,6 +198,49 @@ impl TokenStore for SqliteStore {
         });
     }
 
+    fn put_objects_atomic(&self, slot: u32, rows: &[(u32, bool, Attributes)]) -> bool {
+        self.with_conn(slot, |conn| {
+            let tx = conn.transaction()?;
+            for (handle, private, attrs) in rows {
+                tx.execute(
+                    "INSERT INTO object (handle, private) VALUES (?1, ?2)
+                     ON CONFLICT(handle) DO UPDATE SET private = excluded.private",
+                    params![handle, private],
+                )?;
+                tx.execute("DELETE FROM attribute WHERE handle = ?1", params![handle])?;
+                let mut stmt = tx.prepare("INSERT INTO attribute (handle, type, value) VALUES (?1, ?2, ?3)")?;
+                for (ty, val) in attrs {
+                    stmt.execute(params![handle, ty, val])?;
+                }
+            }
+            tx.execute(
+                "UPDATE token SET next_handle = ?2, unique_id_counter = ?3 WHERE slot = ?1",
+                params![
+                    slot,
+                    crate::state::NEXT_HANDLE.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::state::UNIQUE_ID_COUNTER.load(std::sync::atomic::Ordering::Relaxed) as i64,
+                ],
+            )?;
+            tx.commit()
+        })
+        .is_some()
+    }
+
+    fn rehandle_objects(&self, slot: u32, moves: &[(u32, u32)]) {
+        self.with_conn(slot, |conn| {
+            let tx = conn.transaction()?;
+            for (old, new) in moves {
+                tx.execute(
+                    "INSERT INTO object (handle, private) SELECT ?2, private FROM object WHERE handle = ?1",
+                    params![old, new],
+                )?;
+                tx.execute("UPDATE attribute SET handle = ?2 WHERE handle = ?1", params![old, new])?;
+                tx.execute("DELETE FROM object WHERE handle = ?1", params![old])?;
+            }
+            tx.commit()
+        });
+    }
+
     fn load_objects(&self, slot: u32) -> Vec<(u32, bool, Attributes)> {
         self.with_conn(slot, |conn| {
             let mut stmt = conn.prepare("SELECT handle, private FROM object")?;

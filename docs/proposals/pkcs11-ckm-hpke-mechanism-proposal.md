@@ -463,7 +463,7 @@ shared secret comes from an approved method.
   32-byte ML-KEM `m` (pure ML-KEM, [HPKE-PQ] `ikmE`), or `m ‖ classical seed`
   (hybrids, [CONCRETE-HYBRID-KEMS] `randomness`: 32+32 X25519, 32+128 P-256,
   32+48 P-384). Any other length is `CKR_MECHANISM_PARAM_INVALID`. It
-  reproduces the draft-ietf-hpke-pq-04, CFRG concrete-hybrid-kems and X-Wing
+  reproduces the draft-ietf-hpke-pq-05, CFRG concrete-hybrid-kems and X-Wing
   published vectors byte for byte (`rust/src/hpke_pq_vectors_tests.rs`).
 - Whether `pSenderPk`/`hSenderStaticKey` in Auth/AuthPSK modes should instead
   be unified as a single `hSenderStaticKey`-shaped field that also accepts a

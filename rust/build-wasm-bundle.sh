@@ -13,12 +13,13 @@
 #      this script does that automatically (idempotently) so it can never be
 #      forgotten again.
 #
-# Usage:  ./build-wasm-bundle.sh            # release (default; updates pkg_bundler)
-#         ./build-wasm-bundle.sh --dev      # dev build into pkg/ (for node harnesses)
+# Usage:  ./build-wasm-bundle.sh                         # shipped release, no KAT hooks
+#         ./build-wasm-bundle.sh --dev                   # shipped-shape dev build
+#         ./build-wasm-bundle.sh --acvp-test [--dev]     # test-only deterministic hooks
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROFILE="release"; OUT="pkg-release"
+PROFILE="release"; OUT="pkg-release"; ACVP_TEST=0
 # Both fips204 ML-DSA keygen (unoptimized builds) and
 # CKM_PQCTODAY_FRODOKEM_ENCAPSULATE / CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE
 # (BSI TR-02102-1 §2.4.1/§2.4.2, ffi.rs — even in --release) overflow the
@@ -37,8 +38,19 @@ PROFILE="release"; OUT="pkg-release"
 # RUSTFLAGS with config.toml rustflags — whichever is set here is what the
 # shipped artifact actually gets), so both must stay in sync.
 EXTRA_RUSTFLAGS='-C link-arg=-zstack-size=8388608 -C link-arg=--export-table'
-if [[ "${1:-}" == "--dev" ]]; then
-  PROFILE="dev"; OUT="pkg"
+for arg in "$@"; do
+  case "$arg" in
+    --dev) PROFILE="dev"; OUT="pkg" ;;
+    --acvp-test) ACVP_TEST=1 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+if [[ "$ACVP_TEST" == "1" ]]; then
+  if [[ "$PROFILE" == "release" ]]; then
+    OUT="pkg-acvp"
+  else
+    OUT="pkg-acvp-dev"
+  fi
 fi
 
 # Resolve the rustup toolchain bin dir (NOT Homebrew's cargo/rustc).
@@ -61,13 +73,17 @@ TC="$RUSTUP_ROOT/toolchains/$TOOLCHAIN/bin"
   exit 1
 }
 
-echo "▶ wasm-pack build ($PROFILE, target=bundler, toolchain=$TOOLCHAIN) → $OUT/"
-# --features acvp is required: without it C_Initialize rejects a non-null pReserved
-# (returns CKR_ARGUMENTS_BAD 0x07), which breaks all ACVP KAT seeding.
-# The acvp feature was removed from [default] on 2026-06-21 for compliance builds;
-# it must be explicitly requested here for the playground WASM bundle.
-PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$EXTRA_RUSTFLAGS" \
-  wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- --features acvp
+echo "▶ wasm-pack build ($PROFILE, target=bundler, acvp-test=$ACVP_TEST, toolchain=$TOOLCHAIN) → $OUT/"
+# The default playground/release artifact is deliberately built without ACVP:
+# non-null C_Initialize.pReserved and HPKE pEphemeralSeed are rejected. Only an
+# explicitly named test build enables deterministic KAT hooks.
+if [[ "$ACVP_TEST" == "1" ]]; then
+  PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$EXTRA_RUSTFLAGS" \
+    wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- --features acvp
+else
+  PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$EXTRA_RUSTFLAGS" \
+    wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE"
+fi
 
 # ── Re-apply the __wbg_get_memory post-build shim (idempotent) ───────────────
 BG="$OUT/softhsmrustv3_bg.js"
@@ -117,12 +133,33 @@ node -e "
   console.log('✓ __indirect_function_table export present');
 "
 
+# Feature manifest for the exact post-processed artifact. Keep this generated
+# after patch_export_table.py because that step changes the WASM bytes.
+if command -v sha256sum >/dev/null 2>&1; then
+  WASM_SHA256="$(sha256sum "$OUT/softhsmrustv3_bg.wasm" | awk '{print $1}')"
+else
+  WASM_SHA256="$(shasum -a 256 "$OUT/softhsmrustv3_bg.wasm" | awk '{print $1}')"
+fi
+if [[ "$ACVP_TEST" == "1" ]]; then
+  ACVP_JSON=true
+  FEATURES_JSON='["acvp"]'
+else
+  ACVP_JSON=false
+  FEATURES_JSON='[]'
+fi
+printf '{\n  "profile": "%s",\n  "features": %s,\n  "acvp_test_hooks": %s,\n  "wasm_sha256": "%s"\n}\n' \
+  "$PROFILE" "$FEATURES_JSON" "$ACVP_JSON" "$WASM_SHA256" \
+  > "$OUT/build-profile.json"
+
 # ── Refresh the tracked bundler artifact (release only) ──────────────────────
-if [[ "$PROFILE" == "release" ]]; then
+if [[ "$PROFILE" == "release" && "$ACVP_TEST" == "0" ]]; then
   echo "▶ updating tracked rust/pkg_bundler/"
-  cp "$OUT/softhsmrustv3.js" "$OUT/softhsmrustv3_bg.js" "$OUT/softhsmrustv3_bg.wasm" pkg_bundler/
+  cp "$OUT/softhsmrustv3.js" "$OUT/softhsmrustv3_bg.js" "$OUT/softhsmrustv3_bg.wasm" \
+    "$OUT/build-profile.json" pkg_bundler/
   grep -q "__wbg_get_memory" pkg_bundler/softhsmrustv3_bg.js \
     && echo "✓ pkg_bundler carries the __wbg_get_memory shim" \
     || { echo "✗ shim missing from pkg_bundler — aborting" >&2; exit 1; }
+elif [[ "$ACVP_TEST" == "1" ]]; then
+  echo "▶ test-only ACVP artifact retained in $OUT/; pkg_bundler/ was not modified"
 fi
 echo "✓ done ($OUT/)"

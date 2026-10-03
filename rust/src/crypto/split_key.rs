@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: BSD-2-Clause
 //
 // G12 — Split Key secret sharing, implemented directly from KMIP 3.0
 // §13.1 ("Split Key Algorithms"). PKCS#11 v3.2 has NO mechanism for

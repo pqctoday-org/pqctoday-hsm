@@ -92,6 +92,7 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKA_UNWRAP;
     pub use softhsmrustv3::constants::CKA_WRAP;
     pub use softhsmrustv3::constants::CKA_EXTRACTABLE;
+    pub use softhsmrustv3::constants::CKA_SENSITIVE;
     pub use softhsmrustv3::constants::CKK_GENERIC_SECRET;
     pub use softhsmrustv3::constants::CKM_AES_KEY_WRAP;
     pub use softhsmrustv3::constants::CKM_CONCATENATE_BASE_AND_KEY;
@@ -2929,6 +2930,12 @@ mod tests {
             attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
             attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
             attr_bool(u64::from(ck::CKA_TOKEN), false),
+            // This interoperability test intentionally reads CKA_VALUE below.
+            // Sensitive private ECDH bases now default derived keys to
+            // sensitive/non-extractable custody, so opt into the weaker test
+            // fixture explicitly rather than depending on that old default.
+            attr_bool(u64::from(ck::CKA_SENSITIVE), false),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
         ];
         let (rv, shared) = derive_key(session, u64::from(ck::CKM_ECDH1_DERIVE), ecdh_params.as_slice(), our_prv, &out_tmpl);
         assert_eq!(rv, 0, "ECDH1_DERIVE against a real P-256 peer point must succeed");

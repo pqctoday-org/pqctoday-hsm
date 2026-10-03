@@ -12,6 +12,7 @@
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
+#      + rust replication K2–K4 acceptance (--features educational-replication)
 #   4. OASIS corpus provenance (the XML is the OASIS XML)
 #   5. OASIS byte vectors match that XML (drift guard, added 2026-09-07)
 #   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (99/0/3)
@@ -491,6 +492,17 @@ run_step_bg "rust engine cargo test" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast" \
   rust-engine
 
+# K2–K4 key hierarchy, attestation and protected replication (2026-10-02).
+# Compiled only with the non-default `educational-replication` feature, so the
+# step above never builds or runs it. This lane re-runs the engine's unit
+# tests WITH the feature (the vendor-interface discovery and snapshot paths
+# change shape under it) plus the three acceptance suites: every K2/K3/K4
+# positive, negative, crash-window, concurrency, native-ABI and two-process
+# case for AES-128/192/256, ML-KEM-768 and ML-DSA-65.
+run_step_bg "rust replication K2-K4 acceptance (educational-replication)" \
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-replication,test-support --lib --test replication_k2 --test replication_k3 --test replication_k4 --test replication_store" \
+  rust-replication
+
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
 # all before 2026-08-26 — its three-transport parity suite
 # (remoting/acceptance) was developer-run only, so a proto/service change
@@ -681,9 +693,10 @@ fi
 # on every gate run. Its scope is in its name on purpose — the C++ half needs
 # an Emscripten toolchain that exists nowhere here (plan 2.E), so a name that
 # claimed "the ACVP harness" would reassure about an engine it never loads.
-# It runs against a RELEASE build with the 8 MiB stack and the acvp feature —
-# the configuration rust/build-wasm-bundle.sh ships — built here into the
-# gitignored rust/pkg-acvp/ (the conformance step's rust/pkg is a --dev build,
+# It runs against an explicitly TEST-ONLY release build with the 8 MiB stack
+# and the acvp feature. The shipped build omits that feature; this gate writes
+# to gitignored rust/pkg-acvp/ and never refreshes pkg_bundler/. The conformance
+# step's rust/pkg is a --dev build,
 # on which the SLH-DSA "s" sets take minutes each; release runs the whole
 # harness in about a minute). wasm/rust/ is gitignored and nothing else
 # populates it, so the step stages the two files itself, and installs the

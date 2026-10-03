@@ -94,6 +94,14 @@ pub trait TokenStore: Send + Sync {
     fn load_objects(&self, _slot: u32) -> Vec<(u32, bool, Attributes)> {
         Vec::new()
     }
+    /// Write every `(handle, private, attrs)` row in ONE durable transaction:
+    /// all of them land or none do. `false` on any failure.
+    fn put_objects_atomic(&self, _slot: u32, _rows: &[(u32, bool, Attributes)]) -> bool {
+        true
+    }
+    /// Move stored rows from old to new handles in ONE transaction (logout
+    /// re-keying, `state::invalidate_private_handles_on_slot`).
+    fn rehandle_objects(&self, _slot: u32, _moves: &[(u32, u32)]) {}
 }
 
 static ACTIVE_STORE: OnceLock<RwLock<Arc<dyn TokenStore>>> = OnceLock::new();
@@ -220,6 +228,49 @@ pub fn persist_object(slot: u32, handle: u32, attrs: &Attributes) {
     }
 }
 
+/// Encrypt `attrs` for storage exactly as [`persist_object`] does. `None`
+/// when the object is private and the slot's master key is not unlocked.
+fn storable(slot: u32, attrs: &Attributes) -> Option<(bool, Attributes)> {
+    let private = read_bool(attrs, CKA_PRIVATE);
+    if !private {
+        return Some((false, attrs.clone()));
+    }
+    let key = unlocked_master_key(slot)?;
+    let mut encrypted = Attributes::with_capacity(attrs.len());
+    for (ty, val) in attrs {
+        encrypted.insert(*ty, crypto::encrypt_attr(&key, val).ok()?);
+    }
+    Some((true, encrypted))
+}
+
+/// Persist several objects of one slot atomically (K4 commit boundary,
+/// review K0B-R2-03). Unlike [`persist_object`], a failure is REPORTED: the
+/// caller must not apply the in-memory change. No-op `true` without a store.
+pub fn persist_objects_atomic(slot: u32, objects: &[(u32, &Attributes)]) -> bool {
+    let store = active();
+    if !store.is_persistent() {
+        return true;
+    }
+    let mut rows = Vec::with_capacity(objects.len());
+    for (h, attrs) in objects {
+        match storable(slot, attrs) {
+            Some((private, stored)) => rows.push((*h, private, stored)),
+            None => return false,
+        }
+    }
+    store.put_objects_atomic(slot, &rows)
+}
+
+/// Follow a logout re-key in the durable store (review K0B-R2-02): without
+/// this, the next login rehydrated every private token object a second
+/// time under its old handle.
+pub fn persist_rehandle(slot: u32, moves: &[(u32, u32)]) {
+    let store = active();
+    if store.is_persistent() && !moves.is_empty() {
+        store.rehandle_objects(slot, moves);
+    }
+}
+
 pub fn persist_delete(slot: u32, handle: u32) {
     let store = active();
     if store.is_persistent() {
@@ -260,18 +311,39 @@ pub fn configure_persistent_store(dir: impl AsRef<std::path::Path>) -> std::io::
 
     configure(store.clone());
 
-    for slot in slots {
-        if let Some(pt) = store.get_token(slot) {
-            crate::state::ensure_slot(slot);
-            crate::state::rehydrate_token(slot, &pt);
+    // Order matters (found 2026-10-03 via the K4 store test): every stored
+    // handle, across ALL slots and including private rows not yet
+    // decryptable, must be reserved BEFORE anything allocates. Previously
+    // `ensure_slot` ran first and minted this slot's CKO_PROFILE objects
+    // from a fresh NEXT_HANDLE, which could equal handles already stored
+    // for another slot (each slot's token row only records its own
+    // next_handle). The profile object's persist then overwrote that stored
+    // row, silently losing a token object on every multi-slot restart.
+    let loaded: Vec<(u32, Option<PersistedToken>, Vec<(u32, bool, Attributes)>)> = slots
+        .iter()
+        .map(|&slot| (slot, store.get_token(slot), store.load_objects(slot)))
+        .collect();
+    let max_handle = loaded.iter().flat_map(|(_, _, objs)| objs.iter().map(|(h, _, _)| *h)).max().unwrap_or(0);
+    crate::state::NEXT_HANDLE.fetch_max(max_handle.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+    for (slot, token, _) in &loaded {
+        if let Some(pt) = token {
+            crate::state::rehydrate_token(*slot, pt);
         }
-        for (handle, private, attrs) in store.load_objects(slot) {
-            if private {
+    }
+    for (_, _, objs) in loaded.iter() {
+        for (handle, private, attrs) in objs {
+            if *private {
                 continue; // loaded lazily by rehydrate_private_objects, on login
             }
-            if let Some(plain) = decrypt_loaded(false, None, attrs) {
-                crate::state::rehydrate_insert(handle, plain);
+            if let Some(plain) = decrypt_loaded(false, None, attrs.clone()) {
+                crate::state::rehydrate_insert(*handle, plain);
             }
+        }
+    }
+    // Only now, and only for a slot that has none on disk.
+    for (slot, token, _) in &loaded {
+        if token.is_some() {
+            crate::state::ensure_profile_objects(*slot);
         }
     }
     Ok(())

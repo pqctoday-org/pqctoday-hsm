@@ -45,7 +45,47 @@ use crate::state::{
 /// silently reinterpreted stateful key is a forgery risk, an explicit load
 /// failure is an operations problem. Anyone implementing KMIP engine-key
 /// persistence must read this first.
-const MAGIC: &[u8; 8] = b"SHR3SNP2";
+///
+/// F14 (2026-10-02): bumped `SHR3SNP2` → `SHR3SNP3` for the K2–K4
+/// replication state (device identity, function keys/certificates, trust
+/// anchors, policies, CRLs, challenge reservations, the consumption ledger,
+/// cached packages and receipts). That state lives in token objects tagged
+/// with `CKA_PRIV_REPL_ROLE`; SNP3 appends a trailer recording how many such
+/// objects the snapshot holds and an end marker, so a truncated or partially
+/// written snapshot is refused instead of silently losing ledger entries.
+///
+/// Unlike S4, SNP2 is MIGRATED, not refused: an SNP2 snapshot predates the
+/// replication feature, so it migrates with EMPTY replication state — every
+/// replication-tagged object and every replication attribute is dropped on
+/// load (spec §11: "Old snapshots migrate with empty hierarchy/replication
+/// state and therefore cannot replicate pre-existing keys"). A newer
+/// `SHR3SNP<n>` returns `CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED`.
+const MAGIC: &[u8; 8] = b"SHR3SNP3";
+
+/// The pre-F14 magic, migrated on load (see [`MAGIC`]).
+const MAGIC_V2: &[u8; 8] = b"SHR3SNP2";
+
+/// SNP3 trailer: section tag, section version, replication-object count,
+/// end marker.
+const REPL_SECTION: &[u8; 4] = b"REPL";
+const REPL_SECTION_VERSION: u32 = 1;
+const END_MARKER: &[u8; 8] = b"SNP3END\0";
+
+fn is_replication_object(attrs: &Attributes) -> bool {
+    attrs.contains_key(&CKA_PRIV_REPL_ROLE)
+}
+
+/// Replication attributes stripped from every object of a migrated SNP2.
+const REPLICATION_ATTRS: [u32; 8] = [
+    CKA_PRIV_REPL_ROLE,
+    CKA_PRIV_REPL_BINDING,
+    CKA_PRIV_REPL_RECORD,
+    CKA_PRIV_REPL_BUDGET,
+    CKA_PQCTODAY_REPLICATION_POLICY_ID,
+    CKA_PQCTODAY_REPLICATION_LINEAGE_ID,
+    CKA_PQCTODAY_REPLICATION_PROVENANCE,
+    CKA_PQCTODAY_FUNCTION_PURPOSE,
+];
 
 /// The superseded pre-S4 magic — recognised only so the loader can return a
 /// specific error instead of a generic parse failure.
@@ -100,6 +140,7 @@ pub fn serialize_token_state() -> Vec<u8> {
         }
     });
 
+    let mut replication_objects: u32 = 0;
     OBJECTS.with(|o| {
         let store = o.borrow();
         let token_objects: Vec<(&u32, &Attributes)> = {
@@ -117,6 +158,7 @@ pub fn serialize_token_state() -> Vec<u8> {
         };
         put_u32(&mut out, token_objects.len() as u32);
         for (handle, attrs) in token_objects {
+            replication_objects += is_replication_object(attrs) as u32;
             put_u32(&mut out, *handle);
             put_u32(&mut out, attrs.len() as u32);
             let mut types: Vec<&u32> = attrs.keys().collect();
@@ -130,6 +172,10 @@ pub fn serialize_token_state() -> Vec<u8> {
         }
     });
 
+    out.extend_from_slice(REPL_SECTION);
+    put_u32(&mut out, REPL_SECTION_VERSION);
+    put_u32(&mut out, replication_objects);
+    out.extend_from_slice(END_MARKER);
     out
 }
 
@@ -177,7 +223,12 @@ pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
         // S4 — old layout: refuse, do not reinterpret. See MAGIC.
         return Err(CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED);
     }
-    if magic != MAGIC {
+    let migrate_v2 = magic == MAGIC_V2;
+    if !migrate_v2 && magic != MAGIC {
+        // A future SHR3SNP<n> is a known family at an unknown version.
+        if magic[..7] == MAGIC[..7] {
+            return Err(CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED);
+        }
         return Err(CKR_GENERAL_ERROR);
     }
     let next_handle = c.u32()?;
@@ -219,6 +270,12 @@ pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
     for _ in 0..obj_count {
         let handle = c.u32()?;
         let attr_count = c.u32()?;
+        // Every attribute occupies at least 8 bytes (type + length), so a
+        // count larger than the remaining input is a lie; reject it rather
+        // than letting an untrusted u32 size an allocation (review K0B-R2-12).
+        if attr_count as usize > (buf.len() - c.pos) / 8 {
+            return Err(CKR_GENERAL_ERROR);
+        }
         let mut attrs: Attributes = HashMap::with_capacity(attr_count as usize);
         for _ in 0..attr_count {
             let ty = c.u32()?;
@@ -229,6 +286,31 @@ pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
         // attributes §4 says every object possesses; add only those.
         crate::state::backfill_possessed_defaults(&mut attrs);
         objects.insert(handle, attrs);
+    }
+
+    if migrate_v2 {
+        // F14 migration: SNP2 predates replication — empty replication state.
+        objects.retain(|_, a| !is_replication_object(a));
+        for a in objects.values_mut() {
+            for t in REPLICATION_ATTRS {
+                a.remove(&t);
+            }
+        }
+        if c.pos != buf.len() {
+            return Err(CKR_GENERAL_ERROR);
+        }
+    } else {
+        if c.take(4)? != REPL_SECTION {
+            return Err(CKR_GENERAL_ERROR);
+        }
+        if c.u32()? != REPL_SECTION_VERSION {
+            return Err(CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED);
+        }
+        let declared = c.u32()?;
+        let actual = objects.values().filter(|a| is_replication_object(a)).count() as u32;
+        if declared != actual || c.take(8)? != END_MARKER || c.pos != buf.len() {
+            return Err(CKR_GENERAL_ERROR);
+        }
     }
 
     // Commit.
