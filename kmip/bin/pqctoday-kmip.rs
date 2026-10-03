@@ -434,6 +434,18 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("engine store: volatile (no --engine-store; key material does not survive a restart)");
     }
 
+    // Same exclusive store lock as repl_edu_board: two processes on one engine store corrupt it.
+    #[cfg(feature = "educational-replication")]
+    let _store_lock = match (&cli.engine_store, cli.educational_replication) {
+        (Some(dir), true) => {
+            let p = dir.join(".repl-edu.lock");
+            let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&p)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            f.try_lock().map_err(|_| anyhow::anyhow!("engine store {} is in use by another process", dir.display()))?;
+            Some(f)
+        }
+        _ => None,
+    };
     #[cfg(feature = "educational-replication")]
     if cli.educational_replication {
         softhsmrustv3::replication::select_educational_profile();

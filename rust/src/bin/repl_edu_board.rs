@@ -69,6 +69,10 @@ fn run() -> Result<(), String> {
     let a = &args[1..];
 
     eprintln!("PQCTODAY EDUCATIONAL TEST ONLY — repl_edu_board {cmd}");
+    // Engine state is process-global and the SQLite store has no cross-process coordination:
+    // a second process on the same store (e.g. the test KMIP server) silently corrupts it
+    // (logout re-keys move rows under the other process). Fail loudly instead.
+    let _lock = lock_store(&store)?;
     softhsmrustv3::store::configure_persistent_store(&store).map_err(|e| format!("store {store}: {e}"))?;
     repl::select_educational_profile();
     native::init().map_err(ck("init"))?;
@@ -521,6 +525,16 @@ fn take_opt(args: &mut Vec<String>, name: &str) -> Option<String> {
     let v = args.get(i + 1).cloned();
     args.drain(i..(i + 2).min(args.len()));
     v
+}
+
+/// Exclusive advisory lock on `<store>/.repl-edu.lock`, held for the life of the process.
+/// The test KMIP server takes the same lock with --educational-replication.
+fn lock_store(store: &str) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(store).map_err(|e| format!("store {store}: {e}"))?;
+    let p = PathBuf::from(store).join(".repl-edu.lock");
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    f.try_lock().map_err(|_| format!("engine store {store} is in use by another process (lock {}); stop it first", p.display()))?;
+    Ok(f)
 }
 
 fn env(name: &str) -> Result<String, String> {
