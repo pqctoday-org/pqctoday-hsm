@@ -1847,6 +1847,8 @@ version = "0.3.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e04e2ef80ce82e13552136fabeef8a5ed1f985a96805761cbb9a2c34e7664d9"
 dependencies = [
+ "cfg-if",
+ "futures-util",
  "once_cell",
  "wasm-bindgen",
 ]
@@ -3191,6 +3193,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3659,13 +3672,17 @@ dependencies = [
  "bincode",
  "blake3",
  "bytemuck",
+ "console_error_panic_hook",
  "dyn-stack",
+ "getrandom 0.2.17",
  "itertools 0.15.0",
+ "js-sys",
  "paste",
  "pulp",
  "rand_core 0.6.4",
  "rayon",
  "serde",
+ "serde-wasm-bindgen",
  "sha3 0.10.8",
  "strum",
  "tfhe-csprng",
@@ -3673,6 +3690,8 @@ dependencies = [
  "tfhe-ntt",
  "tfhe-safe-serialize",
  "tfhe-versionable",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -4280,8 +4299,20 @@ dependencies = [
  "cfg-if",
  "once_cell",
  "rustversion",
+ "serde",
+ "serde_json",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.67"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03623de6905b7206edd0a75f69f747f134b7f0a2323392d664448bf2d3c5d87e"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -341,6 +341,17 @@ frodo-kem = { version = "0.1", default-features = false, features = [
 # this fork is derived from the same 3.1.0 tag.
 classic-mceliece-multi = { path = "classic-mceliece-multi" }
 
+# FHE browser matrix (FHE plan §7): on wasm32-unknown-unknown TFHE-rs has an
+# entropy seeder only with its `__wasm_api` feature (via
+# `integer-client-js-wasm-api`; tfhe/src/core_crypto/seeders.rs). Without it
+# the `educational-fhe` browser build compiles but panics in
+# `ShortintEngine::new` on first use (found 2026-10-03 by
+# tests/browser/fhe-kat). Same exact pin as the `tfhe` entry above; the feature
+# only adds the browser seeder and wasm-bindgen glue, and is unified with the
+# native entry only when building for this target.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+tfhe = { version = "=1.8.1", default-features = false, features = ["integer", "integer-client-js-wasm-api"], optional = true }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native store backend (`store::sqlite`) — target-gated as a DEPENDENCY,
 # not a Cargo feature someone has to remember to omit. `target_arch =
@@ -445,6 +456,7 @@ oqs = { version = "0.10", default-features = false, features = ["kems", "vendore
 # plus rust/vendor/aws-lc-sys-0.44.0-cortex-a5x.patch: Cortex-A53/A55 keep the scalar
 # armv8-mont Montgomery kernel (RSA private ops +21-69% on the boards).
 aws-lc-sys = { path = "vendor/aws-lc-sys-0.44.0" }
+# Local fips204 changes are recorded in fips204-patched/PQCTODAY-PATCHES.md.
 fips204 = { path = "fips204-patched" }
 fips205 = { path = "fips205-patched" }
 ml-kem = { path = "ml-kem-patched" }

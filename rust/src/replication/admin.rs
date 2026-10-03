@@ -276,6 +276,9 @@ struct LedgerEntry {
     operation: String,
     request: OctetString,
     receipt: OctetString,
+    /// Authenticated connection metadata of the submitting context (§5,
+    /// A-16), or "context=native" for an in-process caller.
+    connection: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
@@ -441,6 +444,12 @@ fn consume_nonce(slot: u32, n: &[u8; 32]) {
     }
 }
 
+/// Test hook: the `connection` field of every ledger entry on `slot`.
+#[cfg(feature = "test-support")]
+pub fn ledger_connections_for_test(slot: u32) -> Vec<String> {
+    ledger(slot).unwrap_or_default().into_iter().map(|(_, e)| e.connection).collect()
+}
+
 /// Forget every nonce (engine reset and tests); a restart has the same effect.
 pub fn clear_nonces() {
     *nonces() = None;
@@ -460,6 +469,7 @@ pub fn expire_nonce_for_test(slot: u32) {
 /// nonce that REPLACES the slot's current one. Never written to the store.
 pub fn issue_nonce(so_session: u32) -> Result<[u8; 32], u32> {
     let _op = super::package::op_lock();
+    let _audit = AuditScope::enter(so_session, 0);
     require_profile()?;
     let slot = require_so(so_session)?;
     if active_authority(slot)?.is_none() {
@@ -472,15 +482,66 @@ pub fn issue_nonce(so_session: u32) -> Result<[u8; 32], u32> {
         }
     };
     nonces().get_or_insert_with(HashMap::new).insert(slot, (n, Instant::now()));
-    oplog_event("admin_nonce", slot, &[("result", "ok".into())]);
+    audit("admin_nonce", slot, &[("result", "ok".into())]);
     Ok(n)
+}
+
+// ── Audit context (§5, A-16) ────────────────────────────────────────────────
+
+pub const ADMIN_INTERFACE: &str = "PQCTODAY_KEY_REPLICATION_ADMIN_1_0";
+
+/// The audit fields of the admin call in flight. Every admin entry point
+/// holds the replication op lock, so at most one call sets this at a time.
+static AUDIT_CTX: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+
+/// Connection metadata from the session's application context (C1), read
+/// from the context and never from call parameters.
+fn connection_fields(session: u32) -> Vec<(&'static str, String)> {
+    match crate::state::session_context_meta(session) {
+        Some(m) => vec![
+            ("role", m.role),
+            ("client_cert_sha256", super::hex(&m.client_cert_sha256)),
+            ("listener", m.listener),
+            ("correlation", m.correlation.unwrap_or_default()),
+        ],
+        None => vec![("context", "native".into())],
+    }
+}
+
+fn connection_summary(session: u32) -> String {
+    connection_fields(session).iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";")
+}
+
+/// Sets the in-flight audit context; cleared on drop.
+struct AuditScope;
+
+impl AuditScope {
+    fn enter(session: u32, ordinal: u32) -> Self {
+        let mut f = vec![("interface", ADMIN_INTERFACE.to_string()), ("ordinal", ordinal.to_string())];
+        f.extend(connection_fields(session));
+        *AUDIT_CTX.lock().unwrap_or_else(|e| e.into_inner()) = f;
+        AuditScope
+    }
+}
+
+impl Drop for AuditScope {
+    fn drop(&mut self) {
+        AUDIT_CTX.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// Emit an admin audit line carrying the in-flight context.
+fn audit(event: &str, slot: u32, fields: &[(&'static str, String)]) {
+    let mut all = AUDIT_CTX.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    all.extend_from_slice(fields);
+    oplog_event(event, slot, &all);
 }
 
 // ── Execute (§3.2) ──────────────────────────────────────────────────────────
 
 fn refuse(slot: u32, reason: &'static str) -> u32 {
     note_refusal(reason);
-    oplog_event("admin_refused", slot, &[("reason", reason.into())]);
+    audit("admin_refused", slot, &[("reason", reason.into())]);
     CKR_ACTION_PROHIBITED
 }
 
@@ -672,10 +733,20 @@ fn receipt(slot: u32, p: &Prepared, staged: &Staged, sign: bool) -> Result<Vec<u
 /// committed request returns its stored receipt byte-for-byte.
 pub fn execute(so_session: u32, request_der: &[u8]) -> Result<Vec<u8>, u32> {
     let _op = super::package::op_lock();
-    let p = prepare(so_session, request_der)?;
+    let _audit = AuditScope::enter(so_session, 1);
+    let p = match prepare(so_session, request_der) {
+        Ok(p) => p,
+        Err(rv) => {
+            // §5: refused calls are audited too, with the request hash.
+            if let Ok(slot) = super::session_slot_checked(so_session) {
+                audit("admin_execute", slot, &[("request_hash", super::hex(&super::sha384(request_der))), ("result", format!("0x{rv:x}"))]);
+            }
+            return Err(rv);
+        }
+    };
     let slot = p.slot;
     if let Some(r) = p.replay {
-        oplog_event("admin_execute", slot, &[("request_hash", super::hex(&p.request_hash)), ("result", "replayed".into())]);
+        audit("admin_execute", slot, &[("request_hash", super::hex(&p.request_hash)), ("result", "replayed".into())]);
         return Ok(r);
     }
     let staged = p.staged.as_ref().ok_or(CKR_DEVICE_ERROR)?;
@@ -692,6 +763,7 @@ pub fn execute(so_session: u32, request_der: &[u8]) -> Result<Vec<u8>, u32> {
         operation: p.operation.to_string(),
         request: asn1::octets(request_der),
         receipt: asn1::octets(&receipt_der),
+        connection: connection_summary(so_session),
     })?;
     let audit = vec![
         ("request_hash", super::hex(&p.request_hash)),
@@ -700,7 +772,7 @@ pub fn execute(so_session: u32, request_der: &[u8]) -> Result<Vec<u8>, u32> {
         ("operation", p.operation.to_string()),
     ];
     if entries.len() >= MAX_LEDGER_ENTRIES || used + entry_der.len() > MAX_LEDGER_BYTES {
-        oplog_event("admin_execute", slot, &[audit.as_slice(), &[("result", "ledger full".into())]].concat());
+        self::audit("admin_execute", slot, &[audit.as_slice(), &[("result", "ledger full".into())]].concat());
         return Err(CKR_DEVICE_MEMORY);
     }
     let ledger_obj = records::new_record(ROLE_ADMIN_LEDGER, CKO_DATA, "admin replay ledger entry", Vec::new(), entry_der, false);
@@ -711,7 +783,7 @@ pub fn execute(so_session: u32, request_der: &[u8]) -> Result<Vec<u8>, u32> {
     // The nonce is consumed only once that commit is durable.
     enroll::commit_staged(so_session, slot, staged, vec![ledger_obj], vec![seq_update]).map_err(|_| CKR_DEVICE_ERROR)?;
     consume_nonce(slot, &nonce);
-    oplog_event("admin_execute", slot, &[audit.as_slice(), &[("result", "committed".into())]].concat());
+    self::audit("admin_execute", slot, &[audit.as_slice(), &[("result", "committed".into())]].concat());
     Ok(receipt_der)
 }
 
