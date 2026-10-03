@@ -803,8 +803,8 @@ pub const CKM_HPKE: u32 = 0x8000_0014;
 // (pkcs11-vendor-mech-allocation.md §1.4); mirrored in
 // src/lib/vendor_mechanisms.h.
 pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
-// K0B constrained hierarchy mechanisms (private-authority reservation
-// 36340f93, not yet upstream). Engine-internal only: they appear in function
+// K0B constrained hierarchy mechanisms (private-authority reservation,
+// landed in pqctoday-priv main by PR #147 (merge 62044042; commits 7c497c34, 5165c313; formerly 36340f93/f2e5cfa)). Engine-internal only: they appear in function
 // keys' CKA_ALLOWED_MECHANISMS but are deliberately ABSENT from
 // C_GetMechanismList, C_Sign and every other caller-reachable dispatch, so a
 // function key is never a general signing oracle.
@@ -1302,7 +1302,7 @@ pub const CKA_XMSS_PARAM_SET: u32 = 0x8000_0104; // CKP_XMSS_* value
 pub const CKA_XMSSMT_PARAM_SET: u32 = 0x8000_0107; // CKP_XMSSMT_* value (RFC 8391 OID)
 
 // ── PQCToday key replication attributes (K0B; private-authority reservation
-// 36340f93, NOT yet on the authority's origin/main) ─────────────────────────
+// landed in pqctoday-priv main by PR #147 (merge 62044042; commits 7c497c34, 5165c313; formerly 36340f93/f2e5cfa)) ──
 // docs/proposals/pqctoday-key-replication-interface-1.0.md §4. All four are
 // engine-computed or creation-only: `state::attr_mutation_allowed` refuses
 // every write, and `template_attr_is_skipped` never absorbs them from a

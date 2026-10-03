@@ -5,8 +5,8 @@
   "captured_by_phase": "K5 vendor mech codepoint migration (compliance-audit B-1)",
   "authority": {
     "path": "pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md",
-    "sha256": "d2eeda137c1cda32b5db83db5688c21db2959dd5d9d7a7553f4bb8874ac42f3b",
-    "sha256_of_revision": "pqctoday-priv 1fe9caf5 (2026-09-26, 0x80000015 allocated); previously pinned 4b76e108… = aaa5fb82 (2026-07-07), stale through four revisions",
+    "sha256": "6d79b9479f0968585980d8dce7f98b86aadba2aa91fa3d63d0f99a5be4b7daf3",
+    "sha256_of_revision": "pqctoday-priv 7c497c34 via main 62044042 (2026-10-03, HSM replication 0x80000016/17 + 0x80000108-10B allocated); previously 1fe9caf5 (2026-09-26, 0x80000015)",
     "note": "Authority file lives in the private repo, so CI CANNOT hash it: this sha256 is a hand-kept record of which revision the blocks below were last synced to. Update it whenever the authority file changes. What CI does check (scripts/check_pkcs11_constants.py, check_manifest_vendor): `active` / `active_key_types` list exactly the vendor-range CKM_/CKK_ constants the two engines define — the same set authority §1.4 + §1.4.2 registers."
   },
   "active": {
@@ -21,8 +21,8 @@
     "0x80000013": {"symbol": "CKM_HPKE_KEM_KEY_PAIR_GEN",                 "operation": "keygen",      "algorithm": "HPKE (RFC 9180) KEM key pairs, classical DHKEM and PQ/T hybrid — authority §1.4"},
     "0x80000014": {"symbol": "CKM_HPKE",                                  "operation": "encap_decap", "algorithm": "Full HPKE (KEM + RFC 9180 §5.1 KeySchedule) — authority §1.4"},
     "0x80000015": {"symbol": "CKM_PQCTODAY_ECDSA_EXPLICIT_K",             "operation": "sign",        "algorithm": "ECDSA P-256/384/521 with caller-supplied k (key-recovery teaching primitive, see SECURITY.md) — authority §1.4"},
-    "0x80000016": {"symbol": "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE",   "operation": "internal",    "algorithm": "Constrained ML-DSA-65 function-certificate issuance by a device issuer (Rust engine, educational-replication; engine-internal, never advertised) — reserved in authority commit 36340f93, NOT yet upstream"},
-    "0x80000017": {"symbol": "CKM_PQCTODAY_SIGN_KEY_ATTESTATION",         "operation": "internal",    "algorithm": "Constrained ML-DSA-65 key-attestation evidence signing (Rust engine, educational-replication; engine-internal, never advertised) — reserved in authority commit 36340f93, NOT yet upstream"},
+    "0x80000016": {"symbol": "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE",   "operation": "internal",    "algorithm": "Constrained ML-DSA-65 function-certificate issuance by a device issuer (Rust engine, educational-replication; engine-internal, never advertised) — authority §1.4 (pqctoday-priv 7c497c34, main 62044042)"},
+    "0x80000017": {"symbol": "CKM_PQCTODAY_SIGN_KEY_ATTESTATION",         "operation": "internal",    "algorithm": "Constrained ML-DSA-65 key-attestation evidence signing (Rust engine, educational-replication; engine-internal, never advertised) — authority §1.4 (pqctoday-priv 7c497c34, main 62044042)"},
     "0x80000100": {"symbol": "CKM_KMAC_128",                              "operation": "mac",         "algorithm": "KMAC-128 (Rust engine only) — authority §1.4.2"},
     "0x80000101": {"symbol": "CKM_KMAC_256",                              "operation": "mac",         "algorithm": "KMAC-256 (Rust engine only) — authority §1.4.2"},
     "0x80001057": {"symbol": "CKM_EDDSA_PH",                              "operation": "sign",        "algorithm": "Pre-hashed EdDSA (Rust engine only) — authority §1.4.2"},

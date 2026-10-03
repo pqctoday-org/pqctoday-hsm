@@ -183,8 +183,8 @@ allowed only if the policy explicitly permits same-device redundancy; otherwise 
 - An installed clone receives a fresh `CKA_UNIQUE_ID`. Standard history attributes report import,
   not local generation. Read-only vendor provenance records the source lineage and transaction.
 
-The following public vendor attributes were reserved by the private authority in local commit
-`36340f93` (not yet on its `origin/main`):
+The following public vendor attributes are allocated by the private authority (`pqctoday-priv`
+commit `7c497c34`, landed on its `main` by PR #147, merge `62044042`):
 
 | Value | Symbol | Applies to | Meaning |
 |---|---|---|---|
@@ -212,7 +212,7 @@ The selected local educational profile uses the RFC 5612 documentation PEN. Its 
 `.2.6` in this order: device issuer, key attestation, package signing, recovery recipient, peer
 authentication and receipt signing. The authoritative full values are recorded in
 `pqctoday-priv/docs/platform/data/oid-allocation-registry.md` at
-`f2e5cfa175dba803dfafbe8fd1c78946658e9db0`.
+`5165c313` (landed with PR #147; originally local commit `f2e5cfa`).
 
 These identifiers are deliberately fake. The educational profile must be selected explicitly,
 must not install a root in an external trust store or use a network peer, and must label adjacent
@@ -651,9 +651,9 @@ they waive only the production-OID allocation requirement and remain local/non-n
 
 ## 13. Current unresolved external inputs
 
-Private-authority local commit `36340f93` reserves the §4 attributes and the two constrained signing
-mechanisms (`0x80000016` and `0x80000017`). Local commit `f2e5cfa` records the fixed educational
-profile. Neither has landed on authority `origin/main`. Production OIDs remain symbolically recorded
+Private-authority commit `7c497c34` (landed, PR #147) reserves the §4 attributes and the two
+constrained signing mechanisms (`0x80000016` and `0x80000017`). Commit `5165c313` records the fixed
+educational profile. Both are on the authority's `main`. Production OIDs remain symbolically recorded
 and blocked because no verified PQCToday-controlled enterprise arc is recorded. The owner chose not
 to apply for one now. The pinned RATS evidence draft also still contains TBD production OIDs. These
 remain production prerequisites, not values this repository may guess; educational builds use only

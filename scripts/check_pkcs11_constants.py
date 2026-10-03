@@ -315,9 +315,7 @@ PINNED = {
     # CKM_HPKE in the priv allocation ledger.
     "CKM_PQCTODAY_ECDSA_EXPLICIT_K": (0x80000015, "vendor"),
     # K0B key hierarchy / replication (docs/proposals/pqctoday-key-replication-
-    # interface-1.0.md §4). Reserved by private-authority commit 36340f93,
-    # which is NOT yet on the authority's origin/main: these pins must be
-    # re-checked against the landed authority before any advertisement. The
+    # interface-1.0.md §4). Reserved by the private authority, landed in pqctoday-priv main by PR #147 (merge 62044042; commits 7c497c34, 5165c313; formerly 36340f93/f2e5cfa). The
     # two mechanisms are engine-internal (function-key allowlists only) and
     # absent from every caller-reachable dispatch; the four attributes are
     # engine-computed or creation-only and immutable.

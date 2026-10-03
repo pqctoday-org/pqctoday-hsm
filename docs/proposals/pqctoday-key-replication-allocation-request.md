@@ -1,6 +1,6 @@
 # Allocation request: HSM hierarchy, attestation and protected-key replication
 
-Status: **PKCS #11 values allocated in local commit `36340f93`; educational OID profile recorded in local commit `f2e5cfa`; neither is on authority `origin/main`**
+Status: **Landed in the authority on 2026-10-03: `pqctoday-priv` PR #147, merge `62044042`. PKCS #11 values are commit `7c497c34` and the educational OID profile is commit `5165c313`, rebased from local `36340f93`/`f2e5cfa`.**
 Date: 2026-10-02
 Authority targets: `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md` and
 `pqctoday-priv/docs/platform/data/oid-allocation-registry.md`
@@ -10,8 +10,8 @@ choose numeric values. The private authority allocated them on branch
 `docs/hsm-replication-allocations-1002` at commit
 `36340f93f882bfa9a2de2b32e2305a3d299185ce`; the allocation-file SHA-256 is
 `6d79b9479f0968585980d8dce7f98b86aadba2aa91fa3d63d0f99a5be4b7daf3`. The authority
-commit is local and unpushed, so release implementation and advertisement still wait for that
-authority change to land upstream and for all protocol/release gates to close.
+change has since landed upstream (see Status). Advertisement still waits for its own release
+gates, and production use still needs real OIDs.
 
 ## PKCS #11 attribute allocations
 
