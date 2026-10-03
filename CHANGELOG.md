@@ -48,6 +48,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The local gate now tests the checkout it is run from.** Run from a git
+  worktree, `scripts/local-gate.sh` used to build and test the shared main tree
+  inside the `pqc-rust` container, because `AG_CONTAINER_ROOT` defaulted to
+  `/ag/pqctoday-hsm`. It could then write a `.gate-ok-<sha>` marker for a commit
+  it never built. Found on 2026-10-03, when a worktree's gate failed on files
+  that exist only in that worktree.
+  - The container path is now derived from the container's own `/ag` mount
+    (`scripts/lib/gate-container-root.sh`). A checkout the container cannot see
+    is refused with a pointer to `--host`. An explicit `AG_CONTAINER_ROOT`
+    still wins, and `remote-gate.sh` sets one.
+  - A probe file proves the container sees this directory before any step runs.
+  - The marker is written only if the tracked tree equalled HEAD at the start
+    and end, and HEAD did not move. It now records the full commit, the tree
+    hash and the container root.
+  - A new gate step runs the derivation's unit test
+    (`tests/test-gate-container-root.sh`, 9 cases, sabotage-checked against a
+    prefix-collision bug).
+
 - **Rust engine: listing certificates across slots now returns every
   requested attribute.** A black-box audit (5 slots × 20 objects, list slot
   ID + `CKA_LABEL`/`CKA_SUBJECT`/`CKA_ID` for each `CKO_CERTIFICATE`) found
