@@ -146,6 +146,11 @@ path = "src/bin/repl_edu_board.rs"
 required-features = ["educational-replication"]
 
 [[test]]
+# C1 — two-context variant of replication_store (per-connection contexts).
+name = "replication_store_contexts"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
 name = "replication_admin_stage"
 required-features = ["educational-replication", "test-support"]
 
@@ -160,11 +165,6 @@ required-features = ["educational-replication", "test-support"]
 [[test]]
 name = "replication_fhe_p2"
 required-features = ["educational-fhe", "test-support"]
-
-[[test]]
-# C1 — two-context variant of replication_store (per-connection contexts).
-name = "replication_store_contexts"
-required-features = ["educational-replication", "test-support"]
 
 [[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
