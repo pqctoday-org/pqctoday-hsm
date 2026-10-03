@@ -19,6 +19,12 @@ name = "pqctoday-kmip-client"
 path = "bin/pqctoday-kmip-client.rs"
 
 [[bin]]
+# PQCTODAY EDUCATIONAL TEST ONLY: operator courier for the two-board replication test.
+name = "repl_edu_courier"
+path = "bin/repl_edu_courier.rs"
+required-features = ["educational-replication", "native"]
+
+[[bin]]
 name = "pqctoday-kmip-compliance"
 path = "bin/pqctoday-kmip-compliance.rs"
 
@@ -54,6 +60,11 @@ path = "tools/extract_kmip_spec.rs"
 # directly. The native server build (`cargo build`, the three shipping
 # `[[bin]]`s) keeps the default features on and is completely unchanged.
 default = ["native"]
+# PQCTODAY EDUCATIONAL TEST ONLY: serve the protected-replication interfaces over the KMIP
+# PKCS#11 operation (pre-ceremony-ABI). Never in the default or release binary.
+educational-replication = ["softhsmrustv3/educational-replication"]
+# Adds the FHE seed profile (TFHE-rs custody) to the educational courier (`bootstrap --fhe`).
+educational-fhe = ["educational-replication", "softhsmrustv3/educational-fhe"]
 native = [
     "dep:tokio",
     "dep:tokio-rustls",

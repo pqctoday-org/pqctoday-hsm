@@ -122,6 +122,19 @@ struct Cli {
     #[arg(long)]
     engine_store: Option<PathBuf>,
 
+    /// PQCTODAY EDUCATIONAL TEST ONLY: select the educational replication profile and serve
+    /// the replication interfaces over the KMIP PKCS#11 operation (pre-ceremony-ABI).
+    /// Bind `--listen` to the crypto-plane address only.
+    #[cfg(feature = "educational-replication")]
+    #[arg(long)]
+    educational_replication: bool,
+
+    /// Board-local root-only file with the SO PIN for the educational admin interface (O7).
+    /// Without it, admin calls are refused.
+    #[cfg(feature = "educational-replication")]
+    #[arg(long)]
+    replication_so_pin_file: Option<PathBuf>,
+
     /// Append-only JSONL audit log. Combined with the in-memory ring via CompositeSink.
     #[arg(long)]
     audit_log: Option<PathBuf>,
@@ -425,6 +438,30 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("engine store: durable SQLite at {dir:?} (key material persists across restarts)");
     } else {
         tracing::info!("engine store: volatile (no --engine-store; key material does not survive a restart)");
+    }
+
+    // Same exclusive store lock as repl_edu_board: two processes on one engine store corrupt it.
+    #[cfg(feature = "educational-replication")]
+    let _store_lock = match (&cli.engine_store, cli.educational_replication) {
+        (Some(dir), true) => {
+            let p = dir.join(".repl-edu.lock");
+            let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&p)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            f.try_lock().map_err(|_| anyhow::anyhow!("engine store {} is in use by another process", dir.display()))?;
+            Some(f)
+        }
+        _ => None,
+    };
+    #[cfg(feature = "educational-replication")]
+    if cli.educational_replication {
+        softhsmrustv3::replication::select_educational_profile();
+        if let Some(p) = &cli.replication_so_pin_file {
+            pqctoday_kmip::ops::replication_bridge::configure_admin(p.clone(), cli.slot);
+        }
+        tracing::warn!(
+            "PQCTODAY EDUCATIONAL TEST ONLY: replication interfaces served over KMIP on {} (pre-ceremony-ABI)",
+            cli.listen
+        );
     }
 
     // ── Engine session (Phase 7b — real bridge to softhsmrustv3) ────────

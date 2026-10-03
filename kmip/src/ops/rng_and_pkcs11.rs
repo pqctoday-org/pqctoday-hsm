@@ -120,6 +120,26 @@ pub fn pkcs11(
     // engine and returns its actual CK_INFO bytes — real identity, not
     // fabricated. Any other function code is honestly unimplemented.
     use std::sync::atomic::Ordering;
+    // Educational protected-replication interfaces (pre-ceremony-ABI). Only in builds with
+    // the non-default feature; everything else below is the unchanged standard path.
+    #[cfg(feature = "educational-replication")]
+    if super::replication_bridge::handles(req.interface.as_deref()) {
+        let iface = req.interface.clone().unwrap_or_default();
+        let session = deps.resolve_tenant_session(auth.identity.as_ref()).map_err(|_| ());
+        let input = req.input_parameters.as_deref().unwrap_or(&[]);
+        let peer = auth.identity.as_ref().map(|i| i.username.as_str());
+        let (rv, out) = super::replication_bridge::dispatch_as(session, peer, &iface, req.function, input);
+        emit_pkcs11(deps, correlation_id, "replication", None, rv, &ckr_display_name(rv));
+        emit_success(deps, correlation_id, "PKCS_11");
+        let cv = req.correlation_value.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
+        return Ok(Pkcs11Response {
+            interface: req.interface,
+            function: req.function,
+            correlation_value: Some(cv),
+            output_parameters: out,
+            return_code: rv as i32,
+        });
+    }
     let (return_code, output_parameters): (i32, Option<Vec<u8>>) = match req.function {
         C_INITIALIZE => {
             // PKCS#11 v3.2 §5.6: a second C_Initialize without an

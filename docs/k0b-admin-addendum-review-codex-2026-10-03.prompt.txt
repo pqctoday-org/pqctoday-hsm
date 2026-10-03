@@ -1,0 +1,16 @@
+You are an independent security reviewer. You did not write this protocol or its code. Review read-only; do not modify any file.
+
+TARGET: docs/proposals/pqctoday-key-replication-admin-interface-1.0.md (DRAFT 2): two new PKCS#11 vendor interfaces (ADMIN_1_0 for SO administration with ML-DSA-65 signed requests, nonce and sequence; CEREMONY_1_0 for user-level replication ceremony calls) and their KMIP 3.0 PKCS#11-operation binding over an isolated lab crypto network. It is an EDUCATIONAL software-token profile.
+
+CONTEXT (read as needed):
+- docs/proposals/pqctoday-key-replication-interface-1.0.md (base spec rev 3; frozen v1 interface; §5 challenges/evidence, §9 return-code precedence, §10 bounds, §11 persistence)
+- docs/k2-k4-replication-implementation-notes-2026-10-02.md and docs/k0b-protocol-review-*.md (prior reviews and dispositions)
+- rust/src/replication/*.rs (current engine; enroll.rs has the SO functions the admin ops wrap; package.rs has the ceremony calls)
+- kmip/src/ops/rng_and_pkcs11.rs (today's KMIP PKCS#11 op handler)
+- docs/proposals/pqctoday-key-replication-admin-allocation-request.md
+
+FIXED OWNER DECISIONS (do not re-litigate; you may point out risks inside them): SO admin goes over KMIP; root, device and admin-authority enrollment stay board-local; v1 stays frozen; crypto network only; per-connection application contexts (C1) give real SO login concurrent with user sessions; SO PIN from a board-local root-only file; the educational "no network peer" safeguard is narrowed to crypto-network KMIP only.
+
+FIND: replay/reordering, cross-device or cross-interface confusion, signature domain separation, downgrade, privilege escalation (user→admin, admin→root/trust anchor), authorization bypass via KMIP identity mapping or contexts, error oracles, DoS via nonce/reservation exhaustion, crash/atomicity gaps, ambiguity in the ASN.1, missing bounds, inconsistencies with the base spec or the engine code, and anything that would make an implementation diverge.
+
+OUTPUT: numbered findings, each with ID A-NN, severity (high/medium/low/info), the exact section, the concrete attack or failure, and a specific fix. Then a short list of things that are sound. First line of your output must be: "reviewer model: gpt-5.6-sol".
