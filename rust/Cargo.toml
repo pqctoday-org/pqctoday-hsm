@@ -55,6 +55,14 @@ acvp = []
 # caller explicitly selects the educational profile at runtime.
 educational-replication = ["dep:x509-cert", "dep:der", "dep:spki07", "dep:const-oid"]
 
+# FHE P2 (FHE plan §9; P0B spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md):
+# TFHE custody mechanisms on top of educational-replication. OPT-IN, NOT
+# default, EDUCATIONAL ONLY. Pins TFHE-rs 1.8.1 (tag commit 187fc0b9, the
+# reference-runs/tfhe-custody pin) with only the `integer` feature. TFHE-rs is
+# BSD-3-Clause-Clear; Zama states that commercial use needs a separate patent
+# licence, so this feature must never ship in a commercial artefact.
+educational-fhe = ["educational-replication", "dep:tfhe"]
+
 # ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
 # mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
 # rejection-sampling and norm routines the pure-Rust fips204 / ml-kem crates do
@@ -130,6 +138,10 @@ name = "replication_fhe_p1"
 required-features = ["educational-replication", "test-support"]
 
 [[test]]
+name = "replication_fhe_p2"
+required-features = ["educational-fhe", "test-support"]
+
+[[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
 # the process-global token store with distinct test ceremonies.
 name = "hierarchy_attestation_spikes"
@@ -142,6 +154,8 @@ x509-cert = { version = "0.2", default-features = false, features = ["builder"],
 der = { version = "0.7", features = ["oid", "alloc", "std", "derive"], optional = true }
 spki07 = { package = "spki", version = "0.7", features = ["alloc"], optional = true }
 const-oid = { version = "0.9", features = ["db"], optional = true }
+# Optional: educational-fhe only. Exact pin; default features (avx512) off.
+tfhe = { version = "=1.8.1", default-features = false, features = ["integer"], optional = true }
 wasm-bindgen = "0.2.117"
 js-sys = "0.3.69"
 web-sys = { version = "0.3.69", features = ["console"] }

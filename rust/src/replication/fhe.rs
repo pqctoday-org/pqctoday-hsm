@@ -31,19 +31,67 @@ pub const FHE_SEED_LEN: usize = 32;
 pub const MAX_DESCRIPTOR_DER: usize = 4 * 1024;
 
 /// Allowlisted parameter sets (plan §6.2: no caller-supplied cryptographic
-/// parameters). P2 replaces the placeholder hash with the canonical encoding
-/// of the pinned TFHE-rs parameter set.
-pub const FHE_PARAM_SETS: &[(u32, &str)] = &[(1, "tfhe-rs PARAM_MESSAGE_2_CARRY_2_KS_PBS (custody profile v1)")];
+/// parameters; P0B spec §4). Version 1 has exactly one entry.
+pub const FHE_PARAM_SETS: &[(u32, &str)] = &[(1, "PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128")];
 
+/// P0B §4 canonical parameter encoding.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct FheParamSetV1 {
+    pub id: u32,
+    pub library: String,
+    pub version: String,
+    pub commit: OctetString,
+    pub param_name: String,
+    pub config: String,
+    pub kdf: String,
+}
+
+/// TFHE-rs tag `tfhe-rs-1.8.1`, commit 187fc0b95ab35352422deec6c027d0bd8743b6db.
+pub const TFHE_COMMIT: [u8; 20] = [
+    0x18, 0x7f, 0xc0, 0xb9, 0x5a, 0xb3, 0x53, 0x52, 0x42, 0x2d, 0xeb, 0x6c, 0x02, 0x7d, 0x0b, 0xd8, 0x74, 0x3b, 0x6d,
+    0xb6,
+];
+
+/// DER of `FheParamSetV1` for a registry ID.
+pub fn param_set_der(param_set: u32) -> Option<Vec<u8>> {
+    let (id, name) = FHE_PARAM_SETS.iter().find(|(id, _)| *id == param_set)?;
+    asn1::to_der(&FheParamSetV1 {
+        id: *id,
+        library: "tfhe-rs".into(),
+        version: "1.8.1".into(),
+        commit: asn1::octets(&TFHE_COMMIT),
+        param_name: (*name).into(),
+        config: "ConfigBuilder::default().use_dedicated_oprf_key(false)".into(),
+        kdf: "sp800-108-ctr-hmac-sha384/v1".into(),
+    })
+    .ok()
+}
+
+/// `CKA_PQCTODAY_FHE_PARAM_HASH`: SHA-384 of the canonical encoding (P0B §4;
+/// this retired P1's placeholder hash).
 pub fn param_hash(param_set: u32) -> Option<[u8; 48]> {
-    FHE_PARAM_SETS
-        .iter()
-        .find(|(id, _)| *id == param_set)
-        .map(|(_, name)| super::sha384(name.as_bytes()))
+    param_set_der(param_set).map(|d| super::sha384(&d))
 }
 
 pub fn library_id() -> &'static str {
-    "tfhe-rs (P1 opaque-seed fixture; no backend linked)"
+    "tfhe-rs 1.8.1 187fc0b9"
+}
+
+/// P0B §3 / amendment A1: the seed's fixed derive template, a profile
+/// constant. The engine sets it at KEY_GEN and re-sets it on install, so a
+/// replica never loses it; it is never caller-supplied.
+pub fn seed_derive_template() -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut put = |t: u32, v: &[u8]| {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        out.extend_from_slice(v);
+    };
+    put(CKA_CLASS, &(CKO_PUBLIC_KEY as usize).to_le_bytes());
+    put(CKA_KEY_TYPE, &(CKK_PQCTODAY_FHE_PUBLIC as usize).to_le_bytes());
+    put(CKA_TOKEN, &[0]);
+    put(CKA_PRIVATE, &[0]);
+    out
 }
 
 // ── Profile constraint (replication policy typeConstraintHash) ─────────────
@@ -142,6 +190,8 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
         || !p.predicates.windows(2).all(|w| w[0].kind < w[1].kind)
         || !p.recipients.windows(2).all(|w| w[0].as_bytes() < w[1].as_bytes())
         || p.recipients.iter().any(|r| r.as_bytes().len() != 48)
+        // P0B §5.3: version 1 refuses compressed ciphertext lists.
+        || p.allowed_output_types.iter().chain(p.never_release.iter()).any(|t| t.compressed_allowed)
         || (p.recipient_only && p.recipients.is_empty())
     {
         return Err(CKR_DATA_INVALID);
@@ -258,18 +308,18 @@ pub fn validate_descriptor(der: &[u8], header_lineage: &[u8]) -> Result<FheRecov
     Ok(d)
 }
 
-// ── Opaque-seed fixture (test builds only; plan P1 exit gate) ──────────────
+// ── KEY_GEN core (P0B §5.1) ────────────────────────────────────────────────
 
-/// Create a bound, replicable FHE seed object from 32 fresh random bytes
-/// under an enrolled replication policy (FHE profile) and an enrolled
-/// decryption policy. TEST-ONLY: absent from every build without
-/// `test-support`, so no shipped artefact has a seed-import hook.
-#[cfg(feature = "test-support")]
-pub fn create_opaque_seed_fixture(
+/// Generate a bound, replicable FHE seed under an enrolled FHE-profile
+/// replication policy and an enrolled decryption policy. User role, R/W.
+/// `label`/`id` are the only caller-settable attributes (§5.1).
+pub fn generate_fhe_seed(
     user_session: u32,
     param_set: u32,
     replication_policy: &[u8; 48],
     decrypt_policy: &[u8; 48],
+    label: Option<&[u8]>,
+    id: Option<&[u8]>,
 ) -> Result<u32, u32> {
     use crate::state::{store_bool, store_ulong};
     super::require_profile()?;
@@ -298,6 +348,7 @@ pub fn create_opaque_seed_fixture(
         (CKA_EXTRACTABLE, false),
         (CKA_COPYABLE, false),
         (CKA_MODIFIABLE, false),
+        (CKA_TRUSTED, false),
         (CKA_DERIVE, true),
         (CKA_DECRYPT, true),
         (CKA_ENCRYPT, false),
@@ -312,6 +363,7 @@ pub fn create_opaque_seed_fixture(
     }
     store_ulong(&mut a, CKA_KEY_GEN_MECHANISM, CKM_PQCTODAY_FHE_KEY_GEN);
     a.insert(CKA_VALUE, seed.to_vec());
+    a.insert(CKA_DERIVE_TEMPLATE, seed_derive_template());
     a.insert(CKA_PQCTODAY_FHE_SCHEME, FHE_SCHEME_TFHE.as_bytes().to_vec());
     store_ulong(&mut a, CKA_PQCTODAY_FHE_PARAM_SET, param_set);
     a.insert(CKA_PQCTODAY_FHE_PARAM_HASH, ph.to_vec());
@@ -323,9 +375,26 @@ pub fn create_opaque_seed_fixture(
     a.insert(CKA_PQCTODAY_REPLICATION_LINEAGE_ID, lineage.to_vec());
     a.insert(CKA_PRIV_REPL_BUDGET, pol.max_replicas.to_le_bytes().to_vec());
     a.insert(CKA_ALLOWED_MECHANISMS, records::encode_mechanisms(&pol.allowed_mechanisms));
+    if let Some(l) = label {
+        a.insert(records::CKA_LABEL, l.to_vec());
+    }
+    if let Some(i) = id {
+        a.insert(crate::native::CKA_ID, i.to_vec());
+    }
     let h = crate::state::commit_objects_atomically(user_session, vec![a], Vec::new())?[0];
-    super::oplog_event("fhe_seed_fixture", slot, &[("lineage", super::hex(&lineage))]);
+    super::oplog_event("fhe_seed_generated", slot, &[("lineage", super::hex(&lineage))]);
     Ok(h)
+}
+
+/// P1 test fixture name, kept for the P1 suite: now the real KEY_GEN core.
+#[cfg(feature = "test-support")]
+pub fn create_opaque_seed_fixture(
+    user_session: u32,
+    param_set: u32,
+    replication_policy: &[u8; 48],
+    decrypt_policy: &[u8; 48],
+) -> Result<u32, u32> {
+    generate_fhe_seed(user_session, param_set, replication_policy, decrypt_policy, None, None)
 }
 
 #[cfg(test)]
@@ -381,6 +450,9 @@ mod tests {
         let mut ro = policy(vec![ty("FheBool", 1)], vec![], None, 1);
         ro.recipient_only = true;
         assert!(bad(ro), "recipient-only with no recipient");
+        let mut compressed = ty("FheBool", 1);
+        compressed.compressed_allowed = true;
+        assert!(bad(policy(vec![compressed], vec![], None, 1)), "compressed lists refused in v1 (P0B §5.3)");
     }
 
     fn descriptor(version: u8, generator: u32, lineage: [u8; 32], param_hash_bytes: Vec<u8>) -> Vec<u8> {
