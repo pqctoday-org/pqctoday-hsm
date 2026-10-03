@@ -34,6 +34,10 @@ repl_edu_board --store DIR [--slot N] <command> [args]
   check-src KIND UID PUBUID OUTDIR       user, source: AES encrypt / ML-KEM encapsulate a vector
   check-dst KIND LINEAGE INDIR OUTDIR    user, destination: decrypt / decapsulate / sign with the replica
   check-verify PUBUID INDIR              user, source: verify the replica's ML-DSA signature
+  count-lineage LINEAGE                  user: print how many secret/private keys carry this lineage
+  uid-of-lineage LINEAGE                 user: print the CKA_UNIQUE_ID of the one key with this lineage
+  destroy-lineage LINEAGE                user: C_DestroyObject on the one key with this lineage
+                                         (restore proof: the source key is gone before restore)
 FHE (built with --features educational-fhe; FHE plan stage F, PR #318 engine):
   fhe-policy OUT                         SO: enroll the fixed typed decrypt policy, write its 48-byte id
   fhe-genkey RPID DPID OUTDIR            user: FHE seed bound to replication policy RPID + decrypt policy
@@ -155,6 +159,40 @@ fn run() -> Result<(), String> {
                 }
                 k => Err(format!("unknown KIND {k}")),
             }
+        })?,
+        ("count-lineage", 1) => as_user(slot, &user_pin, |s| {
+            let lineage = read(&a[0])?;
+            let mut excluded = Vec::new();
+            for class in [CKO_SECRET_KEY, CKO_PRIVATE_KEY] {
+                for h in find(s, &[(CKA_CLASS, ul(class)), (CKA_PQCTODAY_REPLICATION_LINEAGE_ID, lineage.clone())])? {
+                    if let Some(role) = repl::records::object_attrs(h).and_then(|at| repl::records::role_of(&at)) {
+                        excluded.push(role);
+                    }
+                    let txt = |t: u32| native::get_attribute(s, h, t).map(|v| String::from_utf8_lossy(&v).to_string()).unwrap_or_else(|| "-".into());
+                    println!(
+                        "  handle {h}: class 0x{class:x} keytype {:?} uid {} label {} id {} fhe-lineage {} object_attrs {}",
+                        native::get_attribute_u32(s, h, CKA_KEY_TYPE),
+                        txt(CKA_UNIQUE_ID),
+                        txt(native::CKA_LABEL),
+                        txt(native::CKA_ID),
+                        native::get_attribute(s, h, CKA_PQCTODAY_FHE_LINEAGE_ID).is_some(),
+                        repl::records::object_attrs(h).is_some(),
+                    );
+                }
+            }
+            println!("lineage-count {} (records excluded, by role: {excluded:?})", keys_by_lineage(s, &lineage)?.len());
+            Ok(())
+        })?,
+        ("uid-of-lineage", 1) => as_user(slot, &user_pin, |s| {
+            let h = replica_by_lineage(s, &read(&a[0])?)?;
+            println!("{}", String::from_utf8_lossy(&attr(s, h, CKA_UNIQUE_ID)?));
+            Ok(())
+        })?,
+        ("destroy-lineage", 1) => as_user(slot, &user_pin, |s| {
+            let h = replica_by_lineage(s, &read(&a[0])?)?;
+            rv(softhsmrustv3::ffi::C_DestroyObject(s, h), "C_DestroyObject")?;
+            println!("destroyed the key with this lineage on slot {slot}");
+            Ok(())
         })?,
         ("check-verify", 2) => as_user(slot, &user_pin, |s| {
             let p = by_uid(s, a[0].as_bytes())?;
@@ -427,12 +465,23 @@ fn by_uid(s: u32, uid: &[u8]) -> Result<u32, String> {
     }
 }
 
-/// The installed replica: the one secret/private key carrying `lineage` on this token.
-fn replica_by_lineage(s: u32, lineage: &[u8]) -> Result<u32, String> {
+/// Usable keys carrying `lineage` on this token. Replication RECORDS (ledger entries, cached
+/// packages, … tagged with the engine-private record role) can carry the lineage too and are
+/// excluded, so a source that has created a package still counts as holding one key.
+fn keys_by_lineage(s: u32, lineage: &[u8]) -> Result<Vec<u32>, String> {
     let mut hits = Vec::new();
     for class in [CKO_SECRET_KEY, CKO_PRIVATE_KEY] {
         hits.extend(find(s, &[(CKA_CLASS, ul(class)), (CKA_PQCTODAY_REPLICATION_LINEAGE_ID, lineage.to_vec())])?);
     }
+    Ok(hits
+        .into_iter()
+        .filter(|h| repl::records::object_attrs(*h).map(|a| repl::records::role_of(&a).is_none()).unwrap_or(true))
+        .collect())
+}
+
+/// The installed replica: the one usable secret/private key carrying `lineage` on this token.
+fn replica_by_lineage(s: u32, lineage: &[u8]) -> Result<u32, String> {
+    let hits = keys_by_lineage(s, lineage)?;
     match hits.as_slice() {
         [h] => Ok(*h),
         [] => Err("no replica with that lineage on this token".into()),

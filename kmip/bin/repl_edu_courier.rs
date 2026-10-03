@@ -37,7 +37,10 @@ const USAGE: &str = "\
 repl_edu_courier bootstrap --src HOST --dst HOST --ssh-key KEY --out DIR [--remote-dir /tmp/repl-test] [--fhe]
 repl_edu_courier ceremony  --src-kmip IP:PORT --dst-kmip IP:PORT --src-name SNI --dst-name SNI
                            --tls-ca PEM --client-cert PEM --client-key PEM
-                           --trust DIR --uid UID --out DIR [--op live|backup] [--negative]";
+                           --trust DIR --uid UID --out DIR [--op live|backup|restore] [--negative]
+                           [--dst-policy FILE] [--expect-refusal]
+repl_edu_courier make-policy --trust DIR --out FILE [--fhe]
+  (bootstrap test flag: --fhe-skip-dst-decrypt-policy enrolls the FHE decrypt policy on the source only)";
 
 fn main() {
     if let Err(e) = run() {
@@ -52,6 +55,7 @@ fn run() -> Result<(), String> {
     let cmd = if a.is_empty() { String::new() } else { a.remove(0) };
     match cmd.as_str() {
         "bootstrap" => bootstrap(&mut a),
+        "make-policy" => make_policy(&mut a),
         "ceremony" => ceremony(&mut a),
         _ => Err(USAGE.into()),
     }
@@ -123,6 +127,10 @@ fn bootstrap(a: &mut Vec<String>) -> Result<(), String> {
     let dst_dir = opt(a, "--dst-dir").unwrap_or_else(|| dir.clone());
     let out = PathBuf::from(need(a, "--out")?);
     let fhe_profile = take_flag(a, "--fhe");
+    // TEST ONLY (negative case): leave the destination WITHOUT the FHE decrypt policy, so an FHE
+    // seed import there must be refused and install nothing (engine: descriptor's decrypt policy
+    // must be enrolled at the destination).
+    let skip_dst_dp = take_flag(a, "--fhe-skip-dst-decrypt-policy");
     let boards = [
         Board { host: need(a, "--src")?, key: key.clone(), dir: src_dir },
         Board { host: need(a, "--dst")?, key, dir: dst_dir },
@@ -170,11 +178,12 @@ fn bootstrap(a: &mut Vec<String>) -> Result<(), String> {
             .map_err(rv("build policy"))?
     };
     if fhe_profile {
-        for b in &boards {
+        let enrolled: &[Board] = if skip_dst_dp { &boards[..1] } else { &boards[..] };
+        for b in enrolled {
             b.tool(&format!("fhe-policy {0}/x/fhe-dp-id.bin", b.dir))?;
         }
         let dp = boards[0].get("fhe-dp-id.bin")?;
-        if boards[1].get("fhe-dp-id.bin")? != dp {
+        if !skip_dst_dp && boards[1].get("fhe-dp-id.bin")? != dp {
             return Err("the two boards computed different FHE decrypt-policy ids".into());
         }
         save(&out, "fhe-dp-id.bin", &dp)?;
@@ -215,6 +224,27 @@ fn fhe_policy(devs: &[(Vec<u8>, Vec<u8>, [u8; 32])], t: u64) -> Result<Vec<u8>, 
 #[cfg(not(feature = "educational-fhe"))]
 fn fhe_policy(_: &[(Vec<u8>, Vec<u8>, [u8; 32])], _: u64) -> Result<Vec<u8>, String> {
     Err("--fhe needs a courier built with --features educational-fhe".into())
+}
+
+/// Build a replication policy over the two devices in a bootstrap trust dir (negative cases).
+fn make_policy(a: &mut Vec<String>) -> Result<(), String> {
+    let trust = PathBuf::from(need(a, "--trust")?);
+    let out = PathBuf::from(need(a, "--out")?);
+    let fhe = take_flag(a, "--fhe");
+    let id = |n: &str| -> Result<[u8; 32], String> { load(&trust, n)?.try_into().map_err(|_| format!("{n}: not 32 bytes")) };
+    let devs = [(Vec::new(), Vec::new(), id("src-device-id.bin")?), (Vec::new(), Vec::new(), id("dst-device-id.bin")?)];
+    let t = now();
+    let policy = if fhe {
+        fhe_policy(&devs, t)?
+    } else {
+        let mut mechs = vec![CKM_AES_GCM, CKM_ML_KEM, CKM_ML_DSA];
+        mechs.sort_unstable();
+        repl::records::build_policy(DOMAIN, [true, true, true], vec![devs[0].2, devs[1].2], t - 60, t + 7 * 86_400, 4, mechs, false)
+            .map_err(rv("build policy"))?
+    };
+    std::fs::write(&out, &policy).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("wrote {} ({} B, fhe={fhe})", out.display(), policy.len());
+    Ok(())
 }
 
 // ── ceremony (crypto plane, KMIP only) ────────────────────────────────────
@@ -296,11 +326,18 @@ fn ceremony(a: &mut Vec<String>) -> Result<(), String> {
     let op: u8 = match opt(a, "--op").as_deref() {
         None | Some("live") => 0,
         Some("backup") => 1,
+        Some("restore") => 2,
         Some(o) => return Err(format!("unknown --op {o}")),
     };
     let negative = take_flag(a, "--negative");
+    // Negative-case mode: some step MUST be refused; success of the whole ceremony is a failure.
+    let expect_refusal = take_flag(a, "--expect-refusal");
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let pid = load(&trust_dir, "policy-id.bin")?;
+    // The destination requests its own enrolled policy; default = the shared bootstrap policy.
+    let pid = match opt(a, "--dst-policy") {
+        Some(p) => std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?,
+        None => load(&trust_dir, "policy-id.bin")?,
+    };
     if pid.len() != 48 || uid.len() != 36 {
         return Err("policy id must be 48 bytes and --uid 36 characters".into());
     }
@@ -311,7 +348,17 @@ fn ceremony(a: &mut Vec<String>) -> Result<(), String> {
         log.push_str(&line);
         log.push('\n');
     };
-    let ok = |r: &(i32, Vec<u8>, f64, Option<String>), what: &str| if r.0 == 0 { Ok(()) } else { Err(format!("{what}: CK_RV 0x{:08x}", r.0 as u32)) };
+    // In --expect-refusal mode a refused step ends the ceremony successfully ("REFUSED as expected").
+    let ok = |r: &(i32, Vec<u8>, f64, Option<String>), what: &str| -> Result<(), String> {
+        if r.0 == 0 {
+            Ok(())
+        } else if expect_refusal {
+            Err(format!("EXPECTED-REFUSAL {what}: CK_RV 0x{:08x}", r.0 as u32))
+        } else {
+            Err(format!("{what}: CK_RV 0x{:08x}", r.0 as u32))
+        }
+    };
+    let steps = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
 
     // 1. source issues its challenge (test fn 1 = IssueSourceChallenge).
     let r = src.call(TEST, 1, &[])?;
@@ -336,7 +383,23 @@ fn ceremony(a: &mut Vec<String>) -> Result<(), String> {
     let r = dst.call(V1, 2, &package)?;
     step("dst ImportReplicationPackage", &r);
     ok(&r, "ImportReplicationPackage")?;
-    let receipt = r.1;
+    Ok((request, package, r.1))
+    })();
+    let (request, package, receipt) = match steps {
+        Ok(v) if expect_refusal => {
+            save(&out, "ceremony.log", log.as_bytes())?;
+            let _ = v;
+            return Err("FAIL: --expect-refusal but every step was accepted".into());
+        }
+        Ok(v) => v,
+        Err(e) if expect_refusal && e.starts_with("EXPECTED-REFUSAL") => {
+            println!("PASS refused as expected — {}", e.trim_start_matches("EXPECTED-REFUSAL "));
+            log.push_str(&format!("PASS {e}\n"));
+            save(&out, "ceremony.log", log.as_bytes())?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     save(&out, "request.der", &request)?;
     save(&out, "package.der", &package)?;
     save(&out, "receipt.der", &receipt)?;
