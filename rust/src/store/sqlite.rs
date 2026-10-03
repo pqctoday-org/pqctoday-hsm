@@ -26,7 +26,17 @@ use std::sync::atomic::Ordering;
 pub struct SqliteStore {
     dir: PathBuf,
     conns: Mutex<HashMap<u32, Connection>>,
+    /// Exclusive advisory lock on `<dir>/.engine-store.lock`, held for the
+    /// store's lifetime. Two processes on one store silently corrupt each
+    /// other: each caches the whole token and allocates handles from the
+    /// same stored maximum, so a logout re-key in one and a commit in the
+    /// other leave duplicate rows (found 2026-10-03). The second opener now
+    /// fails instead.
+    _lock: std::fs::File,
 }
+
+/// Name of the lock file inside a store directory.
+pub const LOCK_FILE: &str = ".engine-store.lock";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS token (
@@ -61,7 +71,18 @@ impl SqliteStore {
     pub fn open(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir, conns: Mutex::new(HashMap::new()) })
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("engine store {} is already open in another process (or another store instance)", dir.display()),
+                ));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+        Ok(Self { dir, conns: Mutex::new(HashMap::new()), _lock: lock })
     }
 
     fn with_conn<R>(&self, slot: u32, f: impl FnOnce(&mut Connection) -> rusqlite::Result<R>) -> Option<R> {
@@ -267,6 +288,31 @@ impl TokenStore for SqliteStore {
 mod tests {
     use super::*;
     use crate::store::TokenStore as _;
+
+    /// Two openers on one store directory: the second is refused while the
+    /// first lives, and allowed once it is gone (flock is per open file
+    /// description, so this is the same refusal another process gets).
+    #[test]
+    fn a_second_opener_of_the_same_store_is_refused() {
+        let dir = std::env::temp_dir().join(format!("softhsmrustv3-store-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = SqliteStore::open(&dir).expect("first opener");
+        let err = SqliteStore::open(&dir).err().expect("second opener must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(err.to_string().contains("already open"));
+        drop(first);
+        let again = SqliteStore::open(&dir).expect("reopen after the first closed");
+        drop(again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lock does not leak into slot discovery or the token files.
+    #[test]
+    fn the_lock_file_is_not_a_token() {
+        let s = tmp_store();
+        assert!(s.dir.join(LOCK_FILE).exists());
+        assert!(s.load_objects(0).is_empty());
+    }
 
     fn tmp_store() -> SqliteStore {
         // A test-local counter, NOT `state::UNIQUE_ID_COUNTER` — these tests

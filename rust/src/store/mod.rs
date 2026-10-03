@@ -291,6 +291,11 @@ pub fn persist_delete(slot: u32, handle: u32) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn configure_persistent_store(dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     let dir = dir.as_ref();
+    // Re-pointing this process (an embedder restart, or a test simulating
+    // one): release any store it already holds, and with it that store's
+    // exclusive lock, before opening — otherwise reopening the same
+    // directory would refuse itself.
+    configure(Arc::new(MemoryStore));
     let store = Arc::new(sqlite::SqliteStore::open(dir)?);
 
     // One `.db` file per slot (see sqlite.rs's module doc) — slots present
