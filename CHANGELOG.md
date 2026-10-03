@@ -10,6 +10,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): groundwork for remote
+  administration of replication.** Enrolling a CRL or policy, rotating the
+  recovery key and issuing the device CRL each now split into a validation
+  step that changes nothing and one atomic commit. That commit is the point
+  where a later signed admin request will add its own records. Behaviour of
+  the existing calls is unchanged; they now hold the replication operation
+  lock for both steps. `begin_receive_len` returns the exact size of a
+  `BeginReceive` request without generating randomness, signing, reserving
+  a challenge or changing the token.
+  The SO can now re-issue all five function keys and certificates in one
+  step. The previous set is retired, retired certificates still verify, a
+  backup sealed to the retired recovery key still restores, and the
+  device-CRL number keeps increasing. Revoking a certificate by its bytes is
+  now limited to retired certificates the token still holds; active or
+  foreign certificates are refused.
+  Signed remote administration of replication (admin addendum 1.0): the SO
+  enrolls one admin-authority certificate per token on the board, and from
+  then on can run CRL and policy enrollment, recovery-key rotation, function
+  re-issuance and device-CRL issuance as requests signed by that authority.
+  Each request must carry the token's current one-minute nonce and the next
+  sequence number. It commits atomically with a replay-ledger entry and
+  returns a receipt signed by the token. An exact retry returns the same
+  receipt. Host-side helpers build and sign requests and verify receipts.
+
 - **Rust engine (educational feature only): FHE P1, the FHE seed as a
   replicable key class.** Adds the FHE custody numbers (private authority
   §1.4.5, merged as `b80c856b`), all seven FHE attributes immutable and never

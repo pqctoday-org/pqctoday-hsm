@@ -35,6 +35,60 @@ pub fn verify_key_evidence(
         .map(|v| v.claims)
 }
 
+/// Public facts a verified admin receipt establishes (admin addendum §3.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminReceiptView {
+    pub device_id: [u8; 32],
+    pub sequence: u64,
+    pub result_digest: [u8; 48],
+    pub output: Option<Vec<u8>>,
+    pub committed_at: u64,
+}
+
+/// Verify an admin receipt for the request the operator sent: the signer
+/// chain is a receipt-signing leaf under a device issuer that chains to the
+/// root and is unrevoked on CURRENT CRLs (a listed signer fails whatever
+/// `committedAt` says); `deviceID`, `requestHash` and `sequence` match the
+/// request; and the signature covers the receipt's signed bytes.
+pub fn verify_admin_receipt(
+    receipt_der: &[u8],
+    signed_request_der: &[u8],
+    trust: &TrustInputs,
+    now: u64,
+    profile: Profile,
+) -> Result<AdminReceiptView, Reject> {
+    use super::admin::{AdminReceipt, AdminSignedRequest, MAX_ADMIN_RECEIPT_DER, MAX_ADMIN_REQUEST_DER, RECEIPT_DOMAIN};
+    let rc: AdminReceipt = asn1::decode_strict(receipt_der, MAX_ADMIN_RECEIPT_DER).map_err(|_| Reject("receipt DER"))?;
+    let rq: AdminSignedRequest = asn1::decode_strict(signed_request_der, MAX_ADMIN_REQUEST_DER).map_err(|_| Reject("request DER"))?;
+    let t = &rc.tbs;
+    if t.version != 1
+        || rc.signature_algorithm != pki::ml_dsa_65_alg()
+        || rc.signature.unused_bits() != 0
+        || rc.signature.raw_bytes().len() != super::package::ML_DSA_65_SIG_LEN
+    {
+        return Err(Reject("receipt profile"));
+    }
+    let chain = pki::validate_chain(&t.receipt_signer_chain, Purpose::ReceiptSigning, trust, now, profile)?;
+    if t.device_id.as_bytes() != chain.device_id || rq.tbs.device_id.as_bytes() != chain.device_id {
+        return Err(Reject("receipt device"));
+    }
+    if t.request_hash.as_bytes() != super::sha384(signed_request_der) || t.sequence != rq.tbs.sequence {
+        return Err(Reject("receipt does not answer this request"));
+    }
+    let tbs_der = t.to_der().map_err(|_| Reject("receipt DER"))?;
+    let pk = pki::mldsa65_public(&chain.leaf)?;
+    if !super::mldsa65_verify(pk, &super::admin::signed_bytes(RECEIPT_DOMAIN, &tbs_der), rc.signature.raw_bytes()) {
+        return Err(Reject("receipt signature"));
+    }
+    Ok(AdminReceiptView {
+        device_id: chain.device_id,
+        sequence: t.sequence,
+        result_digest: t.result_digest.as_bytes().try_into().map_err(|_| Reject("result digest"))?,
+        output: t.output.as_ref().map(|o| o.as_bytes().to_vec()),
+        committed_at: pki::time_secs(&x509_cert::time::Time::GeneralTime(t.committed_at)),
+    })
+}
+
 /// Public facts a verified receipt establishes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiptView {
