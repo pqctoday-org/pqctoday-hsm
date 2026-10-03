@@ -206,6 +206,10 @@ mod fhe_cmd {
 
     const SIGNER_ID: &[u8] = b"fhe-custodian-manifest-signer";
     const SEED_ID: &[u8] = b"fhe-custodian-seed";
+    /// CKA_LABEL tells an audit where a manifest signer came from (7f condition 3). Either way its
+    /// K3 evidence (attest_key) is exported with every fhe-export (signer_evidence.der).
+    const LABEL_AT_INIT: &[u8] = b"fhe-manifest-signer generated-at-init";
+    const LABEL_ON_RESTORE: &[u8] = b"fhe-manifest-signer generated-on-restore";
 
     /// The fixed educational decrypt policy (same as `fhe_custodian init`): FheBool/U8/U16/U32
     /// may be released to the owner, FheUint64 never.
@@ -238,7 +242,7 @@ mod fhe_cmd {
         let dp: [u8; 48] = read(dpid)?.try_into().map_err(|_| "decrypt policy id must be 48 bytes".to_string())?;
         let seed = fhe::generate_fhe_seed(s, 1, &rp, &dp, Some(b"FHE custodian seed"), Some(SEED_ID)).map_err(ck("generate_fhe_seed"))?;
         if signer(s, CKO_PRIVATE_KEY).is_err() {
-            gen_signer(s)?;
+            gen_signer(s, LABEL_AT_INIT)?;
         }
         let out = PathBuf::from(outdir);
         write(out.join("uid.txt"), &attr(s, seed, CKA_UNIQUE_ID)?)?;
@@ -250,8 +254,8 @@ mod fhe_cmd {
         // A restored backup has the seed but no manifest signer yet: make one. Its SPKI differs
         // from the custodian's, so a compute server pinning the signer must be told on failover.
         if signer(s, CKO_PRIVATE_KEY).is_err() {
-            eprintln!("note: no manifest signer on this token; generating a new one (new signer SPKI)");
-            gen_signer(s)?;
+            eprintln!("note: no manifest signer on this token; generating a new one (new signer SPKI, label {})", String::from_utf8_lossy(LABEL_ON_RESTORE));
+            gen_signer(s, LABEL_ON_RESTORE)?;
         }
         let (signer_priv, signer_pub) = (signer(s, CKO_PRIVATE_KEY)?, signer(s, CKO_PUBLIC_KEY)?);
         let out = PathBuf::from(outdir);
@@ -307,9 +311,9 @@ mod fhe_cmd {
             .ok_or_else(|| "manifest signer not found (run fhe-genkey first)".to_string())
     }
 
-    fn gen_signer(s: u32) -> Result<(), String> {
-        let pubt = vec![(CKA_TOKEN, bb(true)), (CKA_PARAMETER_SET, ul(CKP_ML_DSA_65)), (CKA_VERIFY, bb(true)), (native::CKA_ID, SIGNER_ID.to_vec())];
-        let prvt = vec![(CKA_TOKEN, bb(true)), (CKA_SENSITIVE, bb(true)), (CKA_EXTRACTABLE, bb(false)), (CKA_SIGN, bb(true)), (native::CKA_ID, SIGNER_ID.to_vec())];
+    fn gen_signer(s: u32, label: &[u8]) -> Result<(), String> {
+        let pubt = vec![(CKA_TOKEN, bb(true)), (CKA_PARAMETER_SET, ul(CKP_ML_DSA_65)), (CKA_VERIFY, bb(true)), (native::CKA_ID, SIGNER_ID.to_vec()), (native::CKA_LABEL, label.to_vec())];
+        let prvt = vec![(CKA_TOKEN, bb(true)), (CKA_SENSITIVE, bb(true)), (CKA_EXTRACTABLE, bb(false)), (CKA_SIGN, bb(true)), (native::CKA_ID, SIGNER_ID.to_vec()), (native::CKA_LABEL, label.to_vec())];
         let (tp, tk) = (raw(&pubt), raw(&prvt));
         let mut m = [CKM_ML_DSA_KEY_PAIR_GEN as usize, 0, 0];
         let (mut hp, mut hk) = (0u32, 0u32);
