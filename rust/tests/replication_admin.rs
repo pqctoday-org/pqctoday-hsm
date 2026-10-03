@@ -323,3 +323,75 @@ fn admin_and_ceremony_interfaces_are_discovered_and_callable() {
         assert_eq!((cf.C_PQCTODAY_CancelReceive)(s1, tx.as_mut_ptr(), 31), CKR_ARGUMENTS_BAD as CK_RV);
     }
 }
+
+#[test]
+fn admin_ledger_full_refuses_with_device_memory_until_pruned() {
+    let _g = lock();
+    let mut w = world(1);
+    let a = setup(&w);
+    let op = AdminOperation::IssueDeviceCrl { revoke: vec![], retired_to_revoke: vec![], validity_seconds: 3_600 };
+    let next = admin::MAX_LEDGER_ENTRIES as u64 + 1;
+    w.as_so(0, |so| {
+        // Fill the ledger to its §3.5 entry limit; each entry is one commit.
+        for seq in 1..next {
+            let n = admin::issue_nonce(so).unwrap();
+            admin::execute(so, &signed(&a, &a.key, &n, seq, &op)).unwrap_or_else(|rv| panic!("seq {seq}: 0x{rv:x}"));
+        }
+        // Entry 1,025 is refused with DEVICE_MEMORY and changes nothing.
+        let n = admin::issue_nonce(so).unwrap();
+        assert_eq!(admin::execute(so, &signed(&a, &a.key, &n, next, &op)), Err(CKR_DEVICE_MEMORY), "a full ledger never evicts silently");
+    });
+    // 31 days on: prune (board-local), renew the expired root CRL, retry.
+    let later = w.now + 31 * 86_400;
+    repl::set_clock_override(Some(later));
+    let fresh = w.ca.crl(later - 5, later + 7 * 86_400).unwrap();
+    w.as_so(0, |so| {
+        let pruned = admin::prune_admin_ledger(so).unwrap();
+        assert_eq!(pruned, admin::MAX_LEDGER_ENTRIES - 1, "all but the active key's newest entry");
+        repl::enroll_crl(so, &fresh, None).unwrap();
+        let n = admin::issue_nonce(so).unwrap();
+        admin::execute(so, &signed(&a, &a.key, &n, next, &op)).expect("space after pruning; the refusal did not consume the sequence");
+    });
+    repl::set_clock_override(Some(w.now));
+}
+
+#[test]
+fn admin_audit_records_the_connection_context_without_quiescing_users() {
+    use softhsmrustv3::app_context::{self, ContextGuard, ContextMeta};
+    let _g = lock();
+    let w = world(1);
+    let a = setup(&w);
+    let user = w.tokens[0].user;
+    // An admin connection: its own application context with authenticated
+    // metadata, SO-logged-in there while the default context's USER login
+    // on the same slot stays live (C1; addendum §1.1).
+    let ctx = ContextGuard::new(ContextMeta {
+        role: "replication-admin".into(),
+        client_cert_sha256: [0xAB; 32],
+        listener: "crypto-plane:5696".into(),
+        correlation: Some("corr-42".into()),
+    });
+    let so = app_context::open_session(ctx.id(), w.tokens[0].slot, CKF_SERIAL_SESSION | CKF_RW_SESSION).unwrap();
+    let mut pin = SO.as_bytes().to_vec();
+    assert_eq!(softhsmrustv3::ffi::C_Login(so, CKU_SO, pin.as_mut_ptr(), pin.len() as u32), CKR_OK);
+    let n = admin::issue_nonce(so).unwrap();
+    let pol = w.policy([true, true, true], 2, test_mechs());
+    let req = signed(&a, &a.key, &n, 1, &AdminOperation::EnrollPolicy { policy: pol });
+    admin::execute(so, &req).expect("admin call inside its own context");
+    // User work was never paused.
+    assert!(repl::device_id(user).is_ok(), "the default context's user session is still usable");
+    let conns = admin::ledger_connections_for_test(w.tokens[0].slot);
+    assert_eq!(conns.len(), 1);
+    let c = &conns[0];
+    assert!(c.contains("role=replication-admin"), "{c}");
+    assert!(c.contains(&format!("client_cert_sha256={}", "ab".repeat(32))), "{c}");
+    assert!(c.contains("listener=crypto-plane:5696") && c.contains("correlation=corr-42"), "{c}");
+    // The admin connection ends (disconnect destroys its context and its
+    // SO login); then a native caller is recorded as such.
+    drop(ctx);
+    w.as_so(0, |so| {
+        let n = admin::issue_nonce(so).unwrap();
+        admin::execute(so, &signed(&a, &a.key, &n, 2, &AdminOperation::RotateRecoveryKey)).unwrap();
+    });
+    assert_eq!(admin::ledger_connections_for_test(w.tokens[0].slot)[1], "context=native");
+}
