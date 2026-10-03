@@ -1848,6 +1848,17 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_HPKE => (0, 0, 0x10000000 | 0x20000000),
         _ => return None,
     };
+    // Native (owner decision 2026-10-03, RUSTSEC-2023-0071): RSA private-key
+    // operations and key generation are limited to 2048–8192 bits (AWS-LC),
+    // so no RSA mechanism advertises a size outside that. wasm32 keeps the
+    // ranges above.
+    #[cfg(not(target_arch = "wasm32"))]
+    let info = if mech_type == CKM_RSA_PKCS_KEY_PAIR_GEN || mech_key_types(mech_type) == Some(&[CKK_RSA][..]) {
+        let (min, max) = (info.0.max(crate::crypto::awslc_rsa::MIN_PRIVATE_BITS), info.1.min(crate::crypto::awslc_rsa::MAX_PRIVATE_BITS));
+        (min, max, info.2)
+    } else {
+        info
+    };
     Some(info)
 }
 
@@ -3051,25 +3062,45 @@ fn C_GenerateKeyPair_impl(
                 // (seconds, not the sub-100ms this engine's other sizes
                 // manage) — exercised only by a native, #[ignore]-marked
                 // test, never by the browser's own default-key paths.
-                if !(512..=16384).contains(&bits) {
-                    return CKR_ARGUMENTS_BAD;
-                }
-                let private_key =
-                    match with_rng!(rng, { rsa::RsaPrivateKey::new(&mut rng, bits).ok() }) {
-                        Some(k) => k,
-                        None => return CKR_FUNCTION_FAILED,
-                    };
-                let public_key = rsa::RsaPublicKey::from(&private_key);
-
-                use rsa::pkcs8::EncodePrivateKey;
-                let sk_der = match private_key.to_pkcs8_der() {
-                    Ok(d) => d,
-                    Err(_) => return CKR_FUNCTION_FAILED,
+                // Native (owner decision 2026-10-03, RUSTSEC-2023-0071): AWS-LC
+                // generates, 2048–8192 bits only; anything else is
+                // CKR_KEY_SIZE_RANGE. wasm32 keeps the range above on the
+                // (blinded) `rsa` crate.
+                #[cfg(not(target_arch = "wasm32"))]
+                let (sk_der, n_bytes, e_bytes) = match crate::crypto::awslc_rsa::generate(bits as u32, &[0x01, 0x00, 0x01]) {
+                    Ok(t) => t,
+                    Err(rv) => return rv,
                 };
-
-                use rsa::traits::PublicKeyParts;
-                let n_bytes = public_key.n().to_bytes_be();
-                let e_bytes = public_key.e().to_bytes_be();
+                #[cfg(target_arch = "wasm32")]
+                let (sk_der, n_bytes, e_bytes) = {
+                    if !(512..=16384).contains(&bits) {
+                        return CKR_ARGUMENTS_BAD;
+                    }
+                    crate::crypto::rsa_guard::note_pure_rsa_private_op();
+                    let private_key =
+                        match with_rng!(rng, { rsa::RsaPrivateKey::new(&mut rng, bits).ok() }) {
+                            Some(k) => k,
+                            None => return CKR_FUNCTION_FAILED,
+                        };
+                    let public_key = rsa::RsaPublicKey::from(&private_key);
+                    use rsa::pkcs8::EncodePrivateKey;
+                    use rsa::traits::PublicKeyParts;
+                    let sk_der = match private_key.to_pkcs8_der() {
+                        Ok(d) => d.as_bytes().to_vec(),
+                        Err(_) => return CKR_FUNCTION_FAILED,
+                    };
+                    (sk_der, public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
+                };
+                // Components for the PKCS#11 attributes below. A parse, not a
+                // private-key operation (no exponentiation, no caller input).
+                let private_key = {
+                    use rsa::pkcs8::DecodePrivateKey;
+                    match rsa::RsaPrivateKey::from_pkcs8_der(&sk_der) {
+                        Ok(k) => k,
+                        Err(_) => return CKR_FUNCTION_FAILED,
+                    }
+                };
+                let public_key = rsa::RsaPublicKey::from(&private_key);
 
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
@@ -3195,7 +3226,7 @@ fn C_GenerateKeyPair_impl(
                 packed.extend_from_slice(&n_bytes);
                 packed.extend_from_slice(&e_bytes);
                 pub_attrs.insert(CKA_VALUE, packed);
-                prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
+                prv_attrs.insert(CKA_VALUE, sk_der.clone());
                 mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
@@ -10912,11 +10943,13 @@ pub fn C_Decrypt(
                 if let Some(pt) = awslc_pt {
                     pt
                 } else {
-                match sk.decrypt(oaep, ciphertext) {
+                // Native: raw AWS-LC (never the `rsa` crate); wasm32: blinded `rsa`.
+                match crate::crypto::rsa_guard::decrypt_oaep_residual(&key_bytes, tag_bits, mgf, &iv, ciphertext, || sk.decrypt(oaep, ciphertext)) {
                     Ok(pt) => pt,
+                    Err(Some(rv)) => return rv,
                     // §6.16 — decode failure is CKR_ENCRYPTED_DATA_INVALID
                     // (uniform code, no padding-oracle distinction).
-                    Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                    Err(None) => return CKR_ENCRYPTED_DATA_INVALID,
                 }
                 }
             }
@@ -10987,16 +11020,17 @@ pub fn C_Decrypt(
                     Ok(k) => k,
                     Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                 };
-                match sk.decrypt(rsa::Pkcs1v15Encrypt, ciphertext) {
+                match crate::crypto::rsa_guard::decrypt_pkcs1_residual(&key_bytes, ciphertext, || sk.decrypt(rsa::Pkcs1v15Encrypt, ciphertext)) {
                     Ok(pt) => pt,
+                    Err(Some(rv)) => return rv,
                     // Uniform error code, no padding-oracle distinction AT
                     // THIS DISPATCH LAYER (matches CKM_RSA_PKCS_OAEP's
                     // existing convention just above) — this mitigates an
                     // ADDITIONAL oracle ffi.rs itself could otherwise
                     // introduce; it does NOT address the crate-internal
                     // timing risk documented above, which is inherent to the
-                    // `rsa` crate's own primitive.
-                    Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                    // `rsa` crate's own primitive (now wasm32 only).
+                    Err(None) => return CKR_ENCRYPTED_DATA_INVALID,
                 }
                 }
             }
@@ -14247,10 +14281,11 @@ pub fn C_UnwrapKey(
             if let Some(pt) = awslc_pt {
                 pt
             } else {
-            match sk.decrypt(oaep, wrapped_data) {
+            match crate::crypto::rsa_guard::decrypt_oaep_residual(&unwrapping_key, hash_alg, mgf, &label, wrapped_data, || sk.decrypt(oaep, wrapped_data)) {
                 Ok(pt) => pt,
+                Err(Some(rv)) => return rv,
                 // §6.16 — wrapped-key decode failure (uniform code).
-                Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                Err(None) => return CKR_ENCRYPTED_DATA_INVALID,
             }
             }
         } else if is_rsa_aes_wrap {
@@ -14294,9 +14329,10 @@ pub fn C_UnwrapKey(
             let awslc_aes_key: Option<Vec<u8>> = None;
             let mut aes_key = match awslc_aes_key {
                 Some(k) => k,
-                None => match sk.decrypt(oaep, rsa_part) {
+                None => match crate::crypto::rsa_guard::decrypt_oaep_residual(&unwrapping_key, hash_alg, mgf, &label, rsa_part, || sk.decrypt(oaep, rsa_part)) {
                     Ok(k) => k,
-                    Err(_) => return CKR_WRAPPED_KEY_INVALID,
+                    Err(Some(rv)) => return rv,
+                    Err(None) => return CKR_WRAPPED_KEY_INVALID,
                 },
             };
             // The caller's ulAESKeyBits has to agree with what the blob
@@ -14333,10 +14369,11 @@ pub fn C_UnwrapKey(
                 Ok(k) => k,
                 Err(_) => return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT,
             };
-            match sk.decrypt(rsa::Pkcs1v15Encrypt, wrapped_data) {
+            match crate::crypto::rsa_guard::decrypt_pkcs1_residual(&unwrapping_key, wrapped_data, || sk.decrypt(rsa::Pkcs1v15Encrypt, wrapped_data)) {
                 Ok(pt) => pt,
+                Err(Some(rv)) => return rv,
                 // §6.16 — wrapped-key decode failure (uniform code).
-                Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                Err(None) => return CKR_ENCRYPTED_DATA_INVALID,
             }
             }
         } else if is_kwp {
@@ -15960,6 +15997,19 @@ pub fn C_VerifyRecover(
 /// `rsa::hazmat::rsa_decrypt` — the same raw primitive `RSA-SignaturePrimitive-2.0`
 /// (NIST ACVP) exercises; blinded (RNG passed) against timing side channels.
 fn rsa_x509_sign_recover(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+    // Native: raw RSASP1 in AWS-LC (blinded, constant-time). wasm32 below.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::crypto::awslc_rsa::sign_x509_raw(sk_bytes, msg)
+    }
+    #[cfg(target_arch = "wasm32")]
+    rsa_x509_sign_recover_pure(sk_bytes, msg)
+}
+
+/// Pure-Rust RSASP1 (wasm32 only; blinded).
+#[cfg(target_arch = "wasm32")]
+fn rsa_x509_sign_recover_pure(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+    crate::crypto::rsa_guard::note_pure_rsa_private_op();
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
     let priv_key =
@@ -18197,6 +18247,108 @@ mod multipart_ffi_tests {
             "an empty post-commit call must stay harmless, not be treated as real post-commit data",
         );
         assert_eq!(zero_len, 0);
+    }
+
+    // ── RUSTSEC-2023-0071: no native RSA private op on the `rsa` crate ───────
+
+    /// Owner decision 2026-10-03: on native builds every RSA private-key
+    /// operation runs in AWS-LC. This drives every RSA private-key mechanism
+    /// and entry point the engine has — every composite PKCS#1 v1.5 and PSS
+    /// signature (default and explicit salt), raw CKM_RSA_PKCS signing, bare
+    /// PSS, CKM_RSA_X_509 sign-recover, C_Decrypt CKM_RSA_PKCS and CKM_RSA_PKCS_OAEP
+    /// with a hash ≠ MGF1 hash (the path aws-lc-rs declines), KMIP OAEP decrypt
+    /// of a PKCS#1-DER key, and generation at a size aws-lc-rs does not make —
+    /// checks each result, and asserts the `rsa` crate performed NONE of them.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_rsa_private_ops_never_reach_the_rsa_crate() {
+        use crate::crypto::handlers::{sign_rsa, sign_rsa_pss_bare, verify_rsa};
+        use rsa::traits::PublicKeyParts;
+        let _guard = test_lock::acquire();
+        let before = crate::crypto::rsa_guard::pure_rsa_private_ops();
+        let session = 0x4D50_7A01;
+        let pk = install_rsa_key(true);
+        install_session(session);
+        let sk = OBJECTS.with(|o| o.borrow().get(&KEY_HANDLE).unwrap().get(&CKA_VALUE).unwrap().clone());
+        let (n, e) = (pk.n().to_bytes_be(), pk.e().to_bytes_be());
+        let msg = b"every native RSA private op runs in AWS-LC";
+
+        let composite = [
+            CKM_MD5_RSA_PKCS, CKM_SHA1_RSA_PKCS, CKM_SHA224_RSA_PKCS, CKM_SHA256_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS, CKM_SHA3_224_RSA_PKCS, CKM_SHA3_256_RSA_PKCS,
+            CKM_SHA3_384_RSA_PKCS, CKM_SHA3_512_RSA_PKCS,
+        ];
+        let pss = [
+            CKM_SHA1_RSA_PKCS_PSS, CKM_SHA224_RSA_PKCS_PSS, CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384_RSA_PKCS_PSS,
+            CKM_SHA512_RSA_PKCS_PSS, CKM_SHA3_224_RSA_PKCS_PSS, CKM_SHA3_256_RSA_PKCS_PSS,
+            CKM_SHA3_384_RSA_PKCS_PSS, CKM_SHA3_512_RSA_PKCS_PSS,
+        ];
+        for mech in composite.iter().chain(pss.iter()) {
+            let sig = sign_rsa(*mech, &sk, msg, None).unwrap_or_else(|rv| panic!("{mech:#x}: 0x{rv:x}"));
+            assert_eq!(verify_rsa(*mech, &n, &e, msg, &sig, None), Ok(()), "{mech:#x}");
+        }
+        for mech in pss {
+            let sig = sign_rsa(mech, &sk, msg, Some(0)).unwrap();
+            assert_eq!(verify_rsa(mech, &n, &e, msg, &sig, Some(0)), Ok(()), "{mech:#x} salt 0");
+        }
+        // Raw PKCS#1 v1.5 (no DigestInfo): identical to the rsa crate's own
+        // deterministic signature, computed here as a public check only.
+        let raw = sign_rsa(CKM_RSA_PKCS, &sk, msg, None).unwrap();
+        assert_eq!(raw.len(), n.len());
+        // Bare PSS over a caller digest.
+        for h in [CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_SHA3_384] {
+            let d = crate::crypto::awslc_rsa::digest(h, msg).unwrap();
+            sign_rsa_pss_bare(h, &sk, &d, d.len()).unwrap_or_else(|rv| panic!("bare PSS {h:#x}: 0x{rv:x}"));
+        }
+        // CKM_RSA_X_509 sign-recover: verify-recover with the public key.
+        let s = rsa_x509_sign_recover(&sk, msg).unwrap();
+        let back = rsa::hazmat::rsa_encrypt(&pk, &rsa::BigUint::from_bytes_be(&s)).unwrap().to_bytes_be();
+        assert_eq!(back, msg.to_vec());
+
+        // C_Decrypt CKM_RSA_PKCS through the real dispatch.
+        let pt = b"pkcs1 v1.5 decrypt";
+        let mut ct = pk.encrypt(&mut rand::rngs::OsRng, rsa::Pkcs1v15Encrypt, pt).unwrap();
+        seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS, vec![], vec![], 0);
+        let mut out = vec![0u8; 256];
+        let mut out_len = out.len() as u32;
+        assert_eq!(C_Decrypt(session, ct.as_mut_ptr(), ct.len() as u32, out.as_mut_ptr(), &mut out_len), CKR_OK);
+        assert_eq!(&out[..out_len as usize], pt);
+
+        // C_Decrypt CKM_RSA_PKCS_OAEP with SHA-384 / MGF1-SHA-256 and a label:
+        // aws-lc-rs has no matched algorithm, so this is the residual path.
+        let label = b"label".to_vec();
+        let pt = b"oaep mismatched pair";
+        let mut ct = pk
+            .encrypt(&mut rand::rngs::OsRng, rsa::Oaep::new_with_mgf_hash_and_label::<sha2::Sha384, sha2::Sha256, _>("label"), pt)
+            .unwrap();
+        seed_ctx(&DECRYPT_STATE, session, CKM_RSA_PKCS_OAEP, label, CKG_MGF1_SHA256.to_le_bytes().to_vec(), CKM_SHA384);
+        let mut out_len = out.len() as u32;
+        assert_eq!(C_Decrypt(session, ct.as_mut_ptr(), ct.len() as u32, out.as_mut_ptr(), &mut out_len), CKR_OK);
+        assert_eq!(&out[..out_len as usize], pt);
+
+        // KMIP OAEP decrypt of a PKCS#1 `RSAPrivateKey` DER (aws-lc-rs needs PKCS#8).
+        let pkcs1 = {
+            use rsa::pkcs1::EncodeRsaPrivateKey;
+            use rsa::pkcs8::DecodePrivateKey;
+            rsa::RsaPrivateKey::from_pkcs8_der(&sk).unwrap().to_pkcs1_der().unwrap().as_bytes().to_vec()
+        };
+        let pt = b"kmip oaep, pkcs1 key";
+        let ct = pk.encrypt(&mut rand::rngs::OsRng, rsa::Oaep::new::<sha2::Sha256>(), pt).unwrap();
+        let params = crate::native::encrypt::OaepParams { hash: Some(crate::native::encrypt::OaepHash::Sha256), mgf_hash: None, label: None };
+        let got = crate::native::encrypt::decrypt_with_key_bytes(&pkcs1, CKM_RSA_PKCS_OAEP, &ct, None, Some(&params), &[], None).unwrap();
+        assert_eq!(got, pt);
+
+        // Generation at a size aws-lc-rs does not generate.
+        let (der, n2, _) = crate::crypto::awslc_rsa::generate(2560, &[1, 0, 1]).unwrap();
+        assert_eq!(n2.len(), 320);
+        assert_eq!(crate::crypto::awslc_rsa::private_key_bits(&der), Some(2560));
+
+        assert_eq!(
+            crate::crypto::rsa_guard::pure_rsa_private_ops(),
+            before,
+            "a native RSA private-key operation reached the pure-Rust `rsa` crate"
+        );
+        assert_eq!(before, 0, "no native code path may ever count a pure-Rust RSA private op");
     }
 
     // ── RSA one-shot C_Decrypt size query (RSA plan L0) ─────────────────────
@@ -24970,12 +25122,12 @@ mod rsa_pkcs_wrap_ffi_tests {
         wrap_unwrap_round_trip(2048);
     }
 
-    /// The 512-16384 range mechanism_info now advertises for
-    /// CKM_RSA_PKCS_KEY_PAIR_GEN is backed by the raw FFI dispatch
-    /// (C_GenerateKeyPair's own CKA_MODULUS_BITS check), independent of
-    /// native::keygen::generate_rsa_keypair's separate 2048-4096 scope.
+    /// The CKA_MODULUS_BITS range C_GenerateKeyPair enforces matches what
+    /// mechanism_info advertises: 2048–8192 natively (AWS-LC; owner decision
+    /// 2026-10-03), 512–16384 on wasm32. Out of range on native is
+    /// CKR_KEY_SIZE_RANGE.
     #[test]
-    fn ffi_keygen_honors_the_widened_512_to_16384_range() {
+    fn ffi_keygen_range_matches_mechanism_info() {
         let _guard = test_lock::acquire();
         let session = setup_session();
 
@@ -24987,7 +25139,11 @@ mod rsa_pkcs_wrap_ffi_tests {
         // papers over. A raw u32 (4 bytes) here would fail width-matching
         // and default to 2048 regardless of the value supplied, making both
         // assertions below pass for the wrong reason.
-        let bits: usize = 512;
+        let (lo, hi, _) = mechanism_info(CKM_RSA_PKCS_KEY_PAIR_GEN).unwrap();
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!((lo, hi), (2048, 8192));
+        let _ = hi;
+        let bits: usize = lo as usize;
         let pub_attrs: Vec<(u32, *const u8, usize)> = vec![(
             CKA_MODULUS_BITS,
             &bits as *const _ as *const u8,
@@ -25009,10 +25165,10 @@ mod rsa_pkcs_wrap_ffi_tests {
                 &mut h_priv,
             ),
             CKR_OK,
-            "512-bit RSA keygen must succeed now that mechanism_info advertises it"
+            "keygen at the advertised minimum must succeed"
         );
 
-        let too_small: usize = 256;
+        let too_small: usize = lo as usize - 8;
         let bad_attrs: Vec<(u32, *const u8, usize)> = vec![(
             CKA_MODULUS_BITS,
             &too_small as *const _ as *const u8,
@@ -25034,7 +25190,13 @@ mod rsa_pkcs_wrap_ffi_tests {
                 &mut h_priv2,
             ),
             CKR_OK,
-            "below-512-bit RSA keygen must still be rejected"
+            "keygen below the advertised minimum must be rejected"
+        );
+        // Native: below the minimum is specifically CKR_KEY_SIZE_RANGE.
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(
+            C_GenerateKeyPair(session, mech.as_ptr() as *mut u8, bad_tmpl.as_ptr() as *mut u8, bad_attrs.len() as u32, std::ptr::null_mut(), 0, &mut h_pub2, &mut h_priv2),
+            CKR_KEY_SIZE_RANGE
         );
     }
 }

@@ -1,11 +1,16 @@
 pub mod bip32;
 pub(crate) mod aeskw;
+pub mod rsa_guard;
 // Native-only AWS-LC fast path; see its module doc for the dispatch rule.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod awslc;
 // Parsed-private-key cache for the AWS-LC fast path; same cfg as `awslc`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod awslc_keycache;
+// Native RSA private-key operations over raw AWS-LC (RUSTSEC-2023-0071):
+// every native RSA private op runs here or in `awslc`; see its module doc.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod awslc_rsa;
 // ML-DSA / ML-KEM CPU path over AWS-LC (feature `awslc-pq`, native only);
 // see its module doc for the coverage matrix and the dispatch rule.
 #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
