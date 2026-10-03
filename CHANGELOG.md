@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rust engine: one process per durable token store.** Opening a SQLite
+  token store now takes an exclusive lock on the store directory, and a
+  second process (or a second store object) opening the same directory is
+  refused with a clear error. Previously two processes could share a store,
+  and each kept its own copy of the token in memory, so a logout in one and
+  a write in the other could leave the same key stored twice. Re-pointing
+  the same process at its store still works.
+
 ### Added
 
 - **Rust engine (educational feature only): FHE P1, the FHE seed as a
