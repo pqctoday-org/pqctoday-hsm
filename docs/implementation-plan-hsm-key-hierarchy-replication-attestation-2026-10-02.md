@@ -1,15 +1,16 @@
 # Implementation plan: HSM key hierarchy, key replication and attestation (Rust engine)
 
-Date: 2026-10-02 · Revision: **v4 (educational OID profile selected)**
+Date: 2026-10-02 · Revision: **v5** (v4 merged with the parallel v2: decision 9 recorded; HPKE fixture item corrected)
 Status: **K0A complete; its existing-function replication mapping was NO-GO. Owner decision 10
 resolves that blocker with a separately discoverable PQCToday vendor interface. K1 prerequisites
-are implemented and the 23-step full local gate passes. A K0B working ABI/wire
-specification now pins locally reserved private-authority PKCS #11 values and the RFC 5612
-documentation-only OID profile selected by owner decision 11. The authority commits are not yet
-upstream. K2–K5 may use the dummy values only in an explicitly enabled local educational profile;
-independent protocol review and real production OIDs remain mandatory before any production or
+are implemented and the full local gate passes. The private-authority PKCS #11 values and the
+RFC 5612 documentation-only OID profile (owner decision 11) landed upstream on 2026-10-03
+(`pqctoday-priv` PR #147). K2–K4 are implemented behind the educational feature (see
+`docs/k2-k4-replication-implementation-notes-2026-10-02.md`), and the independent protocol review
+(G1) was signed off by the owner on 2026-10-03. K2–K5 may use the dummy values only in an explicitly
+enabled local educational profile; real production OIDs remain mandatory before any production or
 interoperability claim.**
-Owner decisions 1–8, 10 and 11 are recorded in §11; decision 9 is open.
+All eleven owner decisions are recorded in §11.
 Owner request (relayed by the coordinator, 16:26 CDT, "proceed with default options"): extract the
 key-hierarchy, cloning/backup-restore and attestation design from the FHE wrapper plan v6 into a
 standalone `pqctoday-hsm` plan that is delivered first and that FHE then uses.
@@ -67,7 +68,7 @@ A certificate chain from the test manufacturing CA proves which **software insta
 | Capability | State | Evidence |
 |---|---|---|
 | ML-DSA-65 sign/verify, ML-KEM-768 encap/decap, AES-GCM, SHA-384 | Present | `rust/src/constants.rs`; AWS-LC PQ path `rust/src/crypto/awslc_pq.rs` |
-| HPKE in-token, pure ML-KEM KEMs `0x0040`–`0x0042`, HKDF-SHA384 and SHAKE256 KDFs | Present. Fixture hash matches upstream commit `6433c8fc`, the official draft-ietf-hpke-pq-05 tag | `CKM_HPKE` `0x80000014`; `rust/src/hpke_pq_vectors_tests.rs` |
+| HPKE in-token, pure ML-KEM KEMs `0x0040`–`0x0042`, HKDF-SHA384 and SHAKE256 KDFs | Present. The vector fixture comes from `hpkewg/hpke-pq@6433c8fc`, the official draft-ietf-hpke-pq-05 tag (hash-matched); K1 relabelled the test file from -04 to -05 | `CKM_HPKE` `0x80000014`; `rust/src/hpke_pq_vectors_tests.rs` |
 | HPKE output key | Fixed template: sensitive, non-extractable, encrypt/decrypt only, no `CKA_WRAP` | `rust/src/native/hpke.rs:810` (`register_aead_key`) |
 | HPKE deterministic-randomness hook | `pEphemeralSeed` reaches encapsulation with **no release guard** | `rust/src/ffi.rs:4831-4870`; `rust/src/native/hpke.rs:796,927,947` |
 | ACVP RNG hook in shipped WASM | `build-wasm-bundle.sh` always builds `--features acvp`; the feature lets non-null `C_Initialize.pReserved` seed the RNG | `rust/build-wasm-bundle.sh:65-70`; hook at `rust/src/ffi.rs:298` |
@@ -256,7 +257,7 @@ until its §12 allocation, review, vector and gate requirements close.
 
 | ID | Item | Phase |
 |---|---|---|
-| F1 | Diff draft-ietf-hpke-pq -04 → -05 and re-pin vectors (`rust/src/hpke_pq_vectors_tests.rs`) | K1 |
+| F1 | Relabel the HPKE vectors as draft-ietf-hpke-pq-05 in `rust/src/hpke_pq_vectors_tests.rs` and the CHANGELOG; the fixture is already the -05 tag, so no re-pin is needed | K1 |
 | F3 | Enforce `CKA_DERIVE_TEMPLATE` (today stored and flattened only). Record the C++ gap separately; this plan does not touch C++ | K1 |
 | F4 | Bound certificate, evidence and package sizes; specify exact ML-DSA-65 signed bytes | K0B/K1 |
 | F5 | Split shipped and test profiles: `wasm-playground` and native release builds without `acvp`. Reject `pReserved` and HPKE `pEphemeralSeed` in shipped artefacts. Ship a feature manifest, and have the Hub check the consumed artefact hash | K1 (exit blocker) |
@@ -285,7 +286,7 @@ F2 and F10 are FHE-specific and stay in the FHE plan.
 | **K3 · Attestation (native)** | Evidence for any key; in-engine and host-side verifiers | Evidence verifies against the chain; tests for stale nonce, misbound key, wrong function and downgrade pass; restored keys report true provenance |
 | **K4 · Replication (native)** | Implement the named vendor interface, package create/import primitives and live-clone wrapper for AES, ML-KEM-768 and ML-DSA-65 keys; F9, F12, F15, F16 | Every acceptance case in §10 passes for all three key classes; `CloneKey` and explicit create/import produce the same installed-key and receipt semantics; exclusions in §3 are refused with the documented error |
 | **K5 · Browser/WASM** | Same flows in the WASM build. Two token instances in workers use create/import; same-module tests also exercise `CloneKey`. Backup is downloaded and restore uploaded. On-screen disclosure says this is an emulator with a test hierarchy | Desktop browser matrix passes; the page states the custody limits |
-| **K6 · Hardware roots (later, separately approved)** | Bind the device identity key to a board root of trust on the i.MX 95 or KV260. Separate scoping document first, using those board programs' own evidence | Only hardware-backed evidence earns hardware claims; nothing in K1–K5 depends on K6 |
+| **K6 · Hardware roots (after K5; decision 9)** | Bind the device identity key to a board root of trust, the i.MX 95 first, then the KV260. Separate scoping document first, using those board programs' own evidence | Only hardware-backed evidence earns hardware claims; nothing in K1–K5 depends on K6 |
 
 **Critical path:** K-1 → K0A → K0B → K1 → K2 → K3 → K4. K5 follows K4. K6 is optional and later.
 
@@ -373,11 +374,11 @@ Every PR that adds a vendor constant, attribute, return code or fixture must sat
 
 ## 11. Owner decisions
 
-Recorded 2026-10-02. Decisions 1–8 come from the owner's "proceed" at 16:33 CDT. The coordinator
+Recorded 2026-10-02. Decisions 1–8 come from the owner's "proceed" at 16:33 CDT; decision 9 from a later owner answer the same evening. The coordinator
 session had asked "defaults for 1–8, choose 9" and relayed the answer; it is not a quote of each
 decision. Decision 10 is the owner's direct instruction in this session to update the plan with the
 explained vendor-interface proposition. Decision 11 records the owner's direct choice to stay with
-dummy identifiers rather than disclose application contact data. Decision 9 remains open.
+dummy identifiers rather than disclose application contact data.
 
 | # | Question | Decision |
 |---|---|---|
@@ -389,6 +390,6 @@ dummy identifiers rather than disclose application contact data. Decision 9 rema
 | 6 | New dependencies for X.509 and DER | **RustCrypto crates allowed**, subject to the K-1 licence and SBOM gate |
 | 7 | Time source | **Host clock** for certificate validity, with that limitation stated on screen |
 | 8 | Commit and push | **A local commit now** of this file and the three FHE docs on `docs/fhe-wrapper-plan-1002`. The owner's direct instruction in this session to execute this plan satisfies the local-commit gate. **Push and a docs-only PR only after tonight's FHE release**; this instruction does not by itself establish that the release gate has lifted |
-| 9 | Hardware phase: when, and which board first (i.MX 95 or KV260) | **Open.** K6 does not start until this is decided. Nothing in K-1 to K5 depends on it |
+| 9 | Hardware phase: when, and which board first (i.MX 95 or KV260) | **After the software phases, i.MX 95 first.** K6 starts only once K-1 to K5 have passed their exit gates; the i.MX 95 is the first board for the hardware root of trust, the KV260 follows. Owner answer "After software, i.MX 95 (Recommended)", relayed by the coordinator session, 2026-10-02 |
 | 10 | Package-export ABI after the K0A semantic NO-GO | **Selected: separate named PQCToday vendor interface.** `PQCTODAY_KEY_REPLICATION_1_0` is discovered through standard `C_GetInterface*` without changing `CK_FUNCTION_LIST_3_2`. `CreateReplicationPackage` and `ImportReplicationPackage` are the normative live/offline primitives; `CloneKey` is a convenience wrapper when one module addresses both sessions. Standard wrapping still refuses non-extractable keys; `C_DeriveKey` is rejected as an export channel |
 | 11 | OID identity while the project is educational | **Use the RFC 5612 dummy profile and do not apply for a PEN now.** The educational root is `1.3.6.1.4.1.32473.20261002`; it is not owned by PQCToday, does not support a production claim, and is rejected unless the local educational profile is explicitly enabled. Personal address, phone and application-contact data must not enter the repository. Production OIDs remain a future gate, not an implied requirement to register now |
