@@ -23,6 +23,64 @@ use softhsmrustv3::replication as repl;
 pub const IFACE_V1: &str = "PQCTODAY_KEY_REPLICATION_1_0";
 /// Pre-ABI test interface (7f): removed when the CEREMONY_1_0 shims land.
 pub const IFACE_CEREMONY_TEST: &str = "PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST";
+/// Admin interface (addendum §2.1): 1 AdminIssueNonce, 2 AdminExecute on the KMIP wire.
+pub const IFACE_ADMIN: &str = "PQCTODAY_KEY_REPLICATION_ADMIN_1_0";
+/// mTLS client-certificate CN of the admin role (pre-ABI: CN, not the A-04 EKU).
+pub const ROLE_ADMIN_CN: &str = "replication-admin";
+
+/// Board-local, root-only file holding the SO PIN (owner O7). Set once at server start.
+static SO_PIN_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// Slot the admin context logs into (the server's `--slot`).
+static ADMIN_SLOT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Configure the admin path (server start, `--replication-so-pin-file`).
+pub fn configure_admin(pin_file: std::path::PathBuf, slot: u32) {
+    let _ = SO_PIN_FILE.set(pin_file);
+    ADMIN_SLOT.store(slot, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One admin call in a fresh application context: open a R/W session in it, SO login with
+/// the board-local PIN, run the call, log out; the guard destroys the context and its
+/// sessions. The KMIP server closes each connection after one Request Message, so this
+/// per-request context is the per-connection context of addendum §1.1. User work in the
+/// default context is not paused (C1).
+fn admin_call(ordinal: u32, input: &[u8]) -> Result<Vec<u8>, u32> {
+    use softhsmrustv3::app_context::{self, ContextGuard, ContextMeta};
+    let pin = SO_PIN_FILE
+        .get()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+    let guard = ContextGuard::new(ContextMeta {
+        role: ROLE_ADMIN_CN.to_string(),
+        // The KMIP listener's own context holds the client-cert hash; the bridge does not see it.
+        client_cert_sha256: [0u8; 32],
+        listener: "kmip-replication-bridge".to_string(),
+        correlation: None,
+    });
+    let slot = ADMIN_SLOT.load(std::sync::atomic::Ordering::Relaxed);
+    let h = app_context::open_session(guard.id(), slot, CKF_SERIAL_SESSION | CKF_RW_SESSION)?;
+    let mut p = pin.into_bytes();
+    let rv = softhsmrustv3::ffi::C_Login(h, CKU_SO, p.as_mut_ptr(), p.len() as u32);
+    zeroize_vec(&mut p);
+    if rv != CKR_OK {
+        return Err(rv);
+    }
+    let r = match (ordinal, input.is_empty()) {
+        (0, true) => repl::admin::issue_nonce(h).map(|n| n.to_vec()),
+        (1, false) => repl::admin::execute(h, input),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    };
+    let _ = softhsmrustv3::ffi::C_Logout(h);
+    drop(guard);
+    r
+}
+
+fn zeroize_vec(v: &mut [u8]) {
+    for b in v.iter_mut() {
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+}
 
 // PKCS#11 return codes used here (values from pkcs11t.h).
 const CKR_ARGUMENTS_BAD: u32 = 0x0000_0007;
@@ -30,6 +88,8 @@ const CKR_FUNCTION_NOT_SUPPORTED: u32 = 0x0000_0054;
 const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
 const CKR_DATA_INVALID: u32 = 0x0000_0020;
 const CKR_USER_NOT_LOGGED_IN: u32 = 0x0000_0101;
+const CKR_USER_TYPE_INVALID: u32 = 0x0000_0103;
+use softhsmrustv3::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKU_SO};
 
 /// Maximum Input Parameters accepted before anything else (base §10 package bound + wrapper).
 const MAX_INPUT: usize = 256 * 1024 + 64;
@@ -40,16 +100,39 @@ static FIND_LOCK: Mutex<()> = Mutex::new(());
 
 /// True when `interface` names one of the replication interfaces this build serves.
 pub fn handles(interface: Option<&str>) -> bool {
-    matches!(interface, Some(IFACE_V1) | Some(IFACE_CEREMONY_TEST))
+    matches!(interface, Some(IFACE_V1) | Some(IFACE_CEREMONY_TEST) | Some(IFACE_ADMIN))
 }
 
 /// Dispatch one call. `function` is the KMIP `PKCS#11 Function` value, which KMIP 3.0 §11.39
 /// defines as the **1-based** offset in the function list (review A-06), so ordinal = value − 1.
 /// Returns `(CK_RV, output)`.
 pub fn dispatch(engine_session: Result<u32, ()>, interface: &str, function: u32, input: &[u8]) -> (u32, Option<Vec<u8>>) {
+    dispatch_as(engine_session, None, interface, function, input)
+}
+
+/// Role-aware dispatch: `peer` is the authenticated client identity (mTLS CN in open-auth).
+/// Admin requires the admin role and runs in its OWN application context with a real SO
+/// login (C1, addendum §1.1); user interfaces refuse the admin role.
+pub fn dispatch_as(engine_session: Result<u32, ()>, peer: Option<&str>, interface: &str, function: u32, input: &[u8]) -> (u32, Option<Vec<u8>>) {
     let Some(ordinal) = function.checked_sub(1) else {
         return (CKR_ARGUMENTS_BAD, None);
     };
+    if !repl::educational_profile_selected() {
+        return (CKR_FUNCTION_NOT_SUPPORTED, None);
+    }
+    let is_admin_peer = peer == Some(ROLE_ADMIN_CN);
+    if interface == IFACE_ADMIN {
+        if !is_admin_peer {
+            return (CKR_USER_TYPE_INVALID, None);
+        }
+        return match admin_call(ordinal, input) {
+            Ok(out) => (CKR_OK, Some(out)),
+            Err(rv) => (rv, None),
+        };
+    }
+    if is_admin_peer {
+        return (CKR_USER_TYPE_INVALID, None);
+    }
     if !repl::educational_profile_selected() {
         return (CKR_FUNCTION_NOT_SUPPORTED, None);
     }

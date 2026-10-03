@@ -129,6 +129,12 @@ struct Cli {
     #[arg(long)]
     educational_replication: bool,
 
+    /// Board-local root-only file with the SO PIN for the educational admin interface (O7).
+    /// Without it, admin calls are refused.
+    #[cfg(feature = "educational-replication")]
+    #[arg(long)]
+    replication_so_pin_file: Option<PathBuf>,
+
     /// Append-only JSONL audit log. Combined with the in-memory ring via CompositeSink.
     #[arg(long)]
     audit_log: Option<PathBuf>,
@@ -449,6 +455,9 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "educational-replication")]
     if cli.educational_replication {
         softhsmrustv3::replication::select_educational_profile();
+        if let Some(p) = &cli.replication_so_pin_file {
+            pqctoday_kmip::ops::replication_bridge::configure_admin(p.clone(), cli.slot);
+        }
         tracing::warn!(
             "PQCTODAY EDUCATIONAL TEST ONLY: replication interfaces served over KMIP on {} (pre-ceremony-ABI)",
             cli.listen

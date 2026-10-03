@@ -127,7 +127,8 @@ pub fn pkcs11(
         let iface = req.interface.clone().unwrap_or_default();
         let session = deps.resolve_tenant_session(auth.identity.as_ref()).map_err(|_| ());
         let input = req.input_parameters.as_deref().unwrap_or(&[]);
-        let (rv, out) = super::replication_bridge::dispatch(session, &iface, req.function, input);
+        let peer = auth.identity.as_ref().map(|i| i.username.as_str());
+        let (rv, out) = super::replication_bridge::dispatch_as(session, peer, &iface, req.function, input);
         emit_pkcs11(deps, correlation_id, "replication", None, rv, &ckr_display_name(rv));
         emit_success(deps, correlation_id, "PKCS_11");
         let cv = req.correlation_value.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());

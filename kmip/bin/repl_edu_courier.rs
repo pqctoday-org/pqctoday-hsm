@@ -30,6 +30,7 @@ use softhsmrustv3::replication::{self as repl, host_verify, pki::TrustInputs, te
 
 const V1: &str = "PQCTODAY_KEY_REPLICATION_1_0";
 const TEST: &str = "PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST";
+const IFACE_ADMIN: &str = "PQCTODAY_KEY_REPLICATION_ADMIN_1_0";
 /// Fixed educational replication domain for this lab.
 const DOMAIN: [u8; 32] = *b"PQCTODAY-EDU-LAB-MX95-MX95PRO-01";
 
@@ -40,6 +41,10 @@ repl_edu_courier ceremony  --src-kmip IP:PORT --dst-kmip IP:PORT --src-name SNI 
                            --trust DIR --uid UID --out DIR [--op live|backup|restore] [--negative]
                            [--dst-policy FILE] [--expect-refusal]
 repl_edu_courier make-policy --trust DIR --out FILE [--fhe]
+repl_edu_courier bootstrap ... --m12 --hook-up CMD --src-kmip IP:PORT --dst-kmip IP:PORT --src-name SNI --dst-name SNI
+                 --tls-ca PEM --client-cert PEM --client-key PEM --admin-cert PEM --admin-key PEM
+  (M12: board-local admin-authority enrollment, source AES key, then servers up and signed admin
+   operations over KMIP on both boards with host-verified receipts and admin negatives)
   (bootstrap test flag: --fhe-skip-dst-decrypt-policy enrolls the FHE decrypt policy on the source only)";
 
 fn main() {
@@ -199,6 +204,147 @@ fn bootstrap(a: &mut Vec<String>) -> Result<(), String> {
     }
     save(&out, "policy-id.bin", &pid)?;
     println!("bootstrap OK: both boards enrolled under one test root; policy id {}", hex(&pid[..8]));
+    if take_flag(a, "--m12") {
+        m12(a, &mut ca, &boards, &devs, &out, t)?;
+    }
+    Ok(())
+}
+
+// ── M12: signed administration over KMIP (admin addendum 3.2; engine M9 + C1) ─────────
+
+fn m12(a: &mut Vec<String>, ca: &mut TestManufacturingCa, boards: &[Board; 2], devs: &[(Vec<u8>, Vec<u8>, [u8; 32])], out: &Path, t: u64) -> Result<(), String> {
+    use softhsmrustv3::replication::admin::AdminOperation;
+    use softhsmrustv3::replication::{admin_host, test_ca::AdminAuthorityKey};
+    let hook_up = need(a, "--hook-up")?;
+    let ca_pem = need(a, "--tls-ca")?;
+    let user_tls = tls_config(&ca_pem, &need(a, "--client-cert")?, &need(a, "--client-key")?)?;
+    let admin_tls = tls_config(&ca_pem, &need(a, "--admin-cert")?, &need(a, "--admin-key")?)?;
+    let parse = |addr: String| -> Result<(String, u16), String> {
+        let (h, p) = addr.rsplit_once(':').ok_or("address must be IP:PORT")?;
+        Ok((h.to_string(), p.parse().map_err(|_| "bad port")?))
+    };
+    let addrs = [(parse(need(a, "--src-kmip")?)?, need(a, "--src-name")?), (parse(need(a, "--dst-kmip")?)?, need(a, "--dst-name")?)];
+
+    // 1. Board-local: admin-authority certificate (host-held key) on both boards.
+    let ak = AdminAuthorityKey::new(ca, t).map_err(rv("admin authority key"))?;
+    save(out, "admin-authority.der", &ak.cert_der)?;
+    for b in boards {
+        b.put("admin-authority.der", &ak.cert_der)?;
+        b.tool(&format!("admin-enroll {}/x/admin-authority.der", b.dir))?;
+    }
+    // 2. Board-local: the source key for the post-admin live clone (servers still down).
+    let d0 = &boards[0].dir;
+    boards[0].ssh(&format!("mkdir -p {d0}/x/m12-aes"), None)?;
+    boards[0].tool(&format!("genkey aes256 {d0}/x/policy-id.bin {d0}/x/m12-aes"))?;
+    save(out, "m12-src-uid.txt", &boards[0].get("m12-aes/uid.txt")?)?;
+    // 3. Servers up (the runner's hook: stop appliance kmip, start the test servers).
+    println!("== M12 hook-up: {hook_up}");
+    let st = Command::new("sh").args(["-c", &hook_up]).status().map_err(|e| format!("hook-up: {e}"))?;
+    if !st.success() {
+        return Err("hook-up failed".into());
+    }
+    let ep = |i: usize, tls: &Arc<rustls::ClientConfig>| Kmip { host: addrs[i].0 .0.clone(), port: addrs[i].0 .1, sni: addrs[i].1.clone(), tls: tls.clone() };
+    let mut trust = TrustInputs { roots: vec![ca.root_der().to_vec()], crls: vec![load(out, "root-crl.der")?, load(out, "src-device-crl.der")?, load(out, "dst-device-crl.der")?] };
+    let key_id = ak.key_id();
+    let mut log = String::new();
+    let mut line = |l: String| {
+        println!("{l}");
+        log.push_str(&l);
+        log.push('\n');
+    };
+    let rc_name = |rc: i32| format!("0x{:08x}", rc as u32);
+
+    // One signed admin call: fresh nonce, sign, execute, verify the receipt on the host.
+    let run = |admin: &Kmip, dev: &[u8; 32], seq: u64, op: &AdminOperation, trust: &TrustInputs| -> Result<(i32, Vec<u8>, Vec<u8>), String> {
+        let (rc, nonce, _, _) = admin.call(IFACE_ADMIN, 1, &[])?;
+        if rc != 0 {
+            return Ok((rc, Vec::new(), Vec::new()));
+        }
+        let nonce: [u8; 32] = nonce.try_into().map_err(|_| "nonce size")?;
+        let tbs = admin_host::tbs_request(dev, &key_id, &nonce, seq, now(), op).map_err(rv("tbs_request"))?;
+        let sig = ak.sign(&admin_host::request_signed_bytes(&tbs)).map_err(rv("admin sign"))?;
+        let req = admin_host::signed_request(&tbs, &sig).map_err(rv("signed_request"))?;
+        let (rc, receipt, _, _) = admin.call(IFACE_ADMIN, 2, &req)?;
+        if rc == 0 {
+            host_verify::verify_admin_receipt(&receipt, &req, trust, now(), repl::Profile::Educational).map_err(|e| format!("admin receipt verify: {e:?}"))?;
+        }
+        Ok((rc, req, receipt))
+    };
+
+    for (i, b) in boards.iter().enumerate() {
+        let admin = ep(i, &admin_tls);
+        let user = ep(i, &user_tls);
+        let dev = devs[i].2;
+        let other = devs[1 - i].2;
+        let name = if i == 0 { "src" } else { "dst" };
+        // seq 1: enroll a policy (a v2 of the bootstrap policy, longer validity).
+        let mut mechs = vec![CKM_AES_GCM, CKM_ML_KEM, CKM_ML_DSA];
+        mechs.sort_unstable();
+        let p2 = repl::records::build_policy(DOMAIN, [true, true, true], vec![devs[0].2, devs[1].2], t - 60, t + 14 * 86_400, 4, mechs, false).map_err(rv("policy v2"))?;
+        let (rc, req1, rcpt1) = run(&admin, &dev, 1, &AdminOperation::EnrollPolicy { policy: p2 }, &trust)?;
+        line(format!("[{name}] seq1 enrollPolicy            CK_RV={} receipt={} B{}", rc_name(rc), rcpt1.len(), if rc == 0 { "  receipt host-verified" } else { "" }));
+        if rc != 0 {
+            return Err(format!("{name}: enrollPolicy refused"));
+        }
+        // Negatives.
+        let (rc, retry, _, _) = admin.call(IFACE_ADMIN, 2, &req1)?;
+        let same = rc == 0 && retry == rcpt1;
+        line(format!("[{name}] NEG exact retry → same receipt            {}", if same { "PASS" } else { "FAIL" }));
+        if !same {
+            return Err("exact admin retry did not return the stored receipt".into());
+        }
+        let mut neg = |what: &str, r: (i32, Vec<u8>, Vec<u8>)| -> Result<(), String> {
+            line(format!("[{name}] NEG {what:<36} CK_RV={}", rc_name(r.0)));
+            if r.0 == 0 { Err(format!("FAIL {name}: {what} accepted")) } else { Ok(()) }
+        };
+        neg("sequence gap (3 instead of 2)", run(&admin, &dev, 3, &AdminOperation::RotateRecoveryKey, &trust)?)?;
+        neg("wrong device id (peer's)", run(&admin, &other, 2, &AdminOperation::RotateRecoveryKey, &trust)?)?;
+        {
+            let (rc, nonce, _, _) = admin.call(IFACE_ADMIN, 1, &[])?;
+            let nonce: [u8; 32] = nonce.try_into().map_err(|_| format!("nonce rc {}", rc_name(rc)))?;
+            let tbs = admin_host::tbs_request(&dev, &key_id, &nonce, 2, now(), &AdminOperation::RotateRecoveryKey).map_err(rv("tbs"))?;
+            let mut sig = ak.sign(&admin_host::request_signed_bytes(&tbs)).map_err(rv("sign"))?;
+            sig[100] ^= 1;
+            let req = admin_host::signed_request(&tbs, &sig).map_err(rv("signed_request"))?;
+            let (rc, _, _, _) = admin.call(IFACE_ADMIN, 2, &req)?;
+            neg("tampered signature", (rc, Vec::new(), Vec::new()))?;
+            // the consumed-or-replaced nonce is now stale: reuse it with a correct signature
+            let sig2 = ak.sign(&admin_host::request_signed_bytes(&tbs)).map_err(rv("sign"))?;
+            let _ = admin.call(IFACE_ADMIN, 1, &[])?; // replace-on-issue makes `nonce` stale
+            let req2 = admin_host::signed_request(&tbs, &sig2).map_err(rv("signed_request"))?;
+            let (rc, _, _, _) = admin.call(IFACE_ADMIN, 2, &req2)?;
+            neg("stale (replaced) nonce", (rc, Vec::new(), Vec::new()))?;
+        }
+        let (rc, _, _, _) = user.call(IFACE_ADMIN, 1, &[])?;
+        line(format!("[{name}] NEG user-role connection → admin     CK_RV={} {}", rc_name(rc), if rc == 0x103 { "PASS" } else { "FAIL" }));
+        if rc != 0x103 {
+            return Err("user role reached the admin interface".into());
+        }
+        let (rc, _, _, _) = admin.call(TEST, 1, &[])?;
+        line(format!("[{name}] NEG admin-role connection → ceremony CK_RV={} {}", rc_name(rc), if rc == 0x103 { "PASS" } else { "FAIL" }));
+        if rc != 0x103 {
+            return Err("admin role reached a user interface".into());
+        }
+        // seq 2..4: rotation, a newer root CRL, function re-issuance.
+        let (rc, _, r2) = run(&admin, &dev, 2, &AdminOperation::RotateRecoveryKey, &trust)?;
+        line(format!("[{name}] seq2 rotateRecoveryKey       CK_RV={} receipt={} B", rc_name(rc), r2.len()));
+        if rc != 0 { return Err("rotateRecoveryKey refused".into()); }
+        let crl2 = ca.crl(now() - 60, now() + 7 * 86_400).map_err(rv("root CRL 2"))?;
+        let (rc, _, r3) = run(&admin, &dev, 3, &AdminOperation::EnrollCrl { crl: crl2.clone(), issuer_device_cert: None }, &trust)?;
+        line(format!("[{name}] seq3 enrollCrl (newer root)   CK_RV={} receipt={} B", rc_name(rc), r3.len()));
+        if rc != 0 { return Err("enrollCrl refused".into()); }
+        trust.crls[0] = crl2.clone();
+        // keep the second board on the same root CRL number sequence
+        if i == 0 {
+            let _ = b;
+        }
+        let (rc, _, r4) = run(&admin, &dev, 4, &AdminOperation::IssueFunctionCerts, &trust)?;
+        line(format!("[{name}] seq4 issueFunctionCerts       CK_RV={} receipt={} B", rc_name(rc), r4.len()));
+        if rc != 0 { return Err("issueFunctionCerts refused".into()); }
+    }
+    save(out, "root-crl.der", &trust.crls[0])?;
+    save(out, "m12-admin.log", log.as_bytes())?;
+    println!("M12 admin phase PASS on both boards (servers left up for the post-admin ceremony)");
     Ok(())
 }
 

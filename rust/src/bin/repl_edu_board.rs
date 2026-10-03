@@ -28,6 +28,7 @@ repl_edu_board --store DIR [--slot N] <command> [args]
                                          writes OUTDIR/{device.der,device-crl.der,device-id.bin}
   peer DEV CRL                           SO: enroll a peer device certificate + its CRL
   root-crl CRL                           SO: enroll a newer root CRL
+  admin-enroll CERT                      SO: enroll the host-held admin-authority certificate (board-local)
   policy POLICY OUT                      SO: enroll a policy, write its 48-byte id
   genkey KIND POLICYID OUTDIR            user: policy-bound key; KIND = aes256|mlkem768|mldsa65;
                                          writes OUTDIR/{uid.txt,lineage.bin[,pub-uid.txt]}
@@ -109,6 +110,8 @@ fn run() -> Result<(), String> {
             let (dev, crl) = (read(&a[0])?, read(&a[1])?);
             repl::enroll_crl(so, &crl, Some(&dev)).map_err(ck("enroll_crl(peer)"))
         })?,
+        // Board-local bootstrap of the admin authority (addendum §1, owner O4): never over the network.
+        ("admin-enroll", 1) => as_so(slot, &so_pin, |so| repl::admin::enroll_admin_authority(so, &read(&a[0])?).map_err(ck("enroll_admin_authority")))?,
         ("root-crl", 1) => as_so(slot, &so_pin, |so| repl::enroll_crl(so, &read(&a[0])?, None).map_err(ck("enroll_crl(root)")))?,
         ("policy", 2) => as_so(slot, &so_pin, |so| {
             let id = repl::enroll_policy(so, &read(&a[0])?).map_err(ck("enroll_policy"))?;
