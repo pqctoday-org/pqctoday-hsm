@@ -542,6 +542,32 @@ pub fn own_device_crl(session: u32) -> Result<Vec<u8>, u32> {
     records::crls(slot).into_iter().find(|(_, k, _)| *k == ski).map(|(_, _, d)| d).ok_or(CKR_DEVICE_ERROR)
 }
 
+/// This slot's device ID (SHA-256 of its device certificate's SPKI).
+pub(crate) fn device_id_of_slot(slot: u32) -> Result<[u8; 32], u32> {
+    Ok(pki::device_id_of(&device_cert(slot)?))
+}
+
+/// The CRL number of the CRL enrolled for `issuer_key_id` (0 if none).
+pub(crate) fn stored_crl_number(slot: u32, issuer_key_id: &[u8]) -> u64 {
+    records::crls(slot)
+        .into_iter()
+        .find(|(_, k, _)| k == issuer_key_id)
+        .and_then(|(_, _, der)| crl_number_of(&der))
+        .unwrap_or(0)
+}
+
+fn crl_number_of(der: &[u8]) -> Option<u64> {
+    use const_oid::AssociatedOid;
+    let c = x509_cert::crl::CertificateList::from_der(der).ok()?;
+    c.tbs_cert_list
+        .crl_extensions
+        .unwrap_or_default()
+        .into_iter()
+        .find(|x| x.extn_id == x509_cert::ext::pkix::CrlNumber::OID)
+        .and_then(|x| x509_cert::ext::pkix::CrlNumber::from_der(x.extn_value.as_bytes()).ok())
+        .map(|n| n.0.as_bytes().iter().fold(0u64, |a, b| (a << 8) | *b as u64))
+}
+
 /// True once the slot holds a device identity with issued function keys.
 pub fn hierarchy_ready(slot: u32) -> bool {
     enrollment_state(slot) == 3

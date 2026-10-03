@@ -25,6 +25,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   device-CRL number keeps increasing. Revoking a certificate by its bytes is
   now limited to retired certificates the token still holds; active or
   foreign certificates are refused.
+  Signed remote administration of replication (admin addendum 1.0): the SO
+  enrolls one admin-authority certificate per token on the board, and from
+  then on can run CRL and policy enrollment, recovery-key rotation, function
+  re-issuance and device-CRL issuance as requests signed by that authority.
+  Each request must carry the token's current one-minute nonce and the next
+  sequence number. It commits atomically with a replay-ledger entry and
+  returns a receipt signed by the token. An exact retry returns the same
+  receipt. Host-side helpers build and sign requests and verify receipts.
 
 - **Pre-push hook allows delete-only pushes.** Deleting a remote branch
   (`git push origin --delete <branch>`) sends no commit, so the hook no longer

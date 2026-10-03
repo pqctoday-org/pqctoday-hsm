@@ -24,6 +24,8 @@
 //! - [`test_ca`] — the host-side test manufacturing CA (never token-resident);
 //! - `abi` — the separately discovered `PQCTODAY_KEY_REPLICATION_1_0` list.
 
+pub mod admin;
+pub mod admin_host;
 pub mod asn1;
 pub mod enroll;
 pub mod evidence;
