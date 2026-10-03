@@ -21,6 +21,8 @@
     "0x80000013": {"symbol": "CKM_HPKE_KEM_KEY_PAIR_GEN",                 "operation": "keygen",      "algorithm": "HPKE (RFC 9180) KEM key pairs, classical DHKEM and PQ/T hybrid — authority §1.4"},
     "0x80000014": {"symbol": "CKM_HPKE",                                  "operation": "encap_decap", "algorithm": "Full HPKE (KEM + RFC 9180 §5.1 KeySchedule) — authority §1.4"},
     "0x80000015": {"symbol": "CKM_PQCTODAY_ECDSA_EXPLICIT_K",             "operation": "sign",        "algorithm": "ECDSA P-256/384/521 with caller-supplied k (key-recovery teaching primitive, see SECURITY.md) — authority §1.4"},
+    "0x80000016": {"symbol": "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE",   "operation": "internal",    "algorithm": "Constrained ML-DSA-65 function-certificate issuance by a device issuer (Rust engine, educational-replication; engine-internal, never advertised) — reserved in authority commit 36340f93, NOT yet upstream"},
+    "0x80000017": {"symbol": "CKM_PQCTODAY_SIGN_KEY_ATTESTATION",         "operation": "internal",    "algorithm": "Constrained ML-DSA-65 key-attestation evidence signing (Rust engine, educational-replication; engine-internal, never advertised) — reserved in authority commit 36340f93, NOT yet upstream"},
     "0x80000100": {"symbol": "CKM_KMAC_128",                              "operation": "mac",         "algorithm": "KMAC-128 (Rust engine only) — authority §1.4.2"},
     "0x80000101": {"symbol": "CKM_KMAC_256",                              "operation": "mac",         "algorithm": "KMAC-256 (Rust engine only) — authority §1.4.2"},
     "0x80001057": {"symbol": "CKM_EDDSA_PH",                              "operation": "sign",        "algorithm": "Pre-hashed EdDSA (Rust engine only) — authority §1.4.2"},

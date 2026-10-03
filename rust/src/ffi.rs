@@ -2320,6 +2320,112 @@ mod ec_extra_bits_tests {
     }
 }
 
+/// K0B replication gate, pre-generation half. `Ok(None)`: the template names
+/// no replication attribute. `Ok(Some(policy_id))`: a validated request to
+/// bind the new key to an enrolled policy (educational-replication only).
+/// Any other replication attribute — or any at all without the feature — is
+/// refused before key material exists.
+///
+/// # Safety
+/// Same contract as `absorb_template_attrs`.
+unsafe fn replication_gate_pre(template: *mut u8, count: u32) -> Result<Option<Vec<u8>>, u32> {
+    if !crate::crypto::handlers::template_has_replication_attr(template, count) {
+        return Ok(None);
+    }
+    #[cfg(feature = "educational-replication")]
+    {
+        crate::replication::binding_request_from_template(template, count).map(Some)
+    }
+    #[cfg(not(feature = "educational-replication"))]
+    {
+        Err(CKR_ATTRIBUTE_TYPE_INVALID)
+    }
+}
+
+/// Post-generation half: bind the freshly generated key, or destroy what was
+/// generated and fail. The caller sees either a bound key or no key.
+///
+/// # Safety
+/// `ph_key`/`ph_pub` are the caller's already-written out-params.
+#[allow(unused_variables)]
+unsafe fn replication_gate_post(
+    h_session: u32,
+    p_mechanism: *mut u8,
+    ph_pub: Option<*mut u32>,
+    ph_key: *mut u32,
+    policy_id: &[u8],
+) -> u32 {
+    #[cfg(feature = "educational-replication")]
+    {
+        let mech = ck_param::mech(p_mechanism).mechanism;
+        let h_pub = ph_pub.map(|p| *p);
+        match crate::replication::bind_generated_key(h_session, mech, *ph_key, h_pub, policy_id) {
+            Ok(()) => CKR_OK,
+            Err(rv) => {
+                crate::replication::discard_object(*ph_key);
+                *ph_key = 0;
+                if let Some(p) = ph_pub {
+                    crate::replication::discard_object(*p);
+                    *p = 0;
+                }
+                rv
+            }
+        }
+    }
+    #[cfg(not(feature = "educational-replication"))]
+    {
+        CKR_ATTRIBUTE_TYPE_INVALID
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_key_pair_with_replication_gate(
+    h_session: u32,
+    p_mechanism: *mut u8,
+    p_public_key_template: *mut u8,
+    ul_public_key_attribute_count: u32,
+    p_private_key_template: *mut u8,
+    ul_private_key_attribute_count: u32,
+    ph_public_key: *mut u32,
+    ph_private_key: *mut u32,
+) -> u32 {
+    require_init!();
+    require_session!(h_session);
+    // The binding belongs on the private half only; any replication
+    // attribute in the public template is refused.
+    if unsafe {
+        crate::crypto::handlers::template_has_replication_attr(
+            p_public_key_template,
+            ul_public_key_attribute_count,
+        )
+    } {
+        return CKR_ATTRIBUTE_READ_ONLY;
+    }
+    let binding = match unsafe { replication_gate_pre(p_private_key_template, ul_private_key_attribute_count) } {
+        Ok(b) => b,
+        Err(rv) => return rv,
+    };
+    let rv = C_GenerateKeyPair_impl(
+        h_session,
+        p_mechanism,
+        p_public_key_template,
+        ul_public_key_attribute_count,
+        p_private_key_template,
+        ul_private_key_attribute_count,
+        ph_public_key,
+        ph_private_key,
+    );
+    if rv != CKR_OK {
+        return rv;
+    }
+    match binding {
+        None => CKR_OK,
+        Some(policy_id) => unsafe {
+            replication_gate_post(h_session, p_mechanism, Some(ph_public_key), ph_private_key, &policy_id)
+        },
+    }
+}
+
 fn C_GenerateKeyPair_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -4360,6 +4466,33 @@ unsafe fn gate_ro_session_for_template(
 
 #[wasm_bindgen(js_name = _C_GenerateKey)]
 pub fn C_GenerateKey(
+    _h_session: u32,
+    p_mechanism: *mut u8,
+    p_template: *mut u8,
+    ul_count: u32,
+    ph_key: *mut u32,
+) -> u32 {
+    // Spec §9 precedence: initialization and session before any template
+    // inspection (the _impl below repeats these checks; they are idempotent).
+    require_init!();
+    require_session!(_h_session);
+    // K0B replication gate: a template naming a replication attribute is
+    // either a validated policy binding (educational-replication) or refused.
+    let binding = match unsafe { replication_gate_pre(p_template, ul_count) } {
+        Ok(b) => b,
+        Err(rv) => return rv,
+    };
+    let rv = C_GenerateKey_impl(_h_session, p_mechanism, p_template, ul_count, ph_key);
+    if rv != CKR_OK {
+        return rv;
+    }
+    match binding {
+        None => CKR_OK,
+        Some(policy_id) => unsafe { replication_gate_post(_h_session, p_mechanism, None, ph_key, &policy_id) },
+    }
+}
+
+fn C_GenerateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
     p_template: *mut u8,
@@ -7059,6 +7192,10 @@ pub fn C_CreateObject(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
+    if unsafe { crate::crypto::handlers::template_has_replication_attr(p_template, count) } {
+        // K0B §8: replication attributes are never caller-supplied here.
+        return CKR_ATTRIBUTE_READ_ONLY;
+    }
     if ph_object.is_null() || (p_template.is_null() && count > 0) {
         return CKR_ARGUMENTS_BAD;
     }
@@ -11939,6 +12076,10 @@ pub fn C_DeriveKey(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
+    if unsafe { crate::crypto::handlers::template_has_replication_attr(p_template, ul_attribute_count) } {
+        // K0B §8: replication attributes are never caller-supplied here.
+        return CKR_ATTRIBUTE_READ_ONLY;
+    }
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
@@ -13880,6 +14021,10 @@ pub fn C_UnwrapKey(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
+    if unsafe { crate::crypto::handlers::template_has_replication_attr(p_template, ul_attribute_count) } {
+        // K0B §8: replication attributes are never caller-supplied here.
+        return CKR_ATTRIBUTE_READ_ONLY;
+    }
     // §5.18.4 — pWrappedKey is the input ciphertext and phKey the required
     // out-param; neither may be NULL.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
@@ -14435,6 +14580,10 @@ pub fn C_UnwrapKeyAuthenticated(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
+    if unsafe { crate::crypto::handlers::template_has_replication_attr(p_template, ul_attribute_count) } {
+        // K0B §8: replication attributes are never caller-supplied here.
+        return CKR_ATTRIBUTE_READ_ONLY;
+    }
     // Same required-pointer surface as C_UnwrapKey.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
     unsafe {
@@ -16158,6 +16307,10 @@ pub fn C_CopyObject(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
+    if unsafe { crate::crypto::handlers::template_has_replication_attr(p_template, ul_count) } {
+        // K0B §8: replication attributes are never caller-supplied here.
+        return CKR_ATTRIBUTE_READ_ONLY;
+    }
     nonnull!(ph_new_object);
     if p_template.is_null() && ul_count > 0 {
         return CKR_ARGUMENTS_BAD;
@@ -25991,7 +26144,7 @@ pub fn C_GenerateKeyPair(
     let ring = crate::behaviour::enabled();
     let t0 = (logging || ring).then(std::time::Instant::now);
 
-    let rv = C_GenerateKeyPair_impl(
+    let rv = generate_key_pair_with_replication_gate(
         h_session,
         p_mechanism,
         p_public_key_template,

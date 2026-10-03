@@ -366,6 +366,35 @@ pub(crate) fn template_attr_is_skipped(attr_type: u32) -> bool {
         || attr_type == CKA_SEED
         || attr_type >= 0xFFFF0000
         || is_server_managed_attr(attr_type)
+        || is_replication_attr(attr_type)
+}
+
+/// K0B §4 replication attributes. Never absorbed generically from a caller
+/// template: lineage, provenance and function purpose are engine-computed,
+/// and a policy binding is honoured only through the explicit, validated
+/// key-generation path in `crate::replication` (feature-gated). Paths that
+/// can return an error refuse them outright via
+/// [`template_has_replication_attr`]; this skip is the backstop for the rest.
+pub(crate) fn is_replication_attr(attr_type: u32) -> bool {
+    matches!(
+        attr_type,
+        CKA_PQCTODAY_REPLICATION_POLICY_ID
+            | CKA_PQCTODAY_REPLICATION_LINEAGE_ID
+            | CKA_PQCTODAY_REPLICATION_PROVENANCE
+            | CKA_PQCTODAY_FUNCTION_PURPOSE
+    )
+}
+
+/// True when a raw CK_ATTRIBUTE template names any K0B replication attribute.
+///
+/// # Safety
+/// Same contract as [`absorb_template_attrs`].
+pub unsafe fn template_has_replication_attr(template: *mut u8, count: u32) -> bool {
+    if template.is_null() || count == 0 || count > 65536 {
+        return false;
+    }
+    let ptr = template as *mut usize;
+    (0..count).any(|i| is_replication_attr(*ptr.add((i * 3) as usize) as u32))
 }
 
 /// Copy all attributes from a caller's CK_ATTRIBUTE template into the attrs map.

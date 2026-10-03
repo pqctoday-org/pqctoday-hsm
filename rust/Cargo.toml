@@ -45,6 +45,16 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 default = ["awslc-pq"]
 acvp = []
 
+# K2–K4 PQCToday key hierarchy, attestation and protected replication
+# (docs/proposals/pqctoday-key-replication-interface-1.0.md). OPT-IN, NOT
+# default, and EDUCATIONAL ONLY: it uses the RFC 5612 documentation OID
+# profile (1.3.6.1.4.1.32473.20261002), which must never reach a production
+# artifact. No shipped native or WASM build enables it until the private
+# authority allocations land, the K0B review closes and the owner enables
+# advertisement. Even when compiled in, nothing is discoverable until a
+# caller explicitly selects the educational profile at runtime.
+educational-replication = ["dep:x509-cert", "dep:der", "dep:spki07", "dep:const-oid"]
+
 # ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
 # mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
 # rejection-sampling and norm routines the pure-Rust fips204 / ml-kem crates do
@@ -99,12 +109,31 @@ name = "awslc_pq_bench"
 required-features = ["awslc-pq"]
 
 [[test]]
+# K2–K4 replication acceptance suites (educational feature + reset hook).
+name = "replication_k2"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
+name = "replication_k3"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
+name = "replication_k4"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
 # the process-global token store with distinct test ceremonies.
 name = "hierarchy_attestation_spikes"
 required-features = ["test-support"]
 
 [dependencies]
+# Optional: educational-replication only (see [features]). Same RustCrypto
+# versions as the dev-dependency K0A spikes and the KMIP certificate code.
+x509-cert = { version = "0.2", default-features = false, features = ["builder"], optional = true }
+der = { version = "0.7", features = ["oid", "alloc", "std", "derive"], optional = true }
+spki07 = { package = "spki", version = "0.7", features = ["alloc"], optional = true }
+const-oid = { version = "0.9", features = ["db"], optional = true }
 wasm-bindgen = "0.2.117"
 js-sys = "0.3.69"
 web-sys = { version = "0.3.69", features = ["console"] }

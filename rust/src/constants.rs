@@ -68,6 +68,9 @@ pub const CKR_TOKEN_WRITE_PROTECTED: u32 = 0x0000_00E2;
 pub const CKR_ATTRIBUTE_TYPE_INVALID: u32 = 0x0000_0012; // PKCS#11 §11.7 — attribute not present on object
 pub const CKR_BUFFER_TOO_SMALL: u32 = 0x0000_0150;
 pub const CKR_ENCRYPTED_DATA_INVALID: u32 = 0x0000_0040;
+// PKCS#11 v3.2 pkcs11t.h — used by the K4 replication ledger (spec §9 items 12–13).
+pub const CKR_DEVICE_ERROR: u32 = 0x0000_0030;
+pub const CKR_DEVICE_MEMORY: u32 = 0x0000_0031;
 pub const CKR_KEY_SIZE_RANGE: u32 = 0x0000_0062;
 pub const CKR_OPERATION_ACTIVE: u32 = 0x0000_0090;
 // PKCS#11 v3.2 §5.18 wrap/unwrap return codes (values from pkcs11t.h).
@@ -451,6 +454,22 @@ pub const CKA_PRIV_STATEFUL_KEY_STATE: u32 = 0xFFFF_0005;
 pub const CKA_PRIV_LEAF_INDEX: u32 = 0xFFFF_0006;
 /// Remaining XMSS / XMSS^MT signature operations (CK_ULONG width, LE).
 pub const CKA_PRIV_XMSS_KEYS_REMAINING: u32 = 0xFFFF_0007;
+// K2–K4 replication engine state (educational-replication). Engine-private:
+// never absorbed from a caller template and never client-writable, so a value
+// here proves the ENGINE wrote it. Present only on objects the replication
+// module created or bound.
+/// Role byte of an engine-owned replication object (function key, trust
+/// anchor, CRL, policy, challenge, ledger entry, cached package, receipt).
+pub const CKA_PRIV_REPL_ROLE: u32 = 0xFFFF_0008;
+/// Engine-written copy of the 48-byte policy digest on a bound eligible key.
+/// `CKA_PQCTODAY_REPLICATION_POLICY_ID` alone is NOT trusted: a key is
+/// replicable only when both carry the same digest.
+pub const CKA_PRIV_REPL_BINDING: u32 = 0xFFFF_0009;
+/// Opaque engine record bytes for a replication state object.
+pub const CKA_PRIV_REPL_RECORD: u32 = 0xFFFF_000A;
+/// Remaining transferable replica budget of a bound key (u32 LE). Durable
+/// state outside the immutable policy (spec §8; review K0B-R-12).
+pub const CKA_PRIV_REPL_BUDGET: u32 = 0xFFFF_000B;
 
 // ── PKCS#11 Mechanism Types ──────────────────────────────────────────────────
 
@@ -784,6 +803,13 @@ pub const CKM_HPKE: u32 = 0x8000_0014;
 // (pkcs11-vendor-mech-allocation.md §1.4); mirrored in
 // src/lib/vendor_mechanisms.h.
 pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
+// K0B constrained hierarchy mechanisms (private-authority reservation
+// 36340f93, not yet upstream). Engine-internal only: they appear in function
+// keys' CKA_ALLOWED_MECHANISMS but are deliberately ABSENT from
+// C_GetMechanismList, C_Sign and every other caller-reachable dispatch, so a
+// function key is never a general signing oracle.
+pub const CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE: u32 = 0x8000_0016;
+pub const CKM_PQCTODAY_SIGN_KEY_ATTESTATION: u32 = 0x8000_0017;
 // ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
 // draft's own name and codepoint — no longer a vendor-range stopgap. See
@@ -1274,6 +1300,21 @@ pub const CKA_LMS_PARAM_SET: u32 = 0x8000_0102; // CKP_LMS_SHA256_M32_H* value
 pub const CKA_LMOTS_PARAM_SET: u32 = 0x8000_0103; // CKP_LMOTS_SHA256_N32_W* value
 pub const CKA_XMSS_PARAM_SET: u32 = 0x8000_0104; // CKP_XMSS_* value
 pub const CKA_XMSSMT_PARAM_SET: u32 = 0x8000_0107; // CKP_XMSSMT_* value (RFC 8391 OID)
+
+// ── PQCToday key replication attributes (K0B; private-authority reservation
+// 36340f93, NOT yet on the authority's origin/main) ─────────────────────────
+// docs/proposals/pqctoday-key-replication-interface-1.0.md §4. All four are
+// engine-computed or creation-only: `state::attr_mutation_allowed` refuses
+// every write, and `template_attr_is_skipped` never absorbs them from a
+// caller template. Only the educational-replication feature acts on them.
+/// Immutable 48-byte SHA-384 digest of the enrolled canonical policy DER.
+pub const CKA_PQCTODAY_REPLICATION_POLICY_ID: u32 = 0x8000_0108;
+/// Immutable 32-byte lineage shared by protected replicas.
+pub const CKA_PQCTODAY_REPLICATION_LINEAGE_ID: u32 = 0x8000_0109;
+/// Engine-produced DER ReplicationProvenance on a restored/cloned key.
+pub const CKA_PQCTODAY_REPLICATION_PROVENANCE: u32 = 0x8000_010A;
+/// Function purpose (1..=6) of a hierarchy function key or certificate.
+pub const CKA_PQCTODAY_FUNCTION_PURPOSE: u32 = 0x8000_010B;
 
 // Official PKCS#11 v3.2 §6.14 HSS attributes (pkcs11t.h:636-638). Phase 5
 // R25: CKA_HSS_LEVELS was previously missing and CKA_HSS_LMS_TYPE was

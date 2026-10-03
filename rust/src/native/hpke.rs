@@ -1528,3 +1528,63 @@ mod tests {
         assert_eq!(encapsulate(session, pub_h, &params, None).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
     }
 }
+
+// ── K4 replication suite (educational-replication only) ─────────────────────
+//
+// Single-shot RFC 9180 base mode with the frozen version-1 replication suite
+// (spec §5, review K0B-R-06): pure ML-KEM-768 (KEM 0x0041,
+// draft-ietf-hpke-pq-05), HKDF-SHA384 (KDF 0x0002), AES-256-GCM (AEAD
+// 0x0002), sequence number 0. Raw-byte, in-engine only: no key handle is
+// registered and nothing here is reachable from the FFI. Encapsulation
+// randomness is always fresh OS randomness — there is no seed parameter.
+
+#[cfg(feature = "educational-replication")]
+fn replication_v1_key_nonce(shared_secret: &[u8], info: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    let sid = hpke_suite_id(CKP_HPKE_KEM_ML_KEM_768, CKD_HPKE_HKDF_SHA384, CKZ_HPKE_AEAD_256_GCM);
+    let sched = key_schedule(CKM_SHA384, &sid, CKZ_HPKE_MODE_BASE, shared_secret, info, &[], &[], Some((32, 12)), 48)?;
+    Ok((sched.key.ok_or(CKR_FUNCTION_FAILED)?, sched.base_nonce.ok_or(CKR_FUNCTION_FAILED)?))
+}
+
+/// Seal `pt` to the ML-KEM-768 encapsulation key `pk_r`. Returns
+/// `(enc, ciphertext)`; `enc` is exactly 1,088 bytes and the ciphertext is
+/// `pt.len() + 16`.
+#[cfg(feature = "educational-replication")]
+pub(crate) fn seal_replication_v1(pk_r: &[u8], info: &[u8], aad: &[u8], pt: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use zeroize::Zeroize;
+    if pk_r.len() != mlkem_ek_len(CKP_ML_KEM_768) {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let (enc, mut ss) = mlkem_encap(CKP_ML_KEM_768, pk_r, None)?;
+    let (mut key, nonce) = replication_v1_key_nonce(&ss, info)?;
+    ss.zeroize();
+    let n = aes_gcm::Nonce::<aes_gcm::aead::consts::U12>::try_from(nonce.as_slice()).map_err(|_| CKR_FUNCTION_FAILED)?;
+    let ct = aes_gcm::Aes256Gcm::new_from_slice(&key)
+        .map_err(|_| CKR_FUNCTION_FAILED)?
+        .encrypt(&n, Payload { msg: pt, aad })
+        .map_err(|_| CKR_FUNCTION_FAILED);
+    key.zeroize();
+    Ok((enc, ct?))
+}
+
+/// Open a replication ciphertext with the expanded ML-KEM-768 decapsulation
+/// key `dk`. Every failure after the length checks is
+/// `CKR_ENCRYPTED_DATA_INVALID` (spec §9 item 11).
+#[cfg(feature = "educational-replication")]
+pub(crate) fn open_replication_v1(dk: &[u8], enc: &[u8], info: &[u8], aad: &[u8], ct: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use zeroize::Zeroize;
+    if enc.len() != mlkem_sizes(CKP_ML_KEM_768).0 || ct.len() < 16 {
+        return Err(CKR_DATA_INVALID);
+    }
+    let mut ss = mlkem_decap(CKP_ML_KEM_768, dk, enc).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
+    let (mut key, nonce) = replication_v1_key_nonce(&ss, info)?;
+    ss.zeroize();
+    let n = aes_gcm::Nonce::<aes_gcm::aead::consts::U12>::try_from(nonce.as_slice()).map_err(|_| CKR_FUNCTION_FAILED)?;
+    let pt = aes_gcm::Aes256Gcm::new_from_slice(&key)
+        .map_err(|_| CKR_FUNCTION_FAILED)?
+        .decrypt(&n, Payload { msg: ct, aad })
+        .map_err(|_| CKR_ENCRYPTED_DATA_INVALID);
+    key.zeroize();
+    pt
+}

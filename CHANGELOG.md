@@ -10,6 +10,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): key hierarchy, key attestation and
+  protected replication of non-extractable keys — K2–K4.** It sits behind the
+  non-default cargo feature `educational-replication` and stays inert until a
+  caller explicitly selects the educational profile. No shipped native or WASM
+  build enables it. A token generates its device identity key in-token and
+  enrolls under a host-side test manufacturing root. It then certifies five
+  single-purpose function keys and keeps CRLs, policies, challenge reservations,
+  a consumption ledger and receipts as immutable token objects. AES-128/192/256,
+  ML-KEM-768 and ML-DSA-65 keys that were bound to an enrolled policy at
+  generation can be cloned to another enrolled token, backed up offline and
+  restored. The package is signed, recipient-bound and sealed with ML-KEM-768
+  HPKE, and plaintext key material never leaves the engine. Import is atomic, a
+  retry after a crash recovers the same key and the byte-identical receipt, and
+  replica budgets are conserved across a lineage. `PQCTODAY_KEY_REPLICATION_1_0`
+  becomes discoverable through `C_GetInterface*` only in that configuration.
+  Standard wrapping, copying and attribute writes still refuse these keys in
+  every build. This is a software token using documentation-only OIDs and the
+  host clock: it makes no hardware, production-identity or rollback-resistance
+  claim. Design notes, the independent K0B review and its dispositions are in
+  `docs/k2-k4-replication-implementation-notes-2026-10-02.md`.
+
 - **A non-advertised ABI and wire specification for protected replication of
   non-extractable keys.** `PQCTODAY_KEY_REPLICATION_1_0` is a separate named
   interface discovered through `C_GetInterface*`; it does not extend
@@ -50,6 +71,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine state snapshots are now `SHR3SNP3` (all builds).** The new
+  format appends a trailer that records how many replication objects the
+  snapshot holds, plus an end marker, so a truncated or partially written
+  snapshot is refused instead of silently losing ledger entries. `SHR3SNP2`
+  snapshots still load: they migrate with replication state removed, so a
+  record forged into an old snapshot cannot make a key replicable. A newer
+  format version returns `CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED`. An older
+  engine cannot read an `SHR3SNP3` snapshot.
+- **Relicensed four owner-authored files from GPL-3.0-only to BSD-2-Clause**,
+  matching the repository root (`src/lib/vendor_mechanisms.h`,
+  `rust/src/crypto/{keccak,lms,split_key}.rs`). See
+  `docs/f6-licence-sbom-decision-2026-10-02.md`.
 - **Secret-key derivation from a sensitive base now defaults to a sensitive,
   non-extractable result.** An explicit template can still request a
   different result when the base key's `CKA_DERIVE_TEMPLATE` permits it.

@@ -66,6 +66,8 @@ pub mod store;
 /// staticlib embedding (openssl.wasm tears the runtime down per command);
 /// serialization halves are target-neutral so native tests cover the seam.
 pub mod state_snapshot;
+#[cfg(feature = "educational-replication")]
+pub mod replication;
 
 // NIST ACVP-Server vectors + advertised-cell probes through the real C_*
 // entry points (gap-closure plan 2026-09-25, findings E11-E17).

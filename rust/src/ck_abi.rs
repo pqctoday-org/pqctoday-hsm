@@ -2360,6 +2360,39 @@ static INTERFACES: [SyncInterface; 3] = [
     }),
 ];
 
+/// K0B separately discovered vendor interface (spec §2). Compiled only with
+/// `educational-replication` and discoverable only after the caller selects
+/// the educational profile; the standard records above never change.
+#[cfg(feature = "educational-replication")]
+static REPLICATION_NAME: [u8; 29] = *b"PQCTODAY_KEY_REPLICATION_1_0\0";
+
+#[cfg(feature = "educational-replication")]
+static REPLICATION_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
+    pInterfaceName: &REPLICATION_NAME as *const u8 as CK_UTF8CHAR_PTR,
+    pFunctionList: &crate::replication::abi::REPLICATION_FUNCTION_LIST
+        as *const PQCTODAY_KEY_REPLICATION_FUNCTION_LIST_1_0 as CK_VOID_PTR,
+    flags: 0,
+});
+
+fn replication_interface() -> Option<&'static SyncInterface> {
+    #[cfg(feature = "educational-replication")]
+    if crate::replication::educational_profile_selected() {
+        return Some(&REPLICATION_INTERFACE);
+    }
+    None
+}
+
+/// Read a NUL-terminated interface name of at most `max` bytes (including
+/// the NUL). `None` if no NUL appears within the bound.
+unsafe fn interface_name<'a>(p: CK_UTF8CHAR_PTR, max: usize) -> Option<&'a [u8]> {
+    for i in 0..max {
+        if *p.add(i) == 0 {
+            return Some(std::slice::from_raw_parts(p, i + 1));
+        }
+    }
+    None
+}
+
 #[inline]
 fn iface_version(i: &SyncInterface) -> CK_VERSION {
     // pFunctionList always begins with a CK_VERSION header.
@@ -2378,7 +2411,8 @@ pub unsafe extern "C" fn C_GetInterfaceList(
     if pulCount.is_null() {
         return rv(CKR_ARGUMENTS_BAD);
     }
-    let n = INTERFACES.len() as CK_ULONG;
+    let extra = replication_interface();
+    let n = (INTERFACES.len() + extra.is_some() as usize) as CK_ULONG;
     if pInterfacesList.is_null() {
         *pulCount = n;
         return rv(CKR_OK);
@@ -2389,6 +2423,9 @@ pub unsafe extern "C" fn C_GetInterfaceList(
     }
     for (i, ifc) in INTERFACES.iter().enumerate() {
         *pInterfacesList.add(i) = ifc.0;
+    }
+    if let Some(r) = extra {
+        *pInterfacesList.add(INTERFACES.len()) = r.0;
     }
     *pulCount = n;
     rv(CKR_OK)
@@ -2406,10 +2443,19 @@ pub unsafe extern "C" fn C_GetInterface(
     if ppInterface.is_null() {
         return rv(CKR_ARGUMENTS_BAD);
     }
-    // Name must be "PKCS 11" (NUL-terminated) when supplied.
+    // Name must be "PKCS 11" (NUL-terminated) when supplied — or, only when
+    // available, exactly the vendor replication name with version {1,0} and
+    // no flags. A NULL name never selects the vendor interface.
     if !pInterfaceName.is_null() {
-        let got = std::slice::from_raw_parts(pInterfaceName, INTERFACE_NAME.len());
-        if got != INTERFACE_NAME {
+        let got = interface_name(pInterfaceName, 64);
+        if got != Some(&INTERFACE_NAME[..]) {
+            if let (Some(r), Some(name)) = (replication_interface(), got) {
+                let want = std::ffi::CStr::from_ptr(r.0.pInterfaceName as *const std::ffi::c_char).to_bytes_with_nul();
+                if name == want && !pVersion.is_null() && *pVersion == iface_version(r) && flags == 0 {
+                    *ppInterface = &r.0 as *const CK_INTERFACE as CK_INTERFACE_PTR;
+                    return rv(CKR_OK);
+                }
+            }
             *ppInterface = std::ptr::null_mut();
             return rv(CKR_FUNCTION_FAILED);
         }

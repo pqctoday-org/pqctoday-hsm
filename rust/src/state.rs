@@ -1507,6 +1507,13 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
         CKA_LMOTS_PARAM_SET,
         CKA_XMSS_PARAM_SET,
         CKA_XMSSMT_PARAM_SET,
+        // K0B §4 — policy binding, lineage, provenance and function purpose
+        // are fixed at creation by the engine; no mutable attribute may
+        // retrofit replication eligibility (plan invariant 2).
+        CKA_PQCTODAY_REPLICATION_POLICY_ID,
+        CKA_PQCTODAY_REPLICATION_LINEAGE_ID,
+        CKA_PQCTODAY_REPLICATION_PROVENANCE,
+        CKA_PQCTODAY_FUNCTION_PURPOSE,
     ];
     if IMMUTABLE_VENDOR_ATTRS.contains(&attr_type) {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
@@ -1860,6 +1867,78 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         crate::store::persist_object(slot, current, &snapshot);
     }
     current
+}
+
+/// K4 atomic commit (spec §11, review K0B-R-09): insert every object in
+/// `new_objects` and apply every `(handle, [(attr, value)])` update in
+/// `updates` under ONE exclusive `OBJECTS` lock, so no observer — and no
+/// snapshot taken afterwards — can see a subset. Each new object gets the
+/// same defaults, slot tag, fresh `CKA_UNIQUE_ID` and handle as
+/// [`allocate_handle`]. Updates to a missing handle abort the whole batch
+/// before anything is written. Returns the new handles in input order.
+/// Reserve a fresh `CKA_UNIQUE_ID` (the same 36-character form
+/// [`allocate_handle`] assigns) for an object about to be committed.
+pub fn reserve_unique_id() -> Vec<u8> {
+    let uid = UNIQUE_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:08x}-0000-4000-8000-{:012x}", (uid >> 48) as u32, uid & 0xffff_ffff_ffff).into_bytes()
+}
+
+pub fn commit_objects_atomically(
+    owner_session: u32,
+    new_objects: Vec<Attributes>,
+    updates: Vec<(u32, Vec<(u32, Vec<u8>)>)>,
+) -> Result<Vec<u32>, u32> {
+    let mut prepared = Vec::with_capacity(new_objects.len());
+    for mut attrs in new_objects {
+        attrs.insert(CKA_PRIV_OWNER_SESSION, owner_session.to_le_bytes().to_vec());
+        tag_object_slot(owner_session, &mut attrs);
+        apply_object_defaults(&mut attrs);
+        attrs
+            .entry(CKA_PRIV_SLOT_ID)
+            .or_insert_with(|| 0u32.to_le_bytes().to_vec());
+        prepared.push(attrs);
+    }
+    let mut persisted: Vec<(u32, u32, Attributes)> = Vec::new();
+    let handles = OBJECTS.with(|objs| {
+        let mut g = objs.borrow_mut();
+        if updates.iter().any(|(h, _)| !g.contains_key(h)) {
+            return Err(CKR_DEVICE_ERROR);
+        }
+        let mut handles = Vec::with_capacity(prepared.len());
+        for mut attrs in prepared {
+            // An engine caller may have reserved the id already (a signed
+            // receipt names it before the commit); otherwise assign one.
+            if !attrs.contains_key(&CKA_UNIQUE_ID) {
+                attrs.insert(CKA_UNIQUE_ID, reserve_unique_id());
+            }
+            let h = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if h == 0 || h == u32::MAX {
+                return Err(CKR_DEVICE_MEMORY);
+            }
+            if read_bool_attr(&attrs, CKA_TOKEN) {
+                persisted.push((object_slot_of(&attrs), h, attrs.clone()));
+            }
+            g.insert(h, attrs);
+            handles.push(h);
+        }
+        for (h, changes) in updates {
+            if let Some(attrs) = g.get_mut(&h) {
+                for (t, v) in changes {
+                    attrs.insert(t, v);
+                }
+                if read_bool_attr(attrs, CKA_TOKEN) {
+                    persisted.push((object_slot_of(attrs), h, attrs.clone()));
+                }
+            }
+        }
+        Ok(handles)
+    })?;
+    if crate::store::is_persistent() {
+        for (slot, h, attrs) in &persisted {
+            crate::store::persist_object(*slot, *h, attrs);
+        }
+    }
+    Ok(handles)
 }
 
 // ── `_from` pure variants (operate on an already-borrowed `&Attributes`,
