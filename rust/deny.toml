@@ -1,0 +1,31 @@
+# cargo-deny policy for the Rust engine (F6 licence/SBOM record,
+# docs/f6-licence-sbom-decision-2026-10-02.md). Run from rust/:
+#   cargo deny [--features educational-replication|educational-fhe] check
+# Not a gate step: cargo-deny is not part of the gate container.
+
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "wasm32-unknown-unknown"]
+all-features = false
+
+[advisories]
+# RustSec advisory database; unmaintained/unsound notices are reported too.
+yanked = "deny"
+
+[licenses]
+# Permissive licences compatible with the crate's BSD-2-Clause, plus the
+# FHE backend's BSD-3-Clause-Clear (educational-fhe only; see the F6 record).
+allow = [
+    "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause",
+    "BSD-3-Clause-Clear", "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0",
+    "Unlicense", "MPL-2.0", "OpenSSL", "CDLA-Permissive-2.0", "0BSD", "BSL-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

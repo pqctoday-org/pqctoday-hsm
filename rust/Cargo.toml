@@ -3,6 +3,7 @@ name = "softhsmrustv3"
 version = "0.17.0"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
+license = "BSD-2-Clause"
 
 # hsm-perf-bench plan §A4.1/§P4 — makes this crate the workspace root, with
 # `bench-harness/` as a sibling member. Purely structural: does not change
