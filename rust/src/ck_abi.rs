@@ -192,6 +192,30 @@ pub type CK_INTERFACE_PTR_PTR = *mut CK_INTERFACE_PTR;
 /// interface: it is intentionally absent from `INTERFACES` until the
 /// external attribute/OID allocations and the protocol review are complete.
 /// See docs/proposals/pqctoday-key-replication-interface-1.0.md.
+/// Admin addendum §2.1: `PQCTODAY_KEY_REPLICATION_ADMIN_1_0`.
+#[repr(C)]
+pub struct PQCTODAY_KEY_REPLICATION_ADMIN_FUNCTION_LIST_1_0 {
+    pub version: CK_VERSION,
+    /// ordinal 0 (KMIP 1)
+    pub C_PQCTODAY_AdminIssueNonce: unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV,
+    /// ordinal 1 (KMIP 2)
+    pub C_PQCTODAY_AdminExecute: unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV,
+}
+
+/// Admin addendum §2.2: `PQCTODAY_KEY_REPLICATION_CEREMONY_1_0`.
+#[repr(C)]
+pub struct PQCTODAY_KEY_REPLICATION_CEREMONY_FUNCTION_LIST_1_0 {
+    pub version: CK_VERSION,
+    /// ordinal 0 (KMIP 1)
+    pub C_PQCTODAY_IssueSourceChallenge: unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV,
+    /// ordinal 1 (KMIP 2)
+    pub C_PQCTODAY_BeginReceive: unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV,
+    /// ordinal 2 (KMIP 3)
+    pub C_PQCTODAY_CancelReceive: unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV,
+    /// ordinal 3 (KMIP 4)
+    pub C_PQCTODAY_AttestKey: unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV,
+}
+
 pub static PQCTODAY_KEY_REPLICATION_INTERFACE_NAME: &[u8] =
     b"PQCTODAY_KEY_REPLICATION_1_0\0";
 
@@ -2374,12 +2398,39 @@ static REPLICATION_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-fn replication_interface() -> Option<&'static SyncInterface> {
+#[cfg(feature = "educational-replication")]
+static ADMIN_NAME: [u8; 35] = *b"PQCTODAY_KEY_REPLICATION_ADMIN_1_0\0";
+
+#[cfg(feature = "educational-replication")]
+static ADMIN_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
+    pInterfaceName: &ADMIN_NAME as *const u8 as CK_UTF8CHAR_PTR,
+    pFunctionList: &crate::replication::abi::ADMIN_FUNCTION_LIST
+        as *const PQCTODAY_KEY_REPLICATION_ADMIN_FUNCTION_LIST_1_0 as CK_VOID_PTR,
+    flags: 0,
+});
+
+#[cfg(feature = "educational-replication")]
+static CEREMONY_NAME: [u8; 38] = *b"PQCTODAY_KEY_REPLICATION_CEREMONY_1_0\0";
+
+#[cfg(feature = "educational-replication")]
+static CEREMONY_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
+    pInterfaceName: &CEREMONY_NAME as *const u8 as CK_UTF8CHAR_PTR,
+    pFunctionList: &crate::replication::abi::CEREMONY_FUNCTION_LIST
+        as *const PQCTODAY_KEY_REPLICATION_CEREMONY_FUNCTION_LIST_1_0 as CK_VOID_PTR,
+    flags: 0,
+});
+
+#[cfg(feature = "educational-replication")]
+static VENDOR_INTERFACES: [&SyncInterface; 3] = [&REPLICATION_INTERFACE, &ADMIN_INTERFACE, &CEREMONY_INTERFACE];
+
+/// The separately discovered vendor interfaces (v1, admin, ceremony), all
+/// gated on the feature AND the runtime educational profile.
+fn vendor_interfaces() -> &'static [&'static SyncInterface] {
     #[cfg(feature = "educational-replication")]
     if crate::replication::educational_profile_selected() {
-        return Some(&REPLICATION_INTERFACE);
+        return &VENDOR_INTERFACES;
     }
-    None
+    &[]
 }
 
 /// Read a NUL-terminated interface name of at most `max` bytes (including
@@ -2411,8 +2462,8 @@ pub unsafe extern "C" fn C_GetInterfaceList(
     if pulCount.is_null() {
         return rv(CKR_ARGUMENTS_BAD);
     }
-    let extra = replication_interface();
-    let n = (INTERFACES.len() + extra.is_some() as usize) as CK_ULONG;
+    let extra = vendor_interfaces();
+    let n = (INTERFACES.len() + extra.len()) as CK_ULONG;
     if pInterfacesList.is_null() {
         *pulCount = n;
         return rv(CKR_OK);
@@ -2424,8 +2475,8 @@ pub unsafe extern "C" fn C_GetInterfaceList(
     for (i, ifc) in INTERFACES.iter().enumerate() {
         *pInterfacesList.add(i) = ifc.0;
     }
-    if let Some(r) = extra {
-        *pInterfacesList.add(INTERFACES.len()) = r.0;
+    for (i, r) in extra.iter().enumerate() {
+        *pInterfacesList.add(INTERFACES.len() + i) = r.0;
     }
     *pulCount = n;
     rv(CKR_OK)
@@ -2449,11 +2500,13 @@ pub unsafe extern "C" fn C_GetInterface(
     if !pInterfaceName.is_null() {
         let got = interface_name(pInterfaceName, 64);
         if got != Some(&INTERFACE_NAME[..]) {
-            if let (Some(r), Some(name)) = (replication_interface(), got) {
-                let want = std::ffi::CStr::from_ptr(r.0.pInterfaceName as *const std::ffi::c_char).to_bytes_with_nul();
-                if name == want && !pVersion.is_null() && *pVersion == iface_version(r) && flags == 0 {
-                    *ppInterface = &r.0 as *const CK_INTERFACE as CK_INTERFACE_PTR;
-                    return rv(CKR_OK);
+            if let Some(name) = got {
+                for r in vendor_interfaces() {
+                    let want = std::ffi::CStr::from_ptr(r.0.pInterfaceName as *const std::ffi::c_char).to_bytes_with_nul();
+                    if name == want && !pVersion.is_null() && *pVersion == iface_version(r) && flags == 0 {
+                        *ppInterface = &r.0 as *const CK_INTERFACE as CK_INTERFACE_PTR;
+                        return rv(CKR_OK);
+                    }
                 }
             }
             *ppInterface = std::ptr::null_mut();
@@ -2552,6 +2605,9 @@ mod tests {
             size_of::<PQCTODAY_KEY_REPLICATION_FUNCTION_LIST_1_0>(),
             PTR * (1 + 3)
         );
+        // Admin addendum §2.1/§2.2: version header + 2 and + 4 slots.
+        assert_eq!(size_of::<PQCTODAY_KEY_REPLICATION_ADMIN_FUNCTION_LIST_1_0>(), PTR * (1 + 2));
+        assert_eq!(size_of::<PQCTODAY_KEY_REPLICATION_CEREMONY_FUNCTION_LIST_1_0>(), PTR * (1 + 4));
     }
 
     #[test]
