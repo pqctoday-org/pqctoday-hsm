@@ -65,6 +65,9 @@ Makefile.in
 .idea/
 .worktrees/
 rust/target/
+# FHE browser-matrix build (scripts/build-fhe-browser-kat.sh)
+rust/target-fhe-web/
+rust/pkg-fhe-web/
 rust/bench-harness/target/
 openmls-provider/target/
 kmip/target/

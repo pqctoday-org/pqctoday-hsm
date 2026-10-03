@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **FHE browser build no longer panics on first use (educational feature
+  only).** A new test-only browser build of the token's TFHE code, with a
+  Playwright runner, checks the client-key known-answer vector in desktop
+  browsers. Its first run found that the `educational-fhe` browser build
+  panicked as soon as it made a key, because TFHE-rs has no entropy source in
+  a browser without its JavaScript feature. That feature is now enabled for
+  browser builds only, and the check passes in Chromium 153 and WebKit 26.6.
+  No shipped bundle uses `educational-fhe`. Plan and results:
+  `docs/fhe-browser-matrix-plan-2026-10-03.md`.
+
 - **Rust engine: one process per durable token store.** Opening a SQLite
   token store now takes an exclusive lock on the store directory, and a
   second process (or a second store object) opening the same directory is
