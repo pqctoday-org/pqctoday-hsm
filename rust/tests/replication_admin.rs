@@ -323,3 +323,34 @@ fn admin_and_ceremony_interfaces_are_discovered_and_callable() {
         assert_eq!((cf.C_PQCTODAY_CancelReceive)(s1, tx.as_mut_ptr(), 31), CKR_ARGUMENTS_BAD as CK_RV);
     }
 }
+
+#[test]
+fn admin_ledger_full_refuses_with_device_memory_until_pruned() {
+    let _g = lock();
+    let mut w = world(1);
+    let a = setup(&w);
+    let op = AdminOperation::IssueDeviceCrl { revoke: vec![], retired_to_revoke: vec![], validity_seconds: 3_600 };
+    let next = admin::MAX_LEDGER_ENTRIES as u64 + 1;
+    w.as_so(0, |so| {
+        // Fill the ledger to its §3.5 entry limit; each entry is one commit.
+        for seq in 1..next {
+            let n = admin::issue_nonce(so).unwrap();
+            admin::execute(so, &signed(&a, &a.key, &n, seq, &op)).unwrap_or_else(|rv| panic!("seq {seq}: 0x{rv:x}"));
+        }
+        // Entry 1,025 is refused with DEVICE_MEMORY and changes nothing.
+        let n = admin::issue_nonce(so).unwrap();
+        assert_eq!(admin::execute(so, &signed(&a, &a.key, &n, next, &op)), Err(CKR_DEVICE_MEMORY), "a full ledger never evicts silently");
+    });
+    // 31 days on: prune (board-local), renew the expired root CRL, retry.
+    let later = w.now + 31 * 86_400;
+    repl::set_clock_override(Some(later));
+    let fresh = w.ca.crl(later - 5, later + 7 * 86_400).unwrap();
+    w.as_so(0, |so| {
+        let pruned = admin::prune_admin_ledger(so).unwrap();
+        assert_eq!(pruned, admin::MAX_LEDGER_ENTRIES - 1, "all but the active key's newest entry");
+        repl::enroll_crl(so, &fresh, None).unwrap();
+        let n = admin::issue_nonce(so).unwrap();
+        admin::execute(so, &signed(&a, &a.key, &n, next, &op)).expect("space after pruning; the refusal did not consume the sequence");
+    });
+    repl::set_clock_override(Some(w.now));
+}
