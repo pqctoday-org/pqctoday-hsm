@@ -396,6 +396,18 @@ if ! docker exec "$RUST_CONTAINER" test -f "$AG_CONTAINER_ROOT/$GATE_PROBE"; the
   exit 2
 fi
 rm -f "$ROOT/$GATE_PROBE"
+# The C++ engine and the differential harness build from three git submodules
+# (liboqs, hash-sigs, xmss-reference). A fresh worktree has none of them, and
+# now that the gate tests the worktree it runs from (not the main tree), that
+# would fail the differential step 15 minutes in with "does not contain a
+# CMakeLists.txt". Fail now instead. remote-gate.sh initialises them itself.
+GATE_SUBMODULES_MISSING="$(git -C "$ROOT" submodule status 2>/dev/null | awk '/^-/ {print $2}')"
+if [ -n "$GATE_SUBMODULES_MISSING" ]; then
+  echo "[gate] uninitialised git submodule(s) in $ROOT:" >&2
+  printf '         %s\n' $GATE_SUBMODULES_MISSING >&2
+  echo "[gate] run: git -C '$ROOT' submodule update --init   (or use --host=…, which does it)" >&2
+  exit 2
+fi
 GATE_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
 GATE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 GATE_DIRTY_START="$(git -C "$ROOT" status --porcelain --untracked-files=no)"

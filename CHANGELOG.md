@@ -59,6 +59,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     is refused with a pointer to `--host`. An explicit `AG_CONTAINER_ROOT`
     still wins, and `remote-gate.sh` sets one.
   - A probe file proves the container sees this directory before any step runs.
+  - Uninitialised git submodules (liboqs, hash-sigs, xmss-reference) are refused
+    up front with the `git submodule update --init` command. A fresh worktree
+    used to fail the differential step about 15 minutes in.
   - The marker is written only if the tracked tree equalled HEAD at the start
     and end, and HEAD did not move. It now records the full commit, the tree
     hash and the container root.
