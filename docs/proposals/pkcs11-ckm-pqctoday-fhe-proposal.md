@@ -1,6 +1,6 @@
 # PQCToday FHE custody mechanisms (CKM_PQCTODAY_FHE_*): normative specification
 
-Status: **P0B working specification, revision 2: review amendments A1–A5 and the §11 answers from the FHE P1/P2 implementer (session 7f) are applied. Educational, not a production interface**
+Status: **P0B working specification, revision 3: review amendments A1–A5, the §11 answers and implementation amendment I-1 from the FHE P1/P2 implementer (session 7f) are applied. Educational, not a production interface**
 Date: 2026-10-03
 Engine scope: `softhsmrustv3` only
 
@@ -160,7 +160,10 @@ typedef struct CK_PQCTODAY_FHE_DECRYPT_PARAMS {
   10. **Release and audit.**
 - **Every policy refusal returns the same `CKR_ACTION_PROHIBITED`.** The reason goes only to the audit log, so the token never says which rule failed. Refusal and release take the same code path up to the final output step.
 - **Output to the owner.** One byte for the type (`0` = `FheBool`, `1` = `FheUint`), then a 2-byte big-endian width in bits, then the value as unsigned little-endian bytes of width ⌈bits/8⌉ (`FheBool` is 1 byte, 0 or 1).
-- **Output to a recipient.** The same plaintext, sealed inside the token with HPKE to the recipient's ML-KEM-768 certificate. The suite is the Key Replication Interface's: KEM `0x0041`, HKDF-SHA384, AES-256-GCM. `info` is the DER of `{lineage, decryptPolicyId, recipient, counter}`, and `aad` is the 3-byte type header. Encapsulation randomness is engine-generated, and test hooks are absent in shipped builds (F5).
+- **Output to a recipient.** The owner-output bytes (3-byte type header plus value), sealed inside the token with HPKE to the recipient's ML-KEM-768 certificate. The suite is the Key Replication Interface's: KEM `0x0041`, HKDF-SHA384, AES-256-GCM.
+  - `info` and `aad` are both the DER of `FheReleaseInfo ::= SEQUENCE { lineage OCTET STRING (SIZE(32)), decryptPolicyId OCTET STRING (SIZE(48)), recipient OCTET STRING (SIZE(48)), counter INTEGER }`.
+  - The type header is inside the authenticated plaintext, not in `aad`: a recipient cannot know it before opening, but it can rebuild `FheReleaseInfo` from the signed release (I-1, found while implementing P2).
+  - Encapsulation randomness is engine-generated, and test hooks are absent in shipped builds (F5).
 - **The sealed release is signed (A2).** HPKE base mode does not authenticate the sender, so on its own a recipient could not tell the plaintext came from this token under this policy. The token therefore signs the release with its existing internal **receipt-signing function key** (ML-DSA-65; no allocation, because it is an internal function key).
   - The signed bytes are `"PQCToday FHE Release 1.0" ‖ 0x00 ‖ DER{lineage, decryptPolicyId, recipient, counter, SHA-384(enc ‖ ciphertext)}`.
   - The output is the DER of `FheSealedReleaseV1 ::= SEQUENCE { enc OCTET STRING, ciphertext OCTET STRING, counter INTEGER, signature OCTET STRING, signerChain SEQUENCE OF Certificate }`. The signer chain is the device and receipt-signer certificates, as in the replication receipt.
@@ -312,4 +315,5 @@ Every error path zeroizes transient secrets and leaves no partial object.
 | Rev | Date | Change |
 |---|---|---|
 | 1 | 2026-10-03 | First normative draft, aligned with authority §1.4.5 and FHE P1 at `f48a040d` |
+| 3 | 2026-10-03 | Implementation amendment I-1 from session 7f: the recipient release uses `info = aad = DER(FheReleaseInfo)`, and the 3-byte type header moves inside the authenticated plaintext. 7f's P2 build reproduces the §5.5 KAT exactly (derived seed `0xf6eb…12dc`, client key `9f5d847e…b77b`, 24,087 B) |
 | 2 | 2026-10-03 | Review amendments from session 7f: A1 derive template re-set on install; A2 signed sealed release; A3 recipient check before decryption; A4 lineage-wide release bound; A5 size query leaks only shape. §11 resolved: header format kept, compressed lists refused, attested manifest key, placeholder hash retired |
