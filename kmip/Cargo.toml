@@ -63,6 +63,8 @@ default = ["native"]
 # PQCTODAY EDUCATIONAL TEST ONLY: serve the protected-replication interfaces over the KMIP
 # PKCS#11 operation (pre-ceremony-ABI). Never in the default or release binary.
 educational-replication = ["softhsmrustv3/educational-replication"]
+# Adds the FHE seed profile (TFHE-rs custody) to the educational courier (`bootstrap --fhe`).
+educational-fhe = ["educational-replication", "softhsmrustv3/educational-fhe"]
 native = [
     "dep:tokio",
     "dep:tokio-rustls",

@@ -34,7 +34,7 @@ const TEST: &str = "PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST";
 const DOMAIN: [u8; 32] = *b"PQCTODAY-EDU-LAB-MX95-MX95PRO-01";
 
 const USAGE: &str = "\
-repl_edu_courier bootstrap --src HOST --dst HOST --ssh-key KEY --out DIR [--remote-dir /tmp/repl-test]
+repl_edu_courier bootstrap --src HOST --dst HOST --ssh-key KEY --out DIR [--remote-dir /tmp/repl-test] [--fhe]
 repl_edu_courier ceremony  --src-kmip IP:PORT --dst-kmip IP:PORT --src-name SNI --dst-name SNI
                            --tls-ca PEM --client-cert PEM --client-key PEM
                            --trust DIR --uid UID --out DIR [--op live|backup] [--negative]";
@@ -122,6 +122,7 @@ fn bootstrap(a: &mut Vec<String>) -> Result<(), String> {
     let src_dir = opt(a, "--src-dir").unwrap_or_else(|| dir.clone());
     let dst_dir = opt(a, "--dst-dir").unwrap_or_else(|| dir.clone());
     let out = PathBuf::from(need(a, "--out")?);
+    let fhe_profile = take_flag(a, "--fhe");
     let boards = [
         Board { host: need(a, "--src")?, key: key.clone(), dir: src_dir },
         Board { host: need(a, "--dst")?, key, dir: dst_dir },
@@ -158,11 +159,26 @@ fn bootstrap(a: &mut Vec<String>) -> Result<(), String> {
         b.put("peer-crl.der", crl)?;
         b.tool(&format!("peer {0}/x/peer-device.der {0}/x/peer-crl.der", b.dir))?;
     }
-    // One policy naming both devices, enrolled on both.
-    let mut mechs = vec![CKM_AES_GCM, CKM_ML_KEM, CKM_ML_DSA];
-    mechs.sort_unstable();
-    let policy = repl::records::build_policy(DOMAIN, [true, true, true], vec![devs[0].2, devs[1].2], t - 60, t + 7 * 86_400, 4, mechs, false)
-        .map_err(rv("build policy"))?;
+    // One policy naming both devices, enrolled on both. With --fhe it is constrained to the FHE
+    // seed profile (FHE plan stage F) and each board also enrolls the typed decrypt policy.
+    let policy = if fhe_profile {
+        fhe_policy(&devs, t)?
+    } else {
+        let mut mechs = vec![CKM_AES_GCM, CKM_ML_KEM, CKM_ML_DSA];
+        mechs.sort_unstable();
+        repl::records::build_policy(DOMAIN, [true, true, true], vec![devs[0].2, devs[1].2], t - 60, t + 7 * 86_400, 4, mechs, false)
+            .map_err(rv("build policy"))?
+    };
+    if fhe_profile {
+        for b in &boards {
+            b.tool(&format!("fhe-policy {0}/x/fhe-dp-id.bin", b.dir))?;
+        }
+        let dp = boards[0].get("fhe-dp-id.bin")?;
+        if boards[1].get("fhe-dp-id.bin")? != dp {
+            return Err("the two boards computed different FHE decrypt-policy ids".into());
+        }
+        save(&out, "fhe-dp-id.bin", &dp)?;
+    }
     save(&out, "policy.der", &policy)?;
     for b in &boards {
         b.put("policy.der", &policy)?;
@@ -175,6 +191,30 @@ fn bootstrap(a: &mut Vec<String>) -> Result<(), String> {
     save(&out, "policy-id.bin", &pid)?;
     println!("bootstrap OK: both boards enrolled under one test root; policy id {}", hex(&pid[..8]));
     Ok(())
+}
+
+#[cfg(feature = "educational-fhe")]
+fn fhe_policy(devs: &[(Vec<u8>, Vec<u8>, [u8; 32])], t: u64) -> Result<Vec<u8>, String> {
+    use softhsmrustv3::constants::{CKM_PQCTODAY_FHE_DECRYPT, CKM_PQCTODAY_FHE_DERIVE_PUBLIC};
+    let mut mechs = vec![CKM_PQCTODAY_FHE_DERIVE_PUBLIC, CKM_PQCTODAY_FHE_DECRYPT];
+    mechs.sort_unstable();
+    repl::records::build_policy_with_constraint(
+        DOMAIN,
+        [true, true, true],
+        vec![devs[0].2, devs[1].2],
+        t - 60,
+        t + 7 * 86_400,
+        4,
+        mechs,
+        false,
+        repl::fhe::profile_constraint_hash(),
+    )
+    .map_err(rv("build FHE policy"))
+}
+
+#[cfg(not(feature = "educational-fhe"))]
+fn fhe_policy(_: &[(Vec<u8>, Vec<u8>, [u8; 32])], _: u64) -> Result<Vec<u8>, String> {
+    Err("--fhe needs a courier built with --features educational-fhe".into())
 }
 
 // ── ceremony (crypto plane, KMIP only) ────────────────────────────────────

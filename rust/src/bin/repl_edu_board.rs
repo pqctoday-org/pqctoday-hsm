@@ -34,6 +34,16 @@ repl_edu_board --store DIR [--slot N] <command> [args]
   check-src KIND UID PUBUID OUTDIR       user, source: AES encrypt / ML-KEM encapsulate a vector
   check-dst KIND LINEAGE INDIR OUTDIR    user, destination: decrypt / decapsulate / sign with the replica
   check-verify PUBUID INDIR              user, source: verify the replica's ML-DSA signature
+FHE (built with --features educational-fhe; FHE plan stage F, PR #318 engine):
+  fhe-policy OUT                         SO: enroll the fixed typed decrypt policy, write its 48-byte id
+  fhe-genkey RPID DPID OUTDIR            user: FHE seed bound to replication policy RPID + decrypt policy
+                                         DPID, plus a token ML-DSA-65 manifest signer;
+                                         writes OUTDIR/{uid.txt,lineage.bin}
+  fhe-export LINEAGE OUTDIR              user: compressed server key + compact public key with signed
+                                         manifests, signer SPKI, signer evidence, device CRL
+                                         (the layout of rust/examples/fhe_custodian.rs `export`)
+  fhe-decrypt LINEAGE CT                 user: typed policy-gated decrypt of one result ciphertext;
+                                         prints 'released <Type> = <v>' (exit 0) or 'refused ...' (exit 1)
 env: REPL_SO_PIN, REPL_USER_PIN (required)";
 
 const IV: [u8; 12] = [0x51; 12];
@@ -157,9 +167,151 @@ fn run() -> Result<(), String> {
                 false => Err("FAIL replica signature does not verify".into()),
             }
         })?,
+        #[cfg(feature = "educational-fhe")]
+        ("fhe-policy", 1) => as_so(slot, &so_pin, |so| fhe_cmd::policy(so, &a[0]))?,
+        #[cfg(feature = "educational-fhe")]
+        ("fhe-genkey", 3) => as_user(slot, &user_pin, |s| fhe_cmd::genkey(s, &a[0], &a[1], &a[2]))?,
+        #[cfg(feature = "educational-fhe")]
+        ("fhe-export", 2) => as_user(slot, &user_pin, |s| fhe_cmd::export(s, &a[0], &a[1]))?,
+        #[cfg(feature = "educational-fhe")]
+        ("fhe-decrypt", 2) => {
+            let s = native::open_session(slot, &user_pin).map_err(ck("user session"))?;
+            let released = fhe_cmd::decrypt(s, &a[0], &a[1]);
+            end(s);
+            if !released? {
+                std::process::exit(1);
+            }
+        }
+        // TEST ONLY: encrypt under the seed's client key so decrypt can be rehearsed without the
+        // compute server (as `fhe_custodian encrypt-owner`). Never in a non-test-support build.
+        #[cfg(all(feature = "educational-fhe", feature = "test-support"))]
+        ("fhe-encrypt-test", 4) => as_user(slot, &user_pin, |s| {
+            let seed = replica_by_lineage(s, &read(&a[0])?)?;
+            let v: u64 = a[2].parse().map_err(|_| "value must be an integer".to_string())?;
+            let ct = softhsmrustv3::replication::fhe_tfhe::encrypt_for_test(s, seed, &a[1], v).map_err(ck("encrypt_for_test"))?;
+            write(&a[3], &ct)
+        })?,
         _ => return Err(USAGE.into()),
     }
     Ok(())
+}
+
+/// FHE stage F on the board (custodian or backup). Mirrors `rust/examples/fhe_custodian.rs`
+/// but runs against the replication-enrolled store, so the same seed can be backed up to the
+/// peer board with the replication ceremony and decrypted there after a restore.
+#[cfg(feature = "educational-fhe")]
+mod fhe_cmd {
+    use super::*;
+    use softhsmrustv3::replication::{fhe, fhe_tfhe as tf};
+
+    const SIGNER_ID: &[u8] = b"fhe-custodian-manifest-signer";
+    const SEED_ID: &[u8] = b"fhe-custodian-seed";
+
+    /// The fixed educational decrypt policy (same as `fhe_custodian init`): FheBool/U8/U16/U32
+    /// may be released to the owner, FheUint64 never.
+    pub fn policy(so: u32, out: &str) -> Result<(), String> {
+        use der::Encode;
+        let ty = |n: &str, w: u16| fhe::FheType {
+            type_name: n.into(),
+            width_bits: w,
+            param_set: 1,
+            serialization_version: 1,
+            compressed_allowed: false,
+        };
+        let der = fhe::FheDecryptPolicy {
+            version: 1,
+            allowed_output_types: vec![ty("FheBool", 1), ty("FheUint16", 16), ty("FheUint32", 32), ty("FheUint8", 8)],
+            never_release: vec![ty("FheUint64", 64)],
+            predicates: vec![],
+            recipients: vec![],
+            recipient_only: false,
+            max_decrypts: 10_000,
+        }
+        .to_der()
+        .map_err(|e| format!("decrypt policy DER: {e}"))?;
+        let id = fhe::enroll_fhe_decrypt_policy(so, &der).map_err(ck("enroll_fhe_decrypt_policy"))?;
+        write(out, &id)
+    }
+
+    pub fn genkey(s: u32, rpid: &str, dpid: &str, outdir: &str) -> Result<(), String> {
+        let rp: [u8; 48] = read(rpid)?.try_into().map_err(|_| "replication policy id must be 48 bytes".to_string())?;
+        let dp: [u8; 48] = read(dpid)?.try_into().map_err(|_| "decrypt policy id must be 48 bytes".to_string())?;
+        let seed = fhe::generate_fhe_seed(s, 1, &rp, &dp, Some(b"FHE custodian seed"), Some(SEED_ID)).map_err(ck("generate_fhe_seed"))?;
+        if signer(s, CKO_PRIVATE_KEY).is_err() {
+            gen_signer(s)?;
+        }
+        let out = PathBuf::from(outdir);
+        write(out.join("uid.txt"), &attr(s, seed, CKA_UNIQUE_ID)?)?;
+        write(out.join("lineage.bin"), &attr(s, seed, CKA_PQCTODAY_REPLICATION_LINEAGE_ID)?)
+    }
+
+    pub fn export(s: u32, lineage: &str, outdir: &str) -> Result<(), String> {
+        let seed = replica_by_lineage(s, &read(lineage)?)?;
+        let (signer_priv, signer_pub) = (signer(s, CKO_PRIVATE_KEY)?, signer(s, CKO_PUBLIC_KEY)?);
+        let out = PathBuf::from(outdir);
+        std::fs::create_dir_all(out.join("crls")).map_err(|e| format!("{}: {e}", out.display()))?;
+        let fl = attr(s, seed, CKA_PQCTODAY_FHE_LINEAGE_ID)?;
+        let ph = attr(s, seed, CKA_PQCTODAY_FHE_PARAM_HASH)?;
+        for (kind, name) in [(tf::PUBLIC_KIND_COMPRESSED_SERVER_KEY, "compressed_server_key"), (tf::PUBLIC_KIND_COMPACT_PUBLIC_KEY, "compact_public_key")] {
+            let h = tf::derive_public(s, seed, kind).map_err(ck("DERIVE_PUBLIC"))?;
+            let blob = attr(s, h, CKA_VALUE)?;
+            let manifest = tf::public_manifest(&fl, &ph, kind, &blob).map_err(ck("public_manifest"))?;
+            let sig = native::sign(s, signer_priv, CKM_ML_DSA, &manifest).map_err(ck("sign manifest"))?;
+            write(out.join(format!("{name}.bin")), &blob)?;
+            write(out.join(format!("{name}.manifest.der")), &manifest)?;
+            write(out.join(format!("{name}.manifest.sig")), &sig)?;
+        }
+        write(out.join("signer_spki.der"), &attr(s, signer_pub, CKA_PUBLIC_KEY_INFO)?)?;
+        // K3 evidence that the manifest key is token-resident and non-extractable;
+        // nonce = first 32 bytes of SHA-384(server-key manifest DER), as fhe_custodian.
+        use sha2::Digest;
+        let m = read(out.join("compressed_server_key.manifest.der"))?;
+        let nonce: [u8; 32] = sha2::Sha384::digest(&m)[..32].try_into().unwrap();
+        write(out.join("signer_evidence.der"), &repl::attest_key(s, signer_priv, &nonce).map_err(ck("attest_key"))?)?;
+        write(out.join("crls/device.crl.der"), &repl::own_device_crl(s).map_err(ck("own_device_crl"))?)
+    }
+
+    /// `Ok(true)` = released (printed), `Ok(false)` = refused by policy or input check.
+    pub fn decrypt(s: u32, lineage: &str, ct: &str) -> Result<bool, String> {
+        let seed = replica_by_lineage(s, &read(lineage)?)?;
+        let input = read(ct)?;
+        match tf::decrypt(s, seed, &[0u8; 48], &input, false) {
+            Ok((_, Some(tf::DecryptOutput::Owner(b)))) if b.len() >= 3 => {
+                let width = u16::from_be_bytes([b[1], b[2]]);
+                let n = (b.len() - 3).min(8);
+                let mut v = [0u8; 8];
+                v[..n].copy_from_slice(&b[3..3 + n]);
+                let kind = if b[0] == 0 { "FheBool".to_string() } else { format!("FheUint{width}") };
+                println!("released {kind} = {}", u64::from_le_bytes(v));
+                Ok(true)
+            }
+            Ok(_) => Err("unexpected decrypt output".into()),
+            Err(rv) => {
+                println!("refused by policy or input check (CK_RV 0x{rv:08x}; reason in the token audit log only)");
+                Ok(false)
+            }
+        }
+    }
+
+    fn signer(s: u32, class: u32) -> Result<u32, String> {
+        native::find_all_by_cka_id(s, SIGNER_ID)
+            .map_err(ck("find signer"))?
+            .into_iter()
+            .find(|h| native::get_attribute_u32(s, *h, CKA_CLASS) == Some(class))
+            .ok_or_else(|| "manifest signer not found (run fhe-genkey first)".to_string())
+    }
+
+    fn gen_signer(s: u32) -> Result<(), String> {
+        let pubt = vec![(CKA_TOKEN, bb(true)), (CKA_PARAMETER_SET, ul(CKP_ML_DSA_65)), (CKA_VERIFY, bb(true)), (native::CKA_ID, SIGNER_ID.to_vec())];
+        let prvt = vec![(CKA_TOKEN, bb(true)), (CKA_SENSITIVE, bb(true)), (CKA_EXTRACTABLE, bb(false)), (CKA_SIGN, bb(true)), (native::CKA_ID, SIGNER_ID.to_vec())];
+        let (tp, tk) = (raw(&pubt), raw(&prvt));
+        let mut m = [CKM_ML_DSA_KEY_PAIR_GEN as usize, 0, 0];
+        let (mut hp, mut hk) = (0u32, 0u32);
+        rv(
+            softhsmrustv3::ffi::C_GenerateKeyPair(s, m.as_mut_ptr() as *mut u8, tp.as_ptr() as *mut u8, pubt.len() as u32, tk.as_ptr() as *mut u8, prvt.len() as u32, &mut hp, &mut hk),
+            "generate manifest signer",
+        )
+    }
 }
 
 // ── sessions ──────────────────────────────────────────────────────────────
