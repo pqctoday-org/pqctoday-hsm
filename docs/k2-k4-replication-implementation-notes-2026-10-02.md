@@ -6,8 +6,7 @@ Scope: Rust engine `softhsmrustv3`, native. **Educational software token only.**
 This records what was built, every decision the K0B specification
 (`docs/proposals/pqctoday-key-replication-interface-1.0.md`) left open, and how each
 finding of the independent review (`docs/k0b-protocol-review-codex-2026-10-02.md`) was
-disposed of. Where this file and the K0B spec differ, the difference is a proposed spec
-edit listed in §B and needs owner sign-off before the spec is amended.
+disposed of. The §B edits were approved by the owner and applied to the K0B spec as revision 2.
 
 ## A. What exists now
 
@@ -27,7 +26,7 @@ Not delivered (deliberately out of this change): K5 WASM/browser flow and Hub le
 (start only after K4 freezes and the authority lands), FHE seed profile (R5), production
 OIDs (G2), hardware roots (K6), archival validation (see R-14).
 
-## B. Proposed spec edits (pending owner sign-off)
+## B. Spec edits (owner approved 2026-10-02; applied as K0B spec revision 2)
 
 | Edit | Spec § | Change | Reason |
 |---|---|---|---|
@@ -106,10 +105,12 @@ must not be the protocol author" is an owner call.
 | R-11 | medium | Adopted (E-11) | `k4_offline_*` (public partners), payload consistency checks |
 | R-12 | high | Adopted (E-12) | `k4_budget_is_conserved_*` |
 | R-13 | medium | Adopted (E-13) | every `PROHIBITED` assertion in `replication_k4.rs` |
-| R-14 | high | **Partly open.** Tombstones are retained independently of object deletion, and a deleted replica's retry is terminal. Archival-time validation is **not** implemented: a restore whose signer certificate or CRL has expired is refused (fail closed). An offline backup is restorable only while the chain and CRLs are current | `k4_offline_*`; CRL expiry fail-closed in `k4_substitution_*` |
+| R-14 | high | **Accepted limitation (owner decision 2026-10-02: keep refusing; spec §10a).** Tombstones are retained independently of object deletion, and a deleted replica's retry is terminal. Archival-time validation is **not** implemented: a restore whose signer certificate or CRL has expired is refused (fail closed). An offline backup is restorable only while the chain and CRLs are current | `k4_offline_*`; CRL expiry fail-closed in `k4_substitution_*` |
 | R-15 | high | Mostly adopted: bounds on policy DER, policy count, CRL size, count and entries, evidence, request, package, plaintext, cached packages, ledger and open challenges; checked before allocation or signature work. Not done: an authenticated-snapshot size cap | constants in `records.rs`/`package.rs`; `k4_malformed_*` |
 
-G1 cannot close while R-14 is open and the independence question is unresolved.
+Owner decision on independence: a second, fresh reviewer who wrote neither the spec nor the
+code reviews the amended spec and this implementation. G1 closes only after the owner signs off
+on both reviews.
 
 ## E. Educational evidence claim profile (`1.3.6.1.4.1.32473.20261002.3`)
 
