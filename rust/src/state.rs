@@ -1514,6 +1514,16 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
         CKA_PQCTODAY_REPLICATION_LINEAGE_ID,
         CKA_PQCTODAY_REPLICATION_PROVENANCE,
         CKA_PQCTODAY_FUNCTION_PURPOSE,
+        // FHE plan §6.2 option (a): public vendor range plus this explicit
+        // immutable set — lineage, parameters, library and decrypt policy
+        // can never be rewritten by a caller.
+        CKA_PQCTODAY_FHE_SCHEME,
+        CKA_PQCTODAY_FHE_PARAM_SET,
+        CKA_PQCTODAY_FHE_PARAM_HASH,
+        CKA_PQCTODAY_FHE_LIBRARY,
+        CKA_PQCTODAY_FHE_LINEAGE_ID,
+        CKA_PQCTODAY_FHE_PUBLIC_KIND,
+        CKA_PQCTODAY_FHE_DECRYPT_POLICY,
     ];
     if IMMUTABLE_VENDOR_ATTRS.contains(&attr_type) {
         return Err(CKR_ATTRIBUTE_READ_ONLY);

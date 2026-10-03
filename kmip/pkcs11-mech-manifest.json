@@ -23,6 +23,10 @@
     "0x80000015": {"symbol": "CKM_PQCTODAY_ECDSA_EXPLICIT_K",             "operation": "sign",        "algorithm": "ECDSA P-256/384/521 with caller-supplied k (key-recovery teaching primitive, see SECURITY.md) — authority §1.4"},
     "0x80000016": {"symbol": "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE",   "operation": "internal",    "algorithm": "Constrained ML-DSA-65 function-certificate issuance by a device issuer (Rust engine, educational-replication; engine-internal, never advertised) — authority §1.4 (pqctoday-priv 7c497c34, main 62044042)"},
     "0x80000017": {"symbol": "CKM_PQCTODAY_SIGN_KEY_ATTESTATION",         "operation": "internal",    "algorithm": "Constrained ML-DSA-65 key-attestation evidence signing (Rust engine, educational-replication; engine-internal, never advertised) — authority §1.4 (pqctoday-priv 7c497c34, main 62044042)"},
+    "0x80000018": {"symbol": "CKM_PQCTODAY_FHE_KEY_GEN",                  "operation": "keygen",      "algorithm": "FHE seed generation (Rust engine; reserved, dispatched from FHE P2) — authority §1.4.5 (priv b80c856b)"},
+    "0x80000019": {"symbol": "CKM_PQCTODAY_FHE_DERIVE_PUBLIC",            "operation": "derive",      "algorithm": "FHE public-material derivation (Rust engine; reserved, P2) — authority §1.4.5"},
+    "0x8000001a": {"symbol": "CKM_PQCTODAY_FHE_DECRYPT",                  "operation": "decrypt",     "algorithm": "Typed, policy-gated FHE decryption (Rust engine; reserved, P2) — authority §1.4.5"},
+    "0x8000001b": {"symbol": "CKM_PQCTODAY_FHE_ENCRYPT",                  "operation": "encrypt",     "algorithm": "FHE test-vector encryption (Rust engine; reserved, P2) — authority §1.4.5"},
     "0x80000100": {"symbol": "CKM_KMAC_128",                              "operation": "mac",         "algorithm": "KMAC-128 (Rust engine only) — authority §1.4.2"},
     "0x80000101": {"symbol": "CKM_KMAC_256",                              "operation": "mac",         "algorithm": "KMAC-256 (Rust engine only) — authority §1.4.2"},
     "0x80001057": {"symbol": "CKM_EDDSA_PH",                              "operation": "sign",        "algorithm": "Pre-hashed EdDSA (Rust engine only) — authority §1.4.2"},
@@ -34,7 +38,9 @@
   "active_key_types": {
     "0x80000001": {"symbol": "CKK_PQCTODAY_FRODOKEM", "algorithm": "FrodoKEM key objects"},
     "0x80000002": {"symbol": "CKK_PQCTODAY_CLASSIC_MCELIECE", "algorithm": "Classic McEliece key objects"},
-    "0x80000003": {"symbol": "CKK_HPKE_KEM", "algorithm": "HPKE KEM key objects, classical + hybrid suites — authority §1.4"}
+    "0x80000003": {"symbol": "CKK_HPKE_KEM", "algorithm": "HPKE KEM key objects, classical + hybrid suites — authority §1.4"},
+    "0x80000010": {"symbol": "CKK_PQCTODAY_FHE", "algorithm": "Seed-backed FHE secret (Rust engine) — authority §1.4.5 (priv b80c856b)"},
+    "0x80000011": {"symbol": "CKK_PQCTODAY_FHE_PUBLIC", "algorithm": "Derived public FHE material (Rust engine; P2) — authority §1.4.5"}
   },
   "standard_pkcs11_v3_2": {
     "_note": "Informational — the standard OASIS PKCS#11 v3.2 PQC codepoints the KMIP layer now emits (source of truth: src/lib/pkcs11/pkcs11t.h, mirrored by softhsmrustv3::constants). These are NOT vendor mechs and are NOT governed by the authority file's allocation table.",

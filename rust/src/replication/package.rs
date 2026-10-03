@@ -24,7 +24,7 @@ use super::host_verify::{package_signed_bytes, receipt_signed_bytes};
 use super::oids::{self, Purpose};
 use super::pki::{self, Reject};
 use super::records::{self, *};
-use super::{crash_check, now_unix, oplog_event, require_profile, require_user, require_user_rw, CrashPoint, Profile};
+use super::{crash_check, now_unix, oplog_event, require_profile, require_user_rw, CrashPoint, Profile};
 use crate::constants::*;
 use crate::crypto::handlers::{Attributes, ALGO_ML_DSA, ALGO_ML_KEM};
 use crate::native::CKA_ID;
@@ -256,6 +256,9 @@ fn payload_allowlist(key_type: u32) -> &'static [u32] {
         CKK_AES => &[CKA_ENCRYPT, CKA_DECRYPT, CKA_WRAP, CKA_UNWRAP, CKA_SIGN, CKA_VERIFY],
         CKK_ML_DSA => &[CKA_SIGN],
         CKK_ML_KEM => &[CKA_DECAPSULATE],
+        // FHE P1: the seed's custody flags (DERIVE_PUBLIC and DECRYPT are its
+        // only mechanisms, fixed by the policy allowlist).
+        CKK_PQCTODAY_FHE => &[CKA_DECRYPT, CKA_DERIVE],
         _ => &[],
     }
 }
@@ -289,7 +292,8 @@ fn source_key(session: u32, h_key: u32) -> Result<(u32, SourceKey), u32> {
         (class, key_type),
         (CKO_SECRET_KEY, CKK_AES)
     ) || (class == CKO_PRIVATE_KEY && key_type == CKK_ML_KEM && ps == CKP_ML_KEM_768)
-        || (class == CKO_PRIVATE_KEY && key_type == CKK_ML_DSA && ps == CKP_ML_DSA_65);
+        || (class == CKO_PRIVATE_KEY && key_type == CKK_ML_DSA && ps == CKP_ML_DSA_65)
+        || (class == CKO_SECRET_KEY && key_type == CKK_PQCTODAY_FHE && super::fhe::param_hash(ps).is_some());
     let policy = attrs.get(&CKA_PQCTODAY_REPLICATION_POLICY_ID).cloned();
     let binding = attrs.get(&CKA_PRIV_REPL_BINDING).cloned();
     let b = |t| crate::state::read_bool_attr(&attrs, t);
@@ -352,10 +356,29 @@ fn cache_hit(slot: u32, req: &ReplicationRequest, request: &[u8], key: &SourceKe
     }
 }
 
+/// The type-specific payload extension: the FHE recovery descriptor for an
+/// FHE seed (FHE P1), nothing for the v1 key profiles.
+fn type_extension(key: &SourceKey) -> Result<Option<Vec<u8>>, u32> {
+    if key.key_type == CKK_PQCTODAY_FHE {
+        super::fhe::descriptor_for(&key.attrs).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// `typeConstraintHash` a replication policy must carry for `key_type`.
+fn profile_constraint_for(key_type: u32) -> [u8; 48] {
+    if key_type == CKK_PQCTODAY_FHE {
+        super::fhe::profile_constraint_hash()
+    } else {
+        super::sha384(b"")
+    }
+}
+
 fn build_payload(key: &SourceKey) -> Result<Vec<u8>, u32> {
     let value = key.attrs.get(&CKA_VALUE).cloned().ok_or(CKR_DEVICE_ERROR)?;
     let (class, paired) = match key.key_type {
-        CKK_AES => (KeyClass::SecretKey, None),
+        CKK_AES | CKK_PQCTODAY_FHE => (KeyClass::SecretKey, None),
         _ => {
             // The paired public value: the canonical raw key inside the SPKI.
             let spki = key.attrs.get(&CKA_PUBLIC_KEY_INFO).ok_or(CKR_DEVICE_ERROR)?;
@@ -377,7 +400,7 @@ fn build_payload(key: &SourceKey) -> Result<Vec<u8>, u32> {
         protected_value: asn1::octets(&value),
         paired_public: paired,
         attributes,
-        type_extension: None,
+        type_extension: type_extension(key)?.map(|d| asn1::octets(&d)),
     };
     asn1::to_der(&p)
 }
@@ -439,7 +462,7 @@ fn assemble(slot: u32, key: &SourceKey, req: &ReplicationRequest, budget_out: u3
         ])
         .map_err(|_| CKR_DEVICE_ERROR)?,
         source_evidence,
-        type_extension_hash: asn1::octets(&super::sha384(b"")),
+        type_extension_hash: asn1::octets(&super::sha384(&type_extension(key)?.unwrap_or_default())),
     };
     let payload_len = build_payload(key)?.len();
     Ok((Assembly { header, payload_len }, claims))
@@ -511,6 +534,9 @@ pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> R
     }
     if req.domain_id.as_bytes() != src_pol.domain {
         return deny(slot, Reject("domain"));
+    }
+    if src_pol.type_constraint_hash != profile_constraint_for(key.key_type) {
+        return deny(slot, Reject("policy profile does not match key type"));
     }
     // Requested destination policy: enrolled here too, equal or stricter.
     let Some(dst_der) = records::find_policy(slot, req.requested_policy.as_bytes()) else {
@@ -739,6 +765,8 @@ struct Staged {
     secret: Vec<u8>,
     public: Option<Vec<u8>>,
     usage: Vec<(u32, bool)>,
+    /// FHE P1: the validated recovery descriptor of an FHE seed.
+    fhe: Option<super::fhe::FheRecoveryDescriptor>,
 }
 
 impl Drop for Staged {
@@ -749,17 +777,35 @@ impl Drop for Staged {
 
 /// Spec §6 payload validation, including the engine's full private/public
 /// consistency checks (spec §6 "the importer performs...").
-fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims) -> Result<Staged, u32> {
+fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims, header: &ReplicationProtectedHeader) -> Result<Staged, u32> {
     let bad = CKR_ENCRYPTED_DATA_INVALID;
     let p: ReplicatedKeyPayload = asn1::decode_strict(pt, MAX_PLAINTEXT).map_err(|_| bad)?;
-    if p.version != 1 || p.type_extension.is_some() {
+    if p.version != 1 {
         return Err(bad);
     }
+    // The extension is bound by the SIGNED header hash (spec §6): FHE seeds
+    // must carry their recovery descriptor; v1 profiles must carry none.
+    let ext = p.type_extension.as_ref().map(|o| o.as_bytes().to_vec());
+    if header.type_extension_hash.as_bytes() != super::sha384(ext.as_deref().unwrap_or(b"")) {
+        return Err(bad);
+    }
+    let fhe = match (p.key_type, &ext) {
+        (CKK_PQCTODAY_FHE, Some(d)) => Some(super::fhe::validate_descriptor(d, header.lineage_id.as_bytes())?),
+        (CKK_PQCTODAY_FHE, None) => return Err(bad),
+        (_, Some(_)) => return Err(bad),
+        (_, None) => None,
+    };
     let secret = p.protected_value.as_bytes().to_vec();
     let public = p.paired_public.as_ref().map(|o| o.as_bytes().to_vec());
     match (p.key_class, p.key_type) {
         (KeyClass::SecretKey, CKK_AES) => {
             if ![16, 24, 32].contains(&secret.len()) || public.is_some() || ev_key.parameter_set != secret.len() as u32 {
+                return Err(bad);
+            }
+        }
+        (KeyClass::SecretKey, CKK_PQCTODAY_FHE) => {
+            let d = fhe.as_ref().ok_or(bad)?;
+            if secret.len() != super::fhe::FHE_SEED_LEN || public.is_some() || ev_key.parameter_set != d.param_set {
                 return Err(bad);
             }
         }
@@ -811,7 +857,7 @@ fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims) -> Result<Staged, u
         }
         usage.push((a.attr_type, v[0] == 1));
     }
-    Ok(Staged { key_type: p.key_type, secret, public, usage })
+    Ok(Staged { key_type: p.key_type, secret, public, usage, fhe })
 }
 
 /// Build the installed private/secret object and its public partner.
@@ -826,7 +872,7 @@ fn installed_objects(
     let mut a: Attributes = Default::default();
     let lineage = header.lineage_id.as_bytes().to_vec();
     let (class, ps, algo) = match st.key_type {
-        CKK_AES => (CKO_SECRET_KEY, 0, 0),
+        CKK_AES | CKK_PQCTODAY_FHE => (CKO_SECRET_KEY, 0, 0),
         CKK_ML_KEM => (CKO_PRIVATE_KEY, CKP_ML_KEM_768, ALGO_ML_KEM),
         _ => (CKO_PRIVATE_KEY, CKP_ML_DSA_65, ALGO_ML_DSA),
     };
@@ -870,6 +916,20 @@ fn installed_objects(
     }
     if st.key_type == CKK_AES {
         crate::state::compute_kcv(&mut a);
+        return (a, None);
+    }
+    if let Some(d) = &st.fhe {
+        // FHE P1: the seed keeps its identity, parameters, library and
+        // decryption policy exactly as the signed descriptor states them.
+        crate::state::store_param_set(&mut a, d.param_set);
+        store_ulong(&mut a, CKA_PQCTODAY_FHE_PARAM_SET, d.param_set);
+        a.insert(CKA_PQCTODAY_FHE_SCHEME, d.scheme.as_bytes().to_vec());
+        a.insert(CKA_PQCTODAY_FHE_PARAM_HASH, d.param_hash.as_bytes().to_vec());
+        a.insert(CKA_PQCTODAY_FHE_LIBRARY, d.library.as_bytes().to_vec());
+        a.insert(CKA_PQCTODAY_FHE_LINEAGE_ID, d.lineage_id.as_bytes().to_vec());
+        a.insert(CKA_PQCTODAY_FHE_DECRYPT_POLICY, d.decrypt_policy.as_bytes().to_vec());
+        // P0B §3 / A1: the fixed derive template is re-set on install.
+        a.insert(CKA_DERIVE_TEMPLATE, super::fhe::seed_derive_template());
         return (a, None);
     }
     let pk = st.public.clone().unwrap_or_default();
@@ -1020,7 +1080,6 @@ pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32
         || now < dst_pol.not_before
         || now >= dst_pol.not_after
         || h.transferred_budget > dst_pol.max_replicas
-        || h.type_extension_hash.as_bytes() != super::sha384(b"")
     {
         return deny(slot, Reject("destination policy refuses package"));
     }
@@ -1055,9 +1114,16 @@ pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32
     info.push(0);
     info.extend_from_slice(&super::sha384(&h_der));
     let mut pt = crate::native::hpke::open_replication_v1(&dk, pkg.tbs.encapsulated.as_bytes(), &info, &h_der, pkg.tbs.ciphertext.as_bytes())?;
-    let staged = validate_payload(&pt, &c.key);
+    let staged = validate_payload(&pt, &c.key, h);
     zeroize::Zeroize::zeroize(&mut pt);
     let staged = staged?;
+    // FHE P1 / plan §6.3: the seed's decryption policy must already be
+    // authorized here; a missing policy fails (no weaker default exists).
+    if let Some(d) = &staged.fhe {
+        if super::fhe::find_decrypt_policy(slot, d.decrypt_policy.as_bytes()).is_none() {
+            return deny(slot, Reject("FHE decryption policy not enrolled at destination"));
+        }
+    }
     crash_check(CrashPoint::ImportAfterDecrypt)?;
 
     // Stage objects and the receipt.

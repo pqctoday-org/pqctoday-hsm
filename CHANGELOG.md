@@ -30,6 +30,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `rust/tests/replication_store_contexts.rs` and
     `kmip/tests/c1_connection_context.rs`.
 
+- **Rust engine (educational feature only): FHE P1, the FHE seed as a
+  replicable key class.** Adds the FHE custody numbers (private authority
+  §1.4.5, merged as `b80c856b`), all seven FHE attributes immutable and never
+  caller-supplied, and SO enrollment of the typed decryption policy (FHE plan
+  §6.3) with an "equal or stricter" ordering. The seed's recovery descriptor
+  travels as the K4 package extension, bound by the signed header and validated
+  at import; unsupported generator versions and tampered descriptors are
+  refused, and a destination without the seed's decryption policy installs
+  nothing. P1 uses an opaque test-only seed fixture (no TFHE backend; no
+  decryption or key-regeneration claim yet; the fixture exists only in
+  `test-support` builds).
+
+- **Rust engine (educational feature only): FHE P2, a real TFHE-rs backend
+  for the FHE seed.** It sits behind the non-default cargo feature
+  `educational-fhe`, which pins `tfhe = "=1.8.1"` (integer API only;
+  BSD-3-Clause-Clear, educational use only because of the upstream patent
+  notice). The token derives the TFHE client key from its seed with a fixed KDF
+  (HMAC-SHA-384, known-answer test included), never stores it, and drops it
+  after each operation. `CKM_PQCTODAY_FHE_DERIVE_PUBLIC` exports only the
+  compressed server key or the compact public key. `CKM_PQCTODAY_FHE_DECRYPT`
+  enforces the enrolled typed decryption policy (allowed and never-release
+  types, predicates, recipients, a durable decrypt budget). It releases
+  plaintext either to the owner or as an HPKE-sealed release signed by the
+  token, which is bound to the lineage, policy, recipient and counter. A new
+  example, `fhe_custodian` (`init`, `export`, `decrypt`), runs the programme's
+  stage F in software. It exports the public material, an ML-DSA-65-signed
+  manifest per blob, key-attestation evidence for the signing key, the test
+  root and the CRLs, so an untrusted compute server can verify the material
+  before it uses it.
+
 - **Pre-push hook allows delete-only pushes.** Deleting a remote branch
   (`git push origin --delete <branch>`) sends no commit, so the hook no longer
   asks for a `.gate-ok-<sha>` marker when every ref in the push is a delete.
