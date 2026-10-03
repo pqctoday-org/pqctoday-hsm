@@ -31,6 +31,10 @@ pub const PURPOSE_RECOVERY_RECIPIENT: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.20261002.2.4");
 pub const PURPOSE_PEER_AUTHENTICATION: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.20261002.2.5");
+/// Replication admin authority (admin addendum §1, §9.2): a signing leaf
+/// directly under the manufacturing root, never a token key.
+pub const PURPOSE_ADMIN_AUTHORITY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.20261002.2.7");
+
 pub const PURPOSE_RECEIPT_SIGNING: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.32473.20261002.2.6");
 

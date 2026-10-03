@@ -609,10 +609,11 @@ fn k4_native_interface_discovery_and_calls() {
         let mut q: CK_INTERFACE_PTR = std::ptr::null_mut();
         assert_eq!(C_GetInterface(std::ptr::null_mut(), std::ptr::null_mut(), &mut q, 0), CKR_OK as CK_RV);
         assert_eq!(*((*q).pFunctionList as *const CK_VERSION), CK_VERSION { major: 3, minor: 2 });
-        // The list includes the vendor interface last, only while selected.
+        // The list includes the three vendor interfaces (v1, admin,
+        // ceremony) last, only while selected.
         let mut n: CK_ULONG = 0;
         C_GetInterfaceList(std::ptr::null_mut(), &mut n);
-        assert_eq!(n, 4);
+        assert_eq!(n, 6);
         repl::clear_profile();
         C_GetInterfaceList(std::ptr::null_mut(), &mut n);
         assert_eq!(n, 3);
