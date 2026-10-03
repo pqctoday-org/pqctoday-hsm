@@ -552,9 +552,11 @@ run_step_bg "rust engine cargo test" \
 # tests WITH the feature (the vendor-interface discovery and snapshot paths
 # change shape under it) plus the three acceptance suites: every K2/K3/K4
 # positive, negative, crash-window, concurrency, native-ABI and two-process
-# case for AES-128/192/256, ML-KEM-768 and ML-DSA-65.
+# case for AES-128/192/256, ML-KEM-768 and ML-DSA-65, plus FHE P1/P2 (the
+# `educational-fhe` feature implies educational-replication and pins TFHE-rs
+# 1.8.1; it reproduces the client-key KAT).
 run_step_bg "rust replication K2-K4 acceptance (educational-replication)" \
-  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-replication,test-support --lib --test replication_k2 --test replication_k3 --test replication_k4 --test replication_store --test replication_admin_stage --test replication_admin --test replication_fhe_p1" \
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-fhe,test-support --lib --test replication_k2 --test replication_k3 --test replication_k4 --test replication_store --test replication_admin_stage --test replication_admin --test replication_fhe_p1 --test replication_fhe_p2" \
   rust-replication
 
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
