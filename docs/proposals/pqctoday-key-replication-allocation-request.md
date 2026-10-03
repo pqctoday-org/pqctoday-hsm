@@ -26,12 +26,14 @@ Requested function-purpose values within the last attribute are:
 
 ```text
 1 = device issuer
-2 = peer authentication
-3 = key attestation
-4 = replication package signing
-5 = recovery recipient
+2 = key attestation
+3 = replication package signing
+4 = recovery recipient
+5 = peer authentication
 6 = replication receipt signing
 ```
+
+Value *n* matches function-purpose OID `.2.n` (spec §4.1) and the engine's `Purpose` enumeration.
 
 The authority deliberately skipped the documented unused `0x80000106` and used the collision-free
 contiguous block after the existing `0x80000107` allocation. The HSM constants, manifest/checkers
