@@ -1,6 +1,6 @@
 # Allocation request: replication admin and ceremony interfaces
 
-Status: **Reviewed and approved as drafted by 7f (engine owner), 2026-10-03, against `origin/main` `62044042`.** Not yet sent to the authority; the priv PR needs the owner's words to push and merge. Nothing allocated.
+Status: **Landed in the authority on 2026-10-03: `pqctoday-priv` PR #151, merge `220ed99e0f1fca412cc2e4224a108e992b3f6436`** (commits `ec846cb6` allocations, `2b54e0ac` safeguard narrowing; owner: "Merge both commits"). Reviewed by 7f against `origin/main` `62044042`/`fe07dcc3`. Reservations only; nothing ships or is advertised.
 Date: 2026-10-03
 Accompanies: `pqctoday-key-replication-admin-interface-1.0.md` (DRAFT 3.1).
 **Changed after 7f's approval (needs 7f re-check):** §3 adds the two client-certificate EKU OIDs required by review A-04 in a new `.4` transport sub-arc (`.4.1`, `.4.2`; 7f nit), §1 states the 1-based KMIP value (A-06), and §2 pins all seven purpose values in engine order (see the discrepancy note).
