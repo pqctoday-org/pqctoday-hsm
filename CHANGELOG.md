@@ -22,6 +22,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   decryption or key-regeneration claim yet; the fixture exists only in
   `test-support` builds).
 
+- **Pre-push hook allows delete-only pushes.** Deleting a remote branch
+  (`git push origin --delete <branch>`) sends no commit, so the hook no longer
+  asks for a `.gate-ok-<sha>` marker when every ref in the push is a delete.
+  Any push that sends a commit, including one mixed with deletes, still needs
+  the marker. `tests/test-pre-push-hook.sh` covers both cases and runs as a
+  gate step. Re-run `scripts/install-hooks.sh` to pick up the new hook.
+
 - **Rust engine (educational feature only): key hierarchy, key attestation and
   protected replication of non-extractable keys — K2–K4.** It sits behind the
   non-default cargo feature `educational-replication` and stays inert until a
@@ -131,6 +138,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   immutable.** BIP32 chain/index and LMS/XMSS parameter-set attributes can no
   longer bypass `C_SetAttributeValue` policy merely because they are in the
   vendor range.
+- **The local gate now tests the checkout it is run from.** Run from a git
+  worktree, `scripts/local-gate.sh` used to build and test the shared main tree
+  inside the `pqc-rust` container, because `AG_CONTAINER_ROOT` defaulted to
+  `/ag/pqctoday-hsm`. It could then write a `.gate-ok-<sha>` marker for a commit
+  it never built. Found on 2026-10-03, when a worktree's gate failed on files
+  that exist only in that worktree.
+  - The container path is now derived from the container's own `/ag` mount
+    (`scripts/lib/gate-container-root.sh`). A checkout the container cannot see
+    is refused with a pointer to `--host`. An explicit `AG_CONTAINER_ROOT`
+    still wins, and `remote-gate.sh` sets one.
+  - A probe file proves the container sees this directory before any step runs.
+  - Uninitialised git submodules (liboqs, hash-sigs, xmss-reference) are refused
+    up front with the `git submodule update --init` command. A fresh worktree
+    used to fail the differential step about 15 minutes in.
+  - The marker is written only if the tracked tree equalled HEAD at the start
+    and end, and HEAD did not move. It now records the full commit, the tree
+    hash and the container root.
+  - A new gate step runs the derivation's unit test
+    (`tests/test-gate-container-root.sh`, 9 cases, sabotage-checked against a
+    prefix-collision bug).
 
 - **Rust engine: listing certificates across slots now returns every
   requested attribute.** A black-box audit (5 slots × 20 objects, list slot
