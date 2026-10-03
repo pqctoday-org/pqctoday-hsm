@@ -928,6 +928,8 @@ fn installed_objects(
         a.insert(CKA_PQCTODAY_FHE_LIBRARY, d.library.as_bytes().to_vec());
         a.insert(CKA_PQCTODAY_FHE_LINEAGE_ID, d.lineage_id.as_bytes().to_vec());
         a.insert(CKA_PQCTODAY_FHE_DECRYPT_POLICY, d.decrypt_policy.as_bytes().to_vec());
+        // P0B §3 / A1: the fixed derive template is re-set on install.
+        a.insert(CKA_DERIVE_TEMPLATE, super::fhe::seed_derive_template());
         return (a, None);
     }
     let pk = st.public.clone().unwrap_or_default();
