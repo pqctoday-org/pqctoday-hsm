@@ -1,6 +1,6 @@
 # PQCToday FHE custody mechanisms (CKM_PQCTODAY_FHE_*): normative specification
 
-Status: **P0B working specification, revision 1, for review by the FHE P1/P2 implementer; educational, not a production interface**
+Status: **P0B working specification, revision 2: review amendments A1–A5 and the §11 answers from the FHE P1/P2 implementer (session 7f) are applied. Educational, not a production interface**
 Date: 2026-10-03
 Engine scope: `softhsmrustv3` only
 
@@ -59,7 +59,7 @@ The decrypt counter of §6.4 lives in the engine-private range (`>= 0xFFFF0000`)
 | `CKA_EXTRACTABLE`, `CKA_COPYABLE`, `CKA_MODIFIABLE`, `CKA_TRUSTED` | false |
 | `CKA_DERIVE`, `CKA_DECRYPT` | true |
 | `CKA_ALLOWED_MECHANISMS` | Exactly the replication policy's allowed mechanisms, which must be a subset of {`DERIVE_PUBLIC`, `DECRYPT`} |
-| `CKA_DERIVE_TEMPLATE` | `{CKA_CLASS=CKO_PUBLIC_KEY, CKA_KEY_TYPE=CKK_PQCTODAY_FHE_PUBLIC, CKA_TOKEN=false, CKA_PRIVATE=false}` (F3 enforces it) |
+| `CKA_DERIVE_TEMPLATE` | `{CKA_CLASS=CKO_PUBLIC_KEY, CKA_KEY_TYPE=CKK_PQCTODAY_FHE_PUBLIC, CKA_TOKEN=false, CKA_PRIVATE=false}` (F3 enforces it). It is a fixed profile constant, never caller-supplied. The engine sets it at `KEY_GEN` **and re-sets it when installing a replication package**, because packages do not carry restriction templates (A1). The descriptor's generator version (§7) implies it, so a replica can never lose it |
 | Replication binding | The Key Replication Interface policy whose `typeConstraintHash` equals the FHE profile hash (P1 `profile_constraint_hash`) |
 | History | Created by `KEY_GEN`: `CKA_LOCAL=true`, `CKA_KEY_GEN_MECHANISM=CKM_PQCTODAY_FHE_KEY_GEN`, `CKA_ALWAYS_SENSITIVE`/`CKA_NEVER_EXTRACTABLE=true`. Installed from a package: imported plus provenance (HSM plan decision 1) |
 
@@ -133,7 +133,7 @@ A template asking for `CKA_TOKEN=true`, or any secret-key attribute, returns `CK
 
 The per-object cap is 64 MiB. The output size is computed before allocation, and exceeding the session quota returns `CKR_DEVICE_MEMORY`.
 
-**Authenticity.** The token does not sign the blob itself. The application signs a manifest with a standard `C_Sign(CKM_ML_DSA)` call using an ML-DSA-65 key. The manifest is the DER of `FhePublicManifestV1 ::= SEQUENCE { lineage OCTET STRING (SIZE(32)), paramHash OCTET STRING (SIZE(48)), kind INTEGER, valueSha384 OCTET STRING (SIZE(48)) }`. It never buffers the blob as signature input (F4). The KV260 compute server verifies the manifest before decompressing.
+**Authenticity.** The token does not sign the blob itself. The application signs a manifest with a standard `C_Sign(CKM_ML_DSA)` call using an ML-DSA-65 key. That key **must be token-resident and non-extractable**, and the compute server verifies it through K3 `attest_key` evidence (device chain plus lineage) before trusting the manifest. So no new vendor operation is needed. The manifest is the DER of `FhePublicManifestV1 ::= SEQUENCE { lineage OCTET STRING (SIZE(32)), paramHash OCTET STRING (SIZE(48)), kind INTEGER, valueSha384 OCTET STRING (SIZE(48)) }`. It never buffers the blob as signature input (F4). The KV260 compute server verifies the manifest before decompressing.
 
 ### 5.3 `CKM_PQCTODAY_FHE_DECRYPT` (`C_Decrypt`)
 
@@ -146,21 +146,24 @@ typedef struct CK_PQCTODAY_FHE_DECRYPT_PARAMS {
 ```
 
 - **Single-part only.** `C_DecryptUpdate`/`C_DecryptFinal` return `CKR_FUNCTION_NOT_SUPPORTED` for this mechanism.
-- **Input.** One TFHE-rs `safe_serialize` blob of a high-level `FheBool` or `FheUint*`, at most 4 MiB. Version 1 does not accept compressed ciphertext lists unless the policy type sets `compressed_allowed`.
+- **Input.** One TFHE-rs `safe_serialize` blob of a high-level `FheBool` or `FheUint*`, at most 4 MiB. **Version 1 refuses compressed ciphertext lists.** `FheType.compressed_allowed` must be false, and the policy parser refuses `true` (P2 change to the P1 parser).
 - **Order of checks.** These run in a fixed order, so that errors cannot be used as an oracle. They extend §9 of the replication interface:
   1. **Rule 4, requester binding.** Session, login and role must be the owning user. The SO and public sessions get the standard role errors.
   2. **Mechanism allowed.** It must be in the base key's allowlist, else `CKR_KEY_FUNCTION_NOT_PERMITTED`.
-  3. **Size query.** If `pData == NULL`, return the output length computed from the matched type (rule 1 below) **without decrypting and without consuming the counter**. A size query of a non-conforming input returns the same `CKR_ACTION_PROHIBITED` as a real call.
+  3. **Size query.** If `pData == NULL`, run only the rule 1 type gate and return the output length of the matched type, **without decrypting and without consuming the counter**. The type gate looks only at the ciphertext's shape (type, width, block count, parameters), which the submitter already knows, so the size query leaks nothing that depends on the plaintext (A5). A size query of a non-conforming input returns the same `CKR_ACTION_PROHIBITED` as a real call.
   4. **Counter.** Reserve one unit of the decrypt counter durably (§6.4). If exhausted, return `CKR_ACTION_PROHIBITED`. From here on, every refusal still consumes the unit.
-  5. **Rule 1, conformance-checked type gate.** For each policy `allowed_output_types` entry in order, call `safe_deserialize_conformant` with that type's conformance parameters (block count, moduli, LWE dimension, atomic pattern) and the 4 MiB cap. The first conforming type is the matched type. If none conforms, return `CKR_ACTION_PROHIBITED`.
-  6. **Rule 2, input types.** If the matched type equals a `never_release` entry, return `CKR_ACTION_PROHIBITED`. P1's parser already forbids overlap, so this check is defensive.
-  7. **Decryption.** Derive the seed (§5.5), regenerate the client key, decrypt, and zeroize.
-  8. **Rule 3, post-decrypt predicates.** Each policy predicate (`MaxValue`/`MinValue` on the unsigned value) must hold. Otherwise return `CKR_ACTION_PROHIBITED`.
-  9. **Rule 5, recipient.** An all-zero recipient is allowed only if `recipient_only` is false. A non-zero recipient must be in the policy `recipients`. Otherwise return `CKR_ACTION_PROHIBITED`.
+  5. **Rule 5, recipient.** An all-zero recipient is allowed only if `recipient_only` is false. A non-zero recipient must be in the policy `recipients`. Otherwise return `CKR_ACTION_PROHIBITED`. This check does not depend on the plaintext, so it runs before any decryption work, and the refusal still consumes the counter unit (A3).
+  6. **Rule 1, conformance-checked type gate.** For each policy `allowed_output_types` entry in order, call `safe_deserialize_conformant` with that type's conformance parameters (block count, moduli, LWE dimension, atomic pattern) and the 4 MiB cap. The first conforming type is the matched type. If none conforms, return `CKR_ACTION_PROHIBITED`.
+  7. **Rule 2, input types.** If the matched type equals a `never_release` entry, return `CKR_ACTION_PROHIBITED`. P1's parser already forbids overlap, so this check is defensive.
+  8. **Decryption.** Derive the seed (§5.5), regenerate the client key, decrypt, and zeroize.
+  9. **Rule 3, post-decrypt predicates.** Each policy predicate (`MaxValue`/`MinValue` on the unsigned value) must hold. Otherwise return `CKR_ACTION_PROHIBITED`.
   10. **Release and audit.**
 - **Every policy refusal returns the same `CKR_ACTION_PROHIBITED`.** The reason goes only to the audit log, so the token never says which rule failed. Refusal and release take the same code path up to the final output step.
 - **Output to the owner.** One byte for the type (`0` = `FheBool`, `1` = `FheUint`), then a 2-byte big-endian width in bits, then the value as unsigned little-endian bytes of width ⌈bits/8⌉ (`FheBool` is 1 byte, 0 or 1).
-- **Output to a recipient.** The same plaintext, sealed inside the token with HPKE to the recipient's ML-KEM-768 certificate. The suite is the Key Replication Interface's: KEM `0x0041`, HKDF-SHA384, AES-256-GCM. `info` is the DER of `{lineage, decryptPolicyId, recipient, transactionCounter}`, and `aad` is the 3-byte type header. Output is `enc ‖ ciphertext`. Encapsulation randomness is engine-generated, and test hooks are absent in shipped builds (F5).
+- **Output to a recipient.** The same plaintext, sealed inside the token with HPKE to the recipient's ML-KEM-768 certificate. The suite is the Key Replication Interface's: KEM `0x0041`, HKDF-SHA384, AES-256-GCM. `info` is the DER of `{lineage, decryptPolicyId, recipient, counter}`, and `aad` is the 3-byte type header. Encapsulation randomness is engine-generated, and test hooks are absent in shipped builds (F5).
+- **The sealed release is signed (A2).** HPKE base mode does not authenticate the sender, so on its own a recipient could not tell the plaintext came from this token under this policy. The token therefore signs the release with its existing internal **receipt-signing function key** (ML-DSA-65; no allocation, because it is an internal function key).
+  - The signed bytes are `"PQCToday FHE Release 1.0" ‖ 0x00 ‖ DER{lineage, decryptPolicyId, recipient, counter, SHA-384(enc ‖ ciphertext)}`.
+  - The output is the DER of `FheSealedReleaseV1 ::= SEQUENCE { enc OCTET STRING, ciphertext OCTET STRING, counter INTEGER, signature OCTET STRING, signerChain SEQUENCE OF Certificate }`. The signer chain is the device and receipt-signer certificates, as in the replication receipt.
 - **Limits the policy cannot remove, stated in every claim.** A requester can re-slice an input into an allowed width (rule 2 bounds bits per call, not provenance). Release-or-refuse leaks one bit per call (rule 3). Both are bounded only by the counter.
 
 ### 5.4 `CKM_PQCTODAY_FHE_ENCRYPT` (`C_Encrypt`)
@@ -230,7 +233,7 @@ A destination installs a replicated seed only under an enrolled policy that is e
 
 The counter is a per-object count of decrypt calls, released or refused, kept in an engine-private attribute. It is reserved durably before any decryption work, in the same atomic snapshot commit as the audit record.
 
-A replicated object starts its own counter at 0, so clones do not share a global budget (HSM plan §3). It resists reuse within the current state, but cannot resist the host rolling the whole token snapshot back; that is disclosed.
+A replicated object starts its own counter at 0, so clones do not share a global budget (HSM plan §3). The bound across a lineage is therefore **total releases ≤ (maxReplicas + 1) × maxDecrypts**, where `maxReplicas` is the replication policy's replica limit (A4). The counter resists reuse within the current state, but cannot resist the host rolling the whole token snapshot back; that is disclosed.
 
 ## 7. Recovery descriptor (replication type extension)
 
@@ -297,15 +300,16 @@ Every error path zeroizes transient secrets and leaves no partial object.
 4. The repository gates of FHE plan §10.1: the vendor-constant manifest, the mechanism ledger with `excluded-by-scope:` on C++ rows, conformance-report freshness, vector reachability, and the full local gate.
 5. The owner's separate approval to advertise.
 
-## 11. Open points for review
+## 11. Review decisions (rev 2)
 
-- **Output encoding.** Is §5.3's 3-byte header plus little-endian value the right owner format, or should it be DER for symmetry with the policy?
-- **Compressed lists.** Should version 1 refuse compressed ciphertext lists outright (simpler type gate), or keep them policy-gated as P1's `FheType.compressed_allowed` allows?
-- **Server-key manifest.** Who signs it (§5.2)? The proposal is an application ML-DSA-65 key through `C_Sign`. The alternative is the HSM plan's package-signing function key through a vendor operation, which would need its own allocation.
-- **Retiring the P1 placeholder hash.** P1 fixtures become unimportable in P2 (§4). Confirm that is acceptable, since they are test-only.
+1. **Owner output format:** the 3-byte type header plus little-endian value stays. DER adds nothing for a scalar.
+2. **Compressed ciphertext lists:** refused in version 1 (§5.3).
+3. **Server-key manifest signer:** an application ML-DSA-65 key that is token-resident, non-extractable and attested through K3 (§5.2).
+4. **P1 placeholder parameter hash:** retired in P2. P1 fixtures are test-only and are not migrated (§4).
 
 ## 12. Revision history
 
 | Rev | Date | Change |
 |---|---|---|
 | 1 | 2026-10-03 | First normative draft, aligned with authority §1.4.5 and FHE P1 at `f48a040d` |
+| 2 | 2026-10-03 | Review amendments from session 7f: A1 derive template re-set on install; A2 signed sealed release; A3 recipient check before decryption; A4 lineage-wide release bound; A5 size query leaks only shape. §11 resolved: header format kept, compressed lists refused, attested manifest key, placeholder hash retired |
