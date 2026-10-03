@@ -122,6 +122,13 @@ struct Cli {
     #[arg(long)]
     engine_store: Option<PathBuf>,
 
+    /// PQCTODAY EDUCATIONAL TEST ONLY: select the educational replication profile and serve
+    /// the replication interfaces over the KMIP PKCS#11 operation (pre-ceremony-ABI).
+    /// Bind `--listen` to the crypto-plane address only.
+    #[cfg(feature = "educational-replication")]
+    #[arg(long)]
+    educational_replication: bool,
+
     /// Append-only JSONL audit log. Combined with the in-memory ring via CompositeSink.
     #[arg(long)]
     audit_log: Option<PathBuf>,
@@ -425,6 +432,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("engine store: durable SQLite at {dir:?} (key material persists across restarts)");
     } else {
         tracing::info!("engine store: volatile (no --engine-store; key material does not survive a restart)");
+    }
+
+    #[cfg(feature = "educational-replication")]
+    if cli.educational_replication {
+        softhsmrustv3::replication::select_educational_profile();
+        tracing::warn!(
+            "PQCTODAY EDUCATIONAL TEST ONLY: replication interfaces served over KMIP on {} (pre-ceremony-ABI)",
+            cli.listen
+        );
     }
 
     // ── Engine session (Phase 7b — real bridge to softhsmrustv3) ────────

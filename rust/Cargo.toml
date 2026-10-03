@@ -138,6 +138,13 @@ required-features = ["educational-replication", "test-support"]
 name = "replication_store"
 required-features = ["educational-replication", "test-support"]
 
+[[bin]]
+# Board-local tool for the educational two-board replication test (pre-ceremony-ABI).
+# PQCTODAY EDUCATIONAL TEST ONLY; never built without the non-default feature.
+name = "repl_edu_board"
+path = "src/bin/repl_edu_board.rs"
+required-features = ["educational-replication"]
+
 [[test]]
 name = "replication_fhe_p1"
 required-features = ["educational-replication", "test-support"]
