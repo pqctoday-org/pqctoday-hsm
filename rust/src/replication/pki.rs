@@ -128,6 +128,25 @@ pub fn leaf_extensions(purpose: Purpose, ski: &[u8], aki: &[u8]) -> Vec<Extensio
     ]
 }
 
+/// Extensions for a replication admin-authority certificate (admin addendum
+/// §1): `cA=FALSE`, critical KU exactly digitalSignature, critical EKU exactly
+/// `.2.7`, issued directly by the manufacturing root.
+pub fn admin_authority_extensions(ski: &[u8], root_ski: &[u8]) -> Vec<Extension> {
+    vec![
+        ext(true, &BasicConstraints { ca: false, path_len_constraint: None }),
+        ext(true, &KeyUsage(KeyUsages::DigitalSignature.into())),
+        ext(true, &ExtendedKeyUsage(vec![oids::PURPOSE_ADMIN_AUTHORITY])),
+        ext(false, &SubjectKeyIdentifier(OctetString::new(ski.to_vec()).expect("ski"))),
+        ext(
+            false,
+            &AuthorityKeyIdentifier {
+                key_identifier: Some(OctetString::new(root_ski.to_vec()).expect("aki")),
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
 pub fn tbs_certificate(
     serial: SerialNumber,
     issuer: Name,
@@ -350,6 +369,64 @@ pub fn validate_leaf(leaf: &Certificate, device: &Certificate, purpose: Purpose,
     }
     check_validity(leaf, now)?;
     verify_signed(leaf, mldsa65_public(device)?)
+}
+
+/// Validate an admin-authority certificate directly under `root` (profile
+/// only: chain, extensions, validity, signature; revocation is the caller's).
+pub fn validate_admin_authority(cert: &Certificate, root: &Certificate, now: u64, profile: Profile) -> PkiResult<()> {
+    if cert.tbs_certificate.version != Version::V3 {
+        return r("admin authority version");
+    }
+    check_serial(cert)?;
+    mldsa65_public(cert)?;
+    let e = profile_exts(cert, profile)?;
+    match e.bc {
+        Some((true, BasicConstraints { ca: false, path_len_constraint: None })) => {}
+        _ => return r("admin authority basic constraints"),
+    }
+    match e.ku {
+        Some((true, ku)) if ku == KeyUsage(KeyUsages::DigitalSignature.into()) => {}
+        _ => return r("admin authority key usage"),
+    }
+    match &e.eku {
+        Some((true, eku)) if eku.0 == vec![oids::PURPOSE_ADMIN_AUTHORITY] => {}
+        _ => return r("admin authority purpose"),
+    }
+    let root_e = profile_exts(root, profile)?;
+    if cert.tbs_certificate.issuer != root.tbs_certificate.subject || e.aki != root_e.ski || e.ski.is_none() {
+        return r("admin authority issuer/authority identifier");
+    }
+    check_validity(cert, now)?;
+    verify_signed(cert, mldsa65_public(root)?)
+}
+
+/// Validate an admin-authority certificate against the trust inputs: it
+/// chains to an enrolled root, and the root's current CRL (or `root_crl`,
+/// an already verified newer one — admin addendum §3.2 step 5, B2) does not
+/// list it. Fails closed when no current root CRL exists.
+pub fn validate_admin_authority_trusted(
+    cert: &Certificate,
+    trust: &TrustInputs,
+    root_crl: Option<&VerifiedCrl>,
+    now: u64,
+    profile: Profile,
+) -> PkiResult<()> {
+    for root_der in &trust.roots {
+        let Ok(root) = parse_cert(root_der) else { continue };
+        if validate_root(&root, now, profile).is_err() || validate_admin_authority(cert, &root, now, profile).is_err() {
+            continue;
+        }
+        let root_ski = profile_exts(&root, profile)?.ski;
+        let crl = match root_crl {
+            Some(c) if Some(&c.issuer_key_id) == root_ski.as_ref() => c.clone(),
+            _ => current_crl(&trust.crls, &root, now)?,
+        };
+        if crl.revoked.iter().any(|s| s.as_slice() == cert.tbs_certificate.serial_number.as_bytes()) {
+            return r("admin authority revoked");
+        }
+        return Ok(());
+    }
+    r("admin authority does not chain to an enrolled root")
 }
 
 // ── CRLs (spec §4.2 revocation; owner decision 5) ──────────────────────────

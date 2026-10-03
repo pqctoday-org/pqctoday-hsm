@@ -92,7 +92,7 @@ pub fn cancel_receive(user_session: u32, transaction_id: &[u8; 32]) -> Result<()
 /// package cannot both observe "no ledger entry".
 static OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn op_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn op_lock() -> std::sync::MutexGuard<'static, ()> {
     OP_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -190,46 +190,9 @@ pub fn begin_receive(
     let slot = require_user_rw(user_session)?;
     ready(slot)?;
     prune(slot);
-    if *source_challenge == [0u8; 32] {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    let now = now_unix();
-    let pol = records::parse_policy(&records::find_policy(slot, requested_policy).ok_or(CKR_ACTION_PROHIBITED)?)?;
-    if !pol.permits(operation) || pol.domain != *domain_id || now < pol.not_before || now >= pol.not_after {
-        return Err(CKR_ACTION_PROHIBITED);
-    }
     let txid = super::random32()?;
     let dchal = super::random32()?;
-    let expires_at = if operation == Operation::OfflineBackup { pol.not_after } else { now + LIVE_CHALLENGE_SECS };
-    let (_, recovery_pub) = records::function_public(slot, Purpose::RecoveryRecipient).ok_or(CKR_ACTION_PROHIBITED)?;
-    let claims = EvidenceClaims {
-        nonce: *source_challenge,
-        role: EvidenceRole::Destination,
-        transaction_id: Some(txid),
-        domain_id: Some(*domain_id),
-        policy: Some(*requested_policy),
-        device_id: evidence::platform_device_id(slot)?,
-        engine: evidence::ENGINE_IDENTITY.to_string(),
-        custody_scope: evidence::CUSTODY_SCOPE.to_string(),
-        issued_at: now,
-        key: evidence::key_claims_from(&recovery_pub)?,
-    };
-    let ev = Evidence::from_der(&evidence::sign_evidence(slot, &claims)?).map_err(|_| CKR_DEVICE_ERROR)?;
-    let chain = pki::chain_from_ders(&super::enroll::function_chain(user_session, Purpose::RecoveryRecipient)?)
-        .map_err(|_| CKR_DEVICE_ERROR)?;
-    let req = ReplicationRequest {
-        version: 1,
-        operation,
-        suite: oids::SUITE_V1,
-        transaction_id: asn1::octets(&txid),
-        source_challenge: asn1::octets(source_challenge),
-        destination_challenge: asn1::octets(&dchal),
-        domain_id: asn1::octets(domain_id),
-        requested_policy: asn1::octets(requested_policy),
-        recipient_chain: chain,
-        recipient_evidence: ev,
-    };
-    let der = asn1::to_der(&req)?;
+    let (der, now, expires_at) = receive_request(user_session, slot, operation, source_challenge, domain_id, requested_policy, Some((txid, dchal)))?;
     reserve_challenge(
         user_session,
         slot,
@@ -246,6 +209,79 @@ pub fn begin_receive(
     )?;
     oplog_event("receive_begin", slot, &[("transaction", super::hex(&txid)), ("operation", format!("{operation:?}"))]);
     Ok(der)
+}
+
+/// Exact length of [`begin_receive`]'s output for the same inputs (base §3
+/// sizing; admin addendum §2.2). Same checks and refusals as the real call,
+/// but no randomness, no signature, no reservation, no pruning and no audit:
+/// nothing in the token changes.
+pub fn begin_receive_len(
+    user_session: u32,
+    operation: Operation,
+    source_challenge: &[u8; 32],
+    domain_id: &[u8; 32],
+    requested_policy: &[u8; 48],
+) -> Result<usize, u32> {
+    let _op = op_lock();
+    require_profile()?;
+    let slot = require_user_rw(user_session)?;
+    ready(slot)?;
+    receive_request(user_session, slot, operation, source_challenge, domain_id, requested_policy, None).map(|(der, _, _)| der.len())
+}
+
+/// The `ReplicationRequest` DER for [`begin_receive`]; `ids` = (transaction,
+/// destination challenge), or `None` to size it with zeroed identifiers and
+/// an unsigned placeholder evidence of identical length.
+fn receive_request(
+    user_session: u32,
+    slot: u32,
+    operation: Operation,
+    source_challenge: &[u8; 32],
+    domain_id: &[u8; 32],
+    requested_policy: &[u8; 48],
+    ids: Option<([u8; 32], [u8; 32])>,
+) -> Result<(Vec<u8>, u64, u64), u32> {
+    if *source_challenge == [0u8; 32] {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let now = now_unix();
+    let pol = records::parse_policy(&records::find_policy(slot, requested_policy).ok_or(CKR_ACTION_PROHIBITED)?)?;
+    if !pol.permits(operation) || pol.domain != *domain_id || now < pol.not_before || now >= pol.not_after {
+        return Err(CKR_ACTION_PROHIBITED);
+    }
+    let sign = ids.is_some();
+    let (txid, dchal) = ids.unwrap_or(([0u8; 32], [0u8; 32]));
+    let expires_at = if operation == Operation::OfflineBackup { pol.not_after } else { now + LIVE_CHALLENGE_SECS };
+    let (_, recovery_pub) = records::function_public(slot, Purpose::RecoveryRecipient).ok_or(CKR_ACTION_PROHIBITED)?;
+    let claims = EvidenceClaims {
+        nonce: *source_challenge,
+        role: EvidenceRole::Destination,
+        transaction_id: Some(txid),
+        domain_id: Some(*domain_id),
+        policy: Some(*requested_policy),
+        device_id: evidence::platform_device_id(slot)?,
+        engine: evidence::ENGINE_IDENTITY.to_string(),
+        custody_scope: evidence::CUSTODY_SCOPE.to_string(),
+        issued_at: now,
+        key: evidence::key_claims_from(&recovery_pub)?,
+    };
+    let ev_der = if sign { evidence::sign_evidence(slot, &claims)? } else { evidence::evidence_der_unsigned(slot, &claims)? };
+    let ev = Evidence::from_der(&ev_der).map_err(|_| CKR_DEVICE_ERROR)?;
+    let chain = pki::chain_from_ders(&super::enroll::function_chain(user_session, Purpose::RecoveryRecipient)?)
+        .map_err(|_| CKR_DEVICE_ERROR)?;
+    let req = ReplicationRequest {
+        version: 1,
+        operation,
+        suite: oids::SUITE_V1,
+        transaction_id: asn1::octets(&txid),
+        source_challenge: asn1::octets(source_challenge),
+        destination_challenge: asn1::octets(&dchal),
+        domain_id: asn1::octets(domain_id),
+        requested_policy: asn1::octets(requested_policy),
+        recipient_chain: chain,
+        recipient_evidence: ev,
+    };
+    Ok((asn1::to_der(&req)?, now, expires_at))
 }
 
 // ── Source side ─────────────────────────────────────────────────────────────

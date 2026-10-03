@@ -211,3 +211,194 @@ pub static REPLICATION_FUNCTION_LIST: PQCTODAY_KEY_REPLICATION_FUNCTION_LIST_1_0
         C_PQCTODAY_ImportReplicationPackage,
         C_PQCTODAY_CloneKey,
     };
+
+// ── Admin addendum §2.1 / §2.2 ─────────────────────────────────────────────
+
+/// Fixed-size output: NULL buffer → the length, no randomness or mutation;
+/// too small → `CKR_BUFFER_TOO_SMALL` before any work.
+unsafe fn fixed_out(out: CK_BYTE_PTR, pul: CK_ULONG_PTR, len: usize) -> Option<CK_RV> {
+    if out.is_null() {
+        *pul = len as CK_ULONG;
+        return Some(rv(CKR_OK));
+    }
+    if (*pul as usize) < len {
+        *pul = len as CK_ULONG;
+        return Some(rv(CKR_BUFFER_TOO_SMALL));
+    }
+    None
+}
+
+pub unsafe extern "C" fn C_PQCTODAY_AdminIssueNonce(hSOSession: CK_SESSION_HANDLE, pNonce: CK_BYTE_PTR, pulNonceLen: CK_ULONG_PTR) -> CK_RV {
+    if !crate::state::is_initialized() {
+        return rv(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    if pulNonceLen.is_null() {
+        return rv(CKR_ARGUMENTS_BAD);
+    }
+    let Some(s) = handle(hSOSession) else {
+        return rv(CKR_SESSION_HANDLE_INVALID);
+    };
+    if let Some(r) = fixed_out(pNonce, pulNonceLen, 32) {
+        return r;
+    }
+    match super::admin::issue_nonce(s) {
+        Ok(n) => write_out(pNonce, pulNonceLen, &n),
+        Err(e) => rv(e),
+    }
+}
+
+pub unsafe extern "C" fn C_PQCTODAY_AdminExecute(
+    hSOSession: CK_SESSION_HANDLE,
+    pSignedRequest: CK_BYTE_PTR,
+    ulSignedRequestLen: CK_ULONG,
+    pReceipt: CK_BYTE_PTR,
+    pulReceiptLen: CK_ULONG_PTR,
+) -> CK_RV {
+    if !crate::state::is_initialized() {
+        return rv(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    if pulReceiptLen.is_null() {
+        return rv(CKR_ARGUMENTS_BAD);
+    }
+    let req = match input(pSignedRequest, ulSignedRequestLen) {
+        Ok(r) => r,
+        Err(e) => return rv(e),
+    };
+    let Some(s) = handle(hSOSession) else {
+        return rv(CKR_SESSION_HANDLE_INVALID);
+    };
+    let len = match super::admin::execute_len(s, req) {
+        Ok(l) => l,
+        Err(e) => return rv(e),
+    };
+    if let Some(r) = fixed_out(pReceipt, pulReceiptLen, len) {
+        return r;
+    }
+    match super::admin::execute(s, req) {
+        Ok(receipt) => write_out(pReceipt, pulReceiptLen, &receipt),
+        Err(e) => rv(e),
+    }
+}
+
+pub unsafe extern "C" fn C_PQCTODAY_IssueSourceChallenge(hUserSession: CK_SESSION_HANDLE, pChallenge: CK_BYTE_PTR, pulChallengeLen: CK_ULONG_PTR) -> CK_RV {
+    if !crate::state::is_initialized() {
+        return rv(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    if pulChallengeLen.is_null() {
+        return rv(CKR_ARGUMENTS_BAD);
+    }
+    let Some(s) = handle(hUserSession) else {
+        return rv(CKR_SESSION_HANDLE_INVALID);
+    };
+    if let Some(r) = fixed_out(pChallenge, pulChallengeLen, 32) {
+        return r;
+    }
+    match super::issue_source_challenge(s) {
+        Ok(c) => write_out(pChallenge, pulChallengeLen, &c),
+        Err(e) => rv(e),
+    }
+}
+
+pub unsafe extern "C" fn C_PQCTODAY_BeginReceive(
+    hUserSession: CK_SESSION_HANDLE,
+    pBeginReceive: CK_BYTE_PTR,
+    ulBeginReceiveLen: CK_ULONG,
+    pRequest: CK_BYTE_PTR,
+    pulRequestLen: CK_ULONG_PTR,
+) -> CK_RV {
+    if !crate::state::is_initialized() {
+        return rv(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    if pulRequestLen.is_null() {
+        return rv(CKR_ARGUMENTS_BAD);
+    }
+    let der = match input(pBeginReceive, ulBeginReceiveLen) {
+        Ok(d) => d,
+        Err(e) => return rv(e),
+    };
+    let Some(s) = handle(hUserSession) else {
+        return rv(CKR_SESSION_HANDLE_INVALID);
+    };
+    let (op, chal, domain, policy) = match super::admin::BeginReceive::parse(der) {
+        Ok(v) => v,
+        Err(e) => return rv(e),
+    };
+    let len = match super::begin_receive_len(s, op, &chal, &domain, &policy) {
+        Ok(l) => l,
+        Err(e) => return rv(e),
+    };
+    if let Some(r) = fixed_out(pRequest, pulRequestLen, len) {
+        return r;
+    }
+    match super::begin_receive(s, op, &chal, &domain, &policy) {
+        Ok(req) => write_out(pRequest, pulRequestLen, &req),
+        Err(e) => rv(e),
+    }
+}
+
+pub unsafe extern "C" fn C_PQCTODAY_CancelReceive(hUserSession: CK_SESSION_HANDLE, pTransactionID: CK_BYTE_PTR, ulTransactionIDLen: CK_ULONG) -> CK_RV {
+    if !crate::state::is_initialized() {
+        return rv(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    let txid: [u8; 32] = match input(pTransactionID, ulTransactionIDLen).map(|t| t.try_into()) {
+        Ok(Ok(t)) => t,
+        _ => return rv(CKR_ARGUMENTS_BAD),
+    };
+    let Some(s) = handle(hUserSession) else {
+        return rv(CKR_SESSION_HANDLE_INVALID);
+    };
+    match super::cancel_receive(s, &txid) {
+        Ok(()) => rv(CKR_OK),
+        Err(e) => rv(e),
+    }
+}
+
+pub unsafe extern "C" fn C_PQCTODAY_AttestKey(
+    hUserSession: CK_SESSION_HANDLE,
+    hKey: CK_OBJECT_HANDLE,
+    pChallenge: CK_BYTE_PTR,
+    ulChallengeLen: CK_ULONG,
+    pEvidence: CK_BYTE_PTR,
+    pulEvidenceLen: CK_ULONG_PTR,
+) -> CK_RV {
+    if !crate::state::is_initialized() {
+        return rv(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    if pulEvidenceLen.is_null() {
+        return rv(CKR_ARGUMENTS_BAD);
+    }
+    let chal: [u8; 32] = match input(pChallenge, ulChallengeLen).map(|c| c.try_into()) {
+        Ok(Ok(c)) => c,
+        _ => return rv(CKR_ARGUMENTS_BAD),
+    };
+    let (Some(s), Some(k)) = (handle(hUserSession), handle(hKey)) else {
+        return rv(CKR_SESSION_HANDLE_INVALID);
+    };
+    let len = match super::evidence::attest_key_len(s, k, &chal) {
+        Ok(l) => l,
+        Err(e) => return rv(e),
+    };
+    if let Some(r) = fixed_out(pEvidence, pulEvidenceLen, len) {
+        return r;
+    }
+    match super::attest_key(s, k, &chal) {
+        Ok(ev) => write_out(pEvidence, pulEvidenceLen, &ev),
+        Err(e) => rv(e),
+    }
+}
+
+/// Admin addendum §2.1 function list.
+pub static ADMIN_FUNCTION_LIST: PQCTODAY_KEY_REPLICATION_ADMIN_FUNCTION_LIST_1_0 = PQCTODAY_KEY_REPLICATION_ADMIN_FUNCTION_LIST_1_0 {
+    version: CK_VERSION { major: 1, minor: 0 },
+    C_PQCTODAY_AdminIssueNonce,
+    C_PQCTODAY_AdminExecute,
+};
+
+/// Admin addendum §2.2 function list.
+pub static CEREMONY_FUNCTION_LIST: PQCTODAY_KEY_REPLICATION_CEREMONY_FUNCTION_LIST_1_0 = PQCTODAY_KEY_REPLICATION_CEREMONY_FUNCTION_LIST_1_0 {
+    version: CK_VERSION { major: 1, minor: 0 },
+    C_PQCTODAY_IssueSourceChallenge,
+    C_PQCTODAY_BeginReceive,
+    C_PQCTODAY_CancelReceive,
+    C_PQCTODAY_AttestKey,
+};

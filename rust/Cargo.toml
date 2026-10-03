@@ -139,6 +139,14 @@ name = "replication_store"
 required-features = ["educational-replication", "test-support"]
 
 [[test]]
+name = "replication_admin_stage"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
+name = "replication_admin"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
 name = "replication_fhe_p1"
 required-features = ["educational-replication", "test-support"]
 

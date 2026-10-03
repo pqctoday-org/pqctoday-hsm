@@ -102,6 +102,54 @@ impl TestManufacturingCa {
     }
 }
 
+impl TestManufacturingCa {
+    /// Issue a replication admin-authority certificate for `spki` (admin
+    /// addendum §1): a leaf directly under this root, EKU `.2.7`.
+    pub fn issue_admin_authority(&self, spki: SubjectPublicKeyInfoOwned, now: u64) -> Result<Vec<u8>, u32> {
+        let tag = super::hex(&super::sha256(spki.subject_public_key.raw_bytes())[..4]);
+        let ski = pki::key_id(&spki);
+        let root_ski = pki::key_id(&self.root.tbs_certificate.subject_public_key_info);
+        let tbs = pki::tbs_certificate(
+            pki::random_serial()?,
+            self.root.tbs_certificate.subject.clone(),
+            pki::name(&format!("{} Replication Admin Authority {tag}", super::EDUCATIONAL_LABEL)),
+            spki,
+            now.saturating_sub(60),
+            now + 2 * 365 * 86_400,
+            pki::admin_authority_extensions(&ski, &root_ski),
+        );
+        let sig = super::mldsa65_sign(&self.sk, &super::asn1::to_der(&tbs)?)?;
+        pki::assemble_certificate(tbs, &sig)
+    }
+}
+
+/// A host-side admin-authority key and its certificate (operator host, never
+/// a board), for tests and the M12 courier.
+pub struct AdminAuthorityKey {
+    sk: Vec<u8>,
+    pub cert_der: Vec<u8>,
+}
+
+impl AdminAuthorityKey {
+    pub fn new(ca: &TestManufacturingCa, now: u64) -> Result<Self, u32> {
+        let (pk, sk) = super::mldsa65_keygen()?;
+        let spki = spki_of(&crate::crypto::handlers::build_mldsa65_spki(&pk))?;
+        let cert_der = ca.issue_admin_authority(spki, now)?;
+        Ok(Self { sk, cert_der })
+    }
+
+    /// `adminKeyID` = SHA-256(DER SPKI of the certificate).
+    pub fn key_id(&self) -> [u8; 32] {
+        let c = Certificate::from_der(&self.cert_der).expect("own certificate");
+        super::sha256(&c.tbs_certificate.subject_public_key_info.to_der().expect("spki"))
+    }
+
+    /// ML-DSA-65, empty context.
+    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, u32> {
+        super::mldsa65_sign(&self.sk, msg)
+    }
+}
+
 /// A host-side rogue "device issuer" (a key the token never held), for
 /// negative tests: substituted keys and wrong-purpose leaves.
 pub struct RogueIssuer {
