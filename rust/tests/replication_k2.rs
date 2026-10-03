@@ -204,6 +204,11 @@ fn k2_snapshot_format_f14() {
     let mut newer_section = snap.clone();
     newer_section[n - 16] = 2; // section version
     assert_eq!(deserialize_token_state(&newer_section), Err(CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED));
+    // An absurd attribute count is refused, not allocated (K0B-R2-12).
+    let mut bad_count = snap.clone();
+    let pos = find_first_attr_count(&snap);
+    bad_count[pos..pos + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(deserialize_token_state(&bad_count), Err(CKR_GENERAL_ERROR));
     // SNP2 migrates with EMPTY replication state: the hierarchy is gone and
     // the bound key keeps its material but loses eligibility.
     let mut v2 = snap[..n - 20].to_vec();
@@ -213,4 +218,18 @@ fn k2_snapshot_format_f14() {
     let migrated = by_uid(&key_uid).expect("key survives migration");
     let attrs = repl::records::object_attrs(migrated).unwrap();
     assert!(!attrs.contains_key(&CKA_PQCTODAY_REPLICATION_POLICY_ID) && !attrs.contains_key(&CKA_PRIV_REPL_BINDING));
+}
+
+/// Offset of the first object's attribute count in a snapshot.
+fn find_first_attr_count(snap: &[u8]) -> usize {
+    let mut p = 8 + 4 + 8;
+    let tokens = u32::from_le_bytes(snap[p..p + 4].try_into().unwrap()) as usize;
+    p += 4;
+    for _ in 0..tokens {
+        p += 4 + 1 + 32 + 16 + 32;
+        let has_user = snap[p];
+        p += 1 + if has_user != 0 { 16 + 32 } else { 0 };
+    }
+    p += 4; // object count
+    p + 4 // past the first handle
 }

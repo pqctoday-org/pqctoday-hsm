@@ -36,7 +36,7 @@ fn k4_explicit_create_transport_import_all_profiles() {
         let req = request(&w, 0, 1, Operation::LiveClone, &pd);
         let pkg = create(&w, 0, src, &req).expect("create");
         let (rep, receipt) = import(&w, 1, &pkg).expect("import");
-        host_verify::verify_receipt(&receipt, &pkg, &trust_of(&w, 0), w.now, Profile::Educational).expect("receipt");
+        host_verify::verify_receipt(&receipt, &pkg, &req, &trust_of(&w, 0), w.now, Profile::Educational).expect("receipt");
         prove_same_key(kp, w.tokens[0].user, src, src_pub, w.tokens[1].user, rep);
         // Installed custody and history (owner decision 1; spec §4).
         let b = |a| native::get_attribute_bool(w.tokens[1].user, rep, a).unwrap();
@@ -71,7 +71,7 @@ fn k4_clone_key_is_equivalent_to_explicit_create_import() {
         }
         // Same receipt structure and size; both verify independently.
         assert_eq!(r1.len(), r2.len());
-        let v1 = host_verify::verify_receipt(&r1, &pkg, &trust_of(&w, 0), w.now, Profile::Educational).unwrap();
+        let v1 = host_verify::verify_receipt(&r1, &pkg, &req1, &trust_of(&w, 0), w.now, Profile::Educational).unwrap();
         use der::Decode;
         let t2 = repl::asn1::ReplicationReceipt::from_der(&r2).unwrap().tbs;
         assert_eq!(t2.lineage_id.as_bytes(), v1.lineage_id, "{kp:?} same lineage");
@@ -205,22 +205,34 @@ fn k4_sizing_is_side_effect_free_and_retry_is_byte_identical() {
 fn k4_budget_is_conserved_across_a_lineage_k0b_r12() {
     let _g = lock();
     let w = world(3);
-    // Source may make at most 2 replicas in total across all descendants.
-    let src_pol = w.policy([true, true, true], 2, test_mechs());
-    let dst_pol = w.policy([true, true, true], 2, test_mechs());
-    let ps = w.enroll_policy_everywhere(&src_pol);
-    let pd = if src_pol == dst_pol { ps } else { w.enroll_policy_everywhere(&dst_pol) };
-    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(16), &ps);
+    // The source may make at most 2 replicas in total across all descendants.
+    let pol = w.policy([true, true, true], 2, test_mechs());
+    let p = w.enroll_policy_everywhere(&pol);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(16), &p);
     let lineage = native::get_attribute(w.tokens[0].user, src, CKA_PQCTODAY_REPLICATION_LINEAGE_ID).unwrap();
-    // 0 → 1 transfers min(2, 2-1) = 1; source left with 0.
-    let (b, _) = import(&w, 1, &create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap()).unwrap();
-    assert_eq!(err(create(&w, 0, src, &request(&w, 0, 2, Operation::LiveClone, &pd))), PROHIBITED, "source budget exhausted");
-    // 1 → 2 transfers 0; token 1 left with 0; token 2 cannot export.
-    let (c, _) = import(&w, 2, &create(&w, 1, b, &request(&w, 1, 2, Operation::LiveClone, &pd)).unwrap()).unwrap();
-    assert_eq!(err(create(&w, 1, b, &request(&w, 1, 0, Operation::LiveClone, &pd))), PROHIBITED);
-    assert_eq!(err(create(&w, 2, c, &request(&w, 2, 0, Operation::LiveClone, &pd))), PROHIBITED);
+    // Live clones transfer nothing (review K0B-R2-10): each costs the source 1.
+    let (b, _) = import(&w, 1, &create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &p)).unwrap()).unwrap();
+    let (c, _) = import(&w, 2, &create(&w, 0, src, &request(&w, 0, 2, Operation::LiveClone, &p)).unwrap()).unwrap();
+    assert_eq!(err(create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &p))), PROHIBITED, "source budget exhausted");
+    assert_eq!(repl::last_refusal(), Some("replica budget exhausted"));
+    // Replicas received no budget and cannot forward the lineage.
+    assert_eq!(err(create(&w, 1, b, &request(&w, 1, 2, Operation::LiveClone, &p))), PROHIBITED);
+    assert_eq!(repl::last_refusal(), Some("replica budget exhausted"));
+    assert_eq!(err(create(&w, 2, c, &request(&w, 2, 0, Operation::LiveClone, &p))), PROHIBITED);
     let total: usize = (0..3).map(|i| replicas_with_lineage(w.tokens[i].slot, &lineage)).sum();
     assert_eq!(total, 3, "original + exactly maxReplicas copies");
+}
+
+#[test]
+fn k4_one_request_cannot_drain_the_source_k0b_r2_10() {
+    let _g = lock();
+    let w = world(2);
+    let (ps, _) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    // The destination asks for the SOURCE policy itself (equal = "stricter").
+    import(&w, 1, &create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &ps)).unwrap()).unwrap();
+    let budget = u32::from_le_bytes(repl::records::object_attrs(src).unwrap()[&CKA_PRIV_REPL_BUDGET].as_slice().try_into().unwrap());
+    assert_eq!(budget, 15, "one live clone costs exactly one");
 }
 
 // ── Negative cases ──────────────────────────────────────────────────────────
@@ -326,6 +338,12 @@ fn k4_trust_identity_and_policy_refusals_k0b_r13() {
     // Wrong recipient: package for 1 imported on 2.
     let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
     assert_eq!(err(import(&w, 2, &pkg)), PROHIBITED, "wrong recipient");
+    // Honest reason (review K0B-R2-07): token 2 never reserved this
+    // transaction, so the reservation check refuses before the recipient
+    // binding is reached. The recipient check is defence in depth: a
+    // package can only match another token's reservation by forging the
+    // source's signature.
+    assert_eq!(repl::last_refusal(), Some("no destination reservation for transaction"));
     // Tampering: header, ciphertext and signature bytes.
     for at in [pkg.len() / 3, pkg.len() - 4000, pkg.len() - 10] {
         let mut t = pkg.clone();
@@ -738,7 +756,7 @@ fn k4_two_process_create_transport_import() {
     let pkg = repl::create_replication_package(user, src, &req).unwrap();
     put(&dir, "package", &pkg);
     let receipt = wait_for(&dir, "receipt");
-    host_verify::verify_receipt(&receipt, &pkg, &repl::trust_inputs(0), w.now, Profile::Educational).expect("child's receipt verifies in parent");
+    host_verify::verify_receipt(&receipt, &pkg, &req, &repl::trust_inputs(0), w.now, Profile::Educational).expect("child's receipt verifies in parent");
     let ct = native::encrypt(user, src, CKM_AES_GCM, b"across processes", Some(&[3u8; 12]), None, b"", Some(16)).unwrap();
     put(&dir, "ct", &ct);
     assert_eq!(wait_for(&dir, "pt"), b"across processes");
@@ -749,4 +767,158 @@ fn k4_two_process_create_transport_import() {
 
 fn repl_nonce() -> String {
     format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
+}
+
+// ── Second independent review (K0B-R2-*) regressions ───────────────────────
+
+#[test]
+fn k4_restricted_keys_are_not_eligible_k0b_r2_01() {
+    let _g = lock();
+    let w = world(1);
+    let (ps, _) = policies(&w);
+    let s = w.tokens[0].user;
+    // A DECAPSULATE_TEMPLATE the payload could not carry → binding refused,
+    // and no key is left behind.
+    let inner = [(CKA_EXTRACTABLE, bb(false))];
+    let inner_t = raw_template(&inner);
+    let inner_bytes: Vec<u8> = inner_t.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let pubt_a = vec![(CKA_TOKEN, bb(true)), (CKA_PARAMETER_SET, ul(CKP_ML_KEM_768)), (CKA_ENCAPSULATE, bb(true))];
+    let prvt_a = vec![
+        (CKA_TOKEN, bb(true)), (CKA_SENSITIVE, bb(true)), (CKA_EXTRACTABLE, bb(false)), (CKA_COPYABLE, bb(false)),
+        (CKA_MODIFIABLE, bb(false)), (CKA_DECAPSULATE, bb(true)), (CKA_DECAPSULATE_TEMPLATE, inner_bytes),
+        (CKA_PQCTODAY_REPLICATION_POLICY_ID, ps.to_vec()),
+    ];
+    let (pubt, prvt) = (raw_template(&pubt_a), raw_template(&prvt_a));
+    let mut m = [CKM_ML_KEM_KEY_PAIR_GEN as usize, 0, 0];
+    let (mut hp, mut hk) = (0u32, 0u32);
+    let before = softhsmrustv3::state::OBJECTS.with(|o| o.borrow().len());
+    let rv = softhsmrustv3::ffi::C_GenerateKeyPair(s, m.as_mut_ptr() as *mut u8, pubt.as_ptr() as *mut u8, pubt_a.len() as u32,
+        prvt.as_ptr() as *mut u8, prvt_a.len() as u32, &mut hp, &mut hk);
+    assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT);
+    assert_eq!(softhsmrustv3::state::OBJECTS.with(|o| o.borrow().len()), before, "no half-bound key left");
+    let _ = inner_t;
+}
+
+#[test]
+fn k4_importer_rechecks_source_policy_k0b_r2_05() {
+    let _g = lock();
+    let w = world(2);
+    // The source policy is enrolled ONLY at the source.
+    let src_pol = w.policy([true, true, true], 4, test_mechs());
+    let ps = w.as_so(0, |so| repl::enroll_policy(so, &src_pol).unwrap());
+    let dst_pol = w.policy([true, true, true], 1, test_mechs());
+    let pd = w.enroll_policy_everywhere(&dst_pol);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(16), &ps);
+    let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    assert_eq!(err(import(&w, 1, &pkg)), PROHIBITED);
+    assert_eq!(repl::last_refusal(), Some("source policy not enrolled at destination"));
+}
+
+#[test]
+fn k4_read_only_sessions_cannot_mutate_k0b_r2_06() {
+    let _g = lock();
+    let w = world(2);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    let mut ro = 0u32;
+    assert_eq!(softhsmrustv3::ffi::C_OpenSession(1, CKF_SERIAL_SESSION, std::ptr::null_mut(), std::ptr::null_mut(), &mut ro), CKR_OK);
+    assert_eq!(err(repl::import_replication_package(ro, &pkg, &[])), Err(CKR_SESSION_READ_ONLY));
+    assert_eq!(err(repl::issue_source_challenge(ro)), Err(CKR_SESSION_READ_ONLY));
+    assert!(repl::records::list(1, repl::records::ROLE_LEDGER).is_empty(), "no reservation from a R/O session");
+}
+
+#[test]
+fn k4_expired_peer_crl_fails_closed_k0b_r2_07() {
+    let _g = lock();
+    let w = world(2);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    // Policies (30 days) and certificates stay valid; the root CRL (7 days)
+    // does not.
+    repl::set_clock_override(Some(w.now + 8 * 86_400));
+    let req = request(&w, 0, 1, Operation::LiveClone, &pd);
+    assert_eq!(err(create(&w, 0, src, &req)), PROHIBITED);
+    assert_eq!(repl::last_refusal(), Some("no current CRL for issuer"));
+    repl::set_clock_override(Some(w.now));
+}
+
+#[test]
+fn k4_records_are_pruned_and_reservations_cancellable_k0b_r2_04() {
+    let _g = lock();
+    let w = world(2);
+    let (ps, pd) = policies(&w);
+    for _ in 0..10 {
+        repl::issue_source_challenge(w.tokens[0].user).unwrap();
+    }
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    assert_eq!(repl::records::list(0, repl::records::ROLE_PACKAGE_CACHE).len(), 1);
+    // Past every window: dead challenges and the cached package are pruned.
+    repl::set_clock_override(Some(w.now + 2 * 3600));
+    repl::issue_source_challenge(w.tokens[0].user).unwrap();
+    assert_eq!(repl::records::list(0, repl::records::ROLE_CHALLENGE).len(), 1, "only the fresh challenge remains");
+    let (src2, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    create(&w, 0, src2, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    assert_eq!(repl::records::list(0, repl::records::ROLE_PACKAGE_CACHE).len(), 1, "expired cache entry pruned");
+    // An abandoned offline-backup reservation can be cancelled.
+    let chal = repl::issue_source_challenge(w.tokens[0].user).unwrap();
+    let req = repl::begin_receive(w.tokens[1].user, Operation::OfflineBackup, &chal, &DOMAIN, &pd).unwrap();
+    use der::Decode;
+    let txid: [u8; 32] = repl::asn1::ReplicationRequest::from_der(&req).unwrap().transaction_id.as_bytes().try_into().unwrap();
+    repl::cancel_receive(w.tokens[1].user, &txid).unwrap();
+    let (src3, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    let pkg = create(&w, 0, src3, &req).unwrap();
+    assert_eq!(err(import(&w, 1, &pkg)), PROHIBITED, "cancelled reservation cannot be used");
+    repl::set_clock_override(Some(w.now));
+}
+
+#[test]
+fn k4_receipt_is_bound_to_the_packages_recipient_k0b_r2_09() {
+    let _g = lock();
+    let w = world(3);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    let req1 = request(&w, 0, 1, Operation::LiveClone, &pd);
+    let pkg1 = create(&w, 0, src, &req1).unwrap();
+    let (_, r1) = import(&w, 1, &pkg1).unwrap();
+    let req2 = request(&w, 0, 2, Operation::LiveClone, &pd);
+    let pkg2 = create(&w, 0, src, &req2).unwrap();
+    let (_, r2) = import(&w, 2, &pkg2).unwrap();
+    let t = trust_of(&w, 0);
+    host_verify::verify_receipt(&r1, &pkg1, &req1, &t, w.now, Profile::Educational).unwrap();
+    // Token 2's genuine receipt does not verify as an acknowledgement of a
+    // package sealed to token 1, nor against the wrong request.
+    assert!(host_verify::verify_receipt(&r2, &pkg1, &req1, &t, w.now, Profile::Educational).is_err());
+    assert!(host_verify::verify_receipt(&r1, &pkg1, &req2, &t, w.now, Profile::Educational).is_err());
+}
+
+#[test]
+fn k4_clone_sizing_checks_the_source_first_k0b_r2_08() {
+    use softhsmrustv3::ck_abi::*;
+    let _g = lock();
+    let w = world(2);
+    let (_, pd) = policies(&w);
+    let mut req = request(&w, 0, 1, Operation::LiveClone, &pd);
+    unsafe {
+        let mut name = b"PQCTODAY_KEY_REPLICATION_1_0\0".to_vec();
+        let mut v = CK_VERSION { major: 1, minor: 0 };
+        let mut p: CK_INTERFACE_PTR = std::ptr::null_mut();
+        assert_eq!(C_GetInterface(name.as_mut_ptr(), &mut v, &mut p, 0), 0);
+        let fl = &*((*p).pFunctionList as *const PQCTODAY_KEY_REPLICATION_FUNCTION_LIST_1_0);
+        let mut len: CK_ULONG = 0;
+        let rv = (fl.C_PQCTODAY_CloneKey)(w.tokens[0].user as CK_ULONG, 0xdead, w.tokens[1].user as CK_ULONG,
+            req.as_mut_ptr(), req.len() as CK_ULONG, std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut(), &mut len);
+        assert_eq!(rv, CKR_KEY_HANDLE_INVALID as CK_ULONG);
+    }
+}
+
+#[test]
+fn k4_native_destroy_respects_destroyable_k0b_r2_11() {
+    let _g = lock();
+    let w = world(1);
+    let (ps, _) = policies(&w);
+    let (h, _) = repl::records::list(0, repl::records::ROLE_POLICY)[0].clone();
+    assert_eq!(native::destroy_object(w.tokens[0].user, h), Err(CKR_ACTION_PROHIBITED));
+    let _ = ps;
 }

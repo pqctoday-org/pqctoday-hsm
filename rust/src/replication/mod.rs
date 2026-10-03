@@ -230,6 +230,16 @@ pub(crate) fn require_so(h_session: u32) -> Result<u32, u32> {
     Err(CKR_USER_NOT_LOGGED_IN)
 }
 
+/// Mutating user operations additionally need a R/W session (PKCS#11
+/// §5.7; review K0B-R2-06): they create or update token objects.
+pub(crate) fn require_user_rw(h_session: u32) -> Result<u32, u32> {
+    let slot = require_user(h_session)?;
+    if !crate::state::session_is_rw(h_session) {
+        return Err(CKR_SESSION_READ_ONLY);
+    }
+    Ok(slot)
+}
+
 /// User operations (create/import/clone/attest): the SO cannot use a user's
 /// key (spec §4).
 pub(crate) fn require_user(h_session: u32) -> Result<u32, u32> {
@@ -321,6 +331,24 @@ pub fn bind_generated_key(
     {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
+    // Review K0B-R2-01: version 1's payload carries usage flags only, so a
+    // key whose restriction templates would not survive replication is not
+    // eligible — otherwise the replica would silently be less restricted
+    // than the source (spec §8 "may not remove a source restriction").
+    const RESTRICTIONS: [u32; 5] = [
+        CKA_WRAP_TEMPLATE,
+        CKA_UNWRAP_TEMPLATE,
+        CKA_DERIVE_TEMPLATE,
+        CKA_ENCAPSULATE_TEMPLATE,
+        CKA_DECAPSULATE_TEMPLATE,
+    ];
+    let restricted = |a: &crate::crypto::handlers::Attributes| {
+        RESTRICTIONS.iter().any(|t| a.get(t).map(|v| !v.is_empty()).unwrap_or(false))
+            || crate::state::read_bool_attr(a, CKA_WRAP_WITH_TRUSTED)
+    };
+    if restricted(&attrs) || h_public.and_then(records::object_attrs).map(|p| restricted(&p)).unwrap_or(false) {
+        return Err(CKR_TEMPLATE_INCONSISTENT);
+    }
     let now = now_unix();
     let pol = records::parse_policy(&policy)?;
     if now < pol.not_before || now >= pol.not_after {
@@ -368,6 +396,20 @@ pub(crate) fn oplog_event(op: &str, slot: u32, fields: &[(&str, String)]) {
         tail.push_str(&format!(" {k}={v}"));
     }
     crate::oplog::emit(&format!("replication_{op}"), &tail);
+}
+
+static LAST_REFUSAL: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// Record a refusal reason (audit only — never returned to a caller).
+pub(crate) fn note_refusal(reason: &'static str) {
+    *LAST_REFUSAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+}
+
+/// The most recent refusal reason in this process. Tests use it to prove a
+/// negative case was refused for the reason it claims (review K0B-R2-07);
+/// callers of the interface only ever see `CKR_ACTION_PROHIBITED`.
+pub fn last_refusal() -> Option<&'static str> {
+    *LAST_REFUSAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {

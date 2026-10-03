@@ -1774,6 +1774,7 @@ pub fn destroy_destroyable_objects_on_slot(slot_id: u32) {
 /// object invisible forever, which the spec does not say.
 pub fn invalidate_private_handles_on_slot(slot_id: u32) {
     use zeroize::Zeroize;
+    let mut moves: Vec<(u32, u32)> = Vec::new();
     OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
         let private_here: Vec<u32> = store
@@ -1802,6 +1803,9 @@ pub fn invalidate_private_handles_on_slot(slot_id: u32) {
                     // silently destroying a token object.
                     Err(_) => h,
                 };
+                if new_handle != h {
+                    moves.push((h, new_handle));
+                }
                 store.insert(new_handle, attrs);
             } else {
                 if let Some(val) = attrs.get_mut(&CKA_VALUE) {
@@ -1810,6 +1814,9 @@ pub fn invalidate_private_handles_on_slot(slot_id: u32) {
             }
         }
     });
+    // K0B-R2-02: the durable rows follow the re-key, or the next login would
+    // rehydrate every private token object a second time under its old handle.
+    crate::store::persist_rehandle(slot_id, &moves);
 }
 
 pub fn allocate_handle(mut attrs: Attributes) -> u32 {
@@ -1896,49 +1903,57 @@ pub fn commit_objects_atomically(
         attrs
             .entry(CKA_PRIV_SLOT_ID)
             .or_insert_with(|| 0u32.to_le_bytes().to_vec());
+        // An engine caller may have reserved the id already (a signed
+        // receipt names it before the commit); otherwise assign one.
+        if !attrs.contains_key(&CKA_UNIQUE_ID) {
+            attrs.insert(CKA_UNIQUE_ID, reserve_unique_id());
+        }
         prepared.push(attrs);
     }
-    let mut persisted: Vec<(u32, u32, Attributes)> = Vec::new();
-    let handles = OBJECTS.with(|objs| {
+    OBJECTS.with(|objs| {
         let mut g = objs.borrow_mut();
-        if updates.iter().any(|(h, _)| !g.contains_key(h)) {
-            return Err(CKR_DEVICE_ERROR);
+        // Every final state is computed before the table is touched.
+        let mut finals: Vec<(u32, Attributes)> = Vec::new();
+        for (h, changes) in &updates {
+            let mut attrs = g.get(h).cloned().ok_or(CKR_DEVICE_ERROR)?;
+            for (t, v) in changes {
+                attrs.insert(*t, v.clone());
+            }
+            finals.push((*h, attrs));
         }
         let mut handles = Vec::with_capacity(prepared.len());
-        for mut attrs in prepared {
-            // An engine caller may have reserved the id already (a signed
-            // receipt names it before the commit); otherwise assign one.
-            if !attrs.contains_key(&CKA_UNIQUE_ID) {
-                attrs.insert(CKA_UNIQUE_ID, reserve_unique_id());
-            }
+        for attrs in prepared {
             let h = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if h == 0 || h == u32::MAX {
                 return Err(CKR_DEVICE_MEMORY);
             }
-            if read_bool_attr(&attrs, CKA_TOKEN) {
-                persisted.push((object_slot_of(&attrs), h, attrs.clone()));
-            }
-            g.insert(h, attrs);
             handles.push(h);
+            finals.push((h, attrs));
         }
-        for (h, changes) in updates {
-            if let Some(attrs) = g.get_mut(&h) {
-                for (t, v) in changes {
-                    attrs.insert(t, v);
-                }
-                if read_bool_attr(attrs, CKA_TOKEN) {
-                    persisted.push((object_slot_of(attrs), h, attrs.clone()));
-                }
+        // Durable first, in ONE store transaction per slot (review
+        // K0B-R2-03). If the store refuses, memory is left untouched too.
+        let mut slots: Vec<u32> = finals
+            .iter()
+            .filter(|(_, a)| read_bool_attr(a, CKA_TOKEN))
+            .map(|(_, a)| object_slot_of(a))
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        for slot in slots {
+            let rows: Vec<(u32, &Attributes)> = finals
+                .iter()
+                .filter(|(_, a)| read_bool_attr(a, CKA_TOKEN) && object_slot_of(a) == slot)
+                .map(|(h, a)| (*h, a))
+                .collect();
+            if !crate::store::persist_objects_atomic(slot, &rows) {
+                return Err(CKR_DEVICE_ERROR);
             }
+        }
+        for (h, attrs) in finals {
+            g.insert(h, attrs);
         }
         Ok(handles)
-    })?;
-    if crate::store::is_persistent() {
-        for (slot, h, attrs) in &persisted {
-            crate::store::persist_object(*slot, *h, attrs);
-        }
-    }
-    Ok(handles)
+    })
 }
 
 // ── `_from` pure variants (operate on an already-borrowed `&Attributes`,

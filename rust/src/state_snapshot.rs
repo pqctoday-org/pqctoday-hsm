@@ -270,6 +270,12 @@ pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
     for _ in 0..obj_count {
         let handle = c.u32()?;
         let attr_count = c.u32()?;
+        // Every attribute occupies at least 8 bytes (type + length), so a
+        // count larger than the remaining input is a lie; reject it rather
+        // than letting an untrusted u32 size an allocation (review K0B-R2-12).
+        if attr_count as usize > (buf.len() - c.pos) / 8 {
+            return Err(CKR_GENERAL_ERROR);
+        }
         let mut attrs: Attributes = HashMap::with_capacity(attr_count as usize);
         for _ in 0..attr_count {
             let ty = c.u32()?;

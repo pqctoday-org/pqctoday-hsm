@@ -270,6 +270,9 @@ pub struct PackageCacheRecord {
     pub request_hash: OctetString,
     pub source_unique_id: String,
     pub package: OctetString,
+    /// Host time of creation; entries are pruned after
+    /// `package::CACHE_RETENTION_SECS` (review K0B-R2-04).
+    pub created_at: u64,
 }
 
 /// Pending device enrollment: the CSR the device key produced.

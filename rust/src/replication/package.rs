@@ -24,7 +24,7 @@ use super::host_verify::{package_signed_bytes, receipt_signed_bytes};
 use super::oids::{self, Purpose};
 use super::pki::{self, Reject};
 use super::records::{self, *};
-use super::{crash_check, now_unix, oplog_event, require_profile, require_user, CrashPoint, Profile};
+use super::{crash_check, now_unix, oplog_event, require_profile, require_user, require_user_rw, CrashPoint, Profile};
 use crate::constants::*;
 use crate::crypto::handlers::{Attributes, ALGO_ML_DSA, ALGO_ML_KEM};
 use crate::native::CKA_ID;
@@ -39,6 +39,52 @@ pub const ML_KEM_768_CT_LEN: usize = 1088;
 pub const ML_DSA_65_SIG_LEN: usize = 3309;
 /// Lifetime of a live challenge reservation (spec §5.1 freshness window).
 pub const LIVE_CHALLENGE_SECS: u64 = evidence::FRESHNESS_SECS;
+/// How long a source keeps a created package for byte-identical retry. Long
+/// after the destination's live reservation and the evidence freshness
+/// window, so a retained transaction ID can never be replayed into a new
+/// package once its entry is pruned (review K0B-R2-04).
+pub const CACHE_RETENTION_SECS: u64 = 3600;
+
+/// Delete dead replication records on `slot`: consumed or expired
+/// challenge reservations, and cached packages past retention. Ledger
+/// entries are NEVER pruned (spec §10: no silent eviction).
+fn prune(slot: u32) {
+    let now = now_unix();
+    for (h, r) in open_challenges(slot) {
+        if r.consumed || now > r.expires_at {
+            super::discard_object(h);
+        }
+    }
+    for (h, a) in records::list(slot, ROLE_PACKAGE_CACHE) {
+        let dead = PackageCacheRecord::from_der(records::record_bytes(&a))
+            .map(|r| now >= r.created_at.saturating_add(CACHE_RETENTION_SECS))
+            .unwrap_or(true);
+        if dead {
+            super::discard_object(h);
+        }
+    }
+}
+
+/// Cancel an abandoned, unconsumed destination reservation (for example an
+/// offline backup that was never created). Refused once an import has
+/// reserved or committed the transaction.
+pub fn cancel_receive(user_session: u32, transaction_id: &[u8; 32]) -> Result<(), u32> {
+    let _op = op_lock();
+    require_profile()?;
+    let slot = require_user_rw(user_session)?;
+    if ledger_entry(slot, transaction_id).is_some() {
+        return Err(CKR_ACTION_PROHIBITED);
+    }
+    let Some((h, _)) = open_challenges(slot)
+        .into_iter()
+        .find(|(_, r)| r.role == 1 && !r.consumed && r.transaction_id.as_bytes() == transaction_id)
+    else {
+        return Err(CKR_ACTION_PROHIBITED);
+    };
+    super::discard_object(h);
+    oplog_event("receive_cancel", slot, &[("transaction", super::hex(transaction_id))]);
+    Ok(())
+}
 
 /// Serializes every replication state transition in this process (plan
 /// R3.6: concurrent calls on the same transaction). Held for the whole of a
@@ -54,6 +100,7 @@ const LEDGER_RESERVED: u8 = 1;
 const LEDGER_COMMITTED: u8 = 2;
 
 fn deny<T>(slot: u32, why: Reject) -> Result<T, u32> {
+    super::note_refusal(why.0);
     oplog_event("refused", slot, &[("reason", format!("\"{}\"", why.0))]);
     Err(CKR_ACTION_PROHIBITED)
 }
@@ -102,8 +149,9 @@ fn reserve_challenge(session: u32, slot: u32, rec: ChallengeRecord) -> Result<()
 pub fn issue_source_challenge(user_session: u32) -> Result<[u8; 32], u32> {
     let _op = op_lock();
     require_profile()?;
-    let slot = require_user(user_session)?;
+    let slot = require_user_rw(user_session)?;
     ready(slot)?;
+    prune(slot);
     let c = super::random32()?;
     let now = now_unix();
     reserve_challenge(
@@ -139,8 +187,9 @@ pub fn begin_receive(
 ) -> Result<Vec<u8>, u32> {
     let _op = op_lock();
     require_profile()?;
-    let slot = require_user(user_session)?;
+    let slot = require_user_rw(user_session)?;
     ready(slot)?;
+    prune(slot);
     if *source_challenge == [0u8; 32] {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -225,7 +274,7 @@ struct SourceKey {
 /// Spec §9 items 3–6: session, role, visibility, eligibility.
 fn source_key(session: u32, h_key: u32) -> Result<(u32, SourceKey), u32> {
     require_profile()?;
-    let slot = require_user(session)?;
+    let slot = require_user_rw(session)?;
     if !crate::state::can_access_handle(session, h_key) {
         return Err(CKR_KEY_HANDLE_INVALID);
     }
@@ -413,11 +462,18 @@ fn finish_unsigned(a: &Assembly) -> Result<Vec<u8>, u32> {
 /// requested policy's quota, capped so source + all descendants never exceed
 /// the source's remaining budget (review K0B-R-12 conservation rule).
 fn transfer_budget(slot: u32, key: &SourceKey, req: &ReplicationRequest) -> u32 {
+    // Review K0B-R2-10: the destination chooses the requested policy, so it
+    // must not choose how much budget leaves the source. Version 1 transfers
+    // exactly one replica right to an offline backup (so the backup HSM can
+    // restore onward) and nothing to a live clone or restore target.
+    if req.operation != Operation::OfflineBackup {
+        return 0;
+    }
     let requested_max = records::find_policy(slot, req.requested_policy.as_bytes())
         .and_then(|d| records::parse_policy(&d).ok())
         .map(|p| p.max_replicas)
         .unwrap_or(0);
-    requested_max.min(key.budget.saturating_sub(1))
+    1u32.min(requested_max).min(key.budget.saturating_sub(1))
 }
 
 /// `C_PQCTODAY_CreateReplicationPackage` sizing: the exact length the
@@ -517,6 +573,7 @@ pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> R
     }
     let transferred = transfer_budget(slot, &key, &req);
     let remaining = key.budget - 1 - transferred;
+    prune(slot);
     if records::list(slot, ROLE_PACKAGE_CACHE).len() >= MAX_CACHED_PACKAGES {
         return Err(CKR_DEVICE_MEMORY);
     }
@@ -552,6 +609,7 @@ pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> R
         request_hash: asn1::octets(&super::sha384(request)),
         source_unique_id: key.unique_id.clone(),
         package: asn1::octets(&pkg),
+        created_at: now,
     };
     let cache_obj = records::new_record(ROLE_PACKAGE_CACHE, CKO_DATA, "cached replication package (ciphertext)", Vec::new(), asn1::to_der(&cache)?, true);
     let used = ChallengeRecord { consumed: true, transaction_id: asn1::octets(&txid), ..chal };
@@ -669,9 +727,9 @@ pub fn receipt_length_for_slot(slot: u32) -> Result<usize, u32> {
 /// shape, then reports the exact receipt length. Creates nothing.
 pub fn replication_receipt_length(session: u32, package: &[u8]) -> Result<usize, u32> {
     require_profile()?;
-    let slot = require_user(session)?;
+    let slot = require_user_rw(session)?;
+    parse_package(package)?; // §9 item 7 before any state check
     ready(slot)?;
-    parse_package(package)?;
     receipt_length_for_slot(slot)
 }
 
@@ -860,9 +918,9 @@ fn installed_objects(
 pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32, Vec<u8>)]) -> Result<(u32, Vec<u8>), u32> {
     let _op = op_lock();
     require_profile()?;
-    let slot = require_user(session)?;
-    ready(slot)?;
+    let slot = require_user_rw(session)?;
     let pkg = parse_package(package)?;
+    ready(slot)?;
     validate_import_template(template)?;
     let h = &pkg.tbs.header;
     let txid = f32(&h.transaction_id)?;
@@ -948,6 +1006,14 @@ pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32
         return deny(slot, Reject("destination policy not enrolled"));
     };
     let dst_pol = records::parse_policy(&dst_der)?;
+    // Spec §3.2 step 4 (review K0B-R2-05): the destination re-checks the
+    // ordering itself rather than trusting the source to have done it.
+    let Some(src_der) = records::find_policy(slot, h.source_policy.as_bytes()) else {
+        return deny(slot, Reject("source policy not enrolled at destination"));
+    };
+    if !dst_pol.is_equal_or_stricter_than(&records::parse_policy(&src_der)?) {
+        return deny(slot, Reject("destination policy weaker than source policy"));
+    }
     let own_device = evidence::platform_device_id(slot)?;
     if !dst_pol.permits(h.operation)
         || dst_pol.domain.as_slice() != h.domain_id.as_bytes()
@@ -1082,13 +1148,15 @@ pub fn clone_key(
     template: &[(u32, Vec<u8>)],
 ) -> Result<(u32, Vec<u8>), u32> {
     require_profile()?;
-    let src_slot = require_user(source_session)?;
-    require_user(destination_session)?;
+    let src_slot = require_user_rw(source_session)?;
+    require_user_rw(destination_session)?;
     validate_import_template(template)?;
     let package = create_replication_package(source_session, h_key, request)?;
     let (handle, receipt) = import_replication_package(destination_session, &package, template)?;
     let trust = super::enroll::trust_inputs(src_slot);
-    if super::host_verify::verify_receipt(&receipt, &package, &trust, now_unix(), Profile::Educational).is_err() {
+    // The destination has already committed. A receipt that fails here is
+    // reported as CKR_DEVICE_ERROR with the replica installed (spec §3.3).
+    if super::host_verify::verify_receipt(&receipt, &package, request, &trust, now_unix(), Profile::Educational).is_err() {
         return Err(CKR_DEVICE_ERROR);
     }
     oplog_event("clone", src_slot, &[("transaction", super::hex(&super::sha384(&package)[..8]))]);
@@ -1096,9 +1164,13 @@ pub fn clone_key(
 }
 
 /// `CloneKey` sizing: the destination's fixed receipt length.
-pub fn clone_receipt_length(destination_session: u32) -> Result<usize, u32> {
-    require_profile()?;
-    let slot = require_user(destination_session)?;
+/// `CloneKey` sizing: validates the source side first (spec §9 items 3–7,
+/// review K0B-R2-08), then reports the destination's fixed receipt length.
+pub fn clone_receipt_length(source_session: u32, h_key: u32, request: &[u8], destination_session: u32) -> Result<usize, u32> {
+    let (src_slot, _) = source_key(source_session, h_key)?;
+    let slot = require_user_rw(destination_session)?;
+    parse_request(request)?;
+    ready(src_slot)?;
     ready(slot)?;
     receipt_length_for_slot(slot)
 }

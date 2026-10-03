@@ -6,7 +6,9 @@ Scope: Rust engine `softhsmrustv3`, native. **Educational software token only.**
 This records what was built, every decision the K0B specification
 (`docs/proposals/pqctoday-key-replication-interface-1.0.md`) left open, and how each
 finding of the independent review (`docs/k0b-protocol-review-codex-2026-10-02.md`) was
-disposed of. The §B edits were approved by the owner and applied to the K0B spec as revision 2.
+disposed of. The §B edits were approved by the owner and applied to the K0B spec as revision 2. Fixes from the
+second independent review (`docs/k0b-protocol-review-claude-2026-10-03.md`) are spec revision 3;
+where this file and that review differ, the review's dispositions are current.
 
 ## A. What exists now
 
@@ -109,8 +111,9 @@ must not be the protocol author" is an owner call.
 | R-15 | high | Mostly adopted: bounds on policy DER, policy count, CRL size, count and entries, evidence, request, package, plaintext, cached packages, ledger and open challenges; checked before allocation or signature work. Not done: an authenticated-snapshot size cap | constants in `records.rs`/`package.rs`; `k4_malformed_*` |
 
 Owner decision on independence: a second, fresh reviewer who wrote neither the spec nor the
-code reviews the amended spec and this implementation. G1 closes only after the owner signs off
-on both reviews.
+code reviewed the amended spec and this implementation. It found 12 issues, all fixed (see
+`docs/k0b-protocol-review-claude-2026-10-03.md`). G1 closes only after the owner signs off on both
+reviews.
 
 ## E. Educational evidence claim profile (`1.3.6.1.4.1.32473.20261002.3`)
 
@@ -126,6 +129,7 @@ recomputed by the engine from the object; only the nonce comes from outside.
 
 ## F. Known limitations (all disclosed as educational)
 
+- The snapshot is not authenticated: whoever can supply one can forge replication state.
 - Software token: no tamper resistance or rollback resistance. A host administrator can
   roll back the snapshot, including the ledger. Host clock only.
 - The K2 CSR carries proof of possession but no LAMPS CSR-attestation statement.

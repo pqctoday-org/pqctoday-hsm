@@ -62,10 +62,21 @@ pub(crate) fn package_signed_bytes(tbs_der: &[u8]) -> Vec<u8> {
     prefixed(PACKAGE_DOMAIN, tbs_der)
 }
 
-/// Verify a receipt against the exact package it acknowledges (spec §7;
-/// review K0B-R-10: the claimed destination device must be the receipt
-/// signer's device).
-pub fn verify_receipt(receipt_der: &[u8], package_der: &[u8], trust: &TrustInputs, now: u64, profile: Profile) -> Result<ReceiptView, Reject> {
+/// Verify a receipt against the exact package it acknowledges and the
+/// request that package answered (spec §7; reviews K0B-R-10, K0B-R2-09).
+/// Beyond the signer chain and package hash, it requires: the claimed
+/// destination device is the receipt signer's device; that device is the
+/// one the package was sealed to (the request's recipient chain, whose key
+/// hash the package header carries); and the receipt's transaction,
+/// lineage and installed policy equal the package header's.
+pub fn verify_receipt(
+    receipt_der: &[u8],
+    package_der: &[u8],
+    request_der: &[u8],
+    trust: &TrustInputs,
+    now: u64,
+    profile: Profile,
+) -> Result<ReceiptView, Reject> {
     if profile != Profile::Educational {
         return Err(Reject("documentation OIDs outside educational profile"));
     }
@@ -82,6 +93,20 @@ pub fn verify_receipt(receipt_der: &[u8], package_der: &[u8], trust: &TrustInput
     }
     if t.package_hash.as_bytes() != super::sha384(package_der) {
         return Err(Reject("receipt package hash"));
+    }
+    let pkg: ReplicationPackage = asn1::decode_strict(package_der, MAX_PACKAGE_DER).map_err(|_| Reject("package DER"))?;
+    let h = &pkg.tbs.header;
+    let req: asn1::ReplicationRequest =
+        asn1::decode_strict(request_der, super::package::MAX_REQUEST_DER).map_err(|_| Reject("request DER"))?;
+    let recipient = pki::validate_chain(&req.recipient_chain, Purpose::RecoveryRecipient, trust, now, profile)?;
+    if h.recipient_key_hash.as_bytes() != pki::spki_hash(&recipient.leaf)
+        || req.transaction_id != h.transaction_id
+        || recipient.device_id != dest
+    {
+        return Err(Reject("receipt signer is not the package's recipient"));
+    }
+    if t.transaction_id != h.transaction_id || t.lineage_id != h.lineage_id || t.installed_policy != h.destination_policy {
+        return Err(Reject("receipt fields differ from the package header"));
     }
     let tbs_der = t.to_der().map_err(|_| Reject("receipt tbs"))?;
     if r.signature.unused_bits() != 0

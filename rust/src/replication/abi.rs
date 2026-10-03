@@ -182,7 +182,7 @@ pub unsafe extern "C" fn C_PQCTODAY_CloneKey(
     let (Some(s), Some(k), Some(d)) = (handle(hSourceSession), handle(hSourceKey), handle(hDestinationSession)) else {
         return rv(CKR_SESSION_HANDLE_INVALID);
     };
-    let len = match super::clone_receipt_length(d) {
+    let len = match super::clone_receipt_length(s, k, request, d) {
         Ok(l) => l,
         Err(e) => return rv(e),
     };

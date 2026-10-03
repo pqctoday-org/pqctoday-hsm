@@ -1,6 +1,6 @@
 # PQCToday Key Replication Interface 1.0
 
-Status: **K0B working specification, revision 2 (review amendments E-01…E-14, see §14);
+Status: **K0B working specification, revision 3 (review amendments E-01…E-14 and R2-01…R2-12, see §14);
 educational OID profile defined; not a production interface**
 Date: 2026-10-02
 Engine scope: `softhsmrustv3` only
@@ -124,7 +124,8 @@ The destination engine:
 2. verifies its recipient binding, transaction ID and operation;
 3. verifies the source hierarchy, function purpose, evidence, package signature, time and
    revocation policy before decapsulation;
-4. checks the package policy and caller template are equal to or stricter than the source policy;
+4. checks the package policy and caller template are equal to or stricter than the source policy,
+   which must itself be enrolled at the destination (R2-05);
 5. rejects an already consumed transaction or conflicting in-progress transaction;
 6. reserves the transaction durably, decapsulates and decrypts inside the engine;
 7. validates the decrypted key type, public association and authenticated attributes;
@@ -161,7 +162,8 @@ terminal error and never clears consumption.
 create/import protocol in memory, verifies the returned receipt, and returns the installed handle
 and receipt. Its externally observable installed attributes, provenance, transaction consumption and
 receipt are identical to explicit create/import. It defines no second wire format and does not copy
-an object directly in the object table.
+an object directly in the object table. The receipt is verified after the destination commit, so a
+verification failure is reported as `CKR_DEVICE_ERROR` with the replica already installed (R2-08).
 
 Sizing and buffer rules match the import call. A source and destination session for the same slot is
 allowed only if the policy explicitly permits same-device redundancy; otherwise it is refused.
@@ -477,7 +479,10 @@ retained with the consumption ledger according to the configured audit-retention
 `receiptSignerChain` contains the destination receipt-signing function leaf followed by its device
 issuer and excludes the enrolled manufacturing root. `destinationDeviceID` is derived as in §5.1,
 and a verifier refuses a receipt whose `destinationDeviceID` differs from the device of
-`receiptSignerChain` (E-03). The verifier checks the chain, critical
+`receiptSignerChain` (E-03). The verifier is also given the request the package answered. It
+requires the signer's device to be the request's recipient device, with a recipient key hash equal to
+the package's, and the receipt's transaction, lineage and `installedPolicy` to equal the package
+header's `transactionID`, `lineageID` and `destinationPolicy` (R2-09). The verifier checks the chain, critical
 receipt-signing purpose, validity and applicable CRLs before accepting the receipt signature.
 
 ## 8. Policy ordering and templates
@@ -518,10 +523,17 @@ outside the immutable policy and cannot be reset by selecting another equal poli
 
 `maxReplicas` is a lineage-wide bound, enforced by conserving budget rather than by global
 coordination (E-12). A key bound at generation starts with budget `maxReplicas`. An export needs
-budget ≥ 1. It transfers `t = min(destinationPolicy.maxReplicas, budget − 1)` to the copy in the
-signed `transferredBudget` field and leaves the source with `budget − 1 − t`. The importer refuses a
+budget ≥ 1. It transfers `t` to the copy in the signed `transferredBudget` field and leaves the
+source with `budget − 1 − t`. The destination chooses the requested policy, so it must not choose
+`t` (R2-10). Version 1 fixes `t = min(1, destinationPolicy.maxReplicas, budget − 1)` for
+`offlineBackup`, so the backup HSM can restore onward, and `t = 0` for `liveClone` and `restore`. The importer refuses a
 `transferredBudget` above its policy's `maxReplicas`. A lineage therefore never holds more than the
 original key plus `maxReplicas` copies, however the copies are forwarded.
+
+A key that carries a restriction attribute the payload cannot carry (`CKA_WRAP_TEMPLATE`,
+`CKA_UNWRAP_TEMPLATE`, `CKA_DERIVE_TEMPLATE`, `CKA_ENCAPSULATE_TEMPLATE`, `CKA_DECAPSULATE_TEMPLATE`,
+`CKA_WRAP_WITH_TRUSTED`, on either half of the pair) is not eligible in version 1. Otherwise its
+replica would silently be less restricted than the source (R2-01).
 
 The import template may set only ordinary labels/application metadata and restrictions allowed by
 the source policy. It cannot set value, unique ID, local/history, lineage, provenance, policy binding,
@@ -538,7 +550,8 @@ Checks occur in this order so callers cannot use errors as a key/trust oracle:
 
 1. uninitialized library → `CKR_CRYPTOKI_NOT_INITIALIZED`;
 2. malformed/null ABI arguments → `CKR_ARGUMENTS_BAD`;
-3. invalid session → `CKR_SESSION_HANDLE_INVALID`;
+3. invalid session → `CKR_SESSION_HANDLE_INVALID`; a read-only session for any mutating
+   replication call → `CKR_SESSION_READ_ONLY` (R2-06);
 4. wrong login/role → `CKR_USER_NOT_LOGGED_IN` or `CKR_USER_TYPE_INVALID`;
 5. invisible/missing source key → `CKR_KEY_HANDLE_INVALID`;
 6. unsupported/excluded key or operation → `CKR_KEY_FUNCTION_NOT_PERMITTED`;
@@ -594,7 +607,16 @@ validation is a future protocol revision and needs its own review.
 ## 11. Persistence, cache and audit
 
 Device identity, function keys/certificates, roots, policies, revocation state, cached packages,
-transaction reservations, consumption entries and receipts are part of the authenticated snapshot.
+transaction reservations, consumption entries and receipts are part of the token's durable state:
+the snapshot and the SQLite store. **The educational snapshot is not authenticated** (R2-12).
+Whoever can supply a snapshot can forge bindings, budgets and the ledger, so it is trusted only as
+far as the host is. The durable store writes every row of one commit in a single transaction (R2-03).
+
+Retention (R2-04): a source keeps a created package for byte-identical retry for one hour, then
+prunes it. That is far past the live reservation and evidence windows, so the pruned transaction ID
+cannot be replayed into a new package. Consumed or expired challenge reservations are pruned. An
+unconsumed destination reservation with no ledger entry can be cancelled explicitly. Ledger entries
+are never pruned.
 Adding them requires a snapshot format bump. Old snapshots migrate with empty hierarchy/replication
 state and therefore cannot replicate pre-existing keys. Unknown future formats return the allocated
 snapshot-format error.
@@ -643,3 +665,4 @@ the explicitly fenced RFC 5612 profile.
 |---|---|---|
 | 1 | 2026-10-02 | K0B working specification |
 | 2 | 2026-10-02 | Amendments E-01…E-14 from the K0B review (`docs/k0b-protocol-review-codex-2026-10-02.md`), approved by the owner for the spec. They cover evidence domain separation and claim profile (E-01/E-02), the device-ID derivation and same-device chain binding (E-03), engine-issued reserved challenges and a destination-generated transaction ID (E-04/E-07), HPKE identifiers and length checks (E-06), reserved/committed ledger states (E-09), the installed public partner (E-11), budget conservation and the provenance DER (E-12), a unified trust-failure code (E-13), and reservation lifetime as the freshness bound (E-14). R-14 is recorded as an accepted version-1 limitation (§10a). Implemented and tested in the Rust engine's `educational-replication` feature |
+| 3 | 2026-10-03 | Fixes from the second independent review (Claude, fresh context, `docs/k0b-protocol-review-claude-2026-10-03.md`): restricted keys are ineligible (R2-01); the store-durable commit and logout re-key (R2-02/03, engine-level); retention, pruning and reservation cancel (R2-04); source-policy re-check at import (R2-05); read-only sessions refused (R2-06); precedence fixes (R2-08); receipts bound to the request and package (R2-09); the source, not the requester, fixes the transferred budget (R2-10); the snapshot stated as unauthenticated (R2-12) |

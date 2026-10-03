@@ -98,6 +98,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rust engine, persistent SQLite store: three pre-existing defects that lost
+  or duplicated token objects.** (1) Logout re-keys private token objects under
+  new handles, but the stored rows kept the old ones, so every later login
+  loaded a second copy of every private key. The rows now move with the
+  re-key in one transaction. (2) On a multi-slot restart, profile objects were
+  created before the stored handles were reserved and could overwrite another
+  object's stored row. The reload now reserves every stored handle first.
+  (3) The native `destroy_object` ignored `CKA_DESTROYABLE`; it now refuses as
+  `C_DestroyObject` does. Found by the K2–K4 replication review; each has a
+  regression test.
+- **Rust engine: a snapshot with an absurd attribute count is refused** instead
+  of sizing an allocation from an untrusted 32-bit value.
+
 - **Rust engine: `CKA_DERIVE_TEMPLATE` is enforced against the final derived
   object before allocation.** Mechanism-contributed class, key type and
   history attributes can no longer bypass the base key's template; a mismatch
