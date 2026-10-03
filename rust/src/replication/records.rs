@@ -343,8 +343,24 @@ pub fn parse_policy(der: &[u8]) -> Result<PolicyView, u32> {
     })
 }
 
-/// Build canonical policy DER (helper for SO tooling and tests).
+/// Build canonical policy DER for the v1 key profiles (helper for SO
+/// tooling and tests).
 pub fn build_policy(
+    domain: [u8; 32],
+    operations: [bool; 3],
+    peers: Vec<[u8; 32]>,
+    not_before: u64,
+    not_after: u64,
+    max_replicas: u32,
+    allowed_mechanisms: Vec<u32>,
+    allow_same_device: bool,
+) -> Result<Vec<u8>, u32> {
+    build_policy_with_constraint(domain, operations, peers, not_before, not_after, max_replicas, allowed_mechanisms, allow_same_device, super::sha384(b""))
+}
+
+/// [`build_policy`] with an explicit profile `typeConstraintHash` (e.g.
+/// `fhe::profile_constraint_hash()` for FHE seeds).
+pub fn build_policy_with_constraint(
     domain: [u8; 32],
     operations: [bool; 3],
     mut peers: Vec<[u8; 32]>,
@@ -353,6 +369,7 @@ pub fn build_policy(
     max_replicas: u32,
     mut allowed_mechanisms: Vec<u32>,
     allow_same_device: bool,
+    type_constraint_hash: [u8; 48],
 ) -> Result<Vec<u8>, u32> {
     peers.sort_unstable();
     peers.dedup();
@@ -373,7 +390,7 @@ pub fn build_policy(
         max_replicas,
         allowed_mechanisms,
         allow_same_device,
-        type_constraint_hash: asn1::octets(&super::sha384(b"")),
+        type_constraint_hash: asn1::octets(&type_constraint_hash),
     };
     asn1::to_der(&p)
 }

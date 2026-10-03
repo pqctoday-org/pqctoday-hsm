@@ -10,6 +10,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): FHE P1, the FHE seed as a
+  replicable key class.** Adds the FHE custody numbers (private authority
+  §1.4.5, merged as `b80c856b`), all seven FHE attributes immutable and never
+  caller-supplied, and SO enrollment of the typed decryption policy (FHE plan
+  §6.3) with an "equal or stricter" ordering. The seed's recovery descriptor
+  travels as the K4 package extension, bound by the signed header and validated
+  at import; unsupported generator versions and tampered descriptors are
+  refused, and a destination without the seed's decryption policy installs
+  nothing. P1 uses an opaque test-only seed fixture (no TFHE backend; no
+  decryption or key-regeneration claim yet; the fixture exists only in
+  `test-support` builds).
+
 - **Rust engine (educational feature only): key hierarchy, key attestation and
   protected replication of non-extractable keys — K2–K4.** It sits behind the
   non-default cargo feature `educational-replication` and stays inert until a
