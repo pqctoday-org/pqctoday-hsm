@@ -438,6 +438,11 @@ run_step_host "gate self-check (every step can fail)" \
 run_step_host "gate container-root derivation test" \
   "cd '$ROOT' && bash tests/test-gate-container-root.sh"
 
+# The pre-push hook trusts the marker this gate writes; its own test pins the
+# rule it enforces (delete-only pushes pass, any pushed commit needs a marker).
+run_step_host "pre-push hook test (delete-only pushes allowed)" \
+  "cd '$ROOT' && bash tests/test-pre-push-hook.sh"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 

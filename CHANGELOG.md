@@ -10,6 +10,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Pre-push hook allows delete-only pushes.** Deleting a remote branch
+  (`git push origin --delete <branch>`) sends no commit, so the hook no longer
+  asks for a `.gate-ok-<sha>` marker when every ref in the push is a delete.
+  Any push that sends a commit, including one mixed with deletes, still needs
+  the marker. `tests/test-pre-push-hook.sh` covers both cases and runs as a
+  gate step. Re-run `scripts/install-hooks.sh` to pick up the new hook.
+
 - **Rust engine (educational feature only): key hierarchy, key attestation and
   protected replication of non-extractable keys — K2–K4.** It sits behind the
   non-default cargo feature `educational-replication` and stays inert until a
