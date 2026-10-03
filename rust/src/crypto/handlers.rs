@@ -382,6 +382,14 @@ pub(crate) fn is_replication_attr(attr_type: u32) -> bool {
             | CKA_PQCTODAY_REPLICATION_LINEAGE_ID
             | CKA_PQCTODAY_REPLICATION_PROVENANCE
             | CKA_PQCTODAY_FUNCTION_PURPOSE
+            // FHE custody attributes (FHE plan §6.2): engine-set only.
+            | CKA_PQCTODAY_FHE_SCHEME
+            | CKA_PQCTODAY_FHE_PARAM_SET
+            | CKA_PQCTODAY_FHE_PARAM_HASH
+            | CKA_PQCTODAY_FHE_LIBRARY
+            | CKA_PQCTODAY_FHE_LINEAGE_ID
+            | CKA_PQCTODAY_FHE_PUBLIC_KIND
+            | CKA_PQCTODAY_FHE_DECRYPT_POLICY
     )
 }
 

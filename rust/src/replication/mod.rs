@@ -27,6 +27,7 @@
 pub mod asn1;
 pub mod enroll;
 pub mod evidence;
+pub mod fhe;
 pub mod host_verify;
 pub mod oids;
 pub mod package;
@@ -351,6 +352,11 @@ pub fn bind_generated_key(
     }
     let now = now_unix();
     let pol = records::parse_policy(&policy)?;
+    // v1 key profiles take only the unconstrained policy profile; an FHE
+    // profile policy can never bind an AES/ML-KEM/ML-DSA key (FHE P1).
+    if pol.type_constraint_hash != sha384(b"") {
+        return Err(CKR_TEMPLATE_INCONSISTENT);
+    }
     if now < pol.not_before || now >= pol.not_after {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }

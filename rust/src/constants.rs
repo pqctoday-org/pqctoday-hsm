@@ -234,6 +234,10 @@ pub const CKK_PQCTODAY_CLASSIC_MCELIECE: u32 = 0x8000_0002;
 // docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md. Allocated per
 // pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4.
 pub const CKK_HPKE_KEM: u32 = 0x8000_0003;
+/// Seed-backed FHE secret (FHE plan §6.2; authority §1.4.5, priv PR #148 merged b80c856b).
+pub const CKK_PQCTODAY_FHE: u32 = 0x8000_0010;
+/// Derived public FHE material (FHE P2).
+pub const CKK_PQCTODAY_FHE_PUBLIC: u32 = 0x8000_0011;
 
 /// `CK_HPKE_KEM_PARAMETER_SET_TYPE` values — deliberately equal to the wire
 /// `kem_id` from RFC 9180 §7.1 / draft-ietf-hpke-pq §8.1 (proposal §3): this
@@ -810,6 +814,13 @@ pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
 // function key is never a general signing oracle.
 pub const CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE: u32 = 0x8000_0016;
 pub const CKM_PQCTODAY_SIGN_KEY_ATTESTATION: u32 = 0x8000_0017;
+// FHE custody mechanisms (authority §1.4.5, priv PR #148 merged b80c856b).
+// Reserved here for the P1 policy model; NOT dispatched by any C_* entry point
+// until FHE P2 implements them.
+pub const CKM_PQCTODAY_FHE_KEY_GEN: u32 = 0x8000_0018;
+pub const CKM_PQCTODAY_FHE_DERIVE_PUBLIC: u32 = 0x8000_0019;
+pub const CKM_PQCTODAY_FHE_DECRYPT: u32 = 0x8000_001A;
+pub const CKM_PQCTODAY_FHE_ENCRYPT: u32 = 0x8000_001B;
 // ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
 // draft's own name and codepoint — no longer a vendor-range stopgap. See
@@ -1315,6 +1326,18 @@ pub const CKA_PQCTODAY_REPLICATION_LINEAGE_ID: u32 = 0x8000_0109;
 pub const CKA_PQCTODAY_REPLICATION_PROVENANCE: u32 = 0x8000_010A;
 /// Function purpose (1..=6) of a hierarchy function key or certificate.
 pub const CKA_PQCTODAY_FUNCTION_PURPOSE: u32 = 0x8000_010B;
+
+// ── FHE custody definitions, batch 1 (FHE plan §6.2; private-authority §1.4.5,
+// pqctoday-priv PR #148, merged as b80c856b) ──
+// Engine-computed or creation-only and immutable: `attr_mutation_allowed`
+// refuses every write and `template_attr_is_skipped` never absorbs them.
+pub const CKA_PQCTODAY_FHE_SCHEME: u32 = 0x8000_010C;
+pub const CKA_PQCTODAY_FHE_PARAM_SET: u32 = 0x8000_010D;
+pub const CKA_PQCTODAY_FHE_PARAM_HASH: u32 = 0x8000_010E;
+pub const CKA_PQCTODAY_FHE_LIBRARY: u32 = 0x8000_010F;
+pub const CKA_PQCTODAY_FHE_LINEAGE_ID: u32 = 0x8000_0110;
+pub const CKA_PQCTODAY_FHE_PUBLIC_KIND: u32 = 0x8000_0111;
+pub const CKA_PQCTODAY_FHE_DECRYPT_POLICY: u32 = 0x8000_0112;
 
 // Official PKCS#11 v3.2 §6.14 HSS attributes (pkcs11t.h:636-638). Phase 5
 // R25: CKA_HSS_LEVELS was previously missing and CKA_HSS_LMS_TYPE was

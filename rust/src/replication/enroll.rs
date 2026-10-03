@@ -339,8 +339,9 @@ pub fn enroll_policy(so_session: u32, policy_der: &[u8]) -> Result<[u8; 48], u32
     require_profile()?;
     let slot = require_so(so_session)?;
     let view = records::parse_policy(policy_der)?;
-    // Version 1 profiles define no per-type constraint (spec §8).
-    if view.type_constraint_hash != super::sha384(b"") {
+    // Version 1 profiles: no per-type constraint (AES / ML-KEM-768 /
+    // ML-DSA-65), or the FHE seed profile (FHE P1).
+    if view.type_constraint_hash != super::sha384(b"") && view.type_constraint_hash != super::fhe::profile_constraint_hash() {
         return Err(CKR_DATA_INVALID);
     }
     if records::find_policy(slot, &view.id).is_some() {
