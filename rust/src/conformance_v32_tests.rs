@@ -374,6 +374,102 @@ fn s2_unwrap_template_constrains_the_unwrapped_key() {
     drop(kek_tmpl);
 }
 
+#[test]
+fn s2_derive_template_constrains_the_final_derived_key() {
+    let _guard = test_lock::acquire();
+    s2_setup();
+
+    // Base key permits derivation only when the FINAL object is a sensitive
+    // secret key. This nested array is flattened at object creation, so the
+    // pointer below need only remain valid through C_CreateObject.
+    let (mut inner, inner_len) = nested_template(vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_SENSITIVE, bbool(true)),
+    ]);
+    let base = Tmpl::new(vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+        (CKA_VALUE, vec![0x5au8; 32]),
+        (CKA_DERIVE, bbool(true)),
+    ]);
+    let mut words = base.words.clone();
+    words.push(CKA_DERIVE_TEMPLATE as usize);
+    words.push(inner.ptr() as usize);
+    words.push(inner_len);
+    let count = (words.len() / 3) as u32;
+    let mut h_base = 0u32;
+    assert_eq!(
+        C_CreateObject(
+            S2_SESSION,
+            words.as_mut_ptr() as *mut u8,
+            count,
+            &mut h_base,
+        ),
+        CKR_OK
+    );
+
+    let mut mech = [CKM_SHA256_KEY_DERIVATION as usize, 0, 0];
+    let mut weak = Tmpl::new(vec![(CKA_SENSITIVE, bbool(false))]);
+    let weak_count = weak.count();
+    let mut refused = 0xfeed_beefu32;
+    assert_eq!(
+        C_DeriveKey(
+            S2_SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            h_base,
+            weak.ptr(),
+            weak_count,
+            &mut refused,
+        ),
+        CKR_TEMPLATE_INCONSISTENT,
+        "a result contradicting CKA_DERIVE_TEMPLATE must be refused"
+    );
+    assert_eq!(refused, 0xfeed_beef, "failure must not publish a handle");
+
+    let mut strong = Tmpl::new(vec![(CKA_SENSITIVE, bbool(true))]);
+    let strong_count = strong.count();
+    let mut h_derived = 0u32;
+    assert_eq!(
+        C_DeriveKey(
+            S2_SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            h_base,
+            strong.ptr(),
+            strong_count,
+            &mut h_derived,
+        ),
+        CKR_OK,
+        "a result satisfying CKA_DERIVE_TEMPLATE must succeed"
+    );
+    assert_eq!(obj_attr(h_derived, CKA_SENSITIVE), Some(bbool(true)));
+}
+
+#[test]
+fn f13_security_vendor_attributes_are_immutable() {
+    let attrs = Attributes::new();
+    for attr in [
+        CKA_BIP32_CHAIN_CODE,
+        CKA_BIP32_CHILD_INDEX,
+        CKA_LMS_PARAM_SET,
+        CKA_LMOTS_PARAM_SET,
+        CKA_XMSS_PARAM_SET,
+        CKA_XMSSMT_PARAM_SET,
+    ] {
+        assert_eq!(
+            crate::state::attr_mutation_allowed(&attrs, attr, &[0u8; 4]),
+            Err(CKR_ATTRIBUTE_READ_ONLY),
+            "security vendor attribute {attr:#x} must not be mutable"
+        );
+    }
+
+    const UNKNOWN_VENDOR_ATTR: u32 = 0x8000_7ffe;
+    assert_eq!(
+        crate::state::attr_mutation_allowed(&attrs, UNKNOWN_VENDOR_ATTR, &[1]),
+        Ok(()),
+        "unknown vendor attributes retain their vendor-defined mutability"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // S3 / S10 — one-way attribute locks (CKA_WRAP_WITH_TRUSTED, CKA_COPYABLE).
 // ─────────────────────────────────────────────────────────────────────────

@@ -134,17 +134,13 @@ reproducibility — a deliberate PKCS#11 v3.2 §5.6 deviation (the spec requires
 WASM bundle, this crate's plain `cdylib`) should build **without** it and be
 §5.6-conformant by default.
 
-**Corrected 2026-09-04 — real discrepancy found, flagged rather than resolved:**
-`rust/build-wasm-bundle.sh`, read directly, does not honor that. It always passes
-`--features acvp` to `wasm-pack`, for both of its modes — `./build-wasm-bundle.sh`
-(release, `--out-dir pkg-release`) and `./build-wasm-bundle.sh --dev` (`--out-dir
-pkg`). On the release path the script then copies `pkg-release/`'s three build
-artifacts straight into `pkg_bundler/`, which its own header comment names as "the
-tracked rust/pkg_bundler artifacts the @pqctoday/softhsm-wasm package vendors into
-the hub playground." So the artifact this script hands to the hub playground appears
-to carry the `acvp` feature, contradicting `Cargo.toml`'s comment above. This doc
-cannot determine which file reflects the intended behavior — surfacing the conflict
-for whoever owns the release pipeline to confirm, not asserting a verdict.
+**Resolved 2026-10-02:** `rust/build-wasm-bundle.sh` now omits `acvp` for normal
+release and dev bundles. Test-only `--acvp-test` builds use distinct output
+directories and are prohibited from refreshing tracked `pkg_bundler/`. The script
+writes a machine-readable `build-profile.json` beside every build and copies the
+normal release manifest with the tracked bundle. Normal builds also reject the
+independent HPKE deterministic-encapsulation hook, not only
+`C_Initialize.pReserved`.
 
 `rust/` also contains `pkg-release-acvp/` and `pkg_nomod/` directories. Neither is
 produced by `build-wasm-bundle.sh`, nor by any other script found in this repo

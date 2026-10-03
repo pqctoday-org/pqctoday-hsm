@@ -10,6 +10,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): key hierarchy, key attestation and
+  protected replication of non-extractable keys — K2–K4.** It sits behind the
+  non-default cargo feature `educational-replication` and stays inert until a
+  caller explicitly selects the educational profile. No shipped native or WASM
+  build enables it. A token generates its device identity key in-token and
+  enrolls under a host-side test manufacturing root. It then certifies five
+  single-purpose function keys and keeps CRLs, policies, challenge reservations,
+  a consumption ledger and receipts as immutable token objects. AES-128/192/256,
+  ML-KEM-768 and ML-DSA-65 keys that were bound to an enrolled policy at
+  generation can be cloned to another enrolled token, backed up offline and
+  restored. The package is signed, recipient-bound and sealed with ML-KEM-768
+  HPKE, and plaintext key material never leaves the engine. Import is atomic, a
+  retry after a crash recovers the same key and the byte-identical receipt, and
+  replica budgets are conserved across a lineage. `PQCTODAY_KEY_REPLICATION_1_0`
+  becomes discoverable through `C_GetInterface*` only in that configuration.
+  Standard wrapping, copying and attribute writes still refuse these keys in
+  every build. This is a software token using documentation-only OIDs and the
+  host clock: it makes no hardware, production-identity or rollback-resistance
+  claim. Design notes, the independent K0B review and its dispositions are in
+  `docs/k2-k4-replication-implementation-notes-2026-10-02.md`.
+
+- **A non-advertised ABI and wire specification for protected replication of
+  non-extractable keys.** `PQCTODAY_KEY_REPLICATION_1_0` is a separate named
+  interface discovered through `C_GetInterface*`; it does not extend
+  `CK_FUNCTION_LIST_3_2` or weaken ordinary wrapping. Package create/import
+  are normative and `CloneKey` is a same-module convenience wrapper. The ABI
+  type is pinned in the Rust engine, but release discovery remains disabled
+  until the locally committed private-authority reservations land upstream,
+  production OIDs are allocated, and protocol review and acceptance vectors
+  close.
 - **The local gate caps the shared cargo cache at 100 GiB.** Each worktree's
   gate run builds in its own dir under `/cargo-target/worktrees/` (~20 GB
   each), and nothing ever deleted them; the `pqc-cargo-target` volume grew
@@ -28,12 +58,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   previously refused with `CKR_MECHANISM_PARAM_INVALID`.
   (1) `CKD_HPKE_SHAKE256` (0x0011): draft-ietf-hpke-hpke-03 one-stage key
   schedule (`LabeledDerive`, `CombineSecrets_OneStage`), Base and PSK modes.
-  (2) `CKP_HPKE_KEM_ML_KEM_512/768/1024` (0x0040–0x0042), draft-ietf-hpke-pq-04
+  (2) `CKP_HPKE_KEM_ML_KEM_512/768/1024` (0x0040–0x0042), draft-ietf-hpke-pq-05
   §3. (3) Seed-format private keys for the pure ML-KEM (64-byte `d ‖ z`) and
   PQ/T hybrid (32-byte) suites, expanded in the token on each Decap; a
   `CKA_SEED` in the `CKM_HPKE_KEM_KEY_PAIR_GEN` template imports an existing
   seed-format key. (4) The test-only `pEphemeralSeed` hook now covers ML-KEM
-  and the hybrids. Verified byte for byte against the draft-ietf-hpke-pq-04
+  and the hybrids. Verified byte for byte against the draft-ietf-hpke-pq-05
   vectors (8 in-scope suites, including DeriveKeyPair, Encap, the key
   schedule, encryptions and exports), the CFRG concrete-hybrid-kems vectors
   (30), the X-Wing draft vectors (3), the JOSE HPKE-12/HPKE-9 examples
@@ -41,13 +71,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine state snapshots are now `SHR3SNP3` (all builds).** The new
+  format appends a trailer that records how many replication objects the
+  snapshot holds, plus an end marker, so a truncated or partially written
+  snapshot is refused instead of silently losing ledger entries. `SHR3SNP2`
+  snapshots still load: they migrate with replication state removed, so a
+  record forged into an old snapshot cannot make a key replicable. A newer
+  format version returns `CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED`. An older
+  engine cannot read an `SHR3SNP3` snapshot.
+- **Relicensed four owner-authored files from GPL-3.0-only to BSD-2-Clause**,
+  matching the repository root (`src/lib/vendor_mechanisms.h`,
+  `rust/src/crypto/{keccak,lms,split_key}.rs`). See
+  `docs/f6-licence-sbom-decision-2026-10-02.md`.
+- **Secret-key derivation from a sensitive base now defaults to a sensitive,
+  non-extractable result.** An explicit template can still request a
+  different result when the base key's `CKA_DERIVE_TEMPLATE` permits it.
 - **Rust engine: `CKK_HPKE_KEM` hybrid private keys are stored as their
-  32-byte seed** (draft-ietf-hpke-pq-04 SerializePrivateKey) instead of the
+  32-byte seed** (draft-ietf-hpke-pq-05 SerializePrivateKey) instead of the
   expanded `dk_PQ ‖ dk_T`; an expanded-form value is refused. These keys are
   session objects, so no stored key is affected.
+- **Rust/WASM release builds no longer contain deterministic ACVP hooks.**
+  `build-wasm-bundle.sh` now keeps normal and `--acvp-test` artifacts in
+  separate directories, writes `build-profile.json`, and only a normal
+  release build can refresh `rust/pkg_bundler/`. Normal builds reject both a
+  non-null `C_Initialize.pReserved` and the HPKE `pEphemeralSeed` hook.
 
 ### Fixed
 
+- **Rust engine, persistent SQLite store: three pre-existing defects that lost
+  or duplicated token objects.** (1) Logout re-keys private token objects under
+  new handles, but the stored rows kept the old ones, so every later login
+  loaded a second copy of every private key. The rows now move with the
+  re-key in one transaction. (2) On a multi-slot restart, profile objects were
+  created before the stored handles were reserved and could overwrite another
+  object's stored row. The reload now reserves every stored handle first.
+  (3) The native `destroy_object` ignored `CKA_DESTROYABLE`; it now refuses as
+  `C_DestroyObject` does. Found by the K2–K4 replication review; each has a
+  regression test.
+- **Rust engine: a snapshot with an absurd attribute count is refused** instead
+  of sizing an allocation from an untrusted 32-bit value.
+
+- **Rust engine: `CKA_DERIVE_TEMPLATE` is enforced against the final derived
+  object before allocation.** Mechanism-contributed class, key type and
+  history attributes can no longer bypass the base key's template; a mismatch
+  returns `CKR_TEMPLATE_INCONSISTENT` without publishing a handle.
+- **Rust engine: security-relevant public vendor attributes are explicitly
+  immutable.** BIP32 chain/index and LMS/XMSS parameter-set attributes can no
+  longer bypass `C_SetAttributeValue` policy merely because they are in the
+  vendor range.
 - **The local gate now tests the checkout it is run from.** Run from a git
   worktree, `scripts/local-gate.sh` used to build and test the shared main tree
   inside the `pqc-rust` container, because `AG_CONTAINER_ROOT` defaulted to

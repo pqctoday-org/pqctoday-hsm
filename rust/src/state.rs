@@ -1481,8 +1481,9 @@ pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
 ///   TRUE→FALSE (the reverse direction is CKR_ATTRIBUTE_READ_ONLY). Flipping
 ///   them does NOT touch CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE, which
 ///   record history;
-/// * vendor stateful-key attrs (≥0x8000_0100) and engine-internal CKA_PRIV_*
-///   (≥0xFFFF_0000) are the engine's own state channel and bypass the policy.
+/// * security-relevant vendor attributes are explicitly read-only; unknown
+///   vendor attributes keep the vendor-defined mutability semantics;
+/// * engine-internal CKA_PRIV_* attributes (≥0xFFFF_0000) are never writable.
 pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -> Result<(), u32> {
     // S4 (2026-08-13) — the ENGINE-PRIVATE range is the engine's own state
     // channel and is never client-writable. Before this, the whole
@@ -1492,8 +1493,34 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
     if attr_type >= ENGINE_PRIVATE_ATTR_BASE {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
-    // Genuine vendor attributes (0x8000_0000..0xFFFF_0000) stay outside
-    // Cryptoki's mutability rules, exactly as the spec says they may.
+    // F13 (2026-10-02) — the public vendor range is not a blanket bypass.
+    // These values bind a key to its derivation domain or stateful-signature
+    // parameter set. Letting a caller rewrite them after creation would make
+    // the object's metadata disagree with its key material. Reserved hierarchy,
+    // policy and provenance attributes must be added here in the same K2/K4
+    // change that introduces their constants, after the private-authority
+    // reservation lands upstream.
+    const IMMUTABLE_VENDOR_ATTRS: &[u32] = &[
+        CKA_BIP32_CHAIN_CODE,
+        CKA_BIP32_CHILD_INDEX,
+        CKA_LMS_PARAM_SET,
+        CKA_LMOTS_PARAM_SET,
+        CKA_XMSS_PARAM_SET,
+        CKA_XMSSMT_PARAM_SET,
+        // K0B §4 — policy binding, lineage, provenance and function purpose
+        // are fixed at creation by the engine; no mutable attribute may
+        // retrofit replication eligibility (plan invariant 2).
+        CKA_PQCTODAY_REPLICATION_POLICY_ID,
+        CKA_PQCTODAY_REPLICATION_LINEAGE_ID,
+        CKA_PQCTODAY_REPLICATION_PROVENANCE,
+        CKA_PQCTODAY_FUNCTION_PURPOSE,
+    ];
+    if IMMUTABLE_VENDOR_ATTRS.contains(&attr_type) {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // Other genuine vendor attributes (0x8000_0000..0xFFFF_0000) remain
+    // governed by their vendor definition rather than Cryptoki's standard
+    // attribute table.
     if attr_type >= 0x8000_0000 {
         return Ok(());
     }
@@ -1747,6 +1774,7 @@ pub fn destroy_destroyable_objects_on_slot(slot_id: u32) {
 /// object invisible forever, which the spec does not say.
 pub fn invalidate_private_handles_on_slot(slot_id: u32) {
     use zeroize::Zeroize;
+    let mut moves: Vec<(u32, u32)> = Vec::new();
     OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
         let private_here: Vec<u32> = store
@@ -1775,6 +1803,9 @@ pub fn invalidate_private_handles_on_slot(slot_id: u32) {
                     // silently destroying a token object.
                     Err(_) => h,
                 };
+                if new_handle != h {
+                    moves.push((h, new_handle));
+                }
                 store.insert(new_handle, attrs);
             } else {
                 if let Some(val) = attrs.get_mut(&CKA_VALUE) {
@@ -1783,6 +1814,9 @@ pub fn invalidate_private_handles_on_slot(slot_id: u32) {
             }
         }
     });
+    // K0B-R2-02: the durable rows follow the re-key, or the next login would
+    // rehydrate every private token object a second time under its old handle.
+    crate::store::persist_rehandle(slot_id, &moves);
 }
 
 pub fn allocate_handle(mut attrs: Attributes) -> u32 {
@@ -1840,6 +1874,86 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         crate::store::persist_object(slot, current, &snapshot);
     }
     current
+}
+
+/// K4 atomic commit (spec §11, review K0B-R-09): insert every object in
+/// `new_objects` and apply every `(handle, [(attr, value)])` update in
+/// `updates` under ONE exclusive `OBJECTS` lock, so no observer — and no
+/// snapshot taken afterwards — can see a subset. Each new object gets the
+/// same defaults, slot tag, fresh `CKA_UNIQUE_ID` and handle as
+/// [`allocate_handle`]. Updates to a missing handle abort the whole batch
+/// before anything is written. Returns the new handles in input order.
+/// Reserve a fresh `CKA_UNIQUE_ID` (the same 36-character form
+/// [`allocate_handle`] assigns) for an object about to be committed.
+pub fn reserve_unique_id() -> Vec<u8> {
+    let uid = UNIQUE_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:08x}-0000-4000-8000-{:012x}", (uid >> 48) as u32, uid & 0xffff_ffff_ffff).into_bytes()
+}
+
+pub fn commit_objects_atomically(
+    owner_session: u32,
+    new_objects: Vec<Attributes>,
+    updates: Vec<(u32, Vec<(u32, Vec<u8>)>)>,
+) -> Result<Vec<u32>, u32> {
+    let mut prepared = Vec::with_capacity(new_objects.len());
+    for mut attrs in new_objects {
+        attrs.insert(CKA_PRIV_OWNER_SESSION, owner_session.to_le_bytes().to_vec());
+        tag_object_slot(owner_session, &mut attrs);
+        apply_object_defaults(&mut attrs);
+        attrs
+            .entry(CKA_PRIV_SLOT_ID)
+            .or_insert_with(|| 0u32.to_le_bytes().to_vec());
+        // An engine caller may have reserved the id already (a signed
+        // receipt names it before the commit); otherwise assign one.
+        if !attrs.contains_key(&CKA_UNIQUE_ID) {
+            attrs.insert(CKA_UNIQUE_ID, reserve_unique_id());
+        }
+        prepared.push(attrs);
+    }
+    OBJECTS.with(|objs| {
+        let mut g = objs.borrow_mut();
+        // Every final state is computed before the table is touched.
+        let mut finals: Vec<(u32, Attributes)> = Vec::new();
+        for (h, changes) in &updates {
+            let mut attrs = g.get(h).cloned().ok_or(CKR_DEVICE_ERROR)?;
+            for (t, v) in changes {
+                attrs.insert(*t, v.clone());
+            }
+            finals.push((*h, attrs));
+        }
+        let mut handles = Vec::with_capacity(prepared.len());
+        for attrs in prepared {
+            let h = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if h == 0 || h == u32::MAX {
+                return Err(CKR_DEVICE_MEMORY);
+            }
+            handles.push(h);
+            finals.push((h, attrs));
+        }
+        // Durable first, in ONE store transaction per slot (review
+        // K0B-R2-03). If the store refuses, memory is left untouched too.
+        let mut slots: Vec<u32> = finals
+            .iter()
+            .filter(|(_, a)| read_bool_attr(a, CKA_TOKEN))
+            .map(|(_, a)| object_slot_of(a))
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        for slot in slots {
+            let rows: Vec<(u32, &Attributes)> = finals
+                .iter()
+                .filter(|(_, a)| read_bool_attr(a, CKA_TOKEN) && object_slot_of(a) == slot)
+                .map(|(h, a)| (*h, a))
+                .collect();
+            if !crate::store::persist_objects_atomic(slot, &rows) {
+                return Err(CKR_DEVICE_ERROR);
+            }
+        }
+        for (h, attrs) in finals {
+            g.insert(h, attrs);
+        }
+        Ok(handles)
+    })
 }
 
 // ── `_from` pure variants (operate on an already-borrowed `&Attributes`,

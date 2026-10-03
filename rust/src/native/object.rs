@@ -32,6 +32,15 @@ pub fn destroy_object(session: u32, handle: u32) -> Result<(), CkRv> {
     // (CKR_OBJECT_HANDLE_INVALID) the un-gated version already returned
     // for a missing handle, now also covering cross-slot / not-logged-in.
     let access = resolve_session_access(session)?;
+    // PKCS#11 v3.2 §4.1.3 — CKA_DESTROYABLE=FALSE forbids destruction, as
+    // ffi::C_DestroyObject already enforced; this native path did not
+    // (review K0B-R2-11: hierarchy records, policies and CRLs depend on it).
+    let destroyable = crate::state::with_object_checked(&access, handle, |a| {
+        a.get(&CKA_DESTROYABLE).map(|v| v.first() != Some(&0)).unwrap_or(true)
+    })?;
+    if !destroyable {
+        return Err(CKR_ACTION_PROHIBITED);
+    }
     let mut attrs = take_object_checked(&access, handle)?;
     // Persist the deletion BEFORE zeroising CKA_VALUE below — not that it
     // matters for correctness here (the delete doesn't read attribute

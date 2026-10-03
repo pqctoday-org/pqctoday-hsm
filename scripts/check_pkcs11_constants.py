@@ -314,6 +314,24 @@ PINNED = {
     # teaching primitive (SECURITY.md). Next free mechanism codepoint after
     # CKM_HPKE in the priv allocation ledger.
     "CKM_PQCTODAY_ECDSA_EXPLICIT_K": (0x80000015, "vendor"),
+    # K0B key hierarchy / replication (docs/proposals/pqctoday-key-replication-
+    # interface-1.0.md §4). Reserved by the private authority, landed in pqctoday-priv main by PR #147 (merge 62044042; commits 7c497c34, 5165c313; formerly 36340f93/f2e5cfa). The
+    # two mechanisms are engine-internal (function-key allowlists only) and
+    # absent from every caller-reachable dispatch; the four attributes are
+    # engine-computed or creation-only and immutable.
+    "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE": (0x80000016, "vendor"),
+    "CKM_PQCTODAY_SIGN_KEY_ATTESTATION": (0x80000017, "vendor"),
+    "CKA_PQCTODAY_REPLICATION_POLICY_ID": (0x80000108, "vendor"),
+    "CKA_PQCTODAY_REPLICATION_LINEAGE_ID": (0x80000109, "vendor"),
+    "CKA_PQCTODAY_REPLICATION_PROVENANCE": (0x8000010A, "vendor"),
+    "CKA_PQCTODAY_FUNCTION_PURPOSE": (0x8000010B, "vendor"),
+    # Engine-private replication state (0xFFFF00xx: never absorbed from a
+    # template, never client-writable) — the binding marker, budget, record
+    # role and record payload the replication module alone writes.
+    "CKA_PRIV_REPL_ROLE": (0xFFFF0008, "vendor"),
+    "CKA_PRIV_REPL_BINDING": (0xFFFF0009, "vendor"),
+    "CKA_PRIV_REPL_RECORD": (0xFFFF000A, "vendor"),
+    "CKA_PRIV_REPL_BUDGET": (0xFFFF000B, "vendor"),
     # CK_HPKE_KDF_TYPE (RFC 9180 §7.2 kdf_id), CK_HPKE_AEAD_TYPE (§7.3
     # aead_id), CK_HPKE_MODE_TYPE (§5.1 mode byte) — small-integer selector
     # enums, not object attributes or standalone codepoints, same category
@@ -784,6 +802,18 @@ VENDOR_PRESENCE = {
     "CKA_PRIV_STATEFUL_KEY_STATE": "rust",
     "CKA_PRIV_LEAF_INDEX": "rust",
     "CKA_PRIV_XMSS_KEYS_REMAINING": "rust",
+    # K2–K4 replication is Rust-engine only by owner scope decision K2 (2a);
+    # the C++ engine is excluded-by-scope and must NOT define these.
+    "CKA_PRIV_REPL_ROLE": "rust",
+    "CKA_PRIV_REPL_BINDING": "rust",
+    "CKA_PRIV_REPL_RECORD": "rust",
+    "CKA_PRIV_REPL_BUDGET": "rust",
+    "CKA_PQCTODAY_REPLICATION_POLICY_ID": "rust",
+    "CKA_PQCTODAY_REPLICATION_LINEAGE_ID": "rust",
+    "CKA_PQCTODAY_REPLICATION_PROVENANCE": "rust",
+    "CKA_PQCTODAY_FUNCTION_PURPOSE": "rust",
+    "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE": "rust",
+    "CKM_PQCTODAY_SIGN_KEY_ATTESTATION": "rust",
     "CKA_STATEFUL_KEY_STATE": "cpp",
     "CKA_LEAF_INDEX": "cpp",
 

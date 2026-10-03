@@ -38,7 +38,7 @@ independent of the repository's overall release version tracked at the top of
 | `build-wasm-bundle.sh` | Builds the packaged WASM bundle — see [Build](#build) |
 | `RUST_P11_V32_CONFORMANCE_REPORT.md` | Live, harness-regenerated PKCS#11 v3.2 conformance evidence for this engine |
 | `CK_ABI_NATIVE_COMPLIANCE_PLAN.md` | Historical native-ABI remediation plan, **superseded 2026-08-23** — see [Testing & conformance](#testing--conformance) |
-| `test_p11_conformance.js`, `test_kat_parity.js`, `test_r36_paramset.js`, `test_xmss_release.js` | Node test harnesses against the built WASM bundle — see [Testing & conformance](#testing--conformance) |
+| `test_p11_conformance.js`, `test_kat_parity.js`, `test_r36_paramset.js`, `test_xmss_release.js`, `test_release_profile_guards.js` | Node test harnesses against the built WASM bundle — see [Testing & conformance](#testing--conformance) |
 | `pkg/`, `pkg-release/`, `pkg_bundler/` | `wasm-pack`/`wasm-bindgen` build output directories — see [Build output directories](#build-output-directories) |
 | `patch_export_table.py` | Post-build step (invoked by `build-wasm-bundle.sh`) that re-adds the `__indirect_function_table` export `wasm-bindgen-cli` strips; `C_GetFunctionList` needs it |
 | `fix_crypto.py`, `fix_literals.py`, `fix_state.py`, `cpp_funcs.txt`, `cpp_funcs2.txt`, `rust_funcs.txt`, `pkcs11_all_funcs.txt`, `output.txt`, `test_xmss.rs`, `test_harness.js` | Tracked but incidental — one-off developer scripts/text dumps from earlier mechanical refactors and investigations, not part of the maintained build or test workflow |
@@ -71,17 +71,17 @@ for anything beyond a quick native check:
 cd rust
 ./build-wasm-bundle.sh            # release profile → pkg-release/, then
                                    # refreshes the tracked pkg_bundler/
-./build-wasm-bundle.sh --dev      # dev profile → pkg/, for the Node harnesses
+./build-wasm-bundle.sh --dev      # shipped-shape dev profile → pkg/
+./build-wasm-bundle.sh --acvp-test --dev  # test-only → pkg-acvp-dev/
 ```
 
-Both invocations pass `--features acvp` (required — without it,
-`C_Initialize` rejects the non-null `pReserved` the harnesses use to seed
-deterministic KATs) and the extra `RUSTFLAGS` the script needs for wasm shadow
-stack size and table export; see the script's own header comments for why.
-The `acvp` Cargo feature itself is opt-in and **off** in every shipped
-artifact (the `pqctoday-kmip` server binary, the in-browser playground WASM
-bundle, this crate's plain `cdylib`) — enabling it is a deliberate PKCS#11
-v3.2 §5.6 deviation, needed only for KAT reproducibility.
+Normal invocations omit `acvp`; shipped native and WASM artifacts therefore
+reject non-null `C_Initialize.pReserved` and HPKE `pEphemeralSeed`. The explicit
+`--acvp-test` mode enables deterministic KAT hooks and writes to a distinct
+directory; it can never refresh `pkg_bundler/`. Every output carries
+`build-profile.json`, and the tracked release manifest is copied beside the
+tracked WASM. The script also supplies the shadow-stack and table-export
+`RUSTFLAGS`; see its header for why.
 
 ### Build output directories
 
@@ -92,8 +92,9 @@ distinction is the Cargo profile, not the content shape:
 
 | Directory | Produced by | Profile | Who actually reads it |
 |---|---|---|---|
-| `pkg/` | `wasm-pack build --dev` (or `build-wasm-bundle.sh --dev`) | dev — unoptimized, larger binary | `test_p11_conformance.js`, `test_kat_parity.js`, `test_r36_paramset.js` all `require('./pkg/...')` directly; this is the build the Node conformance/KAT harnesses need |
-| `pkg-release/` | `wasm-pack build` without `--dev` (or `build-wasm-bundle.sh`, no flags) | release — `opt-level = "s"`, `lto = true` per `Cargo.toml`'s `[profile.release]` | `test_xmss_release.js` (see below); its three build outputs also get copied into `pkg_bundler/` by `build-wasm-bundle.sh` when run without `--dev` |
+| `pkg/` | `wasm-pack build --dev` (or `build-wasm-bundle.sh --dev`) | dev — unoptimized, larger binary, production hook policy | General development. KAT harnesses that require deterministic seeding use the gate's explicit `--features acvp` build or stage `pkg-acvp-dev/` deliberately |
+| `pkg-release/` | `wasm-pack build` without `--dev` (or `build-wasm-bundle.sh`, no flags) | release — `opt-level = "s"`, `lto = true` per `Cargo.toml`'s `[profile.release]` | `test_xmss_release.js` and `test_release_profile_guards.js` (see below); its WASM/glue outputs and build manifest are copied into `pkg_bundler/` by `build-wasm-bundle.sh` when run without `--dev`, but release coordination may deliberately restore/exclude those generated files until the Hub re-pin step |
+| `pkg-acvp/`, `pkg-acvp-dev/` | `build-wasm-bundle.sh --acvp-test [--dev]` | test-only; deterministic hooks enabled | ACVP/KAT work only; never copied to `pkg_bundler/` |
 
 The difference is not cosmetic: XMSS/XMSS-MT keygen+sign measured roughly
 **18x faster** against the release build (~2.3s) than the dev build (~42s) —
@@ -104,7 +105,7 @@ mechanisms rather than eating that cost on every run against `pkg/`.
 `pkg_bundler/` is different from the two above: it **is** tracked in git, and
 it is the real deliverable — the release build's `softhsmrustv3.js`,
 `softhsmrustv3_bg.js` and `softhsmrustv3_bg.wasm` are copied there by
-`build-wasm-bundle.sh`, and that directory is what `../wasm/`'s
+`build-wasm-bundle.sh`, together with `build-profile.json`; that directory is what `../wasm/`'s
 `pqctoday-kmip-wasm` crate and the hub playground actually consume. `pkg/`
 and `pkg-release/` READMEs in this repo are the automatic result of a
 `wasm-pack` implementation detail: `wasm-pack` copies whatever `README.md`
@@ -120,10 +121,11 @@ file says. Keep this file accurate and the copies follow.
 | Harness | What it checks |
 |---|---|
 | `cargo test` | Engine unit + integration tests |
-| `node test_p11_conformance.js` | **PKCS#11 v3.2 conformance** — 999 checks / 51 sections, exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto. Requires `pkg/` (dev build, `--features acvp`) |
+| `node test_p11_conformance.js` | **PKCS#11 v3.2 conformance** — 999 checks / 51 sections, exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto. The local gate deliberately builds `pkg/` with `--features acvp`; that test artifact is not the tracked playground bundle |
 | `node test_kat_parity.js` | KAT parity vs the C++ engine. Requires `pkg/` |
 | `node test_r36_paramset.js` | R3.6 parameter-set coverage. Requires `pkg/` |
 | `node test_xmss_release.js` | XMSS/XMSS-MT keygen+sign+verify round trip against the **release** build — the two mechanisms `test_p11_conformance.js` skips for cost reasons. Requires `pkg-release/` (build with `./build-wasm-bundle.sh`, no flags). Opt-in step of `../scripts/local-gate.sh` (`--release-xmss` / `--all`), not part of its default run |
+| `node test_release_profile_guards.js` | Shipped-profile guard: checks `build-profile.json`, then proves through the raw WASM ABI that normal release rejects non-null `C_Initialize.pReserved`. Requires `pkg-release/` from `./build-wasm-bundle.sh` without `--acvp-test` |
 
 Regenerate the conformance report by running the Rust PKCS#11 v3.2
 conformance step of `../scripts/local-gate.sh` — that step now runs by
