@@ -13,10 +13,33 @@
 # "release" push that should have used --all — that judgment call is a
 # documented human step (see RELEASING.md), not something to guess here.
 #
+# Delete-only pushes (every ref's local sha is all zeros) are allowed
+# without a marker: they send no commit. Mixed pushes are checked as usual.
+#
 # Bypass: `git push --no-verify` (git's own escape hatch — use it knowingly,
 # not as a habit).
 
 set -uo pipefail
+
+# git feeds one line per ref on stdin:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# A delete (`git push origin --delete <branch>` or `:<branch>`) sends an
+# all-zero local sha: no commit leaves this clone, so there is nothing for
+# the gate to have validated. If EVERY ref in this push is a delete, allow
+# it. Any ref that sends a commit keeps the marker check below unchanged.
+# (Accepts 40- and 64-digit zero ids, i.e. SHA-1 and SHA-256 repos.)
+ALL_DELETES=1
+REFS=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [[ -z "${local_sha:-}" ]] && continue
+  REFS=$((REFS + 1))
+  if [[ ! "$local_sha" =~ ^0+$ ]]; then
+    ALL_DELETES=0
+  fi
+done
+if [[ "$REFS" -gt 0 && "$ALL_DELETES" == 1 ]]; then
+  exit 0
+fi
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 HEAD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)" || exit 0

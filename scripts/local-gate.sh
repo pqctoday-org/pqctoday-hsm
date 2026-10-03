@@ -88,16 +88,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_CONTAINER="${RUST_CONTAINER:-pqc-rust}"
 SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-pqc-dev-sandbox}"
-# Worktree-local override: these two are normally hardcoded to the shared
-# main-tree container path, which is correct for that tree but WRONG when
-# this exact script is invoked from an isolated `git worktree` checkout —
-# it would silently test the main tree's (possibly concurrently-edited)
-# kmip/rust source instead of this worktree's pinned commit. AG_CONTAINER_ROOT
-# lets a worktree invocation point these at itself; unset, behavior is
-# unchanged (the original hardcoded main-tree path).
-AG_CONTAINER_ROOT="${AG_CONTAINER_ROOT:-/ag/pqctoday-hsm}"
-AG_KMIP="$AG_CONTAINER_ROOT/kmip"
-AG_RUST="$AG_CONTAINER_ROOT/rust"
+# AG_CONTAINER_ROOT is the container-side path of THIS checkout. An explicit
+# value wins (scripts/remote-gate.sh sets one). Unset, it is derived after the
+# --host dispatch below from $RUST_CONTAINER's /ag mount; see "container root".
+# Until 2026-10-03 it defaulted to /ag/pqctoday-hsm, the shared main tree, so a
+# run from any other worktree silently tested the main tree's code.
+AG_CONTAINER_ROOT="${AG_CONTAINER_ROOT:-}"
 
 # Per-worktree cargo build directory (2026-09-02). The container image sets a
 # single global CARGO_TARGET_DIR=/cargo-target, shared by EVERY worktree and
@@ -122,11 +118,8 @@ AG_RUST="$AG_CONTAINER_ROOT/rust"
 # isolate rather than retry-on-failure: every worktree gets its own build
 # directory. The main tree keeps /cargo-target unchanged, so its large warm
 # cache is not thrown away by this change.
-if [ "$AG_CONTAINER_ROOT" = "/ag/pqctoday-hsm" ]; then
-  CARGO_TARGET_DIR_FOR_RUN="/cargo-target"
-else
-  CARGO_TARGET_DIR_FOR_RUN="/cargo-target/worktrees/$(basename "$AG_CONTAINER_ROOT")"
-fi
+# CARGO_TARGET_DIR_FOR_RUN is set in the "container root" block below, once
+# AG_CONTAINER_ROOT is known.
 JAVAJCE_DIR="$ROOT/JavaJCE"
 JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
 
@@ -371,6 +364,56 @@ join_bg_group() { # waits for every job launched by run_step_bg(_host) since
   BG_PIDS=(); BG_NAMES=(); BG_LOGS=()
 }
 
+# ── container root (2026-10-03) ─────────────────────────────────────────────
+# The steps below build and test the code the container sees at
+# AG_CONTAINER_ROOT, and the marker then certifies this checkout's HEAD. Those
+# must be the same code, so: derive the path from the container's own /ag mount
+# (never assume the main tree), prove the container sees THIS directory with a
+# probe file, and record the commit and tree. The verdict writes no marker if
+# tracked files differed from HEAD at the start or end of the run.
+# shellcheck source=lib/gate-container-root.sh
+source "$ROOT/scripts/lib/gate-container-root.sh"
+if [ -z "$AG_CONTAINER_ROOT" ]; then
+  GATE_HOST_AG="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/ag"}}{{.Source}}{{end}}{{end}}' "$RUST_CONTAINER" 2>/dev/null)"
+  AG_CONTAINER_ROOT="$(derive_container_root "$GATE_HOST_AG" "$(cd "$ROOT" && pwd -P)")" || {
+    echo "[gate] $ROOT is not inside $RUST_CONTAINER's /ag mount (${GATE_HOST_AG:-none found}), so the container cannot see this checkout." >&2
+    echo "[gate] Run it with --host=<user@host>, or set AG_CONTAINER_ROOT to this checkout's container path." >&2
+    exit 2
+  }
+fi
+AG_KMIP="$AG_CONTAINER_ROOT/kmip"
+AG_RUST="$AG_CONTAINER_ROOT/rust"
+if [ "$AG_CONTAINER_ROOT" = "/ag/pqctoday-hsm" ]; then
+  CARGO_TARGET_DIR_FOR_RUN="/cargo-target"
+else
+  CARGO_TARGET_DIR_FOR_RUN="/cargo-target/worktrees/$(basename "$AG_CONTAINER_ROOT")"
+fi
+ensure_container
+GATE_PROBE=".gate-probe-$$-$RANDOM"
+: > "$ROOT/$GATE_PROBE"
+if ! docker exec "$RUST_CONTAINER" test -f "$AG_CONTAINER_ROOT/$GATE_PROBE"; then
+  rm -f "$ROOT/$GATE_PROBE"
+  echo "[gate] $RUST_CONTAINER does not see this checkout at $AG_CONTAINER_ROOT (probe file missing there). Refusing to run: the steps would test some other tree." >&2
+  exit 2
+fi
+rm -f "$ROOT/$GATE_PROBE"
+# The C++ engine and the differential harness build from three git submodules
+# (liboqs, hash-sigs, xmss-reference). A fresh worktree has none of them, and
+# now that the gate tests the worktree it runs from (not the main tree), that
+# would fail the differential step 15 minutes in with "does not contain a
+# CMakeLists.txt". Fail now instead. remote-gate.sh initialises them itself.
+GATE_SUBMODULES_MISSING="$(git -C "$ROOT" submodule status 2>/dev/null | awk '/^-/ {print $2}')"
+if [ -n "$GATE_SUBMODULES_MISSING" ]; then
+  echo "[gate] uninitialised git submodule(s) in $ROOT:" >&2
+  printf '         %s\n' $GATE_SUBMODULES_MISSING >&2
+  echo "[gate] run: git -C '$ROOT' submodule update --init   (or use --host=…, which does it)" >&2
+  exit 2
+fi
+GATE_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+GATE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+GATE_DIRTY_START="$(git -C "$ROOT" status --porcelain --untracked-files=no)"
+say "container root: $AG_CONTAINER_ROOT (probe seen by $RUST_CONTAINER); commit ${GATE_HEAD:0:12}${GATE_DIRTY_START:+ — tracked files differ from HEAD, so no marker will be written}"
+
 # ── steps ───────────────────────────────────────────────────────────────────
 
 # WS-0.4 (2026-08-30): every tests/acvp/*.json vector file must carry a real,
@@ -388,6 +431,17 @@ join_bg_group() { # waits for every job launched by run_step_bg(_host) since
 # sabotage-verified against both of those historical bugs.
 run_step_host "gate self-check (every step can fail)" \
   "cd '$ROOT' && python3 scripts/check_gate_steps_can_fail.py"
+
+# The container-root derivation above decides which tree every container step
+# tests, so its own unit test runs on every gate (prefix collisions, paths
+# outside the mount, the mount itself).
+run_step_host "gate container-root derivation test" \
+  "cd '$ROOT' && bash tests/test-gate-container-root.sh"
+
+# The pre-push hook trusts the marker this gate writes; its own test pins the
+# rule it enforces (delete-only pushes pass, any pushed commit needs a marker).
+run_step_host "pre-push hook test (delete-only pushes allowed)" \
+  "cd '$ROOT' && bash tests/test-pre-push-hook.sh"
 
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
@@ -1006,6 +1060,13 @@ echo
 if [[ ${#FAILED[@]} -eq 0 ]]; then
   HEAD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   MARKER="$ROOT/.gate-ok-$HEAD_SHA"
+  # The marker certifies a COMMIT. Write it only if the tracked tree equalled
+  # HEAD at the start and at the end, and HEAD did not move during the run.
+  GATE_DIRTY_END="$(git -C "$ROOT" status --porcelain --untracked-files=no)"
+  if [[ "$(git -C "$ROOT" rev-parse HEAD)" != "$GATE_HEAD" || -n "$GATE_DIRTY_START$GATE_DIRTY_END" ]]; then
+    printf '\033[1;33m[gate] ALL %d STEPS PASSED, but NO MARKER: tracked files differed from HEAD (or HEAD moved) during the run, so the result does not describe commit %s.\033[0m\n' "$STEP" "$HEAD_SHA"
+    exit 0
+  fi
   FLAGS="core"
   [[ $RUN_CPP == 1 ]] && FLAGS="$FLAGS,cpp"
   [[ $RUN_ACVP_WASM == 1 ]] && FLAGS="$FLAGS,acvp-wasm"
@@ -1018,6 +1079,9 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "flags: $FLAGS"
     echo "steps: $STEP"
+    echo "commit: $GATE_HEAD"
+    echo "tree: $GATE_TREE"
+    echo "container_root: $AG_CONTAINER_ROOT (probe ok)"
   } > "$MARKER"
   printf '\033[1;32m[gate] ALL %d STEPS PASSED\033[0m  (marker: .gate-ok-%s, flags: %s)\n' "$STEP" "$HEAD_SHA" "$FLAGS"
   exit 0
