@@ -453,7 +453,14 @@ pub struct TokenState {
 pub struct SessionState {
     pub slot_id: u32,
     pub rw_session: bool,
+    /// C1 — the application context the session belongs to
+    /// ([`crate::app_context`]); `0` is the default native context.
+    pub context: u64,
 }
+
+/// C1 — re-exported so replication's admin path reads connection metadata
+/// from `crate::state` (contract with the replication admin work).
+pub use crate::app_context::{session_context_meta, ContextId, ContextMeta};
 
 /// PIN-at-rest hashing: salted PBKDF2-HMAC-SHA256, 10k iterations.
 ///
@@ -1104,12 +1111,13 @@ pub fn session_counts(slot_id: u32) -> (u32, u32) {
     (total, rw)
 }
 
-/// True if the session's token is logged in (User or SO).
+/// True if the session's application context is logged in (User or SO) on
+/// the session's token. C1: resolved per context, not per token.
 pub fn session_logged_in(h_session: u32) -> bool {
-    match session_slot(h_session) {
-        Some(slot) => token_logged_in(slot),
-        None => false,
-    }
+    matches!(
+        crate::app_context::session_login_state(h_session),
+        Some(LoginState::User | LoginState::SO)
+    )
 }
 
 /// S8 (2026-08-13) — the predicate behind private-object access. §2.4: "Only
@@ -1130,27 +1138,19 @@ pub fn token_user_logged_in(slot_id: u32) -> bool {
     })
 }
 
-/// [`token_user_logged_in`] for a session handle.
+/// [`token_user_logged_in`] for a session handle, resolved in the session's
+/// application context (C1).
 pub fn session_user_logged_in(h_session: u32) -> bool {
-    match session_slot(h_session) {
-        Some(slot) => token_user_logged_in(slot),
-        None => false,
-    }
+    crate::app_context::session_login_state(h_session) == Some(LoginState::User)
 }
 
 /// True if the session is logged in specifically as SO (Security Officer).
 /// PKCS#11 v3.2 §4.6 Table 19 footnote — `CKA_TRUSTED` on a certificate
 /// "can only be set to CK_TRUE by the SO user".
+///
+/// C1: resolved in the session's application context.
 pub fn session_is_so(h_session: u32) -> bool {
-    match session_slot(h_session) {
-        Some(slot) => TOKEN_STORE.with(|ts| {
-            ts.borrow()
-                .get(&slot)
-                .map(|t| t.login_state == LoginState::SO)
-                .unwrap_or(false)
-        }),
-        None => false,
-    }
+    crate::app_context::session_login_state(h_session) == Some(LoginState::SO)
 }
 
 /// Slot id of the token owning an object record. Objects are stamped with
@@ -1782,6 +1782,41 @@ pub fn destroy_destroyable_objects_on_slot(slot_id: u32) {
 /// the spec requires (only the *session* objects die). Anything that merely
 /// stamped a generation on the object would have made the surviving token
 /// object invisible forever, which the spec does not say.
+/// C1 — the deferred half of a logout (see `crate::app_context`): destroy the
+/// private SESSION objects on `slot_id` owned by one of `owner_sessions`, and
+/// leave every token object and every other context's session objects alone.
+pub fn destroy_private_session_objects_of(slot_id: u32, owner_sessions: &std::collections::HashSet<u32>) {
+    use zeroize::Zeroize;
+    if owner_sessions.is_empty() {
+        return;
+    }
+    OBJECTS.with(|objs| {
+        let mut store = objs.borrow_mut();
+        let doomed: Vec<u32> = store
+            .iter()
+            .filter(|(_, attrs)| {
+                let owner = attrs
+                    .get(&CKA_PRIV_OWNER_SESSION)
+                    .filter(|v| v.len() >= 4)
+                    .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                    .unwrap_or(0);
+                object_slot_of(attrs) == slot_id
+                    && read_bool_attr(attrs, CKA_PRIVATE)
+                    && !read_bool_attr(attrs, CKA_TOKEN)
+                    && owner_sessions.contains(&owner)
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        for h in doomed {
+            if let Some(mut attrs) = store.remove(&h) {
+                if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+                    val.zeroize();
+                }
+            }
+        }
+    });
+}
+
 pub fn invalidate_private_handles_on_slot(slot_id: u32) {
     use zeroize::Zeroize;
     let mut moves: Vec<(u32, u32)> = Vec::new();

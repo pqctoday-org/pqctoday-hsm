@@ -454,6 +454,35 @@ async fn handle_conn(
         .and_then(|der| crate::ops::der_x509::extract_subject_cn(der.as_ref()))
         .map(|cn| crate::server::auth::Identity { username: cn });
     let identity_for_push = transport_identity.clone();
+    // C1 / addendum §1.1 (A-05) — one PKCS#11 application context per
+    // mTLS-authenticated connection, created only after the handshake
+    // verified a client certificate. The guard lives until this function
+    // returns, so the context and every session opened in it are destroyed
+    // on a normal close, on any error path below (`?`), and when the runtime
+    // drops this task at shutdown. Plain-TLS connections get no context.
+    // `role` is left unassigned until the transport-role derivation (A-04,
+    // client-certificate EKU) lands; the KMIP correlation value is not known
+    // before the request is read, so it is not attached here.
+    let _app_context = tls_stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|leaf| {
+            use sha2::Digest;
+            let listener = tls_stream
+                .get_ref()
+                .0
+                .local_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            softhsmrustv3::app_context::ContextGuard::new(softhsmrustv3::app_context::ContextMeta {
+                role: String::new(),
+                client_cert_sha256: sha2::Sha256::digest(leaf.as_ref()).into(),
+                listener,
+                correlation: None,
+            })
+        });
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
     // §9.10 `Maximum Response Size` enforcement now lives inside
     // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
