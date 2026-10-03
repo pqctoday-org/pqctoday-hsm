@@ -2224,9 +2224,13 @@ pub fn sign_rsa(
         CKM_SHA3_512_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_512),
         CKM_SHA3_512_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_512, 64),
         // Raw PKCS#1 v1.5: the caller supplies the bytes (already a DigestInfo
-        // or arbitrary data); no hashing, no DigestInfo prefix.
+        // or arbitrary data); no hashing, no DigestInfo prefix. BLINDED
+        // (`sign_with_rng`), like the macros above: rsa-0.9's `sign` passes
+        // no RNG and so skips blinding of the private exponentiation — the
+        // RUSTSEC-2023-0071 exposure. Output bytes are unchanged (PKCS#1 v1.5
+        // is deterministic); `raw_pkcs1_sign_is_blinded_and_byte_identical`.
         CKM_RSA_PKCS => private_key
-            .sign(rsa::Pkcs1v15Sign::new_unprefixed(), msg)
+            .sign_with_rng(&mut rand::rngs::OsRng, rsa::Pkcs1v15Sign::new_unprefixed(), msg)
             .map_err(|_| CKR_FUNCTION_FAILED),
         _ => Err(CKR_MECHANISM_INVALID),
     }
@@ -4482,6 +4486,43 @@ e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b
             assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &a, None), Ok(()), "{name}: verify");
             assert_eq!(a.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
         }
+    }
+
+    /// Raw CKM_RSA_PKCS signing is blinded (`sign_with_rng`) and its bytes are
+    /// unchanged: identical to rsa-0.9's unblinded `sign` reference, and
+    /// deterministic. Before, this arm called the unblinded `sign` directly.
+    #[test]
+    fn raw_pkcs1_sign_is_blinded_and_byte_identical() {
+        use crate::constants::*;
+        use rsa::pkcs8::DecodePrivateKey;
+        let (sk, n, e) = s6_key();
+        let reference = rsa::RsaPrivateKey::from_pkcs8_der(&sk)
+            .unwrap()
+            .sign(rsa::Pkcs1v15Sign::new_unprefixed(), S6_MSG)
+            .unwrap();
+        let a = sign_rsa(CKM_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        let b = sign_rsa(CKM_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        assert_eq!(a, reference, "blinding must not change the signature bytes");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), n.len());
+        let _ = e;
+    }
+
+    /// A valid key that AWS-LC will not load (here 1536 bits, below its
+    /// 2048-bit floor) must fall through to the pure-Rust path for SHA-2
+    /// PKCS#1 v1.5 signing instead of failing with CKR_KEY_TYPE_INCONSISTENT.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_sign_falls_back_for_keys_it_cannot_load() {
+        use crate::constants::*;
+        use rsa::pkcs8::EncodePrivateKey;
+        use rsa::traits::PublicKeyParts;
+        let k = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 1536).unwrap();
+        let sk = k.to_pkcs8_der().unwrap().as_bytes().to_vec();
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS, &sk, S6_MSG, None).is_none(), "AWS-LC declines, so the caller falls back");
+        let sig = sign_rsa(CKM_SHA256_RSA_PKCS, &sk, S6_MSG, None).expect("pure-Rust fallback signs");
+        let (n, e) = (k.n().to_bytes_be(), k.e().to_bytes_be());
+        assert_eq!(verify_rsa(CKM_SHA256_RSA_PKCS, &n, &e, S6_MSG, &sig, None), Ok(()));
     }
 
     /// §3 Waves 2-3 — the legacy RSA combos (SHA-1, MD5) round-trip, reject

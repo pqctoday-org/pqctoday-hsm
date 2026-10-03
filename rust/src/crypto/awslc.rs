@@ -96,11 +96,14 @@ fn rsa_sign_alg(mech: u32, pss_salt_len: Option<usize>) -> Option<&'static dyn s
 /// format `generate_rsa_keypair` stores and every RSA sign site passes.
 pub fn rsa_sign(mech: u32, sk_pkcs8: &[u8], msg: &[u8], pss_salt_len: Option<usize>) -> Option<Result<Vec<u8>, CkRv>> {
     let alg = rsa_sign_alg(mech, pss_salt_len)?;
+    // Parsed once per distinct key, not once per signature — see
+    // `crypto::awslc_keycache`. A key AWS-LC cannot load (for example a
+    // modulus outside 2048–8192 bits) is NOT an error here: return `None` so
+    // the caller falls through to the pure-Rust path, exactly as the decrypt
+    // helpers already do. (Before, it returned CKR_KEY_TYPE_INCONSISTENT and
+    // a valid key outside that range could not sign with SHA-2 PKCS/PSS.)
+    let kp = crate::crypto::awslc_keycache::signer(sk_pkcs8)?;
     Some((|| {
-        // Parsed once per distinct key, not once per signature — see
-        // `crypto::awslc_keycache`. A build failure keeps this function's
-        // pre-existing error code for an unparseable/unsupported key.
-        let kp = crate::crypto::awslc_keycache::signer(sk_pkcs8).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
         let mut sig = vec![0u8; kp.public_modulus_len()];
         kp.sign(alg, &SystemRandom::new(), msg, &mut sig).map_err(|_| CKR_FUNCTION_FAILED)?;
         Ok(sig)
