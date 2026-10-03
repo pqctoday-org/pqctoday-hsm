@@ -109,3 +109,59 @@ fn begin_receive_len_is_exact_and_side_effect_free() {
     assert_eq!(repl::begin_receive_len(dst, Operation::LiveClone, &[0; 32], &DOMAIN, &p), Err(CKR_ARGUMENTS_BAD));
     assert_eq!(repl::begin_receive_len(dst, Operation::LiveClone, &chal, &DOMAIN, &[7; 48]), Err(CKR_ACTION_PROHIBITED));
 }
+
+#[test]
+fn a14_reissue_rotates_all_five_and_keeps_continuity() {
+    let _g = lock();
+    let w = world(2);
+    let p = w.enroll_policy_everywhere(&w.policy([true, true, true], 4, test_mechs()));
+    let slot0 = w.tokens[0].slot;
+    // An offline backup sealed to token 0's CURRENT recovery key, in flight
+    // across the re-issuance.
+    let (src, _) = gen_key(w.tokens[1].user, Kp::Aes(32), &p);
+    let backup = repl::create_replication_package(w.tokens[1].user, src, &request(&w, 1, 0, Operation::OfflineBackup, &p)).unwrap();
+
+    let old: Vec<Vec<u8>> = Purpose::LEAVES.iter().map(|p| repl::function_certificate(w.tokens[0].user, *p).unwrap()).collect();
+    let digest = w.as_so(0, |so| {
+        let before = snapshot();
+        let st = repl::stage_reissue_function_certificates(slot0).unwrap();
+        assert_eq!(snapshot(), before, "stage_reissue wrote state");
+        let (_, d) = repl::commit_staged(so, slot0, st, Vec::new(), Vec::new()).unwrap();
+        d
+    });
+    let new: Vec<Vec<u8>> = Purpose::LEAVES.iter().map(|p| repl::function_certificate(w.tokens[0].user, *p).unwrap()).collect();
+    for (o, n) in old.iter().zip(&new) {
+        assert_ne!(o, n, "every purpose re-issued");
+    }
+    assert_eq!(digest, sha384(&new.concat()), "resultDigest = SHA-384(5 new leaves in purpose order)");
+    assert!(repl::hierarchy_ready(slot0), "enrollment stays complete");
+
+    // T1: the retired recovery key still opens the in-flight backup.
+    repl::import_replication_package(w.tokens[0].user, &backup, &[]).expect("backup sealed to the retired recovery key imports");
+    // New keys work end to end: live clone 0 → 1 under the re-issued chain.
+    let (k0, _) = gen_key(w.tokens[0].user, Kp::MlDsa, &p);
+    let pkg = repl::create_replication_package(w.tokens[0].user, k0, &request(&w, 0, 1, Operation::LiveClone, &p)).unwrap();
+    repl::import_replication_package(w.tokens[1].user, &pkg, &[]).expect("peer accepts the re-issued chain");
+
+    // T2 + A-15: the next device CRL continues the number, may revoke a
+    // RETIRED leaf by DER, and the peer accepts it.
+    let dev0 = repl::device_certificate(w.tokens[0].user).unwrap();
+    let crl = w.as_so(0, |so| repl::issue_device_crl_with(so, &[], &[old[1].clone()], 3_600).expect("revoke the retired package-signing leaf"));
+    w.as_so(1, |so| repl::enroll_crl(so, &crl, Some(&dev0)).expect("peer accepts the continued CRL number"));
+}
+
+#[test]
+fn a15_revoke_by_der_only_for_retained_retired_certificates() {
+    let _g = lock();
+    let w = world(2);
+    let active = repl::function_certificate(w.tokens[0].user, Purpose::PackageSigning).unwrap();
+    let foreign = repl::function_certificate(w.tokens[1].user, Purpose::PackageSigning).unwrap();
+    w.as_so(0, |so| {
+        assert_eq!(repl::issue_device_crl_with(so, &[], &[active.clone()], 60), Err(CKR_ACTION_PROHIBITED), "active certificate");
+        assert_eq!(repl::issue_device_crl_with(so, &[], &[foreign.clone()], 60), Err(CKR_ACTION_PROHIBITED), "another device's certificate");
+        assert_eq!(repl::issue_device_crl_with(so, &[], &[b"junk".to_vec()], 60), Err(CKR_DATA_INVALID), "not a certificate");
+        repl::reissue_function_certificates(so).unwrap();
+        // Now the old leaf is retired and retained: allowed.
+        repl::issue_device_crl_with(so, &[], &[active.clone()], 60).expect("retired and retained");
+    });
+}

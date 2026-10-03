@@ -19,6 +19,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   lock for both steps. `begin_receive_len` returns the exact size of a
   `BeginReceive` request without generating randomness, signing, reserving
   a challenge or changing the token.
+  The SO can now re-issue all five function keys and certificates in one
+  step. The previous set is retired, retired certificates still verify, a
+  backup sealed to the retired recovery key still restores, and the
+  device-CRL number keeps increasing. Revoking a certificate by its bytes is
+  now limited to retired certificates the token still holds; active or
+  foreign certificates are refused.
 
 - **Pre-push hook allows delete-only pushes.** Deleting a remote branch
   (`git push origin --delete <branch>`) sends no commit, so the hook no longer

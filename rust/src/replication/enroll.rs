@@ -224,6 +224,60 @@ pub fn issue_function_certificates(so_session: u32) -> Result<(), u32> {
     Ok(())
 }
 
+/// Re-issue all five function keys and certificates (admin addendum §3.4,
+/// A-14). Each purpose gets a new key, public key and certificate, and its
+/// current triple is retired in the same commit, so exactly one active triple
+/// per purpose remains and selection stays deterministic. Retired certificates
+/// stay available for verification, and the retired recovery-recipient key
+/// still opens packages already sealed to it (base §10a; same rotation effect
+/// as [`rotate_recovery_key`]). The device-CRL number is not touched: the next
+/// [`issue_device_crl`] continues it, so peers keep accepting it.
+pub fn reissue_function_certificates(so_session: u32) -> Result<(), u32> {
+    let _op = super::package::op_lock();
+    require_profile()?;
+    let slot = require_so(so_session)?;
+    let staged = stage_reissue_function_certificates(slot)?;
+    commit_staged(so_session, slot, staged, Vec::new(), Vec::new()).map(|_| ())
+}
+
+/// Stage of [`reissue_function_certificates`]. `resultDigest` = SHA-384 over
+/// the five new leaf certificates' DER, concatenated in purpose order.
+pub fn stage_reissue_function_certificates(slot: u32) -> Result<Staged, u32> {
+    if enrollment_state(slot) != 3 {
+        return Err(CKR_ACTION_PROHIBITED);
+    }
+    let now = now_unix();
+    let device = device_cert(slot)?;
+    let mut retire = Vec::new();
+    let mut new_objects: Vec<Attributes> = Vec::new();
+    let mut leaves = Vec::new();
+    for purpose in Purpose::LEAVES {
+        for role in [ROLE_FUNCTION_KEY, ROLE_FUNCTION_PUBLIC, ROLE_CERT] {
+            for (h, a) in records::list(slot, role) {
+                if records::purpose_of(&a) == Some(purpose) && !records::is_retired(&a) {
+                    retire.push((h, vec![(CKA_PRIV_REPL_RECORD, records::RETIRED.to_vec())]));
+                }
+            }
+        }
+        let (pk, sk) = if purpose.is_kem() { super::mlkem768_keygen()? } else { super::mldsa65_keygen()? };
+        let (pubk, prv) = records::new_function_key_pair(purpose, pk, sk);
+        let spki_der = pubk.get(&CKA_PUBLIC_KEY_INFO).cloned().ok_or(CKR_DEVICE_ERROR)?;
+        let cert = issue_function_cert(slot, &device, purpose, &spki_der, now)?;
+        leaves.extend_from_slice(&cert);
+        let mut cert_rec = records::new_record(ROLE_CERT, CKO_CERTIFICATE, &format!("{} certificate (re-issued)", purpose.label()), cert, Vec::new(), false);
+        cert_rec.insert(CKA_PQCTODAY_FUNCTION_PURPOSE, vec![purpose as u8]);
+        new_objects.extend([pubk, prv, cert_rec]);
+    }
+    let retired = retire.len();
+    Ok(Staged {
+        new_objects,
+        updates: retire,
+        output: None,
+        result_digest: super::sha384(&leaves),
+        event: Some(("functions_reissued", vec![("device_id", super::hex(&pki::device_id_of(&device))), ("retired", retired.to_string())])),
+    })
+}
+
 /// Rotate the recovery-recipient key (plan R3.5). The new key is certified
 /// by the same device issuer — the continuity proof is that chain. The old
 /// key, its public half and its certificate are retained as RETIRED: new
@@ -284,8 +338,8 @@ pub fn issue_device_crl(so_session: u32, revoke: &[Purpose], validity_secs: u64)
     issue_device_crl_with(so_session, revoke, &[], validity_secs)
 }
 
-/// [`issue_device_crl`], additionally revoking specific (e.g. retired)
-/// function certificates of this device by DER.
+/// [`issue_device_crl`], additionally revoking RETIRED function certificates
+/// this slot retains, named by their exact DER (A-15).
 pub fn issue_device_crl_with(so_session: u32, revoke: &[Purpose], retired_to_revoke: &[Vec<u8>], validity_secs: u64) -> Result<Vec<u8>, u32> {
     let _op = super::package::op_lock();
     require_profile()?;
@@ -318,10 +372,18 @@ pub fn stage_issue_device_crl(slot: u32, revoke: &[Purpose], retired_to_revoke: 
             revoked.push((c.tbs_certificate.serial_number, now));
         }
     }
-    for c in retired_to_revoke {
-        let c = pki::parse_cert(c).or_else(|_| Err(CKR_DATA_INVALID))?;
-        if c.tbs_certificate.issuer != device.tbs_certificate.subject {
-            return Err(CKR_ARGUMENTS_BAD);
+    // A-15: a certificate revoked by DER must byte-match a RETIRED function
+    // certificate this slot still retains. Active certificates are revoked by
+    // purpose; foreign or unknown certificates are refused.
+    let retained: Vec<Vec<u8>> = records::list(slot, ROLE_CERT)
+        .into_iter()
+        .filter(|(_, a)| records::is_retired(a) && matches!(records::purpose_of(a), Some(p) if p != Purpose::DeviceIssuer))
+        .map(|(_, a)| records::value_bytes(&a).to_vec())
+        .collect();
+    for der in retired_to_revoke {
+        let c = pki::parse_cert(der).or_else(|_| Err(CKR_DATA_INVALID))?;
+        if !retained.iter().any(|r| r == der) || c.tbs_certificate.issuer != device.tbs_certificate.subject {
+            return Err(CKR_ACTION_PROHIBITED);
         }
         if !revoked.iter().any(|(s, _)| *s == c.tbs_certificate.serial_number) {
             revoked.push((c.tbs_certificate.serial_number, now));
