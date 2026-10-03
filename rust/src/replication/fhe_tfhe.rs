@@ -146,6 +146,27 @@ pub fn derive_public(session: u32, h_seed: u32, kind: u32) -> Result<u32, u32> {
     Ok(h)
 }
 
+/// P0B §5.2 server-key / public-key manifest, signed by the application with
+/// a token-resident, attested ML-DSA-65 key (`C_Sign(CKM_ML_DSA)`, empty
+/// context). The blob itself is never signature input (F4).
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct FhePublicManifestV1 {
+    pub lineage: OctetString,
+    pub param_hash: OctetString,
+    pub kind: u32,
+    pub value_sha384: OctetString,
+}
+
+/// Manifest DER for a derived public object.
+pub fn public_manifest(lineage: &[u8], param_hash: &[u8], kind: u32, value: &[u8]) -> Result<Vec<u8>, u32> {
+    asn1::to_der(&FhePublicManifestV1 {
+        lineage: asn1::octets(lineage),
+        param_hash: asn1::octets(param_hash),
+        kind,
+        value_sha384: asn1::octets(&super::sha384(value)),
+    })
+}
+
 // ── §5.3 DECRYPT ───────────────────────────────────────────────────────────
 
 /// The engine-private decrypt counter (§6.4).

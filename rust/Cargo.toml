@@ -112,6 +112,11 @@ phase-profile = [
 ]
 
 [[example]]
+# FHE custodian CLI (programme stage F in software; educational).
+name = "fhe_custodian"
+required-features = ["educational-fhe"]
+
+[[example]]
 # fips204 / ml-kem versus AWS-LC timing (`crypto::awslc_pq`); native only.
 name = "awslc_pq_bench"
 required-features = ["awslc-pq"]
