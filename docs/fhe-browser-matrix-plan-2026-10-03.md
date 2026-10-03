@@ -18,13 +18,12 @@ and what it costs there.
   test seed or a decrypted test value comes out.
 - **Runner.** `tests/browser/fhe-kat/run.mjs` serves the bundle locally, drives
   each browser headless with Playwright and prints one JSON line per browser.
-  Playwright is not an hsm dependency: point `PLAYWRIGHT_MODULE` at an
-  installed copy.
+  Playwright 1.63.0 is a pinned devDependency.
 
 ```
 bash scripts/build-fhe-browser-kat.sh
-PLAYWRIGHT_MODULE=<path>/node_modules/playwright \
-  node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox [--add]
+npm ci && npx playwright install chromium webkit firefox
+node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox [--add | --memory]
 ```
 
 ## Checks per browser
@@ -53,6 +52,41 @@ because other sessions' jobs were running. Treat these as upper bounds, not
 frozen budgets. The JS heap figure is only exposed by Chromium and stays at
 its quantized 10 MB floor; it does not see WASM linear memory, so peak memory
 needs the §6.6 measurement below.
+
+## Memory and worker recovery (§6.6 P0A spike)
+
+`run.mjs --memory` runs the bundle inside a dedicated module worker
+(`worker.js`), the disposable-worker model of §6.6. It records the WASM
+linear-memory size after each step. That size only grows, so each value is
+the peak so far. `fhePublicExport` builds the same blobs as the token's
+`CKM_PQCTODAY_FHE_DERIVE_PUBLIC` (`fhe_tfhe::derive_public`), under the same
+64 MiB limit, and returns one owned buffer: exactly one copy crosses into
+JavaScript.
+
+| Step (M5 Max, 17:25 CDT) | Chromium 153 | WebKit 26.6 | Firefox 155 |
+|---|---|---|---|
+| Module init in the worker | 34 ms, 8.2 MB | 64 ms, 8.2 MB | 72 ms, 8.2 MB |
+| Client-key KAT | PASS, 8.4 MB | PASS, 8.4 MB | PASS, 8.4 MB |
+| Compact public key export | 33,034 B, 8.5 MB | same | same |
+| Compressed server key export | 30,147,061 B in 2.51 s | 2.41 s | 2.59 s |
+| Peak WASM memory | 101.5 MB | 101.5 MB | 101.5 MB |
+| Kill the worker 1 s into an add, start a new one | recovered in 32 ms, KAT PASS | 78 ms | 38 ms |
+
+What this settles and what it does not:
+
+- **The export.** The real export is 30.1 MB, not the ~29 MB estimated
+  earlier. Producing it peaks at about 3.4 times its size in WASM memory: the
+  key, its compressed form and the serialized buffer coexist. A 128 MB
+  per-worker ceiling would fit with about 25% headroom.
+- **Termination.** `Worker.terminate()` returns at once in all three engines,
+  and a fresh worker reinitializes and reproduces the KAT in under 80 ms. A
+  killed worker leaves nothing behind for the next one, because each worker
+  owns its own memory. As §6.6 says, this ends the emulator instance; it is
+  not cancellation of one PKCS#11 call.
+- **Not measured yet.** Behaviour under a low-memory cap (no browser here
+  exposes one to Playwright), the JavaScript side of the copy (the 30 MB
+  `Uint8Array` in the page), and token-state recovery after a kill (the
+  snapshot path is not in this bundle).
 
 ## Defect found and fixed by the first run
 
@@ -83,11 +117,14 @@ Hub, wasm or release build enables it.
 
 1. **Idle-machine timings** on the M4 Pro and M5 Max, to freeze budgets (the
    runs above were under load).
-2. **Memory and recovery.** Peak memory for the ~29 MB public export (§6.6
-   P0A spike), worker termination and restart, low-memory behaviour.
+2. **Memory and recovery, remaining parts.** A low-memory cap, the
+   JavaScript-side copy of the 30 MB export, and token snapshot recovery
+   after a worker kill.
 3. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
    `parallel-wasm-api`, measured against single-threaded.
 4. **Freeze budgets** from idle-machine runs, then mark each browser
    supported or evidence-only (§7). Mobile stays evidence-only.
-5. **Gate lane.** Once the runner has a pinned Playwright, add the KAT run to
-   `scripts/local-gate.sh` as a host step.
+5. **Gate lane: done.** `scripts/local-gate.sh` builds the bundle and runs
+   the KAT and `--memory` in Chromium, WebKit and Firefox on every gate.
+   Playwright 1.63.0 is pinned in `package.json`; the browsers download once
+   per gate host.

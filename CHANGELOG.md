@@ -30,6 +30,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **FHE browser matrix: memory, worker recovery and a gate step (educational
+  feature only).** In Chromium, WebKit and Firefox, building the token's 30 MB
+  public server-key export peaks at about 101 MB of WASM memory and takes
+  about 2.5 s. A worker killed in the middle of an operation is replaced, and
+  the replacement passes the known-answer check, in under 80 ms. The local
+  gate now builds the browser bundle and runs both checks in all three
+  browsers. Playwright 1.63.0 is pinned as a development dependency.
+
 - **Rust engine: per-connection application contexts (C1).** A server that
   hosts many clients in one process can now give each connection its own
   PKCS#11 application, as v3.2 §5.6 defines it. A security officer on one

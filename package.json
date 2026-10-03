@@ -49,6 +49,7 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "asn1js": "^3.0.10"
+    "asn1js": "^3.0.10",
+    "playwright": "1.63.0"
   }
 }

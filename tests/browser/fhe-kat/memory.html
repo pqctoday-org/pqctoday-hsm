@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FHE browser memory and recovery</title>
+<script type="module">
+  // FHE plan §6.6 P0A spike: peak WASM memory across the public export, and
+  // worker termination + restart in the middle of an operation.
+  const spawn = () => new Worker('./worker.js', { type: 'module' });
+  const call = (w, msg) => new Promise((res) => { w.onmessage = (e) => res(e.data); w.postMessage(msg); });
+  const out = { ua: navigator.userAgent, steps: [] };
+  try {
+    // 1. Memory across the export sequence, in one worker.
+    const a = spawn();
+    for (const s of ['init', 'kat', 'pk', 'sk']) {
+      const r = await call(a, s);
+      out.steps.push(r);
+      if (r.error) throw new Error(`${s}: ${r.error}`);
+    }
+    a.terminate();
+    // 2. Kill a worker mid-operation, then recover in a fresh one.
+    const b = spawn();
+    await call(b, 'init');
+    b.postMessage('add');                       // ~5-6 s of work
+    await new Promise((r) => setTimeout(r, 1000));
+    const tKill = performance.now();
+    b.terminate();
+    out.terminateMs = performance.now() - tKill;
+    const tRecover = performance.now();
+    const c = spawn();
+    const ci = await call(c, 'init');
+    const ck = await call(c, 'kat');
+    out.recovery = { ms: performance.now() - tRecover, initMs: ci.ms, clientKey: ck.clientKey, memBytes: ck.memBytes };
+    c.terminate();
+  } catch (e) {
+    out.error = String(e && e.message || e);
+  }
+  window.__result = out;
+</script>
