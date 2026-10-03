@@ -190,6 +190,32 @@ impl AdminTbsRequest {
     }
 }
 
+/// Ceremony `BeginReceive` input (§3.1), at most 256 bytes (§8).
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct BeginReceive {
+    pub version: u8,
+    pub operation: super::asn1::Operation,
+    pub source_challenge: OctetString,
+    pub domain_id: OctetString,
+    pub requested_policy: OctetString,
+}
+
+pub const MAX_BEGIN_RECEIVE_DER: usize = 256;
+
+impl BeginReceive {
+    /// Strict decode and fixed sizes, else `CKR_DATA_INVALID`.
+    pub fn parse(der: &[u8]) -> Result<(super::asn1::Operation, [u8; 32], [u8; 32], [u8; 48]), u32> {
+        let b: BeginReceive = decode_strict(der, MAX_BEGIN_RECEIVE_DER)?;
+        if b.version != 1 {
+            return Err(CKR_DATA_INVALID);
+        }
+        let c = b.source_challenge.as_bytes().try_into().map_err(|_| CKR_DATA_INVALID)?;
+        let d = b.domain_id.as_bytes().try_into().map_err(|_| CKR_DATA_INVALID)?;
+        let p = b.requested_policy.as_bytes().try_into().map_err(|_| CKR_DATA_INVALID)?;
+        Ok((b.operation, c, d, p))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct AdminSignedRequest {
     pub tbs: AdminTbsRequest,

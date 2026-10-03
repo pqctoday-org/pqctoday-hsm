@@ -298,6 +298,20 @@ pub(crate) fn platform_device_id(slot: u32) -> Result<[u8; 32], u32> {
 /// K3 general key attestation: evidence about `h_key` bound to the
 /// verifier's 32-byte `challenge`. The caller must be able to see the key.
 pub fn attest_key(user_session: u32, h_key: u32, challenge: &[u8; 32]) -> Result<Vec<u8>, u32> {
+    let (slot, claims) = attest_claims(user_session, h_key, challenge)?;
+    let der = sign_evidence(slot, &claims)?;
+    super::oplog_event("evidence", slot, &[("key_unique_id", claims.key.unique_id.clone()), ("role", "key-attestation".into())]);
+    Ok(der)
+}
+
+/// Exact length of [`attest_key`]'s evidence (same checks; no signature, no
+/// audit): every field has a fixed size for fixed inputs.
+pub fn attest_key_len(user_session: u32, h_key: u32, challenge: &[u8; 32]) -> Result<usize, u32> {
+    let (slot, claims) = attest_claims(user_session, h_key, challenge)?;
+    evidence_der_unsigned(slot, &claims).map(|d| d.len())
+}
+
+fn attest_claims(user_session: u32, h_key: u32, challenge: &[u8; 32]) -> Result<(u32, EvidenceClaims), u32> {
     super::require_profile()?;
     let slot = super::require_user(user_session)?;
     if !super::enroll::hierarchy_ready(slot) {
@@ -325,9 +339,7 @@ pub fn attest_key(user_session: u32, h_key: u32, challenge: &[u8; 32]) -> Result
         issued_at: super::now_unix(),
         key: key_claims_from(&attrs)?,
     };
-    let der = sign_evidence(slot, &claims)?;
-    super::oplog_event("evidence", slot, &[("key_unique_id", claims.key.unique_id.clone()), ("role", "key-attestation".into())]);
-    Ok(der)
+    Ok((slot, claims))
 }
 
 /// The result of a successful verification.

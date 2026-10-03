@@ -240,3 +240,86 @@ fn admin_replacement_and_pruning() {
     repl::set_clock_override(Some(w.now));
     let _ = native::finalize;
 }
+
+#[test]
+fn admin_and_ceremony_interfaces_are_discovered_and_callable() {
+    use softhsmrustv3::ck_abi::*;
+    let _g = lock();
+    let w = world(2);
+    let a = setup(&w);
+    unsafe {
+        let mut v10 = CK_VERSION { major: 1, minor: 0 };
+        let mut p: CK_INTERFACE_PTR = std::ptr::null_mut();
+        let mut admin_name = b"PQCTODAY_KEY_REPLICATION_ADMIN_1_0\0".to_vec();
+        assert_eq!(C_GetInterface(admin_name.as_mut_ptr(), &mut v10, &mut p, 0), CKR_OK as CK_RV);
+        let af = &*((*p).pFunctionList as *const PQCTODAY_KEY_REPLICATION_ADMIN_FUNCTION_LIST_1_0);
+        assert_eq!(af.version, v10);
+        let mut cer_name = b"PQCTODAY_KEY_REPLICATION_CEREMONY_1_0\0".to_vec();
+        assert_eq!(C_GetInterface(cer_name.as_mut_ptr(), &mut v10, &mut p, 0), CKR_OK as CK_RV);
+        let cf = &*((*p).pFunctionList as *const PQCTODAY_KEY_REPLICATION_CEREMONY_FUNCTION_LIST_1_0);
+        // Wrong version is refused; the profile gates both.
+        let mut v11 = CK_VERSION { major: 1, minor: 1 };
+        assert_eq!(C_GetInterface(admin_name.as_mut_ptr(), &mut v11, &mut p, 0), CKR_FUNCTION_FAILED as CK_RV);
+        repl::clear_profile();
+        assert_eq!(C_GetInterface(cer_name.as_mut_ptr(), &mut v10, &mut p, 0), CKR_FUNCTION_FAILED as CK_RV);
+        repl::select_educational_profile();
+
+        // Admin: nonce (sizing first), then execute (sizing, too small, real).
+        let pol = w.policy([true, true, true], 2, test_mechs());
+        let receipt = w.as_so(0, |so| {
+            let so = so as CK_ULONG;
+            let mut n = [0u8; 32];
+            let mut nl: CK_ULONG = 0;
+            assert_eq!((af.C_PQCTODAY_AdminIssueNonce)(so, std::ptr::null_mut(), &mut nl), 0);
+            assert_eq!(nl, 32);
+            assert_eq!((af.C_PQCTODAY_AdminIssueNonce)(so, n.as_mut_ptr(), &mut nl), 0);
+            let mut req = signed(&a, &a.key, &n, 1, &AdminOperation::EnrollPolicy { policy: pol.clone() });
+            let mut len: CK_ULONG = 0;
+            assert_eq!((af.C_PQCTODAY_AdminExecute)(so, req.as_mut_ptr(), req.len() as CK_ULONG, std::ptr::null_mut(), &mut len), 0);
+            let mut small = vec![0u8; 8];
+            let mut sl: CK_ULONG = 8;
+            assert_eq!((af.C_PQCTODAY_AdminExecute)(so, req.as_mut_ptr(), req.len() as CK_ULONG, small.as_mut_ptr(), &mut sl), CKR_BUFFER_TOO_SMALL as CK_RV);
+            let mut out = vec![0u8; len as usize];
+            assert_eq!((af.C_PQCTODAY_AdminExecute)(so, req.as_mut_ptr(), req.len() as CK_ULONG, out.as_mut_ptr(), &mut len), 0);
+            assert_eq!(len as usize, out.len(), "sizing was exact");
+            (req, out)
+        });
+        verify(&w, &receipt.1, &receipt.0).expect("receipt from the C ABI verifies");
+
+        // Ceremony: challenge on 0, BeginReceive on 1 (sizing exact), attest, cancel.
+        let ps = w.enroll_policy_everywhere(&w.policy([true, true, true], 2, test_mechs()));
+        let (s0, s1) = (w.tokens[0].user as CK_ULONG, w.tokens[1].user as CK_ULONG);
+        let mut chal = [0u8; 32];
+        let mut cl: CK_ULONG = 32;
+        assert_eq!((cf.C_PQCTODAY_IssueSourceChallenge)(s0, chal.as_mut_ptr(), &mut cl), 0);
+        use der::Encode;
+        let mut br = admin::BeginReceive {
+            version: 1,
+            operation: repl::asn1::Operation::OfflineBackup,
+            source_challenge: der::asn1::OctetString::new(chal.to_vec()).unwrap(),
+            domain_id: der::asn1::OctetString::new(DOMAIN.to_vec()).unwrap(),
+            requested_policy: der::asn1::OctetString::new(ps.to_vec()).unwrap(),
+        }
+        .to_der()
+        .unwrap();
+        let mut rl: CK_ULONG = 0;
+        assert_eq!((cf.C_PQCTODAY_BeginReceive)(s1, br.as_mut_ptr(), br.len() as CK_ULONG, std::ptr::null_mut(), &mut rl), 0);
+        let mut rq = vec![0u8; rl as usize];
+        assert_eq!((cf.C_PQCTODAY_BeginReceive)(s1, br.as_mut_ptr(), br.len() as CK_ULONG, rq.as_mut_ptr(), &mut rl), 0);
+        assert_eq!(rl as usize, rq.len(), "BeginReceive sizing was exact");
+        let parsed: [u8; 32] = {
+            use der::Decode;
+            repl::asn1::ReplicationRequest::from_der(&rq).unwrap().transaction_id.as_bytes().try_into().unwrap()
+        };
+        let (k, _) = gen_key(w.tokens[0].user, Kp::MlDsa, &ps);
+        let mut el: CK_ULONG = 0;
+        let mut c2 = [5u8; 32];
+        assert_eq!((cf.C_PQCTODAY_AttestKey)(s0, k as CK_ULONG, c2.as_mut_ptr(), 32, std::ptr::null_mut(), &mut el), 0);
+        let mut ev = vec![0u8; el as usize];
+        assert_eq!((cf.C_PQCTODAY_AttestKey)(s0, k as CK_ULONG, c2.as_mut_ptr(), 32, ev.as_mut_ptr(), &mut el), 0);
+        assert_eq!(el as usize, ev.len(), "AttestKey sizing was exact");
+        let mut tx = parsed;
+        assert_eq!((cf.C_PQCTODAY_CancelReceive)(s1, tx.as_mut_ptr(), 32), 0, "the unconsumed reservation cancels");
+        assert_eq!((cf.C_PQCTODAY_CancelReceive)(s1, tx.as_mut_ptr(), 31), CKR_ARGUMENTS_BAD as CK_RV);
+    }
+}
