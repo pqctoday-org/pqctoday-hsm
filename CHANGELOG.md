@@ -39,6 +39,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   manifest per blob, key-attestation evidence for the signing key, the test
   root and the CRLs, so an untrusted compute server can verify the material
   before it uses it.
+  `fhe_custodian verify-signer [--now <unix>] <dir>…` is the data owner's
+  check before trusting an export's signing key. It verifies the key's
+  attestation evidence against the export's root and revocation lists, checks
+  that the evidence belongs to that export and that the attested key is the
+  export's ML-DSA-65 signing key held non-extractable in the token, and prints
+  one JSON line per directory. Several directories must share one root and one
+  FHE key lineage. It reads public files only and never opens the token.
 
 - **Rust engine (educational feature only): key hierarchy, key attestation and
   protected replication of non-extractable keys — K2–K4.** It sits behind the
