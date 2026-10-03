@@ -31,7 +31,7 @@ vendor interface returned by standard `C_GetInterface*`; they do not modify
 `CK_FUNCTION_LIST_3_2`. Ordinary wrapping never bypasses non-extractability.
 The v3.3 draft only fills v3.2 gaps, per the repo's standing rule.
 
-Approval scope requested: **P-1 and P0 only.** Nothing in P1 onward starts until the P0 exit gates
+Approval scope: **P1–P2 approved by the owner on 2026-10-03** ("Approve P1-P2 (Recommended)"); P1 still waits for the HSM plan's K4 exit. Originally requested: **P-1 and P0 only.** Nothing in P1 onward starts until the P0 exit gates
 in §9 pass.
 
 ## 0. Revision history and owner decisions
@@ -55,8 +55,8 @@ Owner decisions recorded 2026-10-02:
 | D2 (revised in v5) | Seed backup model | **Non-extractable FHE seed with controlled cloning and backup/restore.** `CKA_SENSITIVE=true`, `CKA_EXTRACTABLE=false`; ordinary wrap APIs refuse it. A separate vendor replication policy authorizes protected transfers (§6.7), never temporary attribute relaxation |
 | D3 | OpenFHE / Lattigo threshold: reference-only, or a PKCS#11 path for all? | **Target a PKCS#11 path for secret-side threshold steps, subject to a separate GO/NO-GO decision for N-of-N (fhe.rs BFV vs OpenFHE BFV) and t-of-N (Rust port vs Lattigo BGV, D7) in P0A.** Exact OpenFHE and Lattigo runs remain reference lanes. A failed feasibility or review gate downgrades that lane to reference-only rather than blocking TFHE delivery |
 | D4 | TFHE-rs commercial patent-licence notice | **Owner intent: educational, non-commercial use** (Hub WASM, sandbox). Distribution remains blocked until the P-1 licence/patent review confirms that this use and redistribution are permitted. Commercial or appliance (CACP image) use is excluded until separately licensed |
-| D5 | KMIP | **Out of scope** for this plan. No KMIP claims |
-| D6 | Hardware acceleration | **ARM only** (§8). The FPGA track is parked |
+| D5 (amended 2026-10-03) | KMIP | **In scope as a later lane** (programme stages 2–5): KMIP TTLV PKCS#11 operations, then a CACP two-board test, then KV260 compute with board-held keys. Stage 1, this plan's P1–P2, makes no KMIP claims. See `docs/scope-note-fhe-hsm-2026-10-03.md` |
+| D6 (amended 2026-10-03) | Hardware acceleration | **ARM first (Cortex-A53/A55); FPGA as phase 2** ("a53 first - fpga as 2nd phase"). Nothing FPGA until that phase starts |
 | D7 | Lattigo t-of-N scenario | **Switch to BGV and port Lattigo's protocols to Rust:** Lattigo v6.2.0 `multiparty` + `mpbgv` over `schemes/bgv`, behind PKCS#11 vendor mechanisms in `softhsmrustv3` (§6.4) |
 | D8 | Test strategy for the Rust port | **Go is the test oracle.** The real Lattigo, pinned, validates the port (§6.5.1). Go is never linked into the token or the Hub |
 | D9 | TFHE recovery | **Client key only.** The seed regenerates the identical client key (`ClientKey::generate_with_seed`); server and public keys are generated fresh and re-signed |
@@ -67,6 +67,7 @@ Owner decisions recorded 2026-10-02:
 | D14 | Certificate hierarchy | **Manufacturing root signs each device certificate directly; device keys sign function certificates.** Applies to operational and backup HSMs. Function purposes include authentication, attestation and cloning/recovery protection |
 | D15 | Cryptographic profile | **Pure PQC, Category 3: ML-DSA-65 signatures and ML-KEM-768 key establishment.** No classical-only or hybrid fallback. AES-256-GCM is the proposed payload protection. This is not a Category 3 claim for the separate TFHE backend |
 | D16 | Attestation model | **Reuse the existing RATS HSM-evidence draft (`draft-ietf-rats-pkix-key-attestation`, "Evidence Encoding for Hardware Security Modules") and the LAMPS CSR-attestation and freshness drafts**, with published PQ certificate profiles (RFC 9881, RFC 9935). Do not invent a replacement evidence format (§6.8). v5 called this draft "RATS HSM evidence" in some places and "RATS PKIX key attestation" in others; both meant this one document |
+| D17 (2026-10-03) | Programme scope | Five stages, confirmed: (1) HSM K1–K4, then FHE P1–P2; (2) KMIP TTLV PKCS#11 operations; (3) CACP two-board test; (4) FHE on the KV260 as untrusted compute, with keys held by the HSM on the i.MX 95 boards, where only the data owner asks the HSM to decrypt (§6.3 rule 4 unchanged); (5) Hub badges "validated with CACP". The Hub runs only WASM. Validation evidence comes from pqctoday-sandbox, pqctoday-fhe on the KV260, and pqctoday-cacp on the i.MX 95 and i.MX 95 Pro; Ventuno Q comes later. §8's "server-side FHE evaluation is out of scope" now means out of scope **for the token**: it is in scope on the KV260 lane. Topology and the security-officer rule are in `docs/scope-note-fhe-hsm-2026-10-03.md` |
 
 **Planning assumptions, not additional owner decisions:** first implementation uses isolated Rust-token
 instances and a clearly labelled test manufacturing CA; actual hardware/vendor interoperability needs
