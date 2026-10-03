@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FHE browser KAT</title>
+<script type="module">
+  // FHE plan §7 — the token's TFHE derivation in a real browser.
+  const t0 = performance.now();
+  const mod = await import('./pkg/softhsmrustv3.js');
+  await mod.default();
+  const tInit = performance.now();
+  const seed = Uint8Array.from({ length: 32 }, (_, i) => i);
+  const out = { ua: navigator.userAgent, initMs: tInit - t0 };
+  try {
+    let t = performance.now();
+    out.derivedSeed = mod.fheDerivedSeedHex(seed);
+    out.kdfMs = performance.now() - t;
+    t = performance.now();
+    out.clientKey = mod.fheClientKeyKat(seed);
+    out.clientKeyMs = performance.now() - t;
+    if (new URLSearchParams(location.search).has('add')) {
+      t = performance.now();
+      out.addU8 = mod.fheAddU8(seed, 200, 55);
+      out.addMs = performance.now() - t;
+    }
+    if (performance.memory) out.usedJsHeapBytes = performance.memory.usedJSHeapSize;
+  } catch (e) {
+    out.error = String(e && e.stack || e);
+  }
+  window.__result = out;
+</script>

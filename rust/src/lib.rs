@@ -70,6 +70,10 @@ pub mod store;
 pub mod state_snapshot;
 #[cfg(feature = "educational-replication")]
 pub mod replication;
+/// FHE browser matrix (FHE plan §7): the token's TFHE derivation exported to
+/// JS for desktop-browser KAT and timing runs. educational-fhe + wasm32 only.
+#[cfg(all(feature = "educational-fhe", target_arch = "wasm32"))]
+pub mod wasm_fhe_kat;
 
 // NIST ACVP-Server vectors + advertised-cell probes through the real C_*
 // entry points (gap-closure plan 2026-09-25, findings E11-E17).

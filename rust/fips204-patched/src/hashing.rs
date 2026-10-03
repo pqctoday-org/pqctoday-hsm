@@ -142,7 +142,7 @@ pub(crate) fn sample_in_ball<const CTEST: bool>(tau: i32, rho: &[u8]) -> R {
         "Alg 29: bad hamming weight (a)"
     );
     debug_assert!(
-        c.0.iter().map(|&e| e & 1).sum::<i32>() == tau.try_into().expect("cannot fail"),
+        c.0.iter().map(|&e| e & 1).sum::<i32>() == i32::try_from(tau).expect("cannot fail"),
         "Alg 29: bad hamming weight (b)"
     );
 
