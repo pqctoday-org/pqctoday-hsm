@@ -79,12 +79,33 @@ The crate now declares `license = "BSD-2-Clause"` in `rust/Cargo.toml`, matching
 Findings:
 
 1. **RUSTSEC-2023-0071, `rsa 0.9.10` (Marvin timing side channel)**: a vulnerability, no
-   fixed upstream release. The engine depends on `rsa` directly, so it is in **every**
-   build, including the default one. It predates and is unrelated to K2–K4 and FHE. It
-   matters wherever RSA private-key decryption or signing runs on attacker-timed inputs.
-   It needs its own owner decision (accept for the educational engine, route RSA private
-   operations to a constant-time backend, or drop RSA private operations from the Rust
-   path). It is **not** waived here.
+   fixed upstream release. The engine depends on `rsa` directly, so the crate is in
+   **every** build. Natively, the hot network-exposed subset already runs in constant-time
+   AWS-LC (`crypto::awslc`, 2026-09): SHA-2 PKCS#1 v1.5 and default-salt PSS signing,
+   PKCS#1 v1.5 and OAEP decrypt/unwrap of PKCS#8 keys of 2048–8192 bits, and KMIP key
+   generation. A full call-site map (2026-10-03) found the residual native private
+   operations still on the `rsa` crate:
+   - MD5, SHA-1, SHA-224 and SHA-3 RSA signing;
+   - PSS with a non-default salt, and bare `CKM_RSA_PKCS_PSS`;
+   - raw `CKM_RSA_PKCS` signing and sign-recover. This path was also **unblinded in every
+     build**, a separate bug;
+   - `CKM_RSA_X_509` sign-recover;
+   - OAEP with a hash different from the MGF1 hash, or with a PKCS#1-DER key;
+   - any key outside 2048–8192 bits;
+   - PKCS#11 `C_GenerateKeyPair`, which accepted 512–16384 bits.
+
+   **Owner decisions (2026-10-03, relayed by the coordinator):**
+   - Route every native RSA private-key operation (sign, decrypt, unwrap, sign-recover,
+     key generation) to AWS-LC.
+   - Natively, private operations on keys under 2048 or over 8192 bits return
+     `CKR_KEY_SIZE_RANGE`. Public operations (verify, encrypt) on such keys stay.
+   - PKCS#11 key generation is limited to 2048–8192 bits through AWS-LC.
+   - WASM keeps the `rsa` crate, blinded on every path.
+   - Fix the unblinded raw signing in all builds.
+
+   This is implemented separately (branch `fix/rsa-native-awslc-1003`, next release). Its
+   test drives every RSA private-key mechanism natively and asserts that the `rsa` crate
+   performs none of them. Until that lands, the advisory stays open, not waived.
 2. **RUSTSEC-2025-0141, `bincode 1.3.3` (unmaintained)** and **RUSTSEC-2024-0436,
    `paste 1.0.15` (unmaintained)**: both arrive only through `tfhe =1.8.1`, so only with
    `educational-fhe`. They are maintenance notices, not vulnerabilities, and no
