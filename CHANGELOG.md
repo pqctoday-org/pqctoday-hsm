@@ -10,6 +10,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine: per-connection application contexts (C1).** A server that
+  hosts many clients in one process can now give each connection its own
+  PKCS#11 application, as v3.2 §5.6 defines it. A security officer on one
+  connection and a normal user on another can be logged in at the same time;
+  before, the second login failed with `CKR_USER_ANOTHER_ALREADY_LOGGED_IN`.
+  Each context keeps the v3.2 rules on its own. Native C, WASM and remoting
+  callers stay in one default context and behave exactly as before.
+  - The KMIP listener creates a context after each successful mTLS handshake,
+    records the client certificate's SHA-256 and the listener address, and
+    destroys the context, with all its sessions, when the connection ends.
+  - A logout no longer re-keys private handles while another context on the
+    token is still logged in, so that context's handles and stored records
+    stay valid. The re-key runs when the last login ends. Until then, a
+    context that logged out cannot log in again on that token
+    (`CKR_USER_TOO_MANY_TYPES`), so its old handles stay invalid.
+  - `C_CloseAllSessions` closes only the calling application's sessions.
+  - New tests: `rust/tests/c1_app_contexts.rs`,
+    `rust/tests/replication_store_contexts.rs` and
+    `kmip/tests/c1_connection_context.rs`.
+
 - **Pre-push hook allows delete-only pushes.** Deleting a remote branch
   (`git push origin --delete <branch>`) sends no commit, so the hook no longer
   asks for a `.gate-ok-<sha>` marker when every ref in the push is a delete.

@@ -56,6 +56,8 @@ pub mod authlog;
 /// `behaviour/ids.json` (see `behaviour/gen.py`).
 pub mod behaviour;
 pub mod state;
+/// C1 — per-connection PKCS#11 application contexts.
+pub mod app_context;
 /// Native, encrypted-at-rest persistence for the engine's own slots/tokens/
 /// objects. Separate from `state_snapshot.rs` (the Emscripten-only debug
 /// blob, untouched by this module) and from the KMIP crate's own store

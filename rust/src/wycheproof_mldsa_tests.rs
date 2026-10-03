@@ -70,7 +70,7 @@ fn setup() {
     crate::state::set_initialized(true);
     SESSIONS.with(|s| {
         s.shard(SESSION)
-            .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true, context: 0 });
     });
     TOKEN_STORE.with(|ts| {
         ts.borrow_mut()

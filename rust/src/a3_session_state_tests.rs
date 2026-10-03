@@ -34,7 +34,7 @@ fn put_aes_key(handle: u32, value: &[u8]) {
 }
 
 fn open(h: u32) {
-    SESSIONS.insert(h, crate::state::SessionState { slot_id: SLOT, rw_session: true });
+    SESSIONS.insert(h, crate::state::SessionState { slot_id: SLOT, rw_session: true, context: 0 });
 }
 
 fn setup() {
