@@ -41,3 +41,7 @@ created for slots that have none. The store test failed on the old code and pass
 The reviewer confirmed the Codex fixes R-01, R-02, R-03, R-04, R-06, R-07, R-08, R-11 and R-13 as
 correct in code. It found R-05, R-09, R-10, R-12, R-14 and R-15 incomplete; all of those are
 addressed by the rows above.
+
+## G1 sign-off
+
+Owner signed off on G1 (independent protocol review), covering both reviews, in session on 2026-10-03 08:05 CDT. Recorded state: spec revision 3 at `d6b83649`, all 24 gate steps passing. R-14 (no archival validation) is an accepted version-1 limitation per spec §10a. G0 (landing the private-authority commits) remains open.

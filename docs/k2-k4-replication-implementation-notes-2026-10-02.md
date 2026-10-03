@@ -112,8 +112,7 @@ must not be the protocol author" is an owner call.
 
 Owner decision on independence: a second, fresh reviewer who wrote neither the spec nor the
 code reviewed the amended spec and this implementation. It found 12 issues, all fixed (see
-`docs/k0b-protocol-review-claude-2026-10-03.md`). G1 closes only after the owner signs off on both
-reviews.
+`docs/k0b-protocol-review-claude-2026-10-03.md`). **G1 closed: the owner signed off on both reviews on 2026-10-03 08:05 CDT.**
 
 ## E. Educational evidence claim profile (`1.3.6.1.4.1.32473.20261002.3`)
 

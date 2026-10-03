@@ -28,3 +28,6 @@ Points on which two implementers would diverge:
 - Whether `maxReplicas` is source-local or lineage-global, plus the canonical provenance encoding and exact history values.
 - Archival-time validation, historical CRL treatment, backup expiry, and recovery-key rotation continuity.
 - Nested/aggregate parser, CRL, policy, cache, and snapshot limits.
+## G1 sign-off
+
+Owner signed off on G1 (independent protocol review), covering both reviews, in session on 2026-10-03 08:05 CDT. Recorded state: spec revision 3 at `d6b83649`, all 24 gate steps passing. R-14 (no archival validation) is an accepted version-1 limitation per spec §10a. G0 (landing the private-authority commits) remains open.
