@@ -354,3 +354,44 @@ fn admin_ledger_full_refuses_with_device_memory_until_pruned() {
     });
     repl::set_clock_override(Some(w.now));
 }
+
+#[test]
+fn admin_audit_records_the_connection_context_without_quiescing_users() {
+    use softhsmrustv3::app_context::{self, ContextGuard, ContextMeta};
+    let _g = lock();
+    let w = world(1);
+    let a = setup(&w);
+    let user = w.tokens[0].user;
+    // An admin connection: its own application context with authenticated
+    // metadata, SO-logged-in there while the default context's USER login
+    // on the same slot stays live (C1; addendum §1.1).
+    let ctx = ContextGuard::new(ContextMeta {
+        role: "replication-admin".into(),
+        client_cert_sha256: [0xAB; 32],
+        listener: "crypto-plane:5696".into(),
+        correlation: Some("corr-42".into()),
+    });
+    let so = app_context::open_session(ctx.id(), w.tokens[0].slot, CKF_SERIAL_SESSION | CKF_RW_SESSION).unwrap();
+    let mut pin = SO.as_bytes().to_vec();
+    assert_eq!(softhsmrustv3::ffi::C_Login(so, CKU_SO, pin.as_mut_ptr(), pin.len() as u32), CKR_OK);
+    let n = admin::issue_nonce(so).unwrap();
+    let pol = w.policy([true, true, true], 2, test_mechs());
+    let req = signed(&a, &a.key, &n, 1, &AdminOperation::EnrollPolicy { policy: pol });
+    admin::execute(so, &req).expect("admin call inside its own context");
+    // User work was never paused.
+    assert!(repl::device_id(user).is_ok(), "the default context's user session is still usable");
+    let conns = admin::ledger_connections_for_test(w.tokens[0].slot);
+    assert_eq!(conns.len(), 1);
+    let c = &conns[0];
+    assert!(c.contains("role=replication-admin"), "{c}");
+    assert!(c.contains(&format!("client_cert_sha256={}", "ab".repeat(32))), "{c}");
+    assert!(c.contains("listener=crypto-plane:5696") && c.contains("correlation=corr-42"), "{c}");
+    // The admin connection ends (disconnect destroys its context and its
+    // SO login); then a native caller is recorded as such.
+    drop(ctx);
+    w.as_so(0, |so| {
+        let n = admin::issue_nonce(so).unwrap();
+        admin::execute(so, &signed(&a, &a.key, &n, 2, &AdminOperation::RotateRecoveryKey)).unwrap();
+    });
+    assert_eq!(admin::ledger_connections_for_test(w.tokens[0].slot)[1], "context=native");
+}
