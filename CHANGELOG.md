@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rust engine: one process per durable token store.** Opening a SQLite
+  token store now takes an exclusive lock on the store directory, and a
+  second process (or a second store object) opening the same directory is
+  refused with a clear error. Previously two processes could share a store,
+  and each kept its own copy of the token in memory, so a logout in one and
+  a write in the other could leave the same key stored twice. Re-pointing
+  the same process at its store still works.
+
 ### Added
 
 - **Rust engine (educational feature only): groundwork for remote
@@ -63,6 +73,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   manifest per blob, key-attestation evidence for the signing key, the test
   root and the CRLs, so an untrusted compute server can verify the material
   before it uses it.
+  `fhe_custodian verify-signer [--now <unix>] <dir>…` is the data owner's
+  check before trusting an export's signing key. It verifies the key's
+  attestation evidence against the export's root and revocation lists, checks
+  that the evidence belongs to that export and that the attested key is the
+  export's ML-DSA-65 signing key held non-extractable in the token, and prints
+  one JSON line per directory. Several directories must share one root and one
+  FHE key lineage. It reads public files only and never opens the token.
 
 - **Rust engine: per-connection application contexts (C1).** A server that
   hosts many clients in one process can now give each connection its own
