@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): groundwork for remote
+  administration of replication.** Enrolling a CRL or policy, rotating the
+  recovery key and issuing the device CRL each now split into a validation
+  step that changes nothing and one atomic commit. That commit is the point
+  where a later signed admin request will add its own records. Behaviour of
+  the existing calls is unchanged; they now hold the replication operation
+  lock for both steps. `begin_receive_len` returns the exact size of a
+  `BeginReceive` request without generating randomness, signing, reserving
+  a challenge or changing the token.
+
 - **Rust engine (educational feature only): key hierarchy, key attestation and
   protected replication of non-extractable keys — K2–K4.** It sits behind the
   non-default cargo feature `educational-replication` and stays inert until a

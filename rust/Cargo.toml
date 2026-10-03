@@ -126,6 +126,10 @@ name = "replication_store"
 required-features = ["educational-replication", "test-support"]
 
 [[test]]
+name = "replication_admin_stage"
+required-features = ["educational-replication", "test-support"]
+
+[[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
 # the process-global token store with distinct test ceremonies.
 name = "hierarchy_attestation_spikes"

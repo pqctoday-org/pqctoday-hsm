@@ -38,6 +38,49 @@ fn sig_invalid<T>(_: pki::Reject) -> Result<T, u32> {
     Err(CKR_SIGNATURE_INVALID)
 }
 
+/// An SO operation's validated, not-yet-applied effect (admin addendum §3.2
+/// step 8–9, A-03). A `stage_*` function only reads and validates: it writes
+/// no state and no audit. [`commit_staged`] applies the whole effect, plus
+/// any caller-supplied extra rows (the admin path adds its nonce, sequence,
+/// replay-ledger entry and receipt), in ONE store transaction.
+pub struct Staged {
+    pub new_objects: Vec<Attributes>,
+    pub updates: Vec<(u32, Vec<(u32, Vec<u8>)>)>,
+    /// What the operation returns (policy ID, device-CRL DER); the admin
+    /// receipt's `output`.
+    pub output: Option<Vec<u8>>,
+    /// The admin receipt's `resultDigest` (addendum §3.6).
+    pub result_digest: [u8; 48],
+    /// Audit event emitted after a successful commit; `None` for a no-op
+    /// (an idempotent re-enrollment).
+    event: Option<(&'static str, Vec<(&'static str, String)>)>,
+}
+
+/// Apply `staged` and `extra` atomically, then emit the staged audit event.
+/// A store failure changes nothing and emits nothing.
+pub fn commit_staged(
+    session: u32,
+    slot: u32,
+    staged: Staged,
+    extra_objects: Vec<Attributes>,
+    extra_updates: Vec<(u32, Vec<(u32, Vec<u8>)>)>,
+) -> Result<(Option<Vec<u8>>, [u8; 48]), u32> {
+    let Staged { mut new_objects, mut updates, output, result_digest, event } = staged;
+    new_objects.extend(extra_objects);
+    updates.extend(extra_updates);
+    if !new_objects.is_empty() || !updates.is_empty() {
+        crate::state::commit_objects_atomically(session, new_objects, updates)?;
+    }
+    if let Some((name, fields)) = event {
+        oplog_event(name, slot, &fields);
+    }
+    Ok((output, result_digest))
+}
+
+fn device_cert(slot: u32) -> Result<Certificate, u32> {
+    pki::parse_cert(&records::certificate(slot, Purpose::DeviceIssuer).ok_or(CKR_DEVICE_ERROR)?).or_else(|_| Err(CKR_DEVICE_ERROR))
+}
+
 /// Trust inputs from this slot's enrolled state.
 pub fn trust_inputs(slot: u32) -> TrustInputs {
     TrustInputs {
@@ -188,14 +231,21 @@ pub fn issue_function_certificates(so_session: u32) -> Result<(), u32> {
 /// key (an offline backup in transit) still import. Revoking the old
 /// certificate afterwards is a separate, explicit `issue_device_crl` step.
 pub fn rotate_recovery_key(so_session: u32) -> Result<(), u32> {
+    let _op = super::package::op_lock();
     require_profile()?;
     let slot = require_so(so_session)?;
+    let staged = stage_rotate_recovery_key(slot)?;
+    commit_staged(so_session, slot, staged, Vec::new(), Vec::new()).map(|_| ())
+}
+
+/// Stage of [`rotate_recovery_key`]. `resultDigest` = SHA-384(new recovery
+/// certificate DER).
+pub fn stage_rotate_recovery_key(slot: u32) -> Result<Staged, u32> {
     if enrollment_state(slot) != 3 {
         return Err(CKR_ACTION_PROHIBITED);
     }
     let now = now_unix();
-    let device = pki::parse_cert(&records::certificate(slot, Purpose::DeviceIssuer).ok_or(CKR_DEVICE_ERROR)?)
-        .or_else(|_| Err(CKR_DEVICE_ERROR))?;
+    let device = device_cert(slot)?;
     let p = Purpose::RecoveryRecipient;
     let mut retire = Vec::new();
     for role in [ROLE_FUNCTION_KEY, ROLE_FUNCTION_PUBLIC, ROLE_CERT] {
@@ -209,11 +259,16 @@ pub fn rotate_recovery_key(so_session: u32) -> Result<(), u32> {
     let (pubk, prv) = records::new_function_key_pair(p, pk, sk);
     let spki_der = pubk.get(&CKA_PUBLIC_KEY_INFO).cloned().ok_or(CKR_DEVICE_ERROR)?;
     let cert = issue_function_cert(slot, &device, p, &spki_der, now)?;
+    let result_digest = super::sha384(&cert);
     let mut cert_rec = records::new_record(ROLE_CERT, CKO_CERTIFICATE, "recovery recipient certificate (rotated)", cert, Vec::new(), false);
     cert_rec.insert(CKA_PQCTODAY_FUNCTION_PURPOSE, vec![p as u8]);
-    crate::state::commit_objects_atomically(so_session, vec![pubk, prv, cert_rec], retire)?;
-    oplog_event("recovery_rotated", slot, &[("new_spki_sha384", super::hex(&super::sha384(&spki_der)))]);
-    Ok(())
+    Ok(Staged {
+        new_objects: vec![pubk, prv, cert_rec],
+        updates: retire,
+        output: None,
+        result_digest,
+        event: Some(("recovery_rotated", vec![("new_spki_sha384", super::hex(&super::sha384(&spki_der)))])),
+    })
 }
 
 fn sign_device_crl(slot: u32, device: &Certificate, number: u64, this: u64, next: u64, revoked: &[(x509_cert::serial_number::SerialNumber, u64)]) -> Result<Vec<u8>, u32> {
@@ -232,15 +287,23 @@ pub fn issue_device_crl(so_session: u32, revoke: &[Purpose], validity_secs: u64)
 /// [`issue_device_crl`], additionally revoking specific (e.g. retired)
 /// function certificates of this device by DER.
 pub fn issue_device_crl_with(so_session: u32, revoke: &[Purpose], retired_to_revoke: &[Vec<u8>], validity_secs: u64) -> Result<Vec<u8>, u32> {
+    let _op = super::package::op_lock();
     require_profile()?;
     let slot = require_so(so_session)?;
+    let staged = stage_issue_device_crl(slot, revoke, retired_to_revoke, validity_secs)?;
+    let (out, _) = commit_staged(so_session, slot, staged, Vec::new(), Vec::new())?;
+    out.ok_or(CKR_DEVICE_ERROR)
+}
+
+/// Stage of [`issue_device_crl_with`]. Output and `resultDigest` are the new
+/// CRL DER and its SHA-384.
+pub fn stage_issue_device_crl(slot: u32, revoke: &[Purpose], retired_to_revoke: &[Vec<u8>], validity_secs: u64) -> Result<Staged, u32> {
     let (enroll_h, rec) = enrollment(slot).ok_or(CKR_ACTION_PROHIBITED)?;
     if rec.state != 3 || revoke.contains(&Purpose::DeviceIssuer) {
         return Err(CKR_ACTION_PROHIBITED);
     }
     let now = now_unix();
-    let device = pki::parse_cert(&records::certificate(slot, Purpose::DeviceIssuer).ok_or(CKR_DEVICE_ERROR)?)
-        .or_else(|_| Err(CKR_DEVICE_ERROR))?;
+    let device = device_cert(slot)?;
     let ski = pki::key_id(&device.tbs_certificate.subject_public_key_info);
     let (crl_h, _, current) = records::crls(slot).into_iter().find(|(_, k, _)| *k == ski).ok_or(CKR_DEVICE_ERROR)?;
     let mut revoked: Vec<(x509_cert::serial_number::SerialNumber, u64)> = Vec::new();
@@ -267,13 +330,13 @@ pub fn issue_device_crl_with(so_session: u32, revoke: &[Purpose], retired_to_rev
     let number = rec.crl_number + 1;
     let crl = sign_device_crl(slot, &device, number, now, now + validity_secs.max(1), &revoked)?;
     let new_rec = asn1::to_der(&EnrollmentRecord { crl_number: number, ..rec })?;
-    crate::state::commit_objects_atomically(
-        so_session,
-        Vec::new(),
-        vec![(crl_h, vec![(CKA_VALUE, crl.clone())]), (enroll_h, vec![(CKA_PRIV_REPL_RECORD, new_rec)])],
-    )?;
-    oplog_event("device_crl", slot, &[("crl_number", number.to_string()), ("revoked", revoked.len().to_string())]);
-    Ok(crl)
+    Ok(Staged {
+        new_objects: Vec::new(),
+        updates: vec![(crl_h, vec![(CKA_VALUE, crl.clone())]), (enroll_h, vec![(CKA_PRIV_REPL_RECORD, new_rec)])],
+        result_digest: super::sha384(&crl),
+        output: Some(crl),
+        event: Some(("device_crl", vec![("crl_number", number.to_string()), ("revoked", revoked.len().to_string())])),
+    })
 }
 
 /// Enroll a newer CRL: the manufacturing root's (no `issuer_device_cert`) or a
@@ -281,8 +344,15 @@ pub fn issue_device_crl_with(so_session: u32, revoke: &[Purpose], retired_to_rev
 /// itself chain to an enrolled root and be unrevoked). CRL numbers must
 /// strictly increase per issuer.
 pub fn enroll_crl(so_session: u32, crl_der: &[u8], issuer_device_cert: Option<&[u8]>) -> Result<(), u32> {
+    let _op = super::package::op_lock();
     require_profile()?;
     let slot = require_so(so_session)?;
+    let staged = stage_enroll_crl(slot, crl_der, issuer_device_cert)?;
+    commit_staged(so_session, slot, staged, Vec::new(), Vec::new()).map(|_| ())
+}
+
+/// Stage of [`enroll_crl`]. `resultDigest` = SHA-384(CRL DER).
+pub fn stage_enroll_crl(slot: u32, crl_der: &[u8], issuer_device_cert: Option<&[u8]>) -> Result<Staged, u32> {
     if enrollment_state(slot) < 2 {
         return Err(CKR_ACTION_PROHIBITED);
     }
@@ -305,7 +375,7 @@ pub fn enroll_crl(so_session: u32, crl_der: &[u8], issuer_device_cert: Option<&[
         }
     };
     let existing = records::crls(slot).into_iter().find(|(_, k, _)| *k == verified.issuer_key_id);
-    match existing {
+    let (new_objects, updates) = match existing {
         Some((h, _, old)) => {
             let old_number = x509_cert::crl::CertificateList::from_der(&old)
                 .ok()
@@ -319,40 +389,59 @@ pub fn enroll_crl(so_session: u32, crl_der: &[u8], issuer_device_cert: Option<&[
             if verified.number <= old_number {
                 return Err(CKR_ACTION_PROHIBITED);
             }
-            crate::state::commit_objects_atomically(so_session, Vec::new(), vec![(h, vec![(CKA_VALUE, crl_der.to_vec())])])?;
+            (Vec::new(), vec![(h, vec![(CKA_VALUE, crl_der.to_vec())])])
         }
         None => {
             if records::crls(slot).len() >= MAX_CRLS_PER_SLOT {
                 return Err(CKR_DEVICE_MEMORY);
             }
             let rec = records::new_record(ROLE_CRL, CKO_DATA, "enrolled CRL", crl_der.to_vec(), verified.issuer_key_id.clone(), false);
-            crate::state::commit_objects_atomically(so_session, vec![rec], Vec::new())?;
+            (vec![rec], Vec::new())
         }
-    }
-    oplog_event("crl_enrolled", slot, &[("issuer_key_id", super::hex(&verified.issuer_key_id)), ("crl_number", verified.number.to_string())]);
-    Ok(())
+    };
+    Ok(Staged {
+        new_objects,
+        updates,
+        output: None,
+        result_digest: super::sha384(crl_der),
+        event: Some(("crl_enrolled", vec![("issuer_key_id", super::hex(&verified.issuer_key_id)), ("crl_number", verified.number.to_string())])),
+    })
 }
 
 /// Enroll an immutable replication policy; returns its SHA-384 identifier.
 /// Enrolling identical DER again is idempotent.
 pub fn enroll_policy(so_session: u32, policy_der: &[u8]) -> Result<[u8; 48], u32> {
+    let _op = super::package::op_lock();
     require_profile()?;
     let slot = require_so(so_session)?;
+    let staged = stage_enroll_policy(slot, policy_der)?;
+    let (_, id) = commit_staged(so_session, slot, staged, Vec::new(), Vec::new())?;
+    Ok(id)
+}
+
+/// Stage of [`enroll_policy`]. Output and `resultDigest` are the 48-byte
+/// policy ID; re-enrolling identical DER stages nothing.
+pub fn stage_enroll_policy(slot: u32, policy_der: &[u8]) -> Result<Staged, u32> {
     let view = records::parse_policy(policy_der)?;
     // Version 1 profiles define no per-type constraint (spec §8).
     if view.type_constraint_hash != super::sha384(b"") {
         return Err(CKR_DATA_INVALID);
     }
-    if records::find_policy(slot, &view.id).is_some() {
-        return Ok(view.id);
+    let id = view.id;
+    if records::find_policy(slot, &id).is_some() {
+        return Ok(Staged { new_objects: Vec::new(), updates: Vec::new(), output: Some(id.to_vec()), result_digest: id, event: None });
     }
     if records::list(slot, ROLE_POLICY).len() >= MAX_POLICIES_PER_SLOT {
         return Err(CKR_DEVICE_MEMORY);
     }
     let rec = records::new_record(ROLE_POLICY, CKO_DATA, "replication policy", policy_der.to_vec(), Vec::new(), false);
-    crate::state::commit_objects_atomically(so_session, vec![rec], Vec::new())?;
-    oplog_event("policy_enrolled", slot, &[("policy", super::hex(&view.id))]);
-    Ok(view.id)
+    Ok(Staged {
+        new_objects: vec![rec],
+        updates: Vec::new(),
+        output: Some(id.to_vec()),
+        result_digest: id,
+        event: Some(("policy_enrolled", vec![("policy", super::hex(&id))])),
+    })
 }
 
 // ── Public read accessors (any session) ────────────────────────────────────

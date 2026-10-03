@@ -247,6 +247,17 @@ fn signed_bytes(role: EvidenceRole, tbs_der: &[u8]) -> Vec<u8> {
 /// attestation function key (`CKM_PQCTODAY_SIGN_KEY_ATTESTATION` semantics:
 /// claims are engine-computed; only the nonce came from outside).
 pub(crate) fn sign_evidence(slot: u32, claims: &EvidenceClaims) -> Result<Vec<u8>, u32> {
+    evidence_der(slot, claims, true)
+}
+
+/// [`sign_evidence`]'s encoding with a zero placeholder signature of the
+/// exact ML-DSA-65 length — for sizing only, never returned to a caller.
+/// Every field has a fixed size for fixed inputs, so the length is exact.
+pub(crate) fn evidence_der_unsigned(slot: u32, claims: &EvidenceClaims) -> Result<Vec<u8>, u32> {
+    evidence_der(slot, claims, false)
+}
+
+fn evidence_der(slot: u32, claims: &EvidenceClaims, sign: bool) -> Result<Vec<u8>, u32> {
     if claims.nonce == [0u8; 32] {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -260,7 +271,7 @@ pub(crate) fn sign_evidence(slot: u32, claims: &EvidenceClaims) -> Result<Vec<u8
     let tbs = encode_tbs(claims)?;
     let tbs_der = asn1::to_der(&tbs)?;
     let (_, sk) = records::function_secret(slot, Purpose::KeyAttestation).ok_or(CKR_ACTION_PROHIBITED)?;
-    let sig = super::mldsa65_sign(&sk, &signed_bytes(claims.role, &tbs_der))?;
+    let sig = if sign { super::mldsa65_sign(&sk, &signed_bytes(claims.role, &tbs_der))? } else { vec![0u8; super::package::ML_DSA_65_SIG_LEN] };
     let ev = Evidence {
         tbs,
         signatures: vec![SignatureBlock {
