@@ -36,16 +36,23 @@ PLAYWRIGHT_MODULE=<path>/node_modules/playwright \
 | `--add`: `FheUint8` 200 + 55 under a fresh server key | 255 | exercises server-key generation and one bootstrapped operation |
 | Recorded | module init, KDF, client-key and add times; JS heap where the browser exposes it | §7 budgets |
 
-## First result (M5 Max, macOS, headless)
+## Results (M5 Max, macOS, headless, single-threaded)
 
-| Browser | KAT | Init | Client key |
-|---|---|---|---|
-| Chromium 153.0.8010.12 | PASS | 586 ms | 3 ms |
-| WebKit 26.6 (Safari engine) | PASS | 110 ms | 8 ms |
-| Firefox | not run: not in the local Playwright cache | — | — |
+All three desktop engines pass the KAT and the homomorphic add. Times are the
+median of three runs (`--add`), taken at 17:10–17:15 CDT on 2026-10-03.
 
-Timings were taken while another release gate was running on the same machine,
-so they are indicative only. Budgets are not frozen from them.
+| Browser | KAT | Add 200 + 55 | Module init | Client key | Server key + add + decrypt |
+|---|---|---|---|---|---|
+| Chromium 153.0.8010.12 | PASS | 255 | 32 ms | 2 ms | 5.68 s |
+| WebKit 26.6 (Safari engine) | PASS | 255 | 93 ms | 3 ms | 5.50 s |
+| Firefox 155.0 | PASS | 255 | 96 ms | 1 ms | 5.67 s |
+
+Runs varied by less than 5% after the first. Chromium's first run took 6.16 s.
+The machine was not idle: its 1-minute load average was 10–16 on 18 cores,
+because other sessions' jobs were running. Treat these as upper bounds, not
+frozen budgets. The JS heap figure is only exposed by Chromium and stays at
+its quantized 10 MB floor; it does not see WASM linear memory, so peak memory
+needs the §6.6 measurement below.
 
 ## Defect found and fixed by the first run
 
@@ -74,14 +81,13 @@ Hub, wasm or release build enables it.
 
 ## Next steps (P0A → P3)
 
-1. **Firefox.** Install the Playwright Firefox build and add it to the run.
-2. **`--add` timings** on an idle M4 Pro and M5 Max: server-key generation and
-   one bootstrapped operation in each browser, single-threaded.
-3. **Memory and recovery.** Peak memory for the ~29 MB public export (§6.6
+1. **Idle-machine timings** on the M4 Pro and M5 Max, to freeze budgets (the
+   runs above were under load).
+2. **Memory and recovery.** Peak memory for the ~29 MB public export (§6.6
    P0A spike), worker termination and restart, low-memory behaviour.
-4. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
+3. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
    `parallel-wasm-api`, measured against single-threaded.
-5. **Freeze budgets** from idle-machine runs, then mark each browser
+4. **Freeze budgets** from idle-machine runs, then mark each browser
    supported or evidence-only (§7). Mobile stays evidence-only.
-6. **Gate lane.** Once the runner has a pinned Playwright, add the KAT run to
+5. **Gate lane.** Once the runner has a pinned Playwright, add the KAT run to
    `scripts/local-gate.sh` as a host step.
