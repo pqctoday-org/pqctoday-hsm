@@ -494,3 +494,253 @@ mod tests {
         assert_eq!(h, "9f5d847e4d1121eef9d75fcc473e89ee5306523f9cb140384eba5aa85a55b77b");
     }
 }
+
+// ── C ABI dispatch helpers (P0B §5; called from ffi.rs) ────────────────────
+//
+// Parameter structs are read at the exported CK_ULONG width (usize: 4 bytes
+// on wasm32, 8 on 64-bit native), exactly as the rest of ffi.rs reads
+// CK_MECHANISM. A wrong length or version is CKR_MECHANISM_PARAM_INVALID.
+
+const W: usize = std::mem::size_of::<usize>();
+
+unsafe fn param_bytes<'a>(p: *const u8, len: usize, want: usize) -> Result<&'a [u8], u32> {
+    if p.is_null() || len != want {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok(std::slice::from_raw_parts(p, len))
+}
+
+fn ulong_at(b: &[u8], off: usize) -> usize {
+    let mut v = [0u8; W];
+    v.copy_from_slice(&b[off..off + W]);
+    usize::from_le_bytes(v)
+}
+
+/// Raw CK_ATTRIBUTE triples → (type, value) pairs, bounded.
+unsafe fn read_template(t: *mut u8, n: u32) -> Result<Vec<(u32, Vec<u8>)>, u32> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    if t.is_null() || n > 64 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let p = t as *const usize;
+    let mut out = Vec::new();
+    for i in 0..n as usize {
+        let ty = *p.add(i * 3) as u32;
+        let vp = *p.add(i * 3 + 1) as *const u8;
+        let vl = *p.add(i * 3 + 2);
+        if vl > 4096 || (vl > 0 && vp.is_null()) {
+            return Err(CKR_ARGUMENTS_BAD);
+        }
+        out.push((ty, if vl == 0 { Vec::new() } else { std::slice::from_raw_parts(vp, vl).to_vec() }));
+    }
+    Ok(out)
+}
+
+fn bool_of(v: &[u8]) -> Option<bool> {
+    match v {
+        [0] => Some(false),
+        [1] => Some(true),
+        _ => None,
+    }
+}
+
+/// `C_GenerateKey(CKM_PQCTODAY_FHE_KEY_GEN)`. Template may set only
+/// CKA_LABEL, CKA_ID and CKA_TOKEN=TRUE (§5.1).
+///
+/// # Safety
+/// FFI pointers as for `C_GenerateKey`.
+pub unsafe fn ffi_key_gen(session: u32, p_param: *const u8, param_len: usize, tmpl: *mut u8, n: u32) -> Result<u32, u32> {
+    let b = param_bytes(p_param, param_len, 2 * W + 96)?;
+    if ulong_at(b, 0) != 1 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let param_set = u32::try_from(ulong_at(b, W)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let rp: [u8; 48] = b[2 * W..2 * W + 48].try_into().unwrap();
+    let dp: [u8; 48] = b[2 * W + 48..2 * W + 96].try_into().unwrap();
+    let (mut label, mut id) = (None, None);
+    for (t, v) in read_template(tmpl, n)? {
+        match t {
+            records::CKA_LABEL => label = Some(v),
+            t if t == crate::native::CKA_ID => id = Some(v),
+            CKA_TOKEN if bool_of(&v) == Some(true) => {}
+            _ => return Err(CKR_TEMPLATE_INCONSISTENT),
+        }
+    }
+    fhe::generate_fhe_seed(session, param_set, &rp, &dp, label.as_deref(), id.as_deref())
+}
+
+/// `C_DeriveKey(CKM_PQCTODAY_FHE_DERIVE_PUBLIC)`. Template may only restate
+/// the fixed derive template (§3) plus CKA_LABEL/CKA_ID (§5.2).
+///
+/// # Safety
+/// FFI pointers as for `C_DeriveKey`.
+pub unsafe fn ffi_derive_public(session: u32, base: u32, p_param: *const u8, param_len: usize, tmpl: *mut u8, n: u32) -> Result<u32, u32> {
+    let b = param_bytes(p_param, param_len, 2 * W)?;
+    if ulong_at(b, 0) != 1 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let kind = u32::try_from(ulong_at(b, W)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let ul = |v: &[u8]| (v.len() == W).then(|| ulong_at(v, 0) as u32);
+    for (t, v) in read_template(tmpl, n)? {
+        let ok = match t {
+            records::CKA_LABEL => true,
+            t if t == crate::native::CKA_ID => true,
+            CKA_TOKEN | CKA_PRIVATE => bool_of(&v) == Some(false),
+            CKA_CLASS => ul(&v) == Some(CKO_PUBLIC_KEY),
+            CKA_KEY_TYPE => ul(&v) == Some(CKK_PQCTODAY_FHE_PUBLIC),
+            _ => false,
+        };
+        if !ok {
+            return Err(CKR_TEMPLATE_INCONSISTENT);
+        }
+    }
+    derive_public(session, base, kind)
+}
+
+/// Active single-part FHE decrypt/encrypt operations, by session.
+#[derive(Clone, Copy)]
+pub enum FheOp {
+    Decrypt { key: u32, recipient: [u8; 48] },
+    #[cfg(feature = "test-support")]
+    Encrypt { key: u32 },
+}
+
+static FHE_OPS: std::sync::Mutex<Option<std::collections::HashMap<u32, FheOp>>> = std::sync::Mutex::new(None);
+
+fn ops<R>(f: impl FnOnce(&mut std::collections::HashMap<u32, FheOp>) -> R) -> R {
+    let mut g = FHE_OPS.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(Default::default))
+}
+
+pub fn active(session: u32) -> Option<FheOp> {
+    ops(|m| m.get(&session).copied())
+}
+
+pub fn cancel(session: u32) -> bool {
+    ops(|m| m.remove(&session).is_some())
+}
+
+/// `C_DecryptInit(CKM_PQCTODAY_FHE_DECRYPT)`: validates the key and records
+/// the operation. Policy work happens in `C_Decrypt` (§5.3).
+///
+/// # Safety
+/// FFI pointers as for `C_DecryptInit`.
+pub unsafe fn ffi_decrypt_init(session: u32, key: u32, p_param: *const u8, param_len: usize) -> Result<(), u32> {
+    let b = param_bytes(p_param, param_len, (W + 48).next_multiple_of(W))?;
+    if ulong_at(b, 0) != 1 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let recipient: [u8; 48] = b[W..W + 48].try_into().unwrap();
+    seed_object(session, key, CKM_PQCTODAY_FHE_DECRYPT)?;
+    ops(|m| m.insert(session, FheOp::Decrypt { key, recipient }));
+    Ok(())
+}
+
+/// `C_Decrypt` for an active FHE operation. NULL output = size query (the
+/// operation stays active); too-small buffer keeps it active too (PKCS#11
+/// §5.2); every other outcome ends it.
+///
+/// # Safety
+/// FFI pointers as for `C_Decrypt`.
+pub unsafe fn ffi_decrypt(session: u32, input: *const u8, in_len: u32, out: *mut u8, out_len: *mut u32) -> u32 {
+    let Some(FheOp::Decrypt { key, recipient }) = active(session) else {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    };
+    if out_len.is_null() || input.is_null() {
+        cancel(session);
+        return CKR_ARGUMENTS_BAD;
+    }
+    let data = std::slice::from_raw_parts(input, in_len as usize);
+    if out.is_null() {
+        return match decrypt(session, key, &recipient, data, true) {
+            Ok((n, _)) => {
+                *out_len = n as u32;
+                CKR_OK
+            }
+            Err(e) => {
+                cancel(session);
+                e
+            }
+        };
+    }
+    let r = decrypt(session, key, &recipient, data, false);
+    cancel(session);
+    match r {
+        Ok((n, Some(DecryptOutput::Owner(b) | DecryptOutput::Sealed(b)))) => {
+            if (*out_len as usize) < n {
+                // The counter unit is already spent: a caller must size first.
+                *out_len = n as u32;
+                return CKR_BUFFER_TOO_SMALL;
+            }
+            std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len());
+            *out_len = b.len() as u32;
+            CKR_OK
+        }
+        Ok(_) => CKR_DEVICE_ERROR,
+        Err(e) => e,
+    }
+}
+
+/// `C_EncryptInit(CKM_PQCTODAY_FHE_ENCRYPT)` — test builds only (§5.4).
+///
+/// # Safety
+/// FFI pointers as for `C_EncryptInit`.
+#[cfg(feature = "test-support")]
+pub unsafe fn ffi_encrypt_init(session: u32, key: u32) -> Result<(), u32> {
+    seed_object_any(session, key)?;
+    ops(|m| m.insert(session, FheOp::Encrypt { key }));
+    Ok(())
+}
+
+/// `C_Encrypt` for an active FHE test encryption: input is the owner-output
+/// format (3-byte header + LE value).
+///
+/// # Safety
+/// FFI pointers as for `C_Encrypt`.
+#[cfg(feature = "test-support")]
+pub unsafe fn ffi_encrypt(session: u32, input: *const u8, in_len: u32, out: *mut u8, out_len: *mut u32) -> u32 {
+    let Some(FheOp::Encrypt { key }) = active(session) else {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    };
+    if input.is_null() || out_len.is_null() || in_len < 4 {
+        cancel(session);
+        return CKR_ARGUMENTS_BAD;
+    }
+    let b = std::slice::from_raw_parts(input, in_len as usize);
+    let width = u16::from_be_bytes([b[1], b[2]]);
+    let mut v = [0u8; 8];
+    let n = (b.len() - 3).min(8);
+    v[..n].copy_from_slice(&b[3..3 + n]);
+    let name = match (b[0], width) {
+        (0, 1) => "FheBool",
+        (1, 8) => "FheUint8",
+        (1, 16) => "FheUint16",
+        (1, 32) => "FheUint32",
+        (1, 64) => "FheUint64",
+        _ => {
+            cancel(session);
+            return CKR_DATA_INVALID;
+        }
+    };
+    let ct = match encrypt_for_test(session, key, name, u64::from_le_bytes(v)) {
+        Ok(c) => c,
+        Err(e) => {
+            cancel(session);
+            return e;
+        }
+    };
+    if out.is_null() {
+        *out_len = ct.len() as u32;
+        return CKR_OK;
+    }
+    if (*out_len as usize) < ct.len() {
+        *out_len = ct.len() as u32;
+        return CKR_BUFFER_TOO_SMALL;
+    }
+    cancel(session);
+    std::ptr::copy_nonoverlapping(ct.as_ptr(), out, ct.len());
+    *out_len = ct.len() as u32;
+    CKR_OK
+}

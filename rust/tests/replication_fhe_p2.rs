@@ -172,3 +172,68 @@ fn p2_restore_preserves_client_key_and_old_ciphertexts_decrypt() {
     // Fresh public material from the restored seed.
     tf::derive_public(w.tokens[2].user, rest, tf::PUBLIC_KIND_COMPACT_PUBLIC_KEY).unwrap();
 }
+
+#[test]
+fn p2_c_abi_dispatch_of_all_four_mechanisms() {
+    use softhsmrustv3::ffi::*;
+    let _g = lock();
+    let w = world(1);
+    let (ps, _, dpid) = enroll_all(&w, &[0], &dp(vec![], false, 100));
+    let s = w.tokens[0].user;
+    const W: usize = std::mem::size_of::<usize>();
+    // KEY_GEN params: ulVersion, ulParamSet, replicationPolicyId[48], decryptPolicyId[48].
+    let mut kp = Vec::new();
+    kp.extend_from_slice(&1usize.to_le_bytes());
+    kp.extend_from_slice(&1usize.to_le_bytes());
+    kp.extend_from_slice(&ps);
+    kp.extend_from_slice(&dpid);
+    assert_eq!(kp.len(), 2 * W + 96);
+    let mut mech = [CKM_PQCTODAY_FHE_KEY_GEN as usize, kp.as_ptr() as usize, kp.len()];
+    let tmpl_attrs = vec![(CKA_LABEL, b"abi-seed".to_vec()), (CKA_TOKEN, bb(true))];
+    let t = raw_template(&tmpl_attrs);
+    let mut seed = 0u32;
+    assert_eq!(C_GenerateKey(s, mech.as_mut_ptr() as *mut u8, t.as_ptr() as *mut u8, 2, &mut seed), CKR_OK);
+    // A template asking for an extractable seed is inconsistent.
+    let bad = vec![(CKA_EXTRACTABLE, bb(true))];
+    let tb = raw_template(&bad);
+    let mut h2 = 0u32;
+    assert_eq!(C_GenerateKey(s, mech.as_mut_ptr() as *mut u8, tb.as_ptr() as *mut u8, 1, &mut h2), CKR_TEMPLATE_INCONSISTENT);
+    // DERIVE_PUBLIC (compact public key).
+    let mut dpp = Vec::new();
+    dpp.extend_from_slice(&1usize.to_le_bytes());
+    dpp.extend_from_slice(&2usize.to_le_bytes());
+    let mut dm = [CKM_PQCTODAY_FHE_DERIVE_PUBLIC as usize, dpp.as_ptr() as usize, dpp.len()];
+    let mut pk = 0u32;
+    assert_eq!(C_DeriveKey(s, dm.as_mut_ptr() as *mut u8, seed, std::ptr::null_mut(), 0, &mut pk), CKR_OK);
+    assert_eq!(native::get_attribute_u32(s, pk, CKA_KEY_TYPE), Some(CKK_PQCTODAY_FHE_PUBLIC));
+    // ENCRYPT (test builds) of FheUint8 value 9 in owner format.
+    let mut em = [CKM_PQCTODAY_FHE_ENCRYPT as usize, 0, 0];
+    assert_eq!(C_EncryptInit(s, em.as_mut_ptr() as *mut u8, seed), CKR_OK);
+    let mut pt = vec![1u8, 0, 8, 9];
+    let mut ct_len = 0u32;
+    assert_eq!(C_Encrypt(s, pt.as_mut_ptr(), 4, std::ptr::null_mut(), &mut ct_len), CKR_OK);
+    let mut ct = vec![0u8; ct_len as usize];
+    assert_eq!(C_Encrypt(s, pt.as_mut_ptr(), 4, ct.as_mut_ptr(), &mut ct_len), CKR_OK);
+    ct.truncate(ct_len as usize);
+    // DECRYPT: params ulVersion + recipient[48] (owner = zero).
+    let mut dpar = Vec::new();
+    dpar.extend_from_slice(&1usize.to_le_bytes());
+    dpar.extend_from_slice(&[0u8; 48]);
+    dpar.resize((W + 48).next_multiple_of(W), 0);
+    let mut decm = [CKM_PQCTODAY_FHE_DECRYPT as usize, dpar.as_ptr() as usize, dpar.len()];
+    assert_eq!(C_DecryptInit(s, decm.as_mut_ptr() as *mut u8, seed), CKR_OK);
+    let mut out_len = 0u32;
+    assert_eq!(C_Decrypt(s, ct.as_mut_ptr(), ct.len() as u32, std::ptr::null_mut(), &mut out_len), CKR_OK);
+    assert_eq!(out_len, 4);
+    let mut out = vec![0u8; 4];
+    assert_eq!(C_Decrypt(s, ct.as_mut_ptr(), ct.len() as u32, out.as_mut_ptr(), &mut out_len), CKR_OK);
+    assert_eq!(out, vec![1, 0, 8, 9]);
+    // Multi-part is not supported for FHE decrypt.
+    assert_eq!(C_DecryptInit(s, decm.as_mut_ptr() as *mut u8, seed), CKR_OK);
+    let mut part = vec![0u8; 8];
+    let mut part_len = 8u32;
+    assert_eq!(C_DecryptUpdate(s, ct.as_mut_ptr(), ct.len() as u32, part.as_mut_ptr(), &mut part_len), CKR_FUNCTION_NOT_SUPPORTED);
+    // Wrong param length.
+    let mut badm = [CKM_PQCTODAY_FHE_DECRYPT as usize, dpar.as_ptr() as usize, 3];
+    assert_eq!(C_DecryptInit(s, badm.as_mut_ptr() as *mut u8, seed), CKR_MECHANISM_PARAM_INVALID);
+}
