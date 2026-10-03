@@ -63,6 +63,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sequence number. It commits atomically with a replay-ledger entry and
   returns a receipt signed by the token. An exact retry returns the same
   receipt. Host-side helpers build and sign requests and verify receipts.
+  Admin audit records now carry the interface, the function ordinal and the
+  submitting connection's authenticated metadata (role, client-certificate
+  hash, listener, correlation), read from its application context, and the
+  durable replay-ledger entry records the same. Refused admin calls are
+  audited with their request hash and result.
 
 - **Rust engine (educational feature only): FHE P1, the FHE seed as a
   replicable key class.** Adds the FHE custody numbers (private authority
