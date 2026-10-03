@@ -1,6 +1,8 @@
-# Implementation plan: FHE wrapper + PKCS#11 v3.2 vendor extensions (v6)
+# Implementation plan: FHE wrapper + PKCS#11 v3.2 vendor extensions (v7)
 
-Date: 2026-10-02 · Revision: **v6**. The v5 design (non-extractable seeds, live cloning and offline
+Date: 2026-10-02 · Revision: **v7** (2026-10-02, late): owner requirement for typed, policy-gated
+decryption (§6.3), the custody TFHE configuration and measured sizes from the pqctoday-fhe spike
+(§5, §6.6), and the Hub pin on main (§2). v6 summary follows. The v5 design (non-extractable seeds, live cloning and offline
 backup/restore, manufacturing → device → function certificates, pure PQC Category 3, reuse of
 RATS/LAMPS attestation) is unchanged. v6 re-verified every code, registry, Hub and upstream claim in
 v5 on the evening of 2026-10-02 and corrects what had drifted (§0.1), adds the repository gates a
@@ -37,6 +39,7 @@ in §9 pass.
 | v3 | Tightened the v2 design: made the scenario JSON the canonical contract; separated semantic conformance from wire interoperability; added threshold GO/NO-GO gates and independent cryptographic review; scoped rollback claims to a host-controlled software token; specified the trusted HPKE wrapping-key ceremony; removed CKKS and server-side Trivium from the token-linked crate; made browser and ARM support measurement-gated |
 | v4 | Code-checked challenge of v3 (§11.2): closed a seed-custody bypass through the caller-visible KDF; replaced the SO-session backup with a two-step SO-then-user ceremony using a single-use AES-GCM key; limited recovery to the client key (TFHE-rs has no seeded server-key generation); switched the Lattigo scenario to BGV with a Rust port validated against Lattigo in Go; moved CKKS measurements from Poulpy to OpenFHE; kept large public material off the token; allocated vendor IDs in two batches; aligned the Hub flows with engine capabilities |
 | v5 | Supersedes the v4 extractable-seed/SO-wrap ceremony. Consolidates hardware trust hierarchy, Category 3 PQC, dedicated replication of non-extractable seeds, live cloning plus offline backup/restore, RATS/LAMPS evidence reuse, recovery metadata, role provisioning and all FC-1–FC-8 dispositions (§11.3). Historical dispositions below are retained as history, not current requirements |
+| v7 | §6.3 rewritten for the owner's typed-decrypt requirement: conformance-checked type gate, input-type rule with its reslicing limit, post-decrypt predicate with its one-bit limit, requester binding, recipient rule. Custody TFHE config fixed as `use_dedicated_oprf_key(false)` after the pqctoday-fhe spike measured the default server key at 57.4 MB (28.8 MB without the OPRF key). Hub scenario pin moved to Hub main `624115862`. `CompressedServerKey::new` signature corrected. HPKE fixture was already draft -05 |
 | v6 | Verification pass, no design change. Corrected: TFHE-rs 1.8.1 release date, ISO/IEC 28033-3 stage, the RATS draft's name, the `0x80000005`–`0x8000000f` characterization, the LAMPS CSR-attestation status. Recorded: HSM `origin/main` moved past the `ceddd554` baseline; the Hub worktree still carries the v4 wrap ceremony; Lattigo's retry notice is stronger than v5 paraphrased it. Added: §0.1 verification record, §10.1 repository gates, immutable-attribute precedent in §6.2, fixture-reachability rule in §6.5.1. Same day, later: Hub text aligned to v5/v6 by session 0e (`81a2369b`, local); OpenFHE pinned to v1.6.0 |
 
 Owner decisions recorded 2026-10-02:
@@ -83,11 +86,11 @@ What v6 checked, where, and what changed. Line numbers are at `ceddd554`.
 | `pEphemeralSeed` reaches encapsulation with no release guard | `rust/src/ffi.rs:4713-4752`; `rust/src/native/hpke.rs:796,927,947` | Holds |
 | Shipped WASM bundle built with `--features acvp` | `rust/build-wasm-bundle.sh:65-70`; `rust/Cargo.toml` `[features]`; `docs/rust-engine.md:126-145` | Holds |
 | Vendor attributes (`>= 0x8000_0000`) exempt from mutability rules; engine-private range read-only | `rust/src/state.rs:1326-1332`, `ENGINE_PRIVATE_ATTR_BASE = 0xFFFF_0000` at `:1216` | Holds; precedent added to §6.2 |
-| HPKE vectors pinned to draft -04 | `rust/src/hpke_pq_vectors_tests.rs:10,122` | Holds; -05 is current (6 July 2026) |
+| HPKE vectors labelled draft -04 | `rust/src/hpke_pq_vectors_tests.rs:10,122` | **Label was stale, fixture was already -05.** Its source, `hpkewg/hpke-pq@6433c8fc`, is the official `draft-ietf-hpke-pq-05` tag (6 July 2026); corrected in v7 |
 | HSM baseline `ceddd554` = `origin/main` | `git fetch` | **Drifted**: `origin/main` is `b8402936` (PRs #312, #314, #313 merged after the review). All line references remain at `ceddd554`; P-1 re-pins (§2) |
 | Hub FHE files untracked; badges per D11 | `pqctoday-hub-cc-fhe-section-1002`, branch `feat/cc-fhe-section-1002` | **Resolved later on 2026-10-02.** Session 0e owns that worktree; the owner chose v5/v6 and told 0e to make the edits. 0e committed all 13 files (9 new, 4 modified) **locally** as `81a2369b767da97387f087e9a0fbb701c4771de1` on top of `83f97d3cf`; it is not pushed. Verified at that commit: no step text calls `C_WrapKey*` on the seed, and `fheHsmCosts.test.ts:58` asserts that; the one-time-wrap, SO-ceremony and `0x647a` text is gone; the KMIP absolutes are scoped to estimates; OpenFHE links are pinned to `v1.6.0`. The remaining `X25519MLKEM768` mentions describe TLS key exchange, not the HSM hierarchy. Badge vocabulary (`engine`, `planned`, `refused`, `outside`) is unchanged |
 | Sandbox 7 commits behind; no FHE material | `pqctoday-sandbox` at `7d18b794` | Holds; `git ls-files` has no OpenFHE/Lattigo/TFHE entries |
-| TFHE-rs 1.8.1 (2026-09-14) | GitHub releases API | **Date wrong**: published 2026-09-17. `Seed(pub u128)`, `ClientKey::generate_with_seed`, unseeded `CompressedServerKey::new(&[ClientKey])`, `apps/trivium` and the README patent notice confirmed at tag `tfhe-rs-1.8.1` |
+| TFHE-rs 1.8.1 (2026-09-14) | GitHub releases API | **Date wrong**: published 2026-09-17. `Seed(pub u128)`, `ClientKey::generate_with_seed`, unseeded `CompressedServerKey::new(&ClientKey)`, `apps/trivium` and the README patent notice confirmed at tag `tfhe-rs-1.8.1` |
 | Lattigo v6.2.0 (2026-02-02, Apache-2.0) | GitHub releases API, `LICENSE`, `SECURITY.md` at `v6.2.0` | Holds; the retry notice is stronger than paraphrased (§4, §6.4) |
 | fhe.rs `experimental-mbfv` incomplete | `crates/fhe/src/mbfv/mod.rs` at `main` `44ad194` (2026-09-08) and at tag `v0.1.1` | Holds verbatim on `main`; the warning and feature gate arrived in `bd05e2c0` (2026-08-15), after the last release v0.1.1 (2025-11-23), whose `mbfv` is ungated and unwarned. Pin by commit |
 | draft-ietf-hpke-pq-05, 2026-07-06, IDs `0x0040`–`0x0042`; KDF/AEAD unrestricted for pure ML-KEM | Datatracker; draft text | Holds; SHA-3 KDFs are only called "convenient" (§6.7.2) |
@@ -134,7 +137,7 @@ The evidence manifest and the Hub distinguish three things:
 | Requirements contract | `fhe-hsm-scenarios.v1.json`, **the canonical source**, committed in the Hub and referenced here by commit hash. P-1 freezes scenario/step IDs, fixtures, target labels, evidence slots, budget metrics and disclosures; numeric release budgets are frozen in a versioned P0A exit update. Hub TypeScript, HSM tests and sandbox fixtures consume or validate against it; it is not regenerated from mutable UI prose |
 | `pqctoday-hsm` | Review baseline `ceddd554…`, to which every line reference in this plan and its reviews refers. `origin/main` had already moved to `b8402936` (PRs #312, #314, #313) by the v6 check; none of those touches the cited code, but P-1 re-pins to the then-current `origin/main`, re-checks every cited line, and re-pins again at P0 exit |
 | `pqctoday-sandbox` | `origin/main` commit at P-1 (the local checkout `7d18b794` was 7 commits behind at review time and still is). The repo holds no OpenFHE, Lattigo or TFHE-rs material yet, so every P4 lane starts from nothing |
-| `pqctoday-hub` scenario source | `feat/cc-fhe-section-1002` at `81a2369b767da97387f087e9a0fbb701c4771de1`, committed locally by session 0e and not pushed. This is the P-1 pin for the scenario text. The pin holds only once that commit is reachable from the Hub remote: a local-only commit can be amended or lost. The canonical `fhe-hsm-scenarios.v1.json` contract still has to be extracted from it and committed |
+| `pqctoday-hub` scenario source | Hub `main` at **`624115862da17f1013f72bc54af0b9cbaed00add`** (release 4.144.0, PR #822, 2026-10-02), which contains the reviewed section commit `81a2369b767da97387f087e9a0fbb701c4771de1` and 0e's gated `759a628a`. This is the P-1 pin for the scenario text, now permanent on GitHub. The canonical `fhe-hsm-scenarios.v1.json` contract still has to be extracted from it and committed. Later Hub work on decrypt-step wording (`feat/fhe-flow-clarity-1002`, unreleased) follows §6.3 and is re-pinned when released |
 | Libraries | Exact tag + commit + enabled features + toolchain for TFHE-rs (incl. `apps/trivium`), fhe.rs, OpenFHE and Lattigo, plus the Go toolchain and `go.sum` for the oracle. Candidates checked 2026-10-02: TFHE-rs **1.8.1** (tag `tfhe-rs-1.8.1`, published 2026-09-17), Lattigo **v6.2.0** (2026-02-02, Apache-2.0), fhe.rs **by commit** (no tagged release since v0.1.1 of 2025-11-23; `main` was `44ad194` on 2026-09-08), OpenFHE **v1.6.0** (published 2026-09-28, tag commit `6206d24f9eefefc620b524a4f2b9f308feb91e9f`, BSD-2-Clause; `threshold-fhe.cpp` at that tag still runs BGVrns-additive, BFVrns and CKKS, with `RunBFVrns` at line 210 as the reference). The Hub already links this tag. Poulpy is no longer used (v4) |
 | Standards | PKCS#11 **v3.2 OS** + vendor extensions (D13). ISO/IEC 28033-2 **DIS** (ballot closed 2026-04-25), -3 **DIS** (stage 40.60; the earlier review said FDIS, the ISO listing says DIS), -4 **FDIS** (stage 50.20, ballot opened 2026-09-08); none published. draft-ietf-hpke-pq **-05** (2026-07-06; ML-KEM-512/768/1024 = `0x0040`/`0x0041`/`0x0042` confirmed; no KDF/AEAD restriction for pure ML-KEM). NIST IR 8214C ("First Call for Multi-Party Threshold Schemes", final January 2026) is a **call for submissions**, not a standard |
 | Attestation / PQ certificates | `draft-ietf-rats-pkix-key-attestation` **-07**, LAMPS CSR attestation **-29** (past IETF Last Call, "Waiting for AD Go-Ahead" as of 2026-09-16, so it may become an RFC during this plan), LAMPS freshness **-08**, RFC **9881** (ML-DSA in X.509, October 2025) and RFC **9935** (ML-KEM in X.509, March 2026). Links, status and scope in §6.8. Recheck status/errata at P-1 and preserve exact snapshots |
@@ -188,7 +191,9 @@ unsupported/resource error.
 - **Entropy size is justified per backend.** 32 bytes is not assumed universally. TFHE-rs's seeded generation takes `Seed(pub u128)` (tfhe 1.8.1), so the TFHE client key carries the 128 bits the KDF supplies; P0A records that this matches the pinned parameters' 128-bit target.
 - **No sub-seed object persists.** Derived sub-seeds and expanded secret material are zeroized after use and never exposed through `C_GetAttributeValue`.
 - **Reproducibility is pinned to:** backend commit, features, parameter definition, serialization version, thread mode and deterministic RNG-consumption order.
-- **What is reproducible (D9, fixes C3).** Only the **client key**: `ClientKey::generate_with_seed(config, Seed)` regenerates it. TFHE-rs 1.8.1's `CompressedServerKey::new(&[ClientKey])` takes no seed and draws fresh randomness, so server and public keys are **not** byte-reproducible through the public API; a byte-identical path would need `core_crypto` internals and is not used. The client key gets a known-answer hash on each supported architecture and on wasm32.
+- **Custody configuration (owner decision 2026-10-02).** `ConfigBuilder::default().use_dedicated_oprf_key(false)`. TFHE-rs 1.8.1's default config also generates a dedicated OPRF key (encrypted pseudo-random generation) and its server key, which the custody flow does not use and which doubles the export. The KDF context binds this configuration, so a changed configuration derives a different seed rather than silently a different key.
+- **Measured, not assumed (pqctoday-fhe `reference-runs/tfhe-custody`).** Against the pinned TFHE-rs source: the same 32-byte test seed, through an SP 800-108 counter-mode KDF (HMAC-SHA-384) to `Seed(u128)`, regenerates a byte-identical client key; a different context gives a different key; two server keys from one client key differ; after deleting every key, the regenerated client key decrypts ciphertexts made before the "backup", and add/multiply under a fresh server key decrypt correctly. Parameters: n = 918, N = 2048, k = 1, KS level 4, log2 p_fail = −129.58. **Cross-platform:** with the custody configuration the derived seed and the client key are identical on macOS arm64, Linux arm64, Linux x86-64 and wasm32 in Node: client-key SHA-256 `9f5d847e4d1121eef9d75fcc473e89ee5306523f9cb140384eba5aa85a55b77b`, 24,087 B; pqctoday-fhe `ebda5c3d`, `reference-runs/tfhe-custody/results/matrix/`. That covers TFHE-rs's hardware and software AES-CTR paths. wasm32 needs a JavaScript host: TFHE-rs's wasm32 build imports wasm-bindgen glue, so a WASI runtime cannot load it. **Still open:** whether later TFHE-rs releases keep the same seed-to-key mapping (re-run the spike per tag; the upgrade policy below applies), and the desktop browser matrix (§7).
+- **What is reproducible (D9, fixes C3).** Only the **client key**: `ClientKey::generate_with_seed(config, Seed)` regenerates it. TFHE-rs 1.8.1's `CompressedServerKey::new(&ClientKey)` takes no seed and draws fresh randomness, so server and public keys are **not** byte-reproducible through the public API; a byte-identical path would need `core_crypto` internals and is not used. The client key gets a known-answer hash on each supported architecture and on wasm32.
 - **Recovery descriptor (FC-6).** Authenticated backups bind the exact KDF PRF/counter/labels/context/lengths, scheme and parameter hash, backend algorithm/version/configuration, serialization version, lineage and policy digest. Key bytes alone are not a complete backup. Unsupported descriptors fail before object installation.
 - **Upgrade policy.** Retain a version-dispatched compatible generator or complete a specified data/key migration before removing it. Re-encrypting the same seed cannot repair changed key-generation semantics. Test old-package recovery across each supported upgrade.
 - **Recovery run (acceptance test).** Restore the seed from backup → identical client-key hash → decrypt ciphertexts created before the backup → generate a fresh server key and compact public key, re-sign them, and evaluate with them.
@@ -313,24 +318,67 @@ Required tests:
   - caller-controlled KEM randomness, nonce reuse, stale evidence, key substitution and unauthorized peer/domain requests;
   - the SO cannot find or use the seed.
 
-### 6.3 Decryption policy (fixes H7, scoped to D1)
+### 6.3 Decryption policy and typed ciphertexts (fixes H7, scoped to D1; owner requirement 2026-10-02)
 
-The SO provisions a public, non-secret, immutable policy object before user key creation. The user
-selects only an enrolled policy ID; the engine validates authorization and stamps its digest/rules
-into the private seed. The SO never needs to access that private seed. Updates create a new policy
-version through an explicit ceremony. Restore compares the authenticated source policy to an
-already authorized destination policy, preserving or tightening restrictions; a weaker, missing or
-unrecognized policy fails. No user-supplied template can rewrite it (FC-4). The policy specifies:
-- **Outputs:** the allowed typed outputs and their canonical decoding, plus the maximum plaintext size and overflow behaviour.
-- **Scheme-specific leakage control:** noise flooding only where the selected protocol requires and defines it (not as a generic FHE knob). Multiparty BFV/BGV share generation follows the reviewed protocol's flooding rule (OpenFHE's for N-of-N; the `noiseFlooding` distribution passed to Lattigo's protocol constructors for t-of-N).
-- **TFHE (fixes C10, FC-7):** no generic noise-flooding knob. Pin an analytically justified failure probability ≤ 2⁻¹²⁸ and the applicable upstream algorithm/input/circuit assumptions. P0A verifies those assumptions; finite runs do not prove that probability. This does not establish CCA security for arbitrary submitted ciphertexts.
-- **What policy cannot do:** the HSM cannot verify which computation produced a submitted ciphertext. Policy limits what is released, not what was computed.
-- **Rate limiting:** a per-object counter persisted in token state, with atomic update and its scope stated. It detects reuse within the current state but cannot resist rollback by the browser user or native host administrator. The Hub discloses this limitation.
-- **Input checks:** conformance checks on submitted ciphertexts.
-- **Audit:** the audit-event schema.
+Owner requirement, relayed by session 0e: "the hsm fhe decrypt somehow also need to manage the
+concept of policy and typed encrypted block". `CKM_PQCTODAY_FHE_DECRYPT` therefore enforces five
+rules, in this order, inside the token. Rules 1–3 limit **what** is released; rules 4–5 limit **to
+whom**. None of them can establish **which computation** produced a submitted ciphertext.
 
-The threat model states what an educational emulator does and does not resist; adaptive
-decryption-oracle attacks are named explicitly.
+**Policy provisioning (unchanged from v5).** The SO provisions a public, non-secret, immutable
+policy object before user key creation. The user selects only an enrolled policy ID; the engine
+validates authorization and stamps its digest/rules into the private seed. The SO never needs to
+access that private seed. Updates create a new policy version through an explicit ceremony. Restore
+compares the authenticated source policy to an already authorized destination policy, preserving or
+tightening restrictions; a weaker, missing or unrecognized policy fails. No user-supplied template
+can rewrite it (FC-4).
+
+**Rule 1 — Pre-decrypt type gate.**
+- The policy lists the **allowed output types**, each as an exact TFHE-rs high-level type and width (for example `FheBool`, `FheUint8`), the parameter-set ID and serialization version, and whether a compressed ciphertext list is accepted.
+- The mechanism parses the submitted bytes with TFHE-rs's versioned, size-limited, **conformance-checked** deserialization (`tfhe::safe_serialization::safe_deserialize_conformant`). It is called with the conformance parameters of each allowed type in turn. Those parameters fix the block count, message and carry moduli, LWE dimension and atomic pattern, and the size limit is checked before allocation.
+- Anything that does not conform to an allowed type is refused before decryption, with one uniform error.
+- What the header can and cannot tell. TFHE-rs's serialization header carries the version and a type name, but every unsigned width is named `high_level_api::FheUint`. The width, block count, tag and degree are ordinary, unauthenticated bytes chosen by the submitter. The gate therefore enforces the **shape and maximum width** of what is released. It does not identify where the ciphertext came from.
+
+**Rule 2 — Input types are never releasable, within the limit of rule 1.**
+- The policy can mark the types the data owner encrypts inputs with (for example `FheUint64`) as never releasable. A raw input submitted whole as a "result" then fails rule 1.
+- **Limitation, stated on screen.** This does not stop a submitter from **reslicing** an input. Taking 4 of the 32 blocks of an `FheUint64` input and presenting them as an `FheUint8` passes the gate and releases 8 bits of that input. Rule 2 bounds the bits released per call; the rate limit bounds the total.
+- **What would establish provenance.** Only a verifiable-computation proof over the FHE evaluation could show which computation produced a ciphertext. That is research work and out of scope. Key separation does not help: a key-switching key from the input key to the output key would let the server switch raw inputs too.
+
+**Rule 3 — Post-decrypt plaintext predicate.**
+- The policy can attach range, shape or aggregate rules (for example "value ≤ 2¹⁶", "result is a count ≥ k"). They are evaluated inside the token after decryption and before release.
+- A failure releases nothing. Every refusal uses one error code and the same response path, so the token does not say which rule failed.
+- **Limitation, stated on screen.** Release-or-refuse is itself one bit of information about the plaintext. An adaptive requester can homomorphically compute f(input) and learn predicate(f(input)) one bit per call. Every call, released or refused, therefore counts against the rate limit, and the audit record logs refusals. The predicate limits what a single release discloses; the rate limit bounds the total.
+
+**Rule 4 — Requester binding.**
+- Only the data owner's authenticated PKCS#11 user session on the token holding the seed may call `CKM_PQCTODAY_FHE_DECRYPT`: the seed is `CKA_PRIVATE`, and the mechanism is in its allowlist only. The SO cannot call it.
+- The third-party cloud never has a session. The flow is: cloud returns the encrypted result to the owner, and the owner asks its HSM to decrypt.
+- **Limitation.** The token authenticates a role, not a person or an application. A compromised owner application, or an insider holding the user PIN, is still bounded by rules 1–3 and the rate limit, which is the reason those rules exist.
+
+**Rule 5 — Recipient rule.**
+- The policy names who may receive the plaintext. The default is **owner only**: plaintext is returned to the authenticated owner session.
+- **Owner plus named third party** is an option. For a third-party recipient, the token seals the plaintext result to that recipient's enrolled ML-KEM-768 recipient certificate, using the in-token HPKE path and certificate profile from the HSM plan (RFC 9935, D15). The owner session only relays the sealed result.
+- A recipient must be enrolled by the SO in the policy. The caller cannot name an arbitrary recipient public key. The policy can also be recipient-only, so that the owner session never sees that plaintext.
+
+**Scheme-specific leakage control (unchanged from v5).**
+- **Noise flooding** applies only where the selected protocol requires and defines it, not as a generic FHE knob. Multiparty BFV/BGV share generation follows the reviewed protocol's flooding rule: OpenFHE's for N-of-N, and the `noiseFlooding` distribution passed to Lattigo's protocol constructors for t-of-N.
+- **TFHE (fixes C10, FC-7).** There is no generic noise-flooding knob. Pin an analytically justified failure probability ≤ 2⁻¹²⁸ and the applicable upstream assumptions. The default parameters measure log2 p_fail = −129.58 (pqctoday-fhe `reference-runs/tfhe-custody`). Finite runs do not prove that probability, and it does not establish CCA security for arbitrary submitted ciphertexts.
+
+**Rate limiting, audit, and the threat model.**
+- **Rate limit.** A per-object counter is persisted in token state, with atomic update and its scope stated. It counts every decrypt call, whether released or refused. It detects reuse within the current state but cannot resist rollback by the browser user or native host administrator, and the Hub discloses this.
+- **Audit.** Each call records the policy ID, the type matched or "refused", the recipient, and the counter value. It never records the plaintext or the failing rule.
+- **Threat model.** It names adaptive decryption-oracle attacks (IND-CPA^D, rule 3's one-bit leak, reslicing under rule 2), and states what an educational emulator does and does not resist.
+
+**Tests (added to P1/P2):**
+- **Type gate:**
+  - each allowed type releases;
+  - a disallowed width is refused before decryption;
+  - an oversized input is refused before allocation;
+  - a wrong parameter set is refused;
+  - a malformed or truncated input is refused.
+- **Input types:** a raw `FheUint64` input is refused; a resliced 4-block slice is **released**, as the documented limitation.
+- **Predicate:** a failure releases nothing, and every failure looks identical to the caller; refusals consume the rate limit.
+- **Requester:** SO, public session or another token's user is refused.
+- **Recipient:** the default is owner only; third-party sealing opens only with the enrolled recipient key; an unenrolled recipient is refused; a recipient-only policy never returns plaintext to the owner session.
 
 ### 6.4 Threshold protocol feasibility and specification (fixes B5, H2; required by D3)
 
@@ -428,7 +476,8 @@ is a gate failure, not coverage.
   - Key generation publishes no partial object. Stateful operations (replication, threshold rounds and policy counters) must durably reserve/consume state before releasing protected output where their protocol requires it. Termination reopens the last complete snapshot: no partial object or corrupt snapshot survives, but a committed consumption record may survive without a delivered result. Recovery must not roll that record back to permit reuse (§6.7).
   - Terminating the browser worker ends that emulator instance and its sessions; it is not presented as cancellation of one PKCS#11 call.
   - A vendor asynchronous/chunked interface is not proposed.
-- **P0A spike measures the ~30 MB export:** peak memory across the query-then-fill pattern, the number of copies across the WASM/JS boundary, browser memory growth and recovery, concurrency, and the behaviour on low memory, timeout and termination.
+- **Export size, measured.** The custody server key serializes to 28.8 MB (30,147,061 B) with `use_dedicated_oprf_key(false)`, and 57.4 MB with TFHE-rs's default config (pqctoday-fhe spike, M4 Pro, 2026-10-02). The compact public key is 33 KB and one `FheUint64` ciphertext 516 KB.
+- **P0A spike measures the ~29 MB export:** peak memory across the query-then-fill pattern, the number of copies across the WASM/JS boundary, browser memory growth and recovery, concurrency, and the behaviour on low memory, timeout and termination.
 
 ### 6.7 Controlled cloning and offline backup/restore (D2, D10, FC-1–FC-6)
 
@@ -626,7 +675,7 @@ This is benchmark/reproduction metadata, **not** the cryptographic RATS attestat
 
 | ID | Item |
 |---|---|
-| F1 (revised) | Diff draft-ietf-hpke-pq -04 → -05 and re-pin the vectors. Pure ML-KEM HPKE already exists |
+| F1 (revised in v7) | Relabel only: the HPKE vector fixture already comes from the official draft-ietf-hpke-pq-05 tag (`hpkewg/hpke-pq@6433c8fc`); the test-file and CHANGELOG text still said -04. Pure ML-KEM HPKE already exists |
 | F2 (replaced) | Internal-only replication transport and immutable function-key profiles; no caller-visible trusted wrapping-key template or special-case ordinary wrap bypass |
 | F3 | Enforce `CKA_DERIVE_TEMPLATE` in the Rust engine. Record the pre-existing C++ gap separately; this plan does not silently expand to a C++ implementation |
 | F4 | Bound certificate, evidence and signed-manifest sizes; keep large public FHE blobs outside signature buffering; specify exact ML-DSA-65 signed bytes |
@@ -712,7 +761,7 @@ docs and draft-ietf-hpke-pq-05.
 |---|---|---|
 | C1 | **Custody bypass.** The seed allowed `CKM_SP800_108_COUNTER_KDF`, whose outputs default to extractable and non-sensitive (`rust/src/ffi.rs:12752-12756`) while `CKA_DERIVE_TEMPLATE` is not enforced. A user-PIN holder could derive the published sub-seed and read it | KDF internal to FHE mechanisms only; mechanism off the allowlist; negative test (§5, §6.2, F8) |
 | C2 | **Backup ceremony impossible as written.** The SO cannot see private objects (`rust/src/state.rs:1021`); logout destroys private session objects (`rust/src/ffi.rs:1149`); the HPKE AEAD key has no `CKA_WRAP` (`rust/src/native/hpke.rs:810-828`); `C_WrapKeyAuthenticated` does not track IV reuse (`rust/src/ffi.rs:13996-14004`) | Two-step SO-then-user ceremony with a single-use, IV-bound key (D10, §6.7, F9) |
-| C3 | **Server key not reproducible.** `CompressedServerKey::new(&[ClientKey])` takes no seed; only `ClientKey::generate_with_seed` is seeded | Recovery is client-key only (D9, §5) |
+| C3 | **Server key not reproducible.** `CompressedServerKey::new(&ClientKey)` takes no seed; only `ClientKey::generate_with_seed` is seeded | Recovery is client-key only (D9, §5) |
 | C4 | **t-of-N lane could not match its reference.** The Hub's Lattigo scenario was CKKS (`mpckks`); the only Rust candidate (fhe.rs) is BFV-only | Scenario switched to BGV; Rust port of Lattigo validated by a Go oracle (D7, D8, §6.4, §6.5.1) |
 | C5 | **CKKS counter-example mislabelled.** The Hub cites OpenFHE CKKS; v3 measured with Poulpy and called that reference-validated | Measured with OpenFHE; Poulpy dropped (§1, §4) |
 | C6 | **OpenFHE scenario named no scheme.** The example runs BGV, BFV and CKKS | Pinned to BFV in the plan and the Hub |
@@ -749,6 +798,7 @@ P1/P2 and optional lane tests supply implementation evidence.
 - Mouchet et al., PoPETs 2021 (ePrint 2020/304); Mouchet et al. 2022 (ePrint 2022/780, t-of-N); Mouchet et al. 2024 (ePrint 2024/194, retries); Okada et al. (ePrint 2025/409, adaptive active-set attack); Colin de Verdière et al. (ePrint 2026/031, concrete attack and synchronized-decryptor model); Balenbois, Orfila, Smart, WAHC 2023; Chillotti et al., J. Cryptology 2020
 - ISO/IEC 28033 catalogue listings: [DIS 28033-2](https://www.iso.org/standard/87639.html), [DIS 28033-3](https://www.iso.org/standard/87640.html), [FDIS 28033-4](https://www.iso.org/standard/87641.html) (direct automated fetch returns HTTP 403; stages taken from the listing titles and the ISO Update supplement, to be re-read by hand at P-1); [NIST IR 8214C](https://csrc.nist.gov/pubs/ir/8214/c/final)
 - Engine gates named in §10.1: `scripts/local-gate.sh`, `scripts/check_pkcs11_constants.py`, `scripts/check_pkcs11_mechanism_ledger.py`, `scripts/gen_pkcs11_mechanism_ledger.py`, `scripts/check_pkcs11_reports_fresh.py`, `scripts/check_vector_reachability.py`, `tests/differential/exceptions.json`
-- Hub flows (`pqctoday-hub` worktree `pqctoday-hub-cc-fhe-section-1002`, branch `feat/cc-fhe-section-1002`, local commit `81a2369b`, not pushed): `src/components/PKILearning/modules/ConfidentialComputing/data/fheHsmFlows.ts` and siblings
+- Hub flows: Hub `main` `624115862` (release 4.144.0), `src/components/PKILearning/modules/ConfidentialComputing/data/fheHsmFlows.ts` and siblings
+- Reference spike: private repo `pqctoday-org/pqctoday-fhe` at `ebda5c3d`, `reference-runs/tfhe-custody/` (TFHE-rs 1.8.1, custody config, four-platform client-key determinism)
 - Review: `docs/review-implementation-plan-fhe-wrapper-pkcs11-vendor-2026-10-02.md`; HPKE proposal: `docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md`; allocation authority: `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md`
 - Final v4 challenge and owner-decision trail: [review and follow-ups](final-challenge-fhe-wrapper-plan-v4-2026-10-02.md); its findings are dispositioned in §11.3

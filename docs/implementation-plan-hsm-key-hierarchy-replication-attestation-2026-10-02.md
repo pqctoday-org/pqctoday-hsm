@@ -1,7 +1,7 @@
 # Implementation plan: HSM key hierarchy, key replication and attestation (Rust engine)
 
-Date: 2026-10-02 · Revision: **v1**
-Status: **proposal; no implementation or runtime validation claimed.** Docs only. Owner decisions 1–8 recorded in §11; decision 9 open.
+Date: 2026-10-02 · Revision: **v2** (decision 9 recorded; HPKE fixture item corrected)
+Status: **proposal; no implementation or runtime validation claimed.** Docs only. All nine owner decisions recorded in §11.
 Owner request (relayed by the coordinator, 16:26 CDT, "proceed with default options"): extract the
 key-hierarchy, cloning/backup-restore and attestation design from the FHE wrapper plan v6 into a
 standalone `pqctoday-hsm` plan that is delivered first and that FHE then uses.
@@ -51,7 +51,7 @@ A certificate chain from the test manufacturing CA proves which **software insta
 | Capability | State | Evidence |
 |---|---|---|
 | ML-DSA-65 sign/verify, ML-KEM-768 encap/decap, AES-GCM, SHA-384 | Present | `rust/src/constants.rs`; AWS-LC PQ path `rust/src/crypto/awslc_pq.rs` |
-| HPKE in-token, pure ML-KEM KEMs `0x0040`–`0x0042`, HKDF-SHA384 and SHAKE256 KDFs | Present. Vectors pinned to draft-ietf-hpke-pq-04; -05 is current | `CKM_HPKE` `0x80000014`; `rust/src/hpke_pq_vectors_tests.rs` |
+| HPKE in-token, pure ML-KEM KEMs `0x0040`–`0x0042`, HKDF-SHA384 and SHAKE256 KDFs | Present. The vector fixture comes from `hpkewg/hpke-pq@6433c8fc`, the official draft-ietf-hpke-pq-05 tag; the test file still labels it -04 | `CKM_HPKE` `0x80000014`; `rust/src/hpke_pq_vectors_tests.rs` |
 | HPKE output key | Fixed template: sensitive, non-extractable, encrypt/decrypt only, no `CKA_WRAP` | `rust/src/native/hpke.rs:810` (`register_aead_key`) |
 | HPKE deterministic-randomness hook | `pEphemeralSeed` reaches encapsulation with **no release guard** | `rust/src/ffi.rs:4831-4870`; `rust/src/native/hpke.rs:796,927,947` |
 | ACVP RNG hook in shipped WASM | `build-wasm-bundle.sh` always builds `--features acvp`; the feature lets non-null `C_Initialize.pReserved` seed the RNG | `rust/build-wasm-bundle.sh:65-70`; hook at `rust/src/ffi.rs:298` |
@@ -178,7 +178,7 @@ Existing functions only (D13). The candidate mapping is a design starting point,
 
 | ID | Item | Phase |
 |---|---|---|
-| F1 | Diff draft-ietf-hpke-pq -04 → -05 and re-pin vectors (`rust/src/hpke_pq_vectors_tests.rs`) | K1 |
+| F1 | Relabel the HPKE vectors as draft-ietf-hpke-pq-05 in `rust/src/hpke_pq_vectors_tests.rs` and the CHANGELOG; the fixture is already the -05 tag, so no re-pin is needed | K1 |
 | F3 | Enforce `CKA_DERIVE_TEMPLATE` (today stored and flattened only). Record the C++ gap separately; this plan does not touch C++ | K1 |
 | F4 | Bound certificate, evidence and package sizes; specify exact ML-DSA-65 signed bytes | K0B/K1 |
 | F5 | Split shipped and test profiles: `wasm-playground` and native release builds without `acvp`. Reject `pReserved` and HPKE `pEphemeralSeed` in shipped artefacts. Ship a feature manifest, and have the Hub check the consumed artefact hash | K1 (exit blocker) |
@@ -207,7 +207,7 @@ F2 and F10 are FHE-specific and stay in the FHE plan.
 | **K3 · Attestation (native)** | Evidence for any key; in-engine and host-side verifiers | Evidence verifies against the chain; tests for stale nonce, misbound key, wrong function and downgrade pass; restored keys report true provenance |
 | **K4 · Replication (native)** | Live clone and offline backup/restore for AES, ML-KEM-768 and ML-DSA-65 keys; F9, F12, F15, F16 | Every acceptance case in §10 passes for all three key classes; the exclusions in §3 are refused with the documented error |
 | **K5 · Browser/WASM** | Same flows in the WASM build. Two token instances in workers; backup as a downloaded file, restore from an uploaded file. On-screen disclosure that this is an emulator with a test hierarchy | Desktop browser matrix passes; the page states the custody limits |
-| **K6 · Hardware roots (later, separately approved)** | Bind the device identity key to a board root of trust on the i.MX 95 or KV260. Separate scoping document first, using those board programs' own evidence | Only hardware-backed evidence earns hardware claims; nothing in K1–K5 depends on K6 |
+| **K6 · Hardware roots (after K5; decision 9)** | Bind the device identity key to a board root of trust, the i.MX 95 first, then the KV260. Separate scoping document first, using those board programs' own evidence | Only hardware-backed evidence earns hardware claims; nothing in K1–K5 depends on K6 |
 
 **Critical path:** K-1 → K0A → K0B → K1 → K2 → K3 → K4. K5 follows K4. K6 is optional and later.
 
@@ -260,9 +260,9 @@ Every PR that adds a vendor constant, attribute, return code or fixture must sat
 
 ## 11. Owner decisions
 
-Recorded 2026-10-02. Decisions 1–8 come from the owner's "proceed" at 16:33 CDT. The coordinator
+Recorded 2026-10-02. Decisions 1–8 come from the owner's "proceed" at 16:33 CDT; decision 9 from a later owner answer the same evening. The coordinator
 session had asked "defaults for 1–8, choose 9" and relayed the answer; it is not a quote of each
-decision. Decision 9 is open.
+decision.
 
 | # | Question | Decision |
 |---|---|---|
@@ -274,4 +274,4 @@ decision. Decision 9 is open.
 | 6 | New dependencies for X.509 and DER | **RustCrypto crates allowed**, subject to the K-1 licence and SBOM gate |
 | 7 | Time source | **Host clock** for certificate validity, with that limitation stated on screen |
 | 8 | Commit and push | **A local commit now** of this file and the three FHE docs on `docs/fhe-wrapper-plan-1002`. The owner's direct instruction in this session to execute this plan satisfies the local-commit gate. **Push and a docs-only PR only after tonight's FHE release**; this instruction does not by itself establish that the release gate has lifted |
-| 9 | Hardware phase: when, and which board first (i.MX 95 or KV260) | **Open.** K6 does not start until this is decided. Nothing in K-1 to K5 depends on it |
+| 9 | Hardware phase: when, and which board first (i.MX 95 or KV260) | **After the software phases, i.MX 95 first.** K6 starts only once K-1 to K5 have passed their exit gates; the i.MX 95 is the first board for the hardware root of trust, the KV260 follows. Owner answer "After software, i.MX 95 (Recommended)", relayed by the coordinator session, 2026-10-02 |
