@@ -182,32 +182,32 @@ passes the KAT. 102 MiB: every step passes. Same cliff as on the M5 Max.
 **Bundle size (`client.bundleBytes`).** 6,356,732 B wasm (1,566,989 B with
 `gzip -9`, 1,054,159 B with brotli) plus 115,800 B of JavaScript glue.
 
-### What can be frozen now and what cannot
+### Facts recorded; the limits are open
 
 The requirements contract (`fhe-hsm-scenarios.v1.json` in the Hub, scenario 1)
-defines the budget *metrics* but leaves every numeric value `null`. The plan
-(§7) says the user-experience ceilings come from that contract and that a
+defines the budget *metrics* but leaves every numeric value `null`. The FHE
+plan (§7) says the user-experience ceilings come from that contract and that a
 budget must not be chosen merely because it matches a slow implementation.
-So this section records measurements against each metric and separates what is
-exact from what needs a decision.
 
-| Metric (scenario 1) | Measured | Can it be frozen from measurement alone? |
+**Decision (owner, 2026-10-04): record the measured facts only and decide the
+limits later.** So this document sets no ceiling, no regression guard and no
+published per-worker memory limit. The table lists what was measured against
+each metric; the machine state for every figure is in the paragraph above
+(M4 Pro, load 0.08 to 0.18 per core, two idle containers, 13:11 to 13:15 CDT).
+
+| Metric (scenario 1) | Measured fact | Status |
 |---|---|---|
-| `hsm.serverKeyExportBytes` | 30,147,061 B, identical in every run and engine | Yes, as an exact size |
-| `hsm.peakRssMb` | 101.5 MiB of WASM linear memory, identical everywhere; process RSS not measured | The memory floor is exact: a per-worker ceiling below 102 MiB cannot run the flow. The ceiling to publish is a decision (the earlier analysis suggested 128 MiB for about 25% headroom) |
-| `client.bundleBytes` | 6.36 MB wasm, 1.05 MB brotli | The size is exact for this build; the ceiling is a decision |
-| `hsm.clientKeyGenMs` | 1 to 2 ms in all engines | Time ceiling is a decision |
-| `hsm.serverKeyGenMs` | Not timed on its own; server key + add + decrypt together take 5.7 to 6.5 s | Needs a separate timing first |
-| `hsm.decryptMs` | Not timed on its own | Needs a separate timing first |
+| `hsm.serverKeyExportBytes` | 30,147,061 B in every run and engine | Measured |
+| `hsm.peakRssMb` | 101.5 MiB of WASM linear memory in every run and engine; a 100 MiB cap fails and a 102 MiB cap passes. Process RSS was not measured | Measured (WASM memory only) |
+| `client.bundleBytes` | 6,356,732 B wasm; 1,566,989 B gzip -9; 1,054,159 B brotli; 115,800 B JavaScript glue | Measured for this build |
+| `hsm.clientKeyGenMs` | 1 to 2 ms in all engines | Measured |
+| `hsm.serverKeyGenMs` | Not timed on its own. Server key + add + decrypt together took 5.7 to 6.5 s | Open: needs a separate timing |
+| `hsm.decryptMs` | Not timed on its own | Open: needs a separate timing |
 
-Proposal, for the owner or coordinator to accept or change: freeze the exact
-sizes and the 102 MiB memory floor now; treat the timings as a regression
-guard (fail a gate run that is more than 1.5 times the median on the same
-host class) rather than as a user-experience promise; and keep every browser
-"evidence-only" in Hub text until the user-experience ceilings are written
-into the contract. All three desktop engines pass every functional, memory,
-snapshot and recovery check, so none is failing a budget today; none can be
-called "supported" until the ceilings exist. Mobile stays evidence-only.
+**The limits are open.** No numeric ceiling exists in the contract, so no
+browser is marked supported or failing; the Hub text stays evidence-only.
+Mobile stays evidence-only. All three desktop engines pass every functional,
+memory, snapshot and recovery check run so far.
 
 Still open for this item: an M5 Max run when that machine is free, and
 separate timings for server-key generation and decrypt.
@@ -247,11 +247,11 @@ Hub, wasm or release build enables it.
    above.)
 3. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
    `parallel-wasm-api`, measured against single-threaded.
-4. **Freeze budgets.** Exact sizes and the 102 MiB memory floor can be frozen
-   now; the time and memory ceilings need the user-experience ceilings to be
-   written into the requirements contract first (see the table above). Then
-   mark each browser supported or evidence-only (§7). Mobile stays
-   evidence-only.
+4. **Budgets: facts recorded, limits open.** Sizes, the 102 MiB memory floor
+   and timings are recorded above. The user-experience ceilings are not in the
+   requirements contract, and the owner decided (2026-10-04) to decide them
+   later. Then mark each browser supported or evidence-only (§7). Mobile
+   stays evidence-only.
 5. **Gate lane: done.** `scripts/local-gate.sh` builds the bundle and runs
    the KAT and `--memory` in Chromium, WebKit and Firefox on every gate.
    Playwright 1.63.0 is pinned in `package.json`; the browsers download once
