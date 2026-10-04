@@ -1,6 +1,6 @@
 //! `repl_edu_courier` — operator-side tool for the EDUCATIONAL two-board replication test.
 //!
-//! PQCTODAY EDUCATIONAL TEST ONLY · pre-ceremony-ABI. Built only with
+//! PQCTODAY EDUCATIONAL TEST ONLY. Built only with
 //! `--features educational-replication`. Two subcommands:
 //!
 //! - `bootstrap`: a fresh test manufacturing root (held in memory for this run only), then
@@ -29,7 +29,7 @@ use softhsmrustv3::constants::{CKM_AES_GCM, CKM_ML_DSA, CKM_ML_KEM};
 use softhsmrustv3::replication::{self as repl, host_verify, pki::TrustInputs, test_ca::TestManufacturingCa};
 
 const V1: &str = "PQCTODAY_KEY_REPLICATION_1_0";
-const TEST: &str = "PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST";
+const CEREMONY: &str = "PQCTODAY_KEY_REPLICATION_CEREMONY_1_0";
 const IFACE_ADMIN: &str = "PQCTODAY_KEY_REPLICATION_ADMIN_1_0";
 /// Fixed educational replication domain for this lab.
 const DOMAIN: [u8; 32] = *b"PQCTODAY-EDU-LAB-MX95-MX95PRO-01";
@@ -55,7 +55,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    eprintln!("PQCTODAY EDUCATIONAL TEST ONLY — pre-ceremony-ABI");
+    eprintln!("PQCTODAY EDUCATIONAL TEST ONLY");
     let mut a: Vec<String> = std::env::args().skip(1).collect();
     let cmd = if a.is_empty() { String::new() } else { a.remove(0) };
     match cmd.as_str() {
@@ -320,7 +320,7 @@ fn m12(a: &mut Vec<String>, ca: &mut TestManufacturingCa, boards: &[Board; 2], d
         if rc != 0x103 {
             return Err("user role reached the admin interface".into());
         }
-        let (rc, _, _, _) = admin.call(TEST, 1, &[])?;
+        let (rc, _, _, _) = admin.call(CEREMONY, 1, &[])?;
         line(format!("[{name}] NEG admin-role connection → ceremony CK_RV={} {}", rc_name(rc), if rc == 0x103 { "PASS" } else { "FAIL" }));
         if rc != 0x103 {
             return Err("admin role reached a user interface".into());
@@ -506,17 +506,25 @@ fn ceremony(a: &mut Vec<String>) -> Result<(), String> {
     };
     let steps = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
 
-    // 1. source issues its challenge (test fn 1 = IssueSourceChallenge).
-    let r = src.call(TEST, 1, &[])?;
+    // 1. source issues its challenge (ceremony fn 1 = IssueSourceChallenge).
+    let r = src.call(CEREMONY, 1, &[])?;
     step("src IssueSourceChallenge", &r);
     ok(&r, "IssueSourceChallenge")?;
     let chal = r.1;
-    // 2. destination begins receiving (test fn 2): op ‖ challenge ‖ domain ‖ policy.
-    let mut br = vec![op];
-    br.extend_from_slice(&chal);
-    br.extend_from_slice(&DOMAIN);
-    br.extend_from_slice(&pid);
-    let r = dst.call(TEST, 2, &br)?;
+    // 2. destination begins receiving (ceremony fn 2): the BeginReceive DER (addendum §6.9).
+    let br = repl::asn1::to_der(&repl::admin::BeginReceive {
+        version: 1,
+        operation: match op {
+            0 => repl::asn1::Operation::LiveClone,
+            1 => repl::asn1::Operation::OfflineBackup,
+            _ => repl::asn1::Operation::Restore,
+        },
+        source_challenge: repl::asn1::octets(&chal),
+        domain_id: repl::asn1::octets(&DOMAIN),
+        requested_policy: repl::asn1::octets(&pid),
+    })
+    .map_err(|e| format!("BeginReceive DER: CK_RV 0x{e:08x}"))?;
+    let r = dst.call(CEREMONY, 2, &br)?;
     step("dst BeginReceive", &r);
     ok(&r, "BeginReceive")?;
     let request = r.1;
