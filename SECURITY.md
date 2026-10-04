@@ -77,26 +77,29 @@ Out of scope:
     its determinism (and is unaffected by RUSTSEC-2023-0071, which is a
     v1.5-decrypt issue, not an ECDSA one).
   - **The `rsa` crate is still in the tree, so the advisory ID remains
-    ignored in CI**, but only on paths that are *not* the Marvin decrypt
-    surface: (a) `openpgp/`'s legacy classical OpenPGP interop; (b) the engine
-    fallback for mechanisms AWS-LC does not expose (raw `CKM_RSA_X_509`,
-    unprefixed `CKM_RSA_PKCS`, PSS with a caller-chosen salt length, the
-    MD5/SHA-1/SHA-224/SHA-3 RSA variants, and OAEP where the hash differs
-    from the MGF1 hash or the private key is PKCS#1 `RSAPrivateKey` DER
-    rather than PKCS#8 — AWS-LC has no algorithm for the mismatched pairs and
-    its loader declines that key format) — none of which is v1.5 decryption;
-    (c) `pqctoday-kmip`'s DER key-format conversion (`KeyFormatType`
-    PKCS#1↔PKCS#8, component reconstruction), which performs no private-key
-    math and has no timing oracle. This fork's core posture continues to rest
-    on the PQC composite algorithms (`MLDSA65_Ed25519`, `MLDSA87_Ed448`,
-    `MLKEM768_X25519`, `MLKEM1024_X448`), none of which touch `rsa` at all.
+    ignored in CI**, but it no longer performs any RSA private-key operation
+    in a native build. Since 2026-10-03 the engine runs every native RSA
+    private-key operation in AWS-LC (all signing variants, PKCS#1 v1.5 and
+    OAEP decryption and unwrapping, sign-recover and key generation), for keys
+    of 2048 to 8192 bits; other sizes are refused. A test drives every RSA
+    private-key mechanism and fails if the `rsa` crate runs one natively. What
+    the crate is still used for: (a) the **browser (wasm32) build's** RSA
+    private-key operations (see below); (b) `openpgp/`'s legacy classical
+    OpenPGP interop (`RSAEncryptSign`), an accepted risk of that fork; (c)
+    public-key operations, parsing and key-container handling in the engine,
+    which involve no private-key math; and (d) `pqctoday-kmip`'s DER key-format
+    conversion (`KeyFormatType` PKCS#1↔PKCS#8, component reconstruction),
+    which also performs no private-key math and has no timing oracle. This
+    fork's core posture continues to rest on the PQC composite algorithms
+    (`MLDSA65_Ed25519`, `MLDSA87_Ed448`, `MLKEM768_X25519`, `MLKEM1024_X448`),
+    none of which touch `rsa` at all.
   - **wasm32** keeps the pure-Rust `rsa` path (aws-lc-rs is a C library and
     does not build for the hub's `wasm32-unknown-unknown` target). A browser
     tab has no network-observable timing channel against its own in-page key,
     so the oracle that matters on a server does not apply there.
   - Tracked via GitHub Dependabot. Revisit if/when the `rsa` crate ships a
     constant-time release (its `crypto-bigint` migration, RustCrypto/RSA #390),
-    which would let the fallback paths drop the AWS-LC split.
+    which would let the browser build and the openpgp fork drop the exception.
 
 ## WASM Security Limitations
 
