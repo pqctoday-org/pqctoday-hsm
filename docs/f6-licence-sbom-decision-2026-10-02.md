@@ -63,6 +63,15 @@ cargo deny --features educational-replication check
 cargo deny --features educational-fhe check       # implies replication
 ```
 
+**Automated since 2026-10-04.** The `rust-deny` job in
+`.github/workflows/dependency-audit.yml` runs these three `cargo deny` checks on the same
+cadence as `cargo audit` (weekly, and on a push to main that touches a manifest, a lock or
+`rust/deny.toml`). To make them pass, three advisory ignores were added to `rust/deny.toml`,
+each with its reason (`RUSTSEC-2023-0071` as in the audit job; `RUSTSEC-2025-0141` bincode and
+`RUSTSEC-2024-0436` paste, both unmaintained and reached only through tfhe with the
+non-default `educational-fhe` feature), and the path dependency `classic-mceliece-multi`
+got an explicit version, because cargo-deny counted it as a wildcard dependency.
+
 The graph covers macOS arm64, Linux x86_64/aarch64 and wasm32. The advisory database was
 fetched at run time.
 
