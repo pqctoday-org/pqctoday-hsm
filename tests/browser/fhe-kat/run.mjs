@@ -3,10 +3,15 @@
 // index.html on 127.0.0.1, drives each requested browser headless with
 // Playwright, checks the §5.5 KAT and prints one JSON line per browser.
 //
-//   node tests/browser/fhe-kat/run.mjs [--browsers chromium,webkit,firefox] [--add | --memory | --cap-mb 64,96,128]
+//   node tests/browser/fhe-kat/run.mjs [--browsers chromium,webkit,firefox] [--add | --memory | --snapshot | --cap-mb 64,96,128]
 //
 // --memory loads memory.html instead (FHE plan §6.6): peak WASM memory across
 // the public export in a module worker, then worker kill + recovery.
+// --snapshot loads snap.html: token-state snapshot kept in IndexedDB by the
+// page, worker killed mid-add, new worker restores it (expects the fixed key
+// back under the same handle, session object gone, login reset to Public,
+// the built-in profile objects re-created) and
+// refuses a truncated copy.
 // --cap-mb loads cap.html once per cap with the WASM memory maximum patched to
 // that many MiB (exploratory: prints every row, never fails on a capped step;
 // it fails only if recovery on the uncapped bundle does not reproduce the KAT).
@@ -22,6 +27,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = path.resolve(HERE, '../../../rust/pkg-fhe-web');
 const EXPECT = {
+  // sha256(sha256("snap-kat-key")): the fixed AES key value in the snapshot KAT
+  snapKey: '1fdec23053ad4f943ea470f0483d2bdc46b5067eae5ebbcc343ec7c9ba1daffa',
   derivedSeed: 'f6eb1c9a88a4442c8a7449536c3d12dc',
   clientKey: '24087:9f5d847e4d1121eef9d75fcc473e89ee5306523f9cb140384eba5aa85a55b77b',
   addU8: 255,
@@ -31,6 +38,7 @@ const browsers = (args[args.indexOf('--browsers') + 1] && args.includes('--brows
   ? args[args.indexOf('--browsers') + 1] : 'chromium,webkit').split(',');
 const withAdd = args.includes('--add');
 const memoryMode = args.includes('--memory');
+const snapshotMode = args.includes('--snapshot');
 const caps = args.includes('--cap-mb') ? args[args.indexOf('--cap-mb') + 1].split(',').map(Number) : [];
 
 const pwSpec = process.env.PLAYWRIGHT_MODULE;
@@ -59,7 +67,7 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'applic
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const own = { '/': 'index.html', '/memory.html': 'memory.html', '/worker.js': 'worker.js',
-    '/cap.html': 'cap.html', '/worker-cap.js': 'worker-cap.js' };
+    '/cap.html': 'cap.html', '/snap.html': 'snap.html', '/worker-cap.js': 'worker-cap.js' };
   const cm = url.pathname.match(/^\/pkgcap(\d+)\/(.+)$/);
   if (cm) {
     const f = path.join(PKG, cm[2]);
@@ -82,7 +90,7 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${server.address().port}`;
-const base = caps.length ? null : memoryMode ? `${origin}/memory.html` : `${origin}/${withAdd ? '?add' : ''}`;
+const base = caps.length ? null : snapshotMode ? `${origin}/snap.html` : memoryMode ? `${origin}/memory.html` : `${origin}/${withAdd ? '?add' : ''}`;
 
 let failed = 0;
 for (const name of browsers) {
@@ -100,6 +108,11 @@ for (const name of browsers) {
     Object.assign(row, await page.evaluate(() => window.__result), { wallMs: Date.now() - t });
     if (cap !== null) {
       row.kat = !row.error && row.recovery && !row.recovery.error && row.recovery.clientKey === EXPECT.clientKey ? 'PASS' : 'FAIL';
+    } else if (snapshotMode) {
+      const [handle, sha, tokens, tok, sess, pub, next, prof] = ((row.restore && row.restore.restored) || '').split(':');
+      row.kat = !row.error && !row.restore.error && sha === EXPECT.snapKey && tokens === '1' && tok === '1'
+        && sess === '0' && pub === 'true' && next === 'true' && Number(prof) > 0 && Number(handle) >= 100
+        && row.snapshotBytes === row.storedBytes && row.truncated && row.truncated.refused ? 'PASS' : 'FAIL';
     } else if (memoryMode) {
       const kat = (row.steps || []).find((x) => x.step === 'kat');
       row.kat = !row.error && kat && kat.clientKey === EXPECT.clientKey

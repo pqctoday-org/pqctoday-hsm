@@ -59,6 +59,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   memory-starved tab: below about 102 MiB the server-key export fails with a
   catchable error in all three browsers, nothing crashes, and a fresh worker
   recovers at once.
+  The token's saved state also survives a killed worker: the page keeps the
+  snapshot in IndexedDB, a new worker restores it, and the key comes back
+  under the same handle in all three browsers. The local gate now runs this.
 
 - **Rust engine: per-connection application contexts (C1).** A server that
   hosts many clients in one process can now give each connection its own

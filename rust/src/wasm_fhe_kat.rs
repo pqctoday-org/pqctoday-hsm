@@ -70,3 +70,100 @@ pub fn fhe_public_export(seed: &[u8], kind: u32) -> Result<Vec<u8>, JsValue> {
     r.map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(blob)
 }
+
+// ── §6.6 P0A snapshot-recovery KAT ─────────────────────────────────────────
+// A worker is disposable; the page owns persistence. These two functions let
+// the browser test the whole path with the token's OWN snapshot code
+// (`state_snapshot`): build a small fixed token state and snapshot it, then in
+// a fresh instance restore it and report what came back. Only fixed test
+// values are used; nothing here touches a real token.
+
+const SNAP_KAT_LABEL: &[u8] = b"snap-kat-key";
+// Not in constants.rs (the engine never reads CKA_LABEL by id); PKCS#11 §4.4.
+const CKA_LABEL: u32 = 0x0000_0003;
+
+fn snap_kat_value() -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(SNAP_KAT_LABEL).to_vec()
+}
+
+/// Builds slot 0 (initialized, logged in as User) holding one token object (an
+/// AES-256 key with a fixed value) and one session object, then returns
+/// `serialize_token_state()`.
+#[wasm_bindgen(js_name = snapKatCreate)]
+pub fn snap_kat_create() -> Vec<u8> {
+    use crate::constants::*;
+    use crate::state::{pad_label_32, LoginState, TokenState, NEXT_HANDLE, OBJECTS, TOKEN_STORE};
+    use std::sync::atomic::Ordering::Relaxed;
+    TOKEN_STORE.with(|ts| {
+        let mut s = ts.borrow_mut();
+        s.clear();
+        s.insert(
+            0,
+            TokenState {
+                slot_id: 0,
+                initialized: true,
+                label: pad_label_32("snap-kat"),
+                login_state: LoginState::User, // must come back as Public
+                so_pin_salt: [7u8; 16],
+                so_pin_hash: [8u8; 32],
+                user_pin_salt: Some([9u8; 16]),
+                user_pin_hash: Some([10u8; 32]),
+            },
+        );
+    });
+    let mut key = crate::crypto::handlers::Attributes::new();
+    key.insert(CKA_CLASS, CKO_SECRET_KEY.to_le_bytes().to_vec());
+    key.insert(CKA_KEY_TYPE, CKK_AES.to_le_bytes().to_vec());
+    key.insert(CKA_TOKEN, vec![1]);
+    key.insert(CKA_LABEL, SNAP_KAT_LABEL.to_vec());
+    key.insert(CKA_VALUE, snap_kat_value());
+    let mut sess = crate::crypto::handlers::Attributes::new();
+    sess.insert(CKA_TOKEN, vec![0]);
+    sess.insert(CKA_VALUE, vec![9, 9]);
+    OBJECTS.with(|o| {
+        let mut o = o.borrow_mut();
+        o.clear();
+        let hk = NEXT_HANDLE.fetch_add(1, Relaxed);
+        let hs = NEXT_HANDLE.fetch_add(1, Relaxed);
+        o.insert(hk, key);
+        o.insert(hs, sess);
+    });
+    crate::state_snapshot::serialize_token_state()
+}
+
+/// Restores `blob` into this instance and returns
+/// `"<key handle>:<sha256(key value)>:<tokens>:<token objects>:<session objects>:<login public>:<next handle > key handle>:<profile objects>"`.
+/// Restore re-creates the token's built-in `CKO_PROFILE` objects (Profiles v3.2
+/// §3), so they are counted apart from the token objects the snapshot carried.
+/// A truncated or corrupt blob is refused with an error.
+#[wasm_bindgen(js_name = snapKatRestore)]
+pub fn snap_kat_restore(blob: &[u8]) -> Result<String, JsValue> {
+    use crate::constants::*;
+    use crate::state::{LoginState, NEXT_HANDLE, OBJECTS, TOKEN_STORE};
+    use sha2::Digest;
+    crate::state_snapshot::deserialize_token_state(blob)
+        .map_err(|code| JsValue::from_str(&format!("snapshot refused: CKR 0x{code:08x}")))?;
+    let tokens = TOKEN_STORE.with(|ts| ts.borrow().len());
+    let public = TOKEN_STORE.with(|ts| {
+        ts.borrow().get(&0).map_or(false, |t| matches!(t.login_state, LoginState::Public) && t.initialized)
+    });
+    let (mut handle, mut sha, mut tok, mut sess, mut prof) = (0u32, String::new(), 0usize, 0usize, 0usize);
+    OBJECTS.with(|o| {
+        for (h, a) in o.borrow().iter() {
+            if a.get(&CKA_CLASS).map_or(false, |v| v == &CKO_PROFILE.to_le_bytes()) {
+                prof += 1;
+            } else if a.get(&CKA_TOKEN).map_or(false, |v| v == &[1]) {
+                tok += 1;
+            } else {
+                sess += 1;
+            }
+            if a.get(&CKA_LABEL).map_or(false, |l| l == SNAP_KAT_LABEL) {
+                handle = *h;
+                sha = hex(&sha2::Sha256::digest(a.get(&CKA_VALUE).cloned().unwrap_or_default()));
+            }
+        }
+    });
+    let next_ok = NEXT_HANDLE.load(std::sync::atomic::Ordering::Relaxed) > handle;
+    Ok(format!("{handle}:{sha}:{tokens}:{tok}:{sess}:{public}:{next_ok}:{prof}"))
+}

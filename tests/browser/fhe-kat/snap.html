@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FHE browser snapshot recovery</title>
+<script type="module">
+  // FHE plan §6.6 P0A: token-state recovery after a worker kill. The page owns
+  // persistence (IndexedDB); the worker is disposable. Worker A snapshots a
+  // small fixed token state, the page stores the bytes, A is killed in the
+  // middle of an add, and worker B restores the snapshot from IndexedDB. A
+  // truncated copy must be refused.
+  const spawn = () => new Worker('./worker.js', { type: 'module' });
+  const call = (w, msg) => new Promise((res) => { w.onmessage = (e) => res(e.data); w.postMessage(msg); });
+  const idb = (mode, fn) => new Promise((res, rej) => {
+    const open = indexedDB.open('fhe-snap-kat', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('snap');
+    open.onerror = () => rej(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction('snap', mode);
+      const r = fn(tx.objectStore('snap'));
+      tx.oncomplete = () => { open.result.close(); res(r.result); };
+      tx.onerror = () => rej(tx.error);
+    };
+  });
+  const out = { ua: navigator.userAgent };
+  try {
+    const a = spawn();
+    await call(a, 'init');
+    const created = await call(a, 'snapcreate');
+    if (created.error) throw new Error(`snapcreate: ${created.error}`);
+    out.snapshotBytes = created.blob.length;
+    await idb('readwrite', (s) => s.put(created.blob, 'blob'));
+    a.postMessage('add');                        // ~5-6 s of work
+    await new Promise((r) => setTimeout(r, 1000));
+    a.terminate();                               // killed mid-operation
+    const stored = await idb('readonly', (s) => s.get('blob'));
+    out.storedBytes = stored && stored.length;
+    const t = performance.now();
+    const b = spawn();
+    await call(b, 'init');
+    const ok = await call(b, { snaprestore: stored });
+    out.restore = { ms: performance.now() - t, restored: ok.restored, error: ok.error };
+    b.terminate();
+    // A truncated snapshot must be refused (fresh worker: clean state).
+    const c = spawn();
+    await call(c, 'init');
+    const bad = await call(c, { snaprestore: stored.slice(0, stored.length - 1) });
+    out.truncated = { refused: !!bad.error, error: bad.error, restored: bad.restored };
+    c.terminate();
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  }
+  window.__result = out;
+</script>

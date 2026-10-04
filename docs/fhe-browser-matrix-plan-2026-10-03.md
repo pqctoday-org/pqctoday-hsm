@@ -84,8 +84,34 @@ What this settles and what it does not:
   owns its own memory. As §6.6 says, this ends the emulator instance; it is
   not cancellation of one PKCS#11 call.
 - **Not measured yet.** The JavaScript side of the copy (the 30 MB
-  `Uint8Array` in the page), and token-state recovery after a kill (the
-  snapshot path is not in this bundle).
+  `Uint8Array` in the page).
+
+### Token-state recovery after a kill
+
+The worker is disposable, so persistence belongs to the page.
+`run.mjs --snapshot` (page `snap.html`) does the whole path with the token's
+own snapshot code (`state_snapshot`, magic `SHR3SNP3`):
+
+1. Worker A builds a fixed token state (slot 0 initialized and logged in as
+   User; one AES-256 token key with a fixed value; one session object) and
+   returns `serialize_token_state()`: 283 bytes.
+2. The page stores those bytes in IndexedDB, starts a long add in A, and
+   terminates A one second in.
+3. Worker B starts fresh, the page reads the bytes back from IndexedDB, and B
+   restores them. A truncated copy goes to a third fresh worker.
+
+Result, identical in Chromium 153, WebKit 26.6 and Firefox 155: the key comes
+back under the same handle (100) with the same value (SHA-256 matches the
+expected constant), the session object is gone, login is reset to Public, the
+handle counter is past the key's handle (no collision with new objects), the
+four built-in `CKO_PROFILE` objects are re-created, and the truncated
+snapshot is refused (`CKR_ARGUMENTS_BAD`). Restore takes 17 ms in Chromium,
+78 ms in WebKit and 42 ms in Firefox, including module start. The gate now runs it.
+
+This shows the snapshot survives a kill when the page keeps it. It does not
+cover a kill *during* a snapshot write (the page should write the new blob
+only after the worker has returned it whole) or a snapshot held only inside
+the worker (lost with the worker, by design).
 
 ### Low-memory cap
 
@@ -146,9 +172,9 @@ Hub, wasm or release build enables it.
 
 1. **Idle-machine timings** on the M4 Pro and M5 Max, to freeze budgets (the
    runs above were under load).
-2. **Memory and recovery, remaining parts.** The JavaScript-side copy of the
-   30 MB export and token snapshot recovery after a worker kill. (The
-   low-memory cap is measured: see above.)
+2. **Memory and recovery, remaining part.** The JavaScript-side copy of the
+   30 MB export. (The low-memory cap and snapshot recovery are measured: see
+   above.)
 3. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
    `parallel-wasm-api`, measured against single-threaded.
 4. **Freeze budgets** from idle-machine runs, then mark each browser
