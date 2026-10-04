@@ -143,6 +143,75 @@ steps in a worker, then starts a fresh uncapped worker and checks the KAT.
 - **Limit of this test.** A WASM cap models the grow refusal, not a mobile OS
   killing the whole tab; that needs a device and stays evidence-only.
 
+## Quiet-machine measurements on the M4 Pro (2026-10-04)
+
+The first results above were taken while other jobs loaded the M5 Max. These
+were taken on the M4 Pro (Apple M4 Pro, 14 cores, macOS 26.6.2, Node 24.11.1)
+with the bundle built by the 28-step gate at commit `608cd5e8`
+(`softhsmrustv3_bg.wasm` SHA-256 `a4bb96d0ecc6e7c2…`), 13:11–13:15 CDT.
+
+**How quiet the machine was.** It is the owner's daily machine, so "quiet" is
+not "exclusive". Before each run `uptime` and `docker ps` were recorded. The
+1-minute load average was 1.1 to 2.5 on 14 cores (0.08 to 0.18 per core).
+Two containers were up (`pqc-rust`, `pqc-bench-arm64`), with no job running in
+either; the busiest process outside the test was the ssh session (9% of one
+core). Nothing else heavy was observed. These are the "quiet" numbers the
+earlier tables lacked, not guaranteed-idle ones. The M5 Max has not been
+re-measured: it was loaded at the time and then reserved for another job.
+
+**Timing (`--add`, median of 5 runs; min to max in brackets).**
+
+| Browser | Module init | Client key | Server key + add + decrypt (`addMs`) | KAT / add |
+|---|---|---|---|---|
+| Chromium 153.0.8010.12 | 19 ms [19-20] | 1.7 ms | 6.49 s [6.03-6.59] | PASS / 255 |
+| WebKit 26.6 | 102 ms [93-119] | 2 ms | 5.85 s [5.70-6.25] | PASS / 255 |
+| Firefox 155.0 | 61 ms [60-63] | 1 ms | 5.96 s [5.82-6.51] | PASS / 255 |
+
+**Memory and recovery (`--memory`, 3 runs).**
+
+| | Chromium | WebKit | Firefox |
+|---|---|---|---|
+| Compressed server key export (30,147,061 B in every run) | 2.68-2.70 s | 2.54-2.57 s | 2.76 s |
+| Peak WASM memory | 106,430,464 B (101.5 MiB) in every run, every engine | same | same |
+| New worker after a kill, KAT PASS | 16 ms | 98-100 ms | 30-31 ms |
+
+**Cap cliff re-check (`--cap-mb 100,102`).** 100 MiB: the server-key export
+traps in all three engines (catchable, nothing hung) and a fresh worker then
+passes the KAT. 102 MiB: every step passes. Same cliff as on the M5 Max.
+
+**Bundle size (`client.bundleBytes`).** 6,356,732 B wasm (1,566,989 B with
+`gzip -9`, 1,054,159 B with brotli) plus 115,800 B of JavaScript glue.
+
+### Facts recorded; the limits are open
+
+The requirements contract (`fhe-hsm-scenarios.v1.json` in the Hub, scenario 1)
+defines the budget *metrics* but leaves every numeric value `null`. The FHE
+plan (§7) says the user-experience ceilings come from that contract and that a
+budget must not be chosen merely because it matches a slow implementation.
+
+**Decision (owner, 2026-10-04): record the measured facts only and decide the
+limits later.** So this document sets no ceiling, no regression guard and no
+published per-worker memory limit. The table lists what was measured against
+each metric; the machine state for every figure is in the paragraph above
+(M4 Pro, load 0.08 to 0.18 per core, two idle containers, 13:11 to 13:15 CDT).
+
+| Metric (scenario 1) | Measured fact | Status |
+|---|---|---|
+| `hsm.serverKeyExportBytes` | 30,147,061 B in every run and engine | Measured |
+| `hsm.peakRssMb` | 101.5 MiB of WASM linear memory in every run and engine; a 100 MiB cap fails and a 102 MiB cap passes. Process RSS was not measured | Measured (WASM memory only) |
+| `client.bundleBytes` | 6,356,732 B wasm; 1,566,989 B gzip -9; 1,054,159 B brotli; 115,800 B JavaScript glue | Measured for this build |
+| `hsm.clientKeyGenMs` | 1 to 2 ms in all engines | Measured |
+| `hsm.serverKeyGenMs` | Not timed on its own. Server key + add + decrypt together took 5.7 to 6.5 s | Open: needs a separate timing |
+| `hsm.decryptMs` | Not timed on its own | Open: needs a separate timing |
+
+**The limits are open.** No numeric ceiling exists in the contract, so no
+browser is marked supported or failing; the Hub text stays evidence-only.
+Mobile stays evidence-only. All three desktop engines pass every functional,
+memory, snapshot and recovery check run so far.
+
+Still open for this item: an M5 Max run when that machine is free, and
+separate timings for server-key generation and decrypt.
+
 ## Defect found and fixed by the first run
 
 The `educational-fhe` browser build compiled but **panicked on first use**
@@ -170,15 +239,19 @@ Hub, wasm or release build enables it.
 
 ## Next steps (P0A → P3)
 
-1. **Idle-machine timings** on the M4 Pro and M5 Max, to freeze budgets (the
-   runs above were under load).
+1. **Quiet-machine timings.** M4 Pro done (2026-10-04, see above); M5 Max
+   still to do when it is free. Separate timings for server-key generation
+   and decrypt are also missing.
 2. **Memory and recovery, remaining part.** The JavaScript-side copy of the
    30 MB export. (The low-memory cap and snapshot recovery are measured: see
    above.)
 3. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
    `parallel-wasm-api`, measured against single-threaded.
-4. **Freeze budgets** from idle-machine runs, then mark each browser
-   supported or evidence-only (§7). Mobile stays evidence-only.
+4. **Budgets: facts recorded, limits open.** Sizes, the 102 MiB memory floor
+   and timings are recorded above. The user-experience ceilings are not in the
+   requirements contract, and the owner decided (2026-10-04) to decide them
+   later. Then mark each browser supported or evidence-only (§7). Mobile
+   stays evidence-only.
 5. **Gate lane: done.** `scripts/local-gate.sh` builds the bundle and runs
    the KAT and `--memory` in Chromium, WebKit and Firefox on every gate.
    Playwright 1.63.0 is pinned in `package.json`; the browsers download once
