@@ -83,10 +83,39 @@ What this settles and what it does not:
   killed worker leaves nothing behind for the next one, because each worker
   owns its own memory. As §6.6 says, this ends the emulator instance; it is
   not cancellation of one PKCS#11 call.
-- **Not measured yet.** Behaviour under a low-memory cap (no browser here
-  exposes one to Playwright), the JavaScript side of the copy (the 30 MB
+- **Not measured yet.** The JavaScript side of the copy (the 30 MB
   `Uint8Array` in the page), and token-state recovery after a kill (the
   snapshot path is not in this bundle).
+
+### Low-memory cap
+
+No browser exposes a memory limit to Playwright, so `run.mjs --cap-mb 64,96,...`
+serves a copy of the bundle whose WASM memory declares a maximum of that many
+MiB (the memory section of the `.wasm` is rewritten on the fly; the file on
+disk is untouched). It is a controlled stand-in for a memory-starved tab: the
+module cannot grow past the cap, which is the condition a browser creates when
+it refuses a grow. Each cap runs the init, KAT, compact-key and server-key
+steps in a worker, then starts a fresh uncapped worker and checks the KAT.
+
+| Cap | Chromium 153 | WebKit 26.6 | Firefox 155 |
+|---|---|---|---|
+| 64, 96, 100 MiB | init, KAT and compact key pass; server-key export fails with a catchable trap | same | same |
+| 102, 104, 128 MiB | all steps pass, peak 101.5 MiB | same | same |
+| New worker after a failed step | KAT PASS in 34-38 ms | PASS in 84-91 ms | PASS in 37-42 ms |
+
+- **The cliff is sharp and the same everywhere.** The server-key export
+  needs 101.5 MiB; 100 MiB fails and 102 MiB passes, in all three engines. The
+  compact public key (33,034 B) and the client key need only 8.5 MiB.
+- **Failure is a trap, not a crash.** An allocation that cannot grow aborts
+  with a `RuntimeError` (`unreachable`, in each engine's wording) that the
+  worker catches and reports. No tab, worker or page died, and nothing hung.
+- **A trapped instance is not reused.** Recovery is a new worker, as §6.6
+  already plans; it reproduces the KAT in under 100 ms.
+- **Implication for the budget.** A per-worker ceiling below ~102 MiB cannot
+  produce the server key, so the client should treat that failure as "this
+  device cannot run the full flow" and fall back, not retry.
+- **Limit of this test.** A WASM cap models the grow refusal, not a mobile OS
+  killing the whole tab; that needs a device and stays evidence-only.
 
 ## Defect found and fixed by the first run
 
@@ -117,9 +146,9 @@ Hub, wasm or release build enables it.
 
 1. **Idle-machine timings** on the M4 Pro and M5 Max, to freeze budgets (the
    runs above were under load).
-2. **Memory and recovery, remaining parts.** A low-memory cap, the
-   JavaScript-side copy of the 30 MB export, and token snapshot recovery
-   after a worker kill.
+2. **Memory and recovery, remaining parts.** The JavaScript-side copy of the
+   30 MB export and token snapshot recovery after a worker kill. (The
+   low-memory cap is measured: see above.)
 3. **Threaded mode.** Cross-origin-isolated build (COOP/COEP) with
    `parallel-wasm-api`, measured against single-threaded.
 4. **Freeze budgets** from idle-machine runs, then mark each browser

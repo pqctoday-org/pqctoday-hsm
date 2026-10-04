@@ -55,6 +55,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the replacement passes the known-answer check, in under 80 ms. The local
   gate now builds the browser bundle and runs both checks in all three
   browsers. Playwright 1.63.0 is pinned as a development dependency.
+  A new `--cap-mb` mode of the browser runner also shows what happens in a
+  memory-starved tab: below about 102 MiB the server-key export fails with a
+  catchable error in all three browsers, nothing crashes, and a fresh worker
+  recovers at once.
 
 - **Rust engine: per-connection application contexts (C1).** A server that
   hosts many clients in one process can now give each connection its own

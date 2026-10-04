@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FHE browser low-memory cap</title>
+<script type="module">
+  // FHE plan §6.6 P0A: what happens when the WASM memory cannot grow past a
+  // cap (?pkg=pkgcap<MB> serves a bundle with that maximum). Each step runs in
+  // a capped worker; a step that errors, crashes or hangs is recorded, then a
+  // fresh worker on the uncapped bundle must still reproduce the client-key KAT.
+  const q = new URLSearchParams(location.search);
+  const capPkg = q.get('pkg');
+  const STEP_TIMEOUT_MS = 120000;
+  const spawn = (pkg) => {
+    const w = new Worker(`./worker-cap.js?pkg=${pkg}`, { type: 'module' });
+    w.crashed = null;
+    w.onerror = (e) => { w.crashed = String(e.message || 'worker error event'); };
+    return w;
+  };
+  const call = (w, msg) => new Promise((res) => {
+    const timer = setTimeout(() => res({ step: msg, error: 'TIMEOUT' }), STEP_TIMEOUT_MS);
+    w.onmessage = (e) => { clearTimeout(timer); res(e.data); };
+    w.onerror = (e) => { clearTimeout(timer); res({ step: msg, error: `WORKER-CRASH: ${e.message || 'error event'}` }); };
+    w.postMessage(msg);
+  });
+  const out = { ua: navigator.userAgent, pkg: capPkg, steps: [] };
+  try {
+    const a = spawn(capPkg);
+    for (const s of ['init', 'kat', 'pk', 'sk']) {
+      const r = await call(a, s);
+      out.steps.push(r);
+      if (r.error) { out.failedAt = s; break; }
+    }
+    a.terminate();
+    // Recovery: a fresh worker, uncapped, must still be usable.
+    const t = performance.now();
+    const c = spawn('pkg');
+    const ci = await call(c, 'init');
+    const ck = await call(c, 'kat');
+    out.recovery = { ms: performance.now() - t, initMs: ci.ms, clientKey: ck.clientKey, error: ci.error || ck.error };
+    c.terminate();
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  }
+  window.__result = out;
+</script>
