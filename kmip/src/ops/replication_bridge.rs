@@ -44,20 +44,28 @@ pub fn configure_admin(pin_file: std::path::PathBuf, slot: u32) {
 /// sessions. The KMIP server closes each connection after one Request Message, so this
 /// per-request context is the per-connection context of addendum §1.1. User work in the
 /// default context is not paused (C1).
+/// Connection metadata for the admin application context (addendum §5, A-16): the client
+/// certificate hash and listener address the TLS listener authenticated for this request. The
+/// engine stamps them into its audit lines. Without a TLS connection (an in-process call) there is
+/// no certificate, and the fields keep their empty values.
+fn admin_context_meta() -> softhsmrustv3::app_context::ContextMeta {
+    let conn = crate::server::conn_meta::current();
+    softhsmrustv3::app_context::ContextMeta {
+        role: ROLE_ADMIN_CN.to_string(),
+        client_cert_sha256: conn.as_ref().map(|c| c.client_cert_sha256).unwrap_or([0u8; 32]),
+        listener: conn.map(|c| c.listener).unwrap_or_else(|| "kmip-replication-bridge".to_string()),
+        correlation: None,
+    }
+}
+
 fn admin_call(ordinal: u32, input: &[u8]) -> Result<Vec<u8>, u32> {
-    use softhsmrustv3::app_context::{self, ContextGuard, ContextMeta};
+    use softhsmrustv3::app_context::{self, ContextGuard};
     let pin = SO_PIN_FILE
         .get()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-    let guard = ContextGuard::new(ContextMeta {
-        role: ROLE_ADMIN_CN.to_string(),
-        // The KMIP listener's own context holds the client-cert hash; the bridge does not see it.
-        client_cert_sha256: [0u8; 32],
-        listener: "kmip-replication-bridge".to_string(),
-        correlation: None,
-    });
+    let guard = ContextGuard::new(admin_context_meta());
     let slot = ADMIN_SLOT.load(std::sync::atomic::Ordering::Relaxed);
     let h = app_context::open_session(guard.id(), slot, CKF_SERIAL_SESSION | CKF_RW_SESSION)?;
     let mut p = pin.into_bytes();
@@ -297,5 +305,51 @@ mod tests {
     fn interface_names_are_exact() {
         assert!(handles(Some(IFACE_V1)) && handles(Some(IFACE_CEREMONY_TEST)));
         assert!(!handles(Some("PKCS 11")) && !handles(None) && !handles(Some("PQCTODAY_KEY_REPLICATION_1_")));
+    }
+}
+
+#[cfg(test)]
+mod admin_meta_tests {
+    use super::*;
+    use crate::server::conn_meta::{self, ConnMeta};
+    use softhsmrustv3::app_context::{self, ContextGuard};
+
+    /// A-16: the application context the admin path creates carries the certificate hash and
+    /// listener of the connection being served, not zeros, so the engine's audit lines name the
+    /// certificate that made the call. (The engine side, which writes these fields into the audit
+    /// line, is tested in rust/tests/replication_admin.rs.)
+    #[test]
+    fn the_admin_context_carries_the_connection_certificate_hash() {
+        let meta = ConnMeta::from_leaf(b"client-leaf-der", "10.77.0.1:5696".into());
+        let _scope = conn_meta::enter(Some(meta.clone()));
+        let guard = ContextGuard::new(admin_context_meta());
+        let got = app_context::context_meta(guard.id()).expect("context exists");
+        assert_eq!(got.client_cert_sha256, meta.client_cert_sha256);
+        assert_ne!(got.client_cert_sha256, [0u8; 32], "not the all-zero placeholder");
+        assert_eq!(got.listener, "10.77.0.1:5696");
+        assert_eq!(got.role, ROLE_ADMIN_CN);
+    }
+
+    #[test]
+    fn a_different_connection_gets_a_different_hash() {
+        let a = ConnMeta::from_leaf(b"cert-a", "a:1".into());
+        let b = ConnMeta::from_leaf(b"cert-b", "b:2".into());
+        let ha = {
+            let _s = conn_meta::enter(Some(a));
+            admin_context_meta().client_cert_sha256
+        };
+        let hb = {
+            let _s = conn_meta::enter(Some(b));
+            admin_context_meta().client_cert_sha256
+        };
+        assert_ne!(ha, hb);
+    }
+
+    #[test]
+    fn without_a_tls_connection_the_fields_keep_their_empty_values() {
+        assert!(conn_meta::current().is_none());
+        let m = admin_context_meta();
+        assert_eq!(m.client_cert_sha256, [0u8; 32]);
+        assert_eq!(m.role, ROLE_ADMIN_CN);
     }
 }

@@ -463,26 +463,28 @@ async fn handle_conn(
     // `role` is left unassigned until the transport-role derivation (A-04,
     // client-certificate EKU) lands; the KMIP correlation value is not known
     // before the request is read, so it is not attached here.
-    let _app_context = tls_stream
+    let conn_meta = tls_stream
         .get_ref()
         .1
         .peer_certificates()
         .and_then(|certs| certs.first())
         .map(|leaf| {
-            use sha2::Digest;
             let listener = tls_stream
                 .get_ref()
                 .0
                 .local_addr()
                 .map(|a| a.to_string())
                 .unwrap_or_default();
-            softhsmrustv3::app_context::ContextGuard::new(softhsmrustv3::app_context::ContextMeta {
-                role: String::new(),
-                client_cert_sha256: sha2::Sha256::digest(leaf.as_ref()).into(),
-                listener,
-                correlation: None,
-            })
+            crate::server::conn_meta::ConnMeta::from_leaf(leaf.as_ref(), listener)
         });
+    let _app_context = conn_meta.as_ref().map(|m| {
+        softhsmrustv3::app_context::ContextGuard::new(softhsmrustv3::app_context::ContextMeta {
+            role: String::new(),
+            client_cert_sha256: m.client_cert_sha256,
+            listener: m.listener.clone(),
+            correlation: None,
+        })
+    });
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
     // §9.10 `Maximum Response Size` enforcement now lives inside
     // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
@@ -502,7 +504,11 @@ async fn handle_conn(
             // pool so a slow op can't stall the tokio reactor and starve other
             // connections.
             let deps = Arc::clone(&deps);
+            let conn_meta = conn_meta.clone();
             tokio::task::spawn_blocking(move || {
+                // The replication admin binding builds its own application context and needs the
+                // connection's certificate hash and listener for the engine's audit lines (A-16).
+                let _conn = crate::server::conn_meta::enter(conn_meta);
                 dispatch_with_transport_identity(&deps, request, transport_identity)
             })
             .await

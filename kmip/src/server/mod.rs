@@ -17,6 +17,7 @@
 //! and closes.
 
 pub mod auth;
+pub mod conn_meta;
 // The TLS listener is `native` only (tokio + rustls). The `auth` types it
 // produces (`Identity`, `AuthContext`, `AuthUser`, the credential verifiers)
 // are pure Rust and stay available to the wasm core — the dispatcher signature
