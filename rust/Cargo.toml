@@ -391,10 +391,13 @@ libc = "0.2"
 # wasm32-unknown-unknown / wasm-bindgen build. On wasm32 the pure-Rust crates
 # stay the only backend — there is no network timing oracle against a user's
 # own key inside their own browser tab. `rsa` and `p256` are NOT removed on
-# native either: they remain the fallback for what AWS-LC deliberately does
-# not expose (raw CKM_RSA_X_509, unprefixed CKM_RSA_PKCS, PSS with a
-# caller-chosen salt length, MD5/SHA-1/SHA-224/SHA-3 RSA variants, and
-# BIP32's P-256 scalar arithmetic). See `crypto::awslc` for the dispatch rule.
+# native either, but their roles differ. Since 2026-10-03 no native RSA
+# private-key operation runs in `rsa` (all of them run in AWS-LC, keys 2048 to
+# 8192 bits; `crypto::rsa_guard` and a test prove it), so `rsa` remains for the
+# wasm32 build's private-key operations and for public-key operations,
+# parsing and key containers. `p256` remains for what AWS-LC deliberately does
+# not expose (BIP32's P-256 scalar arithmetic, deterministic ECDSA nonces).
+# See `crypto::awslc` and `crypto::awslc_rsa` for the dispatch rules.
 aws-lc-rs = "1"
 # The raw AWS-LC API under aws-lc-rs, for `crypto::awslc_pq` (feature
 # `awslc-pq`): aws-lc-rs 1.18 exposes ML-DSA without context strings and

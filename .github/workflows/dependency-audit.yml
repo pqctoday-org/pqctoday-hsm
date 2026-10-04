@@ -42,10 +42,14 @@ jobs:
       - name: Run cargo audit
         # RUSTSEC-2023-0071 (rsa crate, Marvin): the exposed v1.5 DECRYPT
         # oracle was closed 2026-09-15 by routing the engine's decrypt through
-        # aws-lc-rs on native (see SECURITY.md). The crate stays for non-oracle
-        # paths (openpgp interop, engine fallback mechanisms AWS-LC does not
-        # expose, KMIP DER format conversion), so the ID is still ignored until
-        # the crate ships a constant-time release (RustCrypto/RSA #390).
+        # aws-lc-rs on native (see SECURITY.md), and since 2026-10-03 every
+        # native RSA private-key operation runs in AWS-LC. The crate stays in
+        # the lockfiles for the browser (wasm32) build's private-key
+        # operations, the openpgp fork's legacy RSA path, and non-private-key
+        # uses (public-key operations, parsing, KMIP DER format conversion),
+        # so the ID is still ignored until the crate ships a constant-time
+        # release (RustCrypto/RSA #390). cargo audit reads lockfiles and cannot
+        # scope an ignore to one target, so the ignore cannot be narrowed.
         #
         # RUSTSEC-2026-0097 (rand unsound with a custom logger) used to be
         # ignored here too; every rand in rust/Cargo.lock is on a patched
