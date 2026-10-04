@@ -3,10 +3,18 @@
 // index.html on 127.0.0.1, drives each requested browser headless with
 // Playwright, checks the §5.5 KAT and prints one JSON line per browser.
 //
-//   node tests/browser/fhe-kat/run.mjs [--browsers chromium,webkit,firefox] [--add | --memory]
+//   node tests/browser/fhe-kat/run.mjs [--browsers chromium,webkit,firefox] [--add | --memory | --snapshot | --cap-mb 64,96,128]
 //
 // --memory loads memory.html instead (FHE plan §6.6): peak WASM memory across
 // the public export in a module worker, then worker kill + recovery.
+// --snapshot loads snap.html: token-state snapshot kept in IndexedDB by the
+// page, worker killed mid-add, new worker restores it (expects the fixed key
+// back under the same handle, session object gone, login reset to Public,
+// the built-in profile objects re-created) and
+// refuses a truncated copy.
+// --cap-mb loads cap.html once per cap with the WASM memory maximum patched to
+// that many MiB (exploratory: prints every row, never fails on a capped step;
+// it fails only if recovery on the uncapped bundle does not reproduce the KAT).
 //
 // Playwright is pinned in package.json (`npm ci`, then
 // `npx playwright install chromium webkit firefox`). PLAYWRIGHT_MODULE can
@@ -19,6 +27,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = path.resolve(HERE, '../../../rust/pkg-fhe-web');
 const EXPECT = {
+  // sha256(sha256("snap-kat-key")): the fixed AES key value in the snapshot KAT
+  snapKey: '1fdec23053ad4f943ea470f0483d2bdc46b5067eae5ebbcc343ec7c9ba1daffa',
   derivedSeed: 'f6eb1c9a88a4442c8a7449536c3d12dc',
   clientKey: '24087:9f5d847e4d1121eef9d75fcc473e89ee5306523f9cb140384eba5aa85a55b77b',
   addU8: 255,
@@ -28,14 +38,48 @@ const browsers = (args[args.indexOf('--browsers') + 1] && args.includes('--brows
   ? args[args.indexOf('--browsers') + 1] : 'chromium,webkit').split(',');
 const withAdd = args.includes('--add');
 const memoryMode = args.includes('--memory');
+const snapshotMode = args.includes('--snapshot');
+const caps = args.includes('--cap-mb') ? args[args.indexOf('--cap-mb') + 1].split(',').map(Number) : [];
 
 const pwSpec = process.env.PLAYWRIGHT_MODULE;
 const pw = await import(pwSpec ? pathToFileURL(path.join(pwSpec, 'index.mjs')).href : 'playwright');
 
+// Rewrites the module's memory section to declare a maximum of `mib` MiB.
+function capWasm(buf, mib) {
+  let o = 8;
+  const leb = () => { let r = 0, sh = 0, x; do { x = buf[o++]; r |= (x & 127) << sh; sh += 7; } while (x & 128); return r >>> 0; };
+  const enc = (v) => { const a = []; do { let x = v & 127; v >>>= 7; if (v) x |= 128; a.push(x); } while (v); return a; };
+  while (o < buf.length) {
+    const idPos = o; const id = buf[o++]; const len = leb(); const start = o;
+    if (id === 5) {
+      const n = leb(); const flag = buf[o++]; const min = leb();
+      if (n !== 1 || flag !== 0) throw new Error(`unexpected memory section (n=${n} flag=${flag})`);
+      const body = [1, 1, ...enc(min), ...enc(mib * 16)];   // 1 memory, has-max, min, max (64 KiB pages)
+      return Buffer.concat([buf.subarray(0, idPos), Buffer.from([5, ...enc(body.length), ...body]), buf.subarray(start + len)]);
+    }
+    o = start + len;
+  }
+  throw new Error('no memory section');
+}
+const capped = new Map();
+
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm' };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
-  const own = { '/': 'index.html', '/memory.html': 'memory.html', '/worker.js': 'worker.js' };
+  const own = { '/': 'index.html', '/memory.html': 'memory.html', '/worker.js': 'worker.js',
+    '/cap.html': 'cap.html', '/snap.html': 'snap.html', '/worker-cap.js': 'worker-cap.js' };
+  const cm = url.pathname.match(/^\/pkgcap(\d+)\/(.+)$/);
+  if (cm) {
+    const f = path.join(PKG, cm[2]);
+    if (!f.startsWith(PKG) || !fs.existsSync(f)) { res.writeHead(404).end(); return; }
+    let body = fs.readFileSync(f);
+    if (f.endsWith('.wasm')) {
+      if (!capped.has(cm[1])) capped.set(cm[1], capWasm(body, Number(cm[1])));
+      body = capped.get(cm[1]);
+    }
+    res.writeHead(200, { 'content-type': TYPES[path.extname(f)] || 'application/octet-stream' }).end(body);
+    return;
+  }
   const file = own[url.pathname] ? path.join(HERE, own[url.pathname])
     : url.pathname.startsWith('/pkg/') ? path.join(PKG, url.pathname.slice(5)) : null;
   if (!file || !file.startsWith(HERE) && !file.startsWith(PKG) || !fs.existsSync(file)) {
@@ -46,21 +90,30 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${server.address().port}`;
-const base = memoryMode ? `${origin}/memory.html` : `${origin}/${withAdd ? '?add' : ''}`;
+const base = caps.length ? null : snapshotMode ? `${origin}/snap.html` : memoryMode ? `${origin}/memory.html` : `${origin}/${withAdd ? '?add' : ''}`;
 
 let failed = 0;
 for (const name of browsers) {
+ for (const cap of (caps.length ? caps : [null])) {
   const row = { browser: name };
+  if (cap !== null) row.capMiB = cap;
   let browser;
   try {
     browser = await pw[name].launch();
     row.version = browser.version();
     const page = await browser.newPage();
     const t = Date.now();
-    await page.goto(base);
+    await page.goto(cap !== null ? `${origin}/cap.html?pkg=pkgcap${cap}` : base);
     await page.waitForFunction(() => window.__result, null, { timeout: 15 * 60 * 1000 });
     Object.assign(row, await page.evaluate(() => window.__result), { wallMs: Date.now() - t });
-    if (memoryMode) {
+    if (cap !== null) {
+      row.kat = !row.error && row.recovery && !row.recovery.error && row.recovery.clientKey === EXPECT.clientKey ? 'PASS' : 'FAIL';
+    } else if (snapshotMode) {
+      const [handle, sha, tokens, tok, sess, pub, next, prof] = ((row.restore && row.restore.restored) || '').split(':');
+      row.kat = !row.error && !row.restore.error && sha === EXPECT.snapKey && tokens === '1' && tok === '1'
+        && sess === '0' && pub === 'true' && next === 'true' && Number(prof) > 0 && Number(handle) >= 100
+        && row.snapshotBytes === row.storedBytes && row.truncated && row.truncated.refused ? 'PASS' : 'FAIL';
+    } else if (memoryMode) {
       const kat = (row.steps || []).find((x) => x.step === 'kat');
       row.kat = !row.error && kat && kat.clientKey === EXPECT.clientKey
         && row.recovery && row.recovery.clientKey === EXPECT.clientKey ? 'PASS' : 'FAIL';
@@ -76,6 +129,7 @@ for (const name of browsers) {
   }
   if (row.kat !== 'PASS') failed++;
   console.log(JSON.stringify(row));
+ }
 }
 server.close();
 process.exit(failed ? 1 : 0);

@@ -774,8 +774,8 @@ run_step_host "ACVP wasm harness — Rust engine only (C++ WASM half not exercis
 # browsers are cached on the gate host. run.mjs exits non-zero on any FAIL.
 run_step "FHE browser bundle build (educational-fhe, wasm32, target web)" \
   "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=8388608' /cargo-target/release/wasm-pack build --release --target web --no-typescript --out-dir pkg-fhe-web -- --features educational-fhe >/dev/null 2>&1"
-run_step_host "FHE browser matrix — client-key KAT + worker recovery (Chromium, WebKit, Firefox)" \
-  "cd '$ROOT' && (test -d node_modules/playwright || npm ci --silent --no-audit --no-fund) && npx playwright install chromium webkit firefox >/dev/null 2>&1 && node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox && node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox --memory"
+run_step_host "FHE browser matrix — client-key KAT + worker recovery + snapshot recovery (Chromium, WebKit, Firefox)" \
+  "cd '$ROOT' && (test -d node_modules/playwright || npm ci --silent --no-audit --no-fund) && npx playwright install chromium webkit firefox >/dev/null 2>&1 && node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox && node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox --memory && node tests/browser/fhe-kat/run.mjs --browsers chromium,webkit,firefox --snapshot"
 
 # Plan item 2.E (2026-09-27): the C++ half of the same harness, plus the
 # cross-engine checks (HSS, ML-DSA, SLH-DSA, ML-KEM: signed/encapsulated by one

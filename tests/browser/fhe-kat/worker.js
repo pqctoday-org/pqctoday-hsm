@@ -22,6 +22,14 @@ self.onmessage = async ({ data }) => {
       const t = performance.now();
       const blob = m.fhePublicExport(seed, data === 'sk' ? 0 : 1);
       self.postMessage({ step: data, ms: performance.now() - t, bytes: blob.length, memBytes: mem() });
+    } else if (data === 'snapcreate') {
+      const t = performance.now();
+      const blob = m.snapKatCreate();
+      self.postMessage({ step: data, ms: performance.now() - t, blob, memBytes: mem() });
+    } else if (data && data.snaprestore) {
+      const t = performance.now();
+      const r = m.snapKatRestore(data.snaprestore);
+      self.postMessage({ step: 'snaprestore', ms: performance.now() - t, restored: r, memBytes: mem() });
     } else if (data === 'add') {
       const t = performance.now();
       const sum = m.fheAddU8(seed, 200, 55);
