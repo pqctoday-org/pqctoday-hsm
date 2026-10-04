@@ -201,16 +201,38 @@ each metric; the machine state for every figure is in the paragraph above
 | `hsm.peakRssMb` | 101.5 MiB of WASM linear memory in every run and engine; a 100 MiB cap fails and a 102 MiB cap passes. Process RSS was not measured | Measured (WASM memory only) |
 | `client.bundleBytes` | 6,356,732 B wasm; 1,566,989 B gzip -9; 1,054,159 B brotli; 115,800 B JavaScript glue | Measured for this build |
 | `hsm.clientKeyGenMs` | 1 to 2 ms in all engines | Measured |
-| `hsm.serverKeyGenMs` | Not timed on its own. Server key + add + decrypt together took 5.7 to 6.5 s | Open: needs a separate timing |
-| `hsm.decryptMs` | Not timed on its own | Open: needs a separate timing |
+| `hsm.serverKeyGenMs` | 3.21 to 3.47 s (full `ServerKey::new`), see the staged timing below | Measured |
+| `hsm.decryptMs` | Under 1 ms in all engines, see the staged timing below | Measured |
 
 **The limits are open.** No numeric ceiling exists in the contract, so no
 browser is marked supported or failing; the Hub text stays evidence-only.
 Mobile stays evidence-only. All three desktop engines pass every functional,
 memory, snapshot and recovery check run so far.
 
-Still open for this item: an M5 Max run when that machine is free, and
-separate timings for server-key generation and decrypt.
+### Staged timing (`run.mjs --staged`)
+
+The same add, with each stage timed inside the module by `performance.now()`
+(`fheAddU8Staged`, a test-only export). Median of 5 runs per browser, M4 Pro,
+13:56 to 13:58 CDT on 2026-10-04. Machine state: 1-minute load 1.0 to 1.9 on
+14 cores; the 15-minute average (7.5 to 8.1) was the gate run that had just
+finished on the same machine; containers `pqc-rust` and `pqc-bench-arm64`
+up and idle; the busiest other process used 1.4% of one core.
+
+| Stage | Chromium 153 | WebKit 26.6 | Firefox 155 |
+|---|---|---|---|
+| Client key from the seed | 0.1 ms | under 1 ms | under 1 ms |
+| Server-key generation (`ServerKey::new` + `set_server_key`) | 3.39 s [3.30-3.41] | 3.21 s [3.13-3.23] | 3.47 s [3.43-3.50] |
+| Encrypt two `FheUint8` values | 2.8 ms | 2 ms | 3 ms |
+| One homomorphic add (`FheUint8 + FheUint8`) | 2.69 s [2.63-2.87] | 2.54 s [2.48-2.59] | 2.56 s [2.53-2.63] |
+| Decrypt | 0.1 ms | under 1 ms | under 1 ms |
+
+KAT PASS and sum 255 in all 15 runs. The server-key stage is the full key
+that the add needs; it is not the compressed export timed in the memory
+section (2.5 to 2.8 s, which includes serialization). Of the 5.7 to 6.5 s
+total above, key generation is about 55% and the one add about 45%.
+
+Still open for this item: an M5 Max run when that machine is free. The limits
+remain open (see above).
 
 ## Defect found and fixed by the first run
 
@@ -239,9 +261,8 @@ Hub, wasm or release build enables it.
 
 ## Next steps (P0A → P3)
 
-1. **Quiet-machine timings.** M4 Pro done (2026-10-04, see above); M5 Max
-   still to do when it is free. Separate timings for server-key generation
-   and decrypt are also missing.
+1. **Quiet-machine timings.** M4 Pro done, including the staged timing
+   (2026-10-04, see above); M5 Max still to do when it is free.
 2. **Memory and recovery, remaining part.** The JavaScript-side copy of the
    30 MB export. (The low-memory cap and snapshot recovery are measured: see
    above.)
