@@ -21,6 +21,10 @@
       out.addU8 = mod.fheAddU8(seed, 200, 55);
       out.addMs = performance.now() - t;
     }
+    if (new URLSearchParams(location.search).has('staged')) {
+      const st = mod.fheAddU8Staged(seed, 200, 55);
+      out.staged = { clientKeyMs: st[0], serverKeyMs: st[1], encryptMs: st[2], addMs: st[3], decryptMs: st[4], sum: st[5] };
+    }
     if (performance.memory) out.usedJsHeapBytes = performance.memory.usedJSHeapSize;
   } catch (e) {
     out.error = String(e && e.stack || e);
