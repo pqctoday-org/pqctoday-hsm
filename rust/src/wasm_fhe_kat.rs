@@ -51,6 +51,39 @@ pub fn fhe_add_u8(seed: &[u8], a: u8, b: u8) -> Result<u8, JsValue> {
     Ok(sum)
 }
 
+/// `performance.now()` of the current global (window or worker), in ms.
+fn now_ms() -> f64 {
+    let g = js_sys::global();
+    let perf = js_sys::Reflect::get(&g, &"performance".into()).ok();
+    let now = perf.as_ref().and_then(|p| js_sys::Reflect::get(p, &"now".into()).ok());
+    match (perf, now.and_then(|n| n.dyn_into::<js_sys::Function>().ok())) {
+        (Some(p), Some(f)) => f.call0(&p).ok().and_then(|v| v.as_f64()).unwrap_or(0.0),
+        _ => js_sys::Date::now(),
+    }
+}
+
+/// The same computation as `fheAddU8`, timed stage by stage. Returns
+/// `[clientKeyMs, serverKeyMs, encryptMs, addMs, decryptMs, sum]`: the client
+/// key from the seed, `ServerKey::new` (full server-key generation) plus
+/// `set_server_key`, the two encryptions, one homomorphic add, and the decrypt.
+/// For the browser budget metrics `hsm.serverKeyGenMs` and `hsm.decryptMs`.
+#[wasm_bindgen(js_name = fheAddU8Staged)]
+pub fn fhe_add_u8_staged(seed: &[u8], a: u8, b: u8) -> Result<Vec<f64>, JsValue> {
+    let t0 = now_ms();
+    let ck = crate::replication::fhe_tfhe::client_key_for(&seed32(seed)?);
+    let t1 = now_ms();
+    tfhe::set_server_key(tfhe::ServerKey::new(&ck));
+    let t2 = now_ms();
+    let x = tfhe::FheUint8::encrypt(a, &ck);
+    let y = tfhe::FheUint8::encrypt(b, &ck);
+    let t3 = now_ms();
+    let z = &x + &y;
+    let t4 = now_ms();
+    let sum: u8 = z.decrypt(&ck);
+    let t5 = now_ms();
+    Ok(vec![t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, f64::from(sum)])
+}
+
 /// §6.6 P0A memory spike: the public export the token's
 /// `CKM_PQCTODAY_FHE_DERIVE_PUBLIC` produces, built the same way
 /// (`fhe_tfhe::derive_public`): the safe-serialized `CompressedServerKey`
