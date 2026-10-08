@@ -3,8 +3,11 @@
 // index.html on 127.0.0.1, drives each requested browser headless with
 // Playwright, checks the §5.5 KAT and prints one JSON line per browser.
 //
-//   node tests/browser/fhe-kat/run.mjs [--browsers chromium,webkit,firefox] [--add | --memory | --snapshot | --cap-mb 64,96,128]
+//   node tests/browser/fhe-kat/run.mjs [--browsers chromium,webkit,firefox] [--add | --staged | --memory | --snapshot | --cap-mb 64,96,128]
 //
+// --staged runs the add once more with each stage timed (client key, server-key
+// generation, encrypt, homomorphic add, decrypt): the budget metrics
+// hsm.serverKeyGenMs and hsm.decryptMs.
 // --memory loads memory.html instead (FHE plan §6.6): peak WASM memory across
 // the public export in a module worker, then worker kill + recovery.
 // --snapshot loads snap.html: token-state snapshot kept in IndexedDB by the
@@ -37,6 +40,7 @@ const args = process.argv.slice(2);
 const browsers = (args[args.indexOf('--browsers') + 1] && args.includes('--browsers')
   ? args[args.indexOf('--browsers') + 1] : 'chromium,webkit').split(',');
 const withAdd = args.includes('--add');
+const staged = args.includes('--staged');
 const memoryMode = args.includes('--memory');
 const snapshotMode = args.includes('--snapshot');
 const caps = args.includes('--cap-mb') ? args[args.indexOf('--cap-mb') + 1].split(',').map(Number) : [];
@@ -90,7 +94,7 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${server.address().port}`;
-const base = caps.length ? null : snapshotMode ? `${origin}/snap.html` : memoryMode ? `${origin}/memory.html` : `${origin}/${withAdd ? '?add' : ''}`;
+const base = caps.length ? null : snapshotMode ? `${origin}/snap.html` : memoryMode ? `${origin}/memory.html` : `${origin}/${staged ? '?staged' : withAdd ? '?add' : ''}`;
 
 let failed = 0;
 for (const name of browsers) {
@@ -119,7 +123,8 @@ for (const name of browsers) {
         && row.recovery && row.recovery.clientKey === EXPECT.clientKey ? 'PASS' : 'FAIL';
     } else {
       row.kat = row.derivedSeed === EXPECT.derivedSeed && row.clientKey === EXPECT.clientKey
-        && (!withAdd || row.addU8 === EXPECT.addU8) ? 'PASS' : 'FAIL';
+        && (!withAdd || row.addU8 === EXPECT.addU8)
+        && (!staged || (row.staged && row.staged.sum === EXPECT.addU8)) ? 'PASS' : 'FAIL';
     }
   } catch (e) {
     row.kat = 'ERROR';
