@@ -9,6 +9,7 @@ build-pqctoday/
 build_fresh/
 build_test/
 test_tokens/
+tests/tokens/
 # Compiled output of the ad-hoc executables in tests/ (see tests/README.md)
 /test_acvp_lms_sigver
 /test_classic_mceliece_kat

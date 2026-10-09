@@ -228,9 +228,6 @@ legal divergences enumerated in `differential/exceptions.json`. Run via
 README for the full detail (`--list`, `--only`, `--verbose`, `--no-build`,
 `--parallel`/`--jobs N` to shard across cores).
 
-`tokens/` holds a token directory left behind by a prior test run (not
-committed test fixture data — a `softhsm2-util`-managed slot).
-
 ## Files
 
 ```
@@ -253,6 +250,5 @@ tests/
 ├── test_classic_mceliece_kat.cpp          ad-hoc: Classic McEliece decaps vs NIST KATs
 ├── test_classic_mceliece_cross_engine.cpp ad-hoc: C++ side of the cross-engine check
 ├── differential/              cross-engine differential harness — see its own README
-├── tokens/                    leftover token dir from a prior local run
 └── README.md                 This file
 ```
