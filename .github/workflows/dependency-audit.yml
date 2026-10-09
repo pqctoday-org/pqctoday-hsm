@@ -79,11 +79,9 @@ jobs:
         # clean), so cargo audit was green and silent about it the whole time.
         # Dependabot saw it; this job structurally could not.
         #
-        # openpgp/Cargo.lock is gitignored (openpgp/.gitignore) -- the only
-        # workspace here whose lock is NOT committed -- so a fresh checkout has
-        # no lock for cargo audit to read. Generate one first; that audits the
-        # resolution a build would actually get, which is the question that
-        # matters. The two committed locks are audited as-is, untouched.
+        # All three locks are committed (openpgp/Cargo.lock since 2026-09-25,
+        # #267) and audited as-is. The generate-lockfile fallback below only
+        # runs if a lock goes missing; it does not run in normal CI.
         run: |
           set -eu
           for crate in rust kmip openpgp; do
