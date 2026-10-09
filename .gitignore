@@ -7,6 +7,7 @@ build-wasm/
 build-san/
 build-pqctoday/
 build_fresh/
+build_test/
 build-wasm-fresh/
 build-wasm-native/
 build_remediation/
