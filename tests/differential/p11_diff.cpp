@@ -700,10 +700,28 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
     // it's actually returned in the clear -- there is no legitimate case
     // where classify() has anything real to check here, so this is CKA_CLASS-
     // gated rather than another per-key-type entry to keep adding to.
+    //
+    // 2026-10-09: the same trap once more, on CKO_PRIVATE_KEY. A full gate
+    // failed with ONE uncovered divergence,
+    //   scenario encoding.wrap_private_key_pkcs8
+    //   path     unwrapped_priv.CKA_VALUE.enc
+    //   cpp      RAW_32      rust  DER_SEQUENCE_MALFORMED_LEN
+    // and an immediate re-run of the identical commit reported 0 uncovered
+    // over the same 80 scenarios and 17,492 observations. A private key's
+    // CKA_VALUE, returned in the clear, is the raw private value for every
+    // key type that has one (EC scalar, EdDSA/XDH seed, DSA/DH integer, PQC
+    // key); RSA private keys carry no CKA_VALUE at all. So there is again no
+    // ASN.1 framing for a leading 0x30 to be the start of. Only the
+    // classification of this one attribute is skipped: its .rv and .len are
+    // still recorded, so an engine that returned a PKCS#8-framed value (longer
+    // than the raw one) would still diverge on length, and the wrapped blob's
+    // own .enc (the thing encoding.wrap_private_key_pkcs8 is about) is
+    // classified as before.
     const bool rawValue = (attr_ulong(e, s, o, CKA_KEY_TYPE, &keyType) &&
                             is_raw_pqc_key_type(keyType)) ||
                            (attr_ulong(e, s, o, CKA_CLASS, &objClass) &&
-                            objClass == CKO_SECRET_KEY);
+                            (objClass == CKO_SECRET_KEY ||
+                             objClass == CKO_PRIVATE_KEY));
     std::vector<std::string> present;
     for (CK_ATTRIBUTE_TYPE t : kProbe) {
         std::string an = attr_name(t);
