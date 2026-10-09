@@ -2,10 +2,11 @@
 //!
 //! PQCTODAY EDUCATIONAL TEST ONLY — compiled only with `--features educational-replication`
 //! and inert until the server selects the educational profile (`--educational-replication`).
-//! Status: **pre-ceremony-ABI** (engine owner 7f, 2026-10-03). The v1 interface is mapped
-//! as specified in the admin/ceremony addendum §6; the user-level ceremony calls use a
-//! TEST interface name and call the existing Rust functions directly. That test interface is
-//! replaced by `PQCTODAY_KEY_REPLICATION_CEREMONY_1_0` shims before this branch merges anywhere.
+//! The v1, ceremony and admin interfaces are mapped as specified in the admin/ceremony addendum
+//! §6. The ceremony calls are served under `PQCTODAY_KEY_REPLICATION_CEREMONY_1_0` (addendum
+//! §6.9 envelopes). The temporary lab name `PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST`, with its
+//! flat 113-byte BeginReceive input, stays as a DEPRECATED ALIAS for one release (removed in the
+//! next one); see hsm-kmip-ceremony-interface-plan-10042026.md.
 //!
 //! Rules (7f conditions + addendum §6):
 //! - every call runs in the caller's USER R/W session (`resolve_tenant_session`); the engine
@@ -21,7 +22,11 @@ use softhsmrustv3::constants::{CKA_UNIQUE_ID, CKR_OK};
 use softhsmrustv3::replication as repl;
 
 pub const IFACE_V1: &str = "PQCTODAY_KEY_REPLICATION_1_0";
-/// Pre-ABI test interface (7f): removed when the CEREMONY_1_0 shims land.
+/// Ceremony interface (addendum §2.2, §6.9): 1 IssueSourceChallenge, 2 BeginReceive (DER),
+/// 3 CancelReceive, 4 AttestKey on the KMIP wire.
+pub const IFACE_CEREMONY: &str = "PQCTODAY_KEY_REPLICATION_CEREMONY_1_0";
+/// DEPRECATED alias of [`IFACE_CEREMONY`] for one release: the old lab test name, whose
+/// BeginReceive input is the flat 113-byte form. Removed in the next release.
 pub const IFACE_CEREMONY_TEST: &str = "PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST";
 /// Admin interface (addendum §2.1): 1 AdminIssueNonce, 2 AdminExecute on the KMIP wire.
 pub const IFACE_ADMIN: &str = "PQCTODAY_KEY_REPLICATION_ADMIN_1_0";
@@ -44,20 +49,28 @@ pub fn configure_admin(pin_file: std::path::PathBuf, slot: u32) {
 /// sessions. The KMIP server closes each connection after one Request Message, so this
 /// per-request context is the per-connection context of addendum §1.1. User work in the
 /// default context is not paused (C1).
+/// Connection metadata for the admin application context (addendum §5, A-16): the client
+/// certificate hash and listener address the TLS listener authenticated for this request. The
+/// engine stamps them into its audit lines. Without a TLS connection (an in-process call) there is
+/// no certificate, and the fields keep their empty values.
+fn admin_context_meta() -> softhsmrustv3::app_context::ContextMeta {
+    let conn = crate::server::conn_meta::current();
+    softhsmrustv3::app_context::ContextMeta {
+        role: ROLE_ADMIN_CN.to_string(),
+        client_cert_sha256: conn.as_ref().map(|c| c.client_cert_sha256).unwrap_or([0u8; 32]),
+        listener: conn.map(|c| c.listener).unwrap_or_else(|| "kmip-replication-bridge".to_string()),
+        correlation: None,
+    }
+}
+
 fn admin_call(ordinal: u32, input: &[u8]) -> Result<Vec<u8>, u32> {
-    use softhsmrustv3::app_context::{self, ContextGuard, ContextMeta};
+    use softhsmrustv3::app_context::{self, ContextGuard};
     let pin = SO_PIN_FILE
         .get()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-    let guard = ContextGuard::new(ContextMeta {
-        role: ROLE_ADMIN_CN.to_string(),
-        // The KMIP listener's own context holds the client-cert hash; the bridge does not see it.
-        client_cert_sha256: [0u8; 32],
-        listener: "kmip-replication-bridge".to_string(),
-        correlation: None,
-    });
+    let guard = ContextGuard::new(admin_context_meta());
     let slot = ADMIN_SLOT.load(std::sync::atomic::Ordering::Relaxed);
     let h = app_context::open_session(guard.id(), slot, CKF_SERIAL_SESSION | CKF_RW_SESSION)?;
     let mut p = pin.into_bytes();
@@ -100,7 +113,7 @@ static FIND_LOCK: Mutex<()> = Mutex::new(());
 
 /// True when `interface` names one of the replication interfaces this build serves.
 pub fn handles(interface: Option<&str>) -> bool {
-    matches!(interface, Some(IFACE_V1) | Some(IFACE_CEREMONY_TEST) | Some(IFACE_ADMIN))
+    matches!(interface, Some(IFACE_V1) | Some(IFACE_CEREMONY) | Some(IFACE_CEREMONY_TEST) | Some(IFACE_ADMIN))
 }
 
 /// Dispatch one call. `function` is the KMIP `PKCS#11 Function` value, which KMIP 3.0 §11.39
@@ -152,36 +165,52 @@ pub fn dispatch_as(engine_session: Result<u32, ()>, peer: Option<&str>, interfac
         (IFACE_V1, 1) => repl::import_replication_package(s, input, &[]).map(|(_h, receipt)| receipt),
         // v1: 2 CloneKey — not meaningful over a network transport.
         (IFACE_V1, 2) => Err(CKR_FUNCTION_NOT_SUPPORTED),
-        // test 0 IssueSourceChallenge — no input; Output = 32 bytes.
-        (IFACE_CEREMONY_TEST, 0) if input.is_empty() => repl::issue_source_challenge(s).map(|c| c.to_vec()),
-        // test 1 BeginReceive — Input = op(1) ‖ sourceChallenge(32) ‖ domainID(32) ‖ policyID(48).
-        (IFACE_CEREMONY_TEST, 1) if input.len() == 113 => {
+        (IFACE_CEREMONY, n) => ceremony(s, false, n, input),
+        (IFACE_CEREMONY_TEST, n) => {
+            tracing::warn!("deprecated KMIP interface name {IFACE_CEREMONY_TEST}: use {IFACE_CEREMONY}");
+            ceremony(s, true, n, input)
+        }
+        (IFACE_V1, _) => Err(CKR_ARGUMENTS_BAD),
+        _ => Err(CKR_FUNCTION_NOT_SUPPORTED),
+    };
+    match r {
+        Ok(out) => (CKR_OK, Some(out)),
+        Err(rv) => (rv, None),
+    }
+}
+
+/// The four user-level ceremony calls (addendum §6.9). `legacy` selects the old lab encoding of
+/// BeginReceive (flat `op ‖ sourceChallenge(32) ‖ domainID(32) ‖ policyID(48)`, 113 bytes); the
+/// real interface takes the `BeginReceive` DER, strictly decoded by the engine's own parser.
+fn ceremony(s: u32, legacy: bool, ordinal: u32, input: &[u8]) -> Result<Vec<u8>, u32> {
+    match ordinal {
+        // 0 IssueSourceChallenge — no input; Output = 32 bytes.
+        0 if input.is_empty() => repl::issue_source_challenge(s).map(|c| c.to_vec()),
+        // 1 BeginReceive — Output = ReplicationRequest DER.
+        1 if legacy && input.len() == 113 => {
             let op = match input[0] {
                 0 => repl::asn1::Operation::LiveClone,
                 1 => repl::asn1::Operation::OfflineBackup,
                 2 => repl::asn1::Operation::Restore,
-                _ => return (CKR_ARGUMENTS_BAD, None),
+                _ => return Err(CKR_ARGUMENTS_BAD),
             };
             let chal: [u8; 32] = input[1..33].try_into().unwrap();
             let domain: [u8; 32] = input[33..65].try_into().unwrap();
             let policy: [u8; 48] = input[65..113].try_into().unwrap();
             repl::begin_receive(s, op, &chal, &domain, &policy)
         }
-        // test 2 CancelReceive — Input = transactionID(32).
-        (IFACE_CEREMONY_TEST, 2) if input.len() == 32 => {
-            repl::cancel_receive(s, input.try_into().unwrap()).map(|()| Vec::new())
+        1 if !legacy => {
+            let (op, chal, domain, policy) = repl::admin::BeginReceive::parse(input)?;
+            repl::begin_receive(s, op, &chal, &domain, &policy)
         }
-        // test 3 AttestKey — Input = DER KeyCall { uid, challenge(32) }; Output = evidence DER.
-        (IFACE_CEREMONY_TEST, 3) => key_call(input).and_then(|(uid, chal)| {
+        // 2 CancelReceive — Input = transactionID(32).
+        2 if input.len() == 32 => repl::cancel_receive(s, input.try_into().unwrap()).map(|()| Vec::new()),
+        // 3 AttestKey — Input = DER KeyCall { uid, challenge(32) }; Output = evidence DER.
+        3 => key_call(input).and_then(|(uid, chal)| {
             let chal: [u8; 32] = chal.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             repl::evidence::attest_key(s, by_uid(s, uid)?, &chal)
         }),
-        (IFACE_V1, _) | (IFACE_CEREMONY_TEST, _) => Err(CKR_ARGUMENTS_BAD),
-        _ => Err(CKR_FUNCTION_NOT_SUPPORTED),
-    };
-    match r {
-        Ok(out) => (CKR_OK, Some(out)),
-        Err(rv) => (rv, None),
+        _ => Err(CKR_ARGUMENTS_BAD),
     }
 }
 
@@ -280,22 +309,158 @@ mod tests {
         assert!(tlv(&[0x04, 0x82, 0x00, 0x90]).is_none(), "leading zero length octet");
     }
 
+    /// The educational profile is process-global: tests that select or clear it must not overlap.
+    fn profile_lock() -> std::sync::MutexGuard<'static, ()> {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// True when the call got past the bridge's own routing and decoding (the engine, which is not
+    /// initialised in these unit tests, answered), as opposed to being refused by the bridge.
+    fn reached_the_engine(rv: u32) -> bool {
+        !matches!(rv, CKR_ARGUMENTS_BAD | CKR_DATA_INVALID | CKR_FUNCTION_NOT_SUPPORTED)
+    }
+
+    fn begin_receive_der() -> Vec<u8> {
+        let b = repl::admin::BeginReceive {
+            version: 1,
+            operation: repl::asn1::Operation::LiveClone,
+            source_challenge: repl::asn1::octets(&[1u8; 32]),
+            domain_id: repl::asn1::octets(&[2u8; 32]),
+            requested_policy: repl::asn1::octets(&[3u8; 48]),
+        };
+        repl::asn1::to_der(&b).unwrap()
+    }
+
+    fn begin_receive_flat() -> Vec<u8> {
+        let mut v = vec![0u8];
+        v.extend_from_slice(&[1u8; 32]);
+        v.extend_from_slice(&[2u8; 32]);
+        v.extend_from_slice(&[3u8; 48]);
+        v
+    }
+
     #[test]
     fn refuses_unless_the_educational_profile_is_selected() {
+        let _g = profile_lock();
         repl::clear_profile();
         assert_eq!(dispatch(Ok(1), IFACE_V1, 2, b"x").0, CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 1, b"").0, CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY_TEST, 1, b"").0, CKR_FUNCTION_NOT_SUPPORTED);
     }
 
     #[test]
     fn kmip_function_value_zero_is_refused_because_it_is_one_based() {
+        let _g = profile_lock();
         repl::select_educational_profile();
         assert_eq!(dispatch(Ok(1), IFACE_V1, 0, b"").0, CKR_ARGUMENTS_BAD);
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 0, b"").0, CKR_ARGUMENTS_BAD);
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY_TEST, 0, b"").0, CKR_ARGUMENTS_BAD);
         repl::clear_profile();
     }
 
     #[test]
     fn interface_names_are_exact() {
-        assert!(handles(Some(IFACE_V1)) && handles(Some(IFACE_CEREMONY_TEST)));
+        assert_eq!(IFACE_CEREMONY, "PQCTODAY_KEY_REPLICATION_CEREMONY_1_0");
+        assert!(handles(Some(IFACE_V1)) && handles(Some(IFACE_CEREMONY)) && handles(Some(IFACE_CEREMONY_TEST)) && handles(Some(IFACE_ADMIN)));
         assert!(!handles(Some("PKCS 11")) && !handles(None) && !handles(Some("PQCTODAY_KEY_REPLICATION_1_")));
+        assert!(!handles(Some("PQCTODAY_KEY_REPLICATION_CEREMONY_2_0")) && !handles(Some("PQCTODAY_KEY_REPLICATION_CEREMONY_1_0 ")));
+    }
+
+    /// The real ceremony interface takes the BeginReceive DER (addendum §6.9) and refuses the
+    /// old flat form; the other three calls keep their envelopes.
+    #[test]
+    fn the_real_ceremony_interface_takes_begin_receive_der() {
+        let _g = profile_lock();
+        repl::select_educational_profile();
+        // BeginReceive (function 2).
+        assert!(reached_the_engine(dispatch(Ok(1), IFACE_CEREMONY, 2, &begin_receive_der()).0), "DER is routed to the engine");
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 2, &begin_receive_flat()).0, CKR_DATA_INVALID, "the flat form is not DER");
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 2, b"").0, CKR_DATA_INVALID);
+        let mut trailing = begin_receive_der();
+        trailing.push(0);
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 2, &trailing).0, CKR_DATA_INVALID, "trailing bytes are refused");
+        // IssueSourceChallenge (1) takes no input; CancelReceive (3) takes exactly 32 bytes.
+        assert!(reached_the_engine(dispatch(Ok(1), IFACE_CEREMONY, 1, b"").0));
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 1, b"x").0, CKR_ARGUMENTS_BAD);
+        assert!(reached_the_engine(dispatch(Ok(1), IFACE_CEREMONY, 3, &[7u8; 32]).0));
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 3, &[7u8; 31]).0, CKR_ARGUMENTS_BAD);
+        // AttestKey (4) needs a strict KeyCall; nothing beyond function 4 exists.
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 4, b"junk").0, CKR_DATA_INVALID);
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY, 5, b"").0, CKR_ARGUMENTS_BAD);
+        assert_eq!(dispatch(Err(()), IFACE_CEREMONY, 1, b"").0, CKR_USER_NOT_LOGGED_IN);
+        repl::clear_profile();
+    }
+
+    /// Decision (plan note 2026-10-04): the old lab name stays as a deprecated alias for one
+    /// release, with its flat BeginReceive input, so archived courier builds keep working. It does
+    /// not accept the DER form. Remove this test together with the alias.
+    #[test]
+    fn the_old_test_name_is_a_deprecated_alias_with_the_flat_input() {
+        let _g = profile_lock();
+        repl::select_educational_profile();
+        assert!(reached_the_engine(dispatch(Ok(1), IFACE_CEREMONY_TEST, 2, &begin_receive_flat()).0), "flat form still routed");
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY_TEST, 2, &begin_receive_der()).0, CKR_ARGUMENTS_BAD, "DER is not the alias's form");
+        let mut bad_op = begin_receive_flat();
+        bad_op[0] = 9;
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY_TEST, 2, &bad_op).0, CKR_ARGUMENTS_BAD);
+        assert!(reached_the_engine(dispatch(Ok(1), IFACE_CEREMONY_TEST, 1, b"").0));
+        assert!(reached_the_engine(dispatch(Ok(1), IFACE_CEREMONY_TEST, 3, &[7u8; 32]).0));
+        assert_eq!(dispatch(Ok(1), IFACE_CEREMONY_TEST, 5, b"").0, CKR_ARGUMENTS_BAD);
+        repl::clear_profile();
+    }
+
+    #[test]
+    fn an_unknown_ceremony_version_is_not_served() {
+        let _g = profile_lock();
+        repl::select_educational_profile();
+        assert_eq!(dispatch(Ok(1), "PQCTODAY_KEY_REPLICATION_CEREMONY_2_0", 1, b"").0, CKR_FUNCTION_NOT_SUPPORTED);
+        repl::clear_profile();
+    }
+}
+
+#[cfg(test)]
+mod admin_meta_tests {
+    use super::*;
+    use crate::server::conn_meta::{self, ConnMeta};
+    use softhsmrustv3::app_context::{self, ContextGuard};
+
+    /// A-16: the application context the admin path creates carries the certificate hash and
+    /// listener of the connection being served, not zeros, so the engine's audit lines name the
+    /// certificate that made the call. (The engine side, which writes these fields into the audit
+    /// line, is tested in rust/tests/replication_admin.rs.)
+    #[test]
+    fn the_admin_context_carries_the_connection_certificate_hash() {
+        let meta = ConnMeta::from_leaf(b"client-leaf-der", "10.77.0.1:5696".into());
+        let _scope = conn_meta::enter(Some(meta.clone()));
+        let guard = ContextGuard::new(admin_context_meta());
+        let got = app_context::context_meta(guard.id()).expect("context exists");
+        assert_eq!(got.client_cert_sha256, meta.client_cert_sha256);
+        assert_ne!(got.client_cert_sha256, [0u8; 32], "not the all-zero placeholder");
+        assert_eq!(got.listener, "10.77.0.1:5696");
+        assert_eq!(got.role, ROLE_ADMIN_CN);
+    }
+
+    #[test]
+    fn a_different_connection_gets_a_different_hash() {
+        let a = ConnMeta::from_leaf(b"cert-a", "a:1".into());
+        let b = ConnMeta::from_leaf(b"cert-b", "b:2".into());
+        let ha = {
+            let _s = conn_meta::enter(Some(a));
+            admin_context_meta().client_cert_sha256
+        };
+        let hb = {
+            let _s = conn_meta::enter(Some(b));
+            admin_context_meta().client_cert_sha256
+        };
+        assert_ne!(ha, hb);
+    }
+
+    #[test]
+    fn without_a_tls_connection_the_fields_keep_their_empty_values() {
+        assert!(conn_meta::current().is_none());
+        let m = admin_context_meta();
+        assert_eq!(m.client_cert_sha256, [0u8; 32]);
+        assert_eq!(m.role, ROLE_ADMIN_CN);
     }
 }

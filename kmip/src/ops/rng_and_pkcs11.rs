@@ -120,7 +120,7 @@ pub fn pkcs11(
     // engine and returns its actual CK_INFO bytes — real identity, not
     // fabricated. Any other function code is honestly unimplemented.
     use std::sync::atomic::Ordering;
-    // Educational protected-replication interfaces (pre-ceremony-ABI). Only in builds with
+    // Educational protected-replication interfaces. Only in builds with
     // the non-default feature; everything else below is the unchanged standard path.
     #[cfg(feature = "educational-replication")]
     if super::replication_bridge::handles(req.interface.as_deref()) {

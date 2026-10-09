@@ -559,6 +559,17 @@ run_step_bg "rust replication K2-K4 acceptance (educational-replication)" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-fhe,test-support --lib --test replication_k2 --test replication_k3 --test replication_k4 --test replication_store --test replication_store_contexts --test replication_admin_stage --test replication_admin --test replication_fhe_p1 --test replication_fhe_p2" \
   rust-replication
 
+# KMIP bridge for the educational replication interfaces (2026-10-04). The
+# kmip crate's own `educational-replication` feature (the PKCS#11-operation
+# binding in kmip/src/ops/replication_bridge.rs and the lab tool
+# repl_edu_courier) was built by no gate step and no CI job, so a change there
+# compiled and ran nowhere until a board run. This lane runs the bridge's unit
+# tests with the feature and builds the courier. Its own lane, so its target
+# directory never collides with the kmip lane above.
+run_step_bg "kmip educational bridge (educational-replication): tests + courier build" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-replication --lib replication_bridge && cargo build --features educational-replication --bin repl_edu_courier" \
+  kmip-replication
+
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
 # all before 2026-08-26 — its three-transport parity suite
 # (remoting/acceptance) was developer-run only, so a proto/service change
