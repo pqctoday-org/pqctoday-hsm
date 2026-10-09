@@ -11,7 +11,7 @@
  * Ad-hoc executable, not a CppUnit suite addition — same precedent as
  * test_classic_mceliece_kat.cpp / test_acvp_lms_sigver.cpp.
  *
- * Build: g++ -o test_classic_mceliece_cross_engine test_classic_mceliece_cross_engine.cpp -ldl -I src/lib/pkcs11 -std=c++17
+ * Build: (from the repo root) g++ -o test_classic_mceliece_cross_engine tests/test_classic_mceliece_cross_engine.cpp -ldl -I src/lib/pkcs11 -std=c++17
  * Usage: ./test_classic_mceliece_cross_engine keygen <variant> <pk_out> <sk_out> [libPath]
  *        ./test_classic_mceliece_cross_engine encaps <variant> <pk_in> <ct_out> <ss_out> [libPath]
  *        ./test_classic_mceliece_cross_engine decaps <variant> <sk_in> <ct_in> <ss_out> [libPath]
@@ -34,7 +34,7 @@
 #define NULL_PTR 0
 #endif
 
-#include "src/lib/pkcs11/pkcs11.h"
+#include "../src/lib/pkcs11/pkcs11.h"
 
 #define CKK_PQCTODAY_CLASSIC_MCELIECE              0x80000002UL
 #define CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN 0x80000003UL

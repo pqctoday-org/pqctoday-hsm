@@ -206,6 +206,19 @@ Not wired into `package.json` but present and runnable directly with `node`:
   PKCS#11, since `C_CreateObject` doesn't support HSS key import).
 - [`test_raw.cpp`](test_raw.cpp) — minimal raw-OpenSSL SLH-DSA keygen probe,
   independent of PKCS#11 entirely.
+- [`test_acvp_lms_sigver.cpp`](test_acvp_lms_sigver.cpp) — ad-hoc executable
+  (not in any CMake target) that checks `hss_validate_signature()` against all
+  320 NIST ACVP LMS sigVer demo vectors.
+- [`test_classic_mceliece_kat.cpp`](test_classic_mceliece_kat.cpp) — ad-hoc
+  executable: Classic McEliece decapsulation against the official NIST Round-4
+  KAT vectors, all 10 parameter sets.
+- [`test_classic_mceliece_cross_engine.cpp`](test_classic_mceliece_cross_engine.cpp)
+  — ad-hoc CLI for the C++ side of the C++/Rust Classic McEliece cross-engine
+  check (keygen / encaps / decaps through files).
+
+The three ad-hoc `.cpp` executables above are built by hand from the repo root;
+each file's header comment has the exact `g++` line. Their compiled output is
+ignored by git.
 
 **[`differential/`](differential/README.md)** is a separate, larger harness:
 it drives the C++ and Rust engines through identical call sequences and
@@ -236,6 +249,9 @@ tests/
 ├── test-ecdsa-sha512.mjs     CKM_ECDSA_SHA512/P-256 unit test
 ├── test_acvp_lms_sigver.py   NIST ACVP LMS sigVer vectors (direct, no PKCS#11)
 ├── test_raw.cpp              raw-OpenSSL SLH-DSA keygen probe
+├── test_acvp_lms_sigver.cpp  ad-hoc: NIST ACVP LMS sigVer demo vectors
+├── test_classic_mceliece_kat.cpp          ad-hoc: Classic McEliece decaps vs NIST KATs
+├── test_classic_mceliece_cross_engine.cpp ad-hoc: C++ side of the cross-engine check
 ├── differential/              cross-engine differential harness — see its own README
 ├── tokens/                    leftover token dir from a prior local run
 └── README.md                 This file

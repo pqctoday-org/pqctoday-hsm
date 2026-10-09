@@ -7,7 +7,7 @@
  * Tests hss_validate_signature() from the hash-sigs C library against all 320
  * NIST ACVP LMS sigVer demo vectors (80 parameter sets × 4 tests each).
  *
- * Build: g++ -o test_acvp_lms_sigver test_acvp_lms_sigver.cpp -ldl -I src/lib/pkcs11 -std=c++17
+ * Build: (from the repo root) g++ -o test_acvp_lms_sigver tests/test_acvp_lms_sigver.cpp -ldl -I src/lib/pkcs11 -std=c++17
  * Run:   SOFTHSM2_CONF=... ./test_acvp_lms_sigver
  */
 
@@ -24,7 +24,7 @@
 #define NULL_PTR 0
 #endif
 
-#include "src/lib/pkcs11/pkcs11.h"
+#include "../src/lib/pkcs11/pkcs11.h"
 
 static CK_FUNCTION_LIST_PTR fl;
 static CK_SESSION_HANDLE hSess;

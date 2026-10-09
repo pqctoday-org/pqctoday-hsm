@@ -18,7 +18,7 @@
  * a "Tests.cpp" file under src/lib/crypto/test/; cryptotest's SOURCES list
  * covers only pre-PQC classical algorithms).
  *
- * Build: g++ -o test_classic_mceliece_kat test_classic_mceliece_kat.cpp -ldl -I src/lib/pkcs11 -std=c++17
+ * Build: (from the repo root) g++ -o test_classic_mceliece_kat tests/test_classic_mceliece_kat.cpp -ldl -I src/lib/pkcs11 -std=c++17
  * Run:   ./test_classic_mceliece_kat [path to built libsofthsmv3.so]
  */
 
@@ -39,7 +39,7 @@
 #define NULL_PTR 0
 #endif
 
-#include "src/lib/pkcs11/pkcs11.h"
+#include "../src/lib/pkcs11/pkcs11.h"
 
 // Vendor extension constants — src/lib/vendor_mechanisms.h (kept in sync by
 // hand here since that header pulls in the engine's own config.h, which
