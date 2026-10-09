@@ -92,7 +92,13 @@ jobs:
               echo "no committed lock for $crate -- generating one to audit"
               (cd "$crate" && cargo generate-lockfile)
             fi
-            (cd "$crate" && cargo audit --deny warnings --ignore RUSTSEC-2023-0071)
+            # Same ignores as rust/deny.toml (reasons there and in the F6
+            # record): rsa Marvin, plus bincode and paste (unmaintained, only
+            # under the non-default educational-fhe feature).
+            (cd "$crate" && cargo audit --deny warnings \
+              --ignore RUSTSEC-2023-0071 \
+              --ignore RUSTSEC-2025-0141 \
+              --ignore RUSTSEC-2024-0436)
             echo "::endgroup::"
           done
 
