@@ -525,6 +525,80 @@ fn k4_every_crash_window_recovers_to_exactly_one_key() {
     }
 }
 
+/// Fill `slot`'s consumption ledger with synthetic committed entries until it
+/// holds `total` entries. The entries carry random transaction ids and mark
+/// nothing as installed, so they only occupy capacity.
+fn fill_ledger_to(w: &World, d: usize, total: usize) {
+    use repl::asn1::LedgerRecord;
+    use repl::records::{self, ROLE_LEDGER};
+    let have = records::list(w.tokens[d].slot, ROLE_LEDGER).len();
+    let mut objs = Vec::new();
+    for i in have..total {
+        let mut txid = [0u8; 32];
+        txid[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        txid[8] = 0xfe; // never a real transaction id (real ones are random)
+        let rec = LedgerRecord {
+            transaction_id: repl::asn1::octets(&txid),
+            state: 2,
+            package_hash: repl::asn1::octets(&[0u8; 48]),
+            installed_unique_id: String::new(),
+            receipt: repl::asn1::octets(&[]),
+        };
+        objs.push(records::new_record(ROLE_LEDGER, CKO_DATA, "consumption ledger entry", Vec::new(), repl::asn1::to_der(&rec).unwrap(), true));
+    }
+    softhsmrustv3::state::commit_objects_atomically(w.tokens[d].user, objs, Vec::new()).expect("fill ledger");
+    assert_eq!(records::list(w.tokens[d].slot, ROLE_LEDGER).len(), total);
+}
+
+/// Spec §10 / review K0B-R-15: the destination consumption ledger holds at
+/// most 4,096 entries. The bound is enforced, not just declared: a full ledger
+/// refuses a new import with CKR_DEVICE_MEMORY and reserves and installs
+/// nothing; the 4,096th entry is accepted; and an import that already holds
+/// its reservation still completes when the ledger is full.
+#[test]
+fn k4_ledger_capacity_is_enforced_k0b_r15() {
+    use repl::records::{self, ROLE_LEDGER, MAX_LEDGER_ENTRIES};
+    assert_eq!(MAX_LEDGER_ENTRIES, 4096);
+    let _g = lock();
+
+    // 1. Full ledger: a fresh import is refused and leaves no trace.
+    let w = world(2);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    let lineage = native::get_attribute(w.tokens[0].user, src, CKA_PQCTODAY_REPLICATION_LINEAGE_ID).unwrap();
+    let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    fill_ledger_to(&w, 1, MAX_LEDGER_ENTRIES);
+    assert_eq!(err(import(&w, 1, &pkg)), Err(CKR_DEVICE_MEMORY), "full ledger refuses a new import");
+    assert_eq!(records::list(w.tokens[1].slot, ROLE_LEDGER).len(), MAX_LEDGER_ENTRIES, "nothing reserved");
+    assert_eq!(replicas_with_lineage(w.tokens[1].slot, &lineage), 0, "nothing installed");
+
+    // 2. One slot free: the import is accepted and takes the last entry.
+    let w = world(2);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    let lineage = native::get_attribute(w.tokens[0].user, src, CKA_PQCTODAY_REPLICATION_LINEAGE_ID).unwrap();
+    let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    fill_ledger_to(&w, 1, MAX_LEDGER_ENTRIES - 1);
+    import(&w, 1, &pkg).expect("the 4,096th entry is accepted");
+    assert_eq!(records::list(w.tokens[1].slot, ROLE_LEDGER).len(), MAX_LEDGER_ENTRIES);
+    assert_eq!(replicas_with_lineage(w.tokens[1].slot, &lineage), 1);
+
+    // 3. An import that already reserved its entry completes on a full ledger.
+    let w = world(2);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::Aes(32), &ps);
+    let lineage = native::get_attribute(w.tokens[0].user, src, CKA_PQCTODAY_REPLICATION_LINEAGE_ID).unwrap();
+    let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    repl::inject_crash(Some(CrashPoint::ImportAfterReserve));
+    assert_eq!(err(import(&w, 1, &pkg)), Err(CKR_DEVICE_ERROR), "crash after the reservation");
+    repl::inject_crash(None);
+    assert_eq!(records::list(w.tokens[1].slot, ROLE_LEDGER).len(), 1, "one reservation survived");
+    fill_ledger_to(&w, 1, MAX_LEDGER_ENTRIES);
+    import(&w, 1, &pkg).expect("the reserved import completes although the ledger is now full");
+    assert_eq!(records::list(w.tokens[1].slot, ROLE_LEDGER).len(), MAX_LEDGER_ENTRIES, "no extra entry");
+    assert_eq!(replicas_with_lineage(w.tokens[1].slot, &lineage), 1, "exactly one key");
+}
+
 /// Simulate a process restart: serialize nonvolatile state, wipe the engine,
 /// reload, and log the users back in.
 fn restart(w: &mut World) {

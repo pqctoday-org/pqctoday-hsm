@@ -133,8 +133,11 @@ recomputed by the engine from the object; only the nonce comes from outside.
   roll back the snapshot, including the ledger. Host clock only.
 - The K2 CSR carries proof of possession but no LAMPS CSR-attestation statement.
 - `deviceID` binds only to the device certificate SPKI; there is no hardware identity before K6.
-- Ledger capacity exhaustion (4,096) is enforced but not exercised by a test, because it
-  would need 4,096 imports.
+- Ledger capacity exhaustion (4,096) is exercised by `k4_ledger_capacity_is_enforced_k0b_r15`
+  (2026-10-04): the ledger is pre-filled with synthetic committed entries, so no 4,096 imports
+  are needed. A full ledger refuses a new import with `CKR_DEVICE_MEMORY` and reserves nothing;
+  the 4,096th entry is accepted; an import that already holds its reservation completes on a
+  full ledger. Weakening the bound (`>=` to `>`) makes the test fail.
 - The host verifier shares its verification core with the engine. K3 agreement tests
   prove that trust inputs from public bytes and trust inputs from enrolled records give
   the same verdicts. They do not prove two independent implementations.
