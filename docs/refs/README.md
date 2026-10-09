@@ -41,6 +41,17 @@ Unlike the v3.2 table above, this is not a stage document with a SHA-256 to
 verify against a publisher artifact; it is a live, mutable git branch, and
 every fact in it is subject to change before ratification.
 
+## HPKE — RFC 9180 and the post-quantum draft
+
+Plain-text copies used when auditing the `CKM_HPKE` mechanism family. Each was fetched from the publisher on 2026-10-09 and compared byte for byte with the copy kept here.
+
+| File | Document | Stage | Date | SHA-256 |
+|---|---|---|---|---|
+| `rfc9180-hpke.txt` | RFC 9180, Hybrid Public Key Encryption | RFC (Informational) | 2022-02 | `f45a8b7c…1f8f6` |
+| `draft-ietf-hpke-pq-05.txt` | draft-ietf-hpke-pq-05, Post-Quantum and Post-Quantum/Traditional Hybrid Algorithms for HPKE | Internet-Draft, revision 05 | 2026-07-06 | `c3afa398…1ac9c5d` |
+
+Sources: `https://www.rfc-editor.org/rfc/rfc9180.txt` and `https://www.ietf.org/archive/id/draft-ietf-hpke-pq-05.txt`. Revision 05 was the latest on the IETF datatracker on 2026-10-09; the draft expires 2027-01-07 and is unpublished work in progress, so re-check the datatracker before citing it as current.
+
 ## Refreshing these
 
 PKCS#11 moves faster than it looks — CSD01 to ratified Standard took roughly seven months. Before citing any status, re-check the publisher rather than trusting this table:
