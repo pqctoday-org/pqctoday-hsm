@@ -1,7 +1,8 @@
 # cargo-deny policy for the Rust engine (F6 licence/SBOM record,
 # docs/f6-licence-sbom-decision-2026-10-02.md). Run from rust/:
 #   cargo deny [--features educational-replication|educational-fhe] check
-# Not a gate step: cargo-deny is not part of the gate container.
+# Run automatically by the `rust-deny` job in .github/workflows/dependency-audit.yml
+# (not a gate step: cargo-deny is not part of the gate container).
 
 [graph]
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "wasm32-unknown-unknown"]
@@ -10,6 +11,13 @@ all-features = false
 [advisories]
 # RustSec advisory database; unmaintained/unsound notices are reported too.
 yanked = "deny"
+# Every ignore needs a reason and an owner decision or record. Keep this list in
+# step with the `--ignore` in .github/workflows/dependency-audit.yml (cargo audit).
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin): no native RSA private-key operation runs in the crate since 2026-10-03 (AWS-LC does them); it remains for the browser build, the openpgp fork and public-key/parsing uses. F6 record section 4." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained: transitive dependency of tfhe 1.8.1, reached only with the non-default educational-fhe feature, which no shipped bundle enables. F6 record section 4." },
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained: transitive dependency of tfhe 1.8.1, reached only with the non-default educational-fhe feature, which no shipped bundle enables. F6 record section 4." },
+]
 
 [licenses]
 # Permissive licences compatible with the crate's BSD-2-Clause, plus the

@@ -347,7 +347,7 @@ frodo-kem = { version = "0.1", default-features = false, features = [
 # used to be (BSI's Category-5 mceliece6688128 pick only) — the v3+ ciphertext fix
 # (K = H(1,e,C), not the non-spec v2.0.2 K = H(1,e,C,H(2,e))) still applies, since
 # this fork is derived from the same 3.1.0 tag.
-classic-mceliece-multi = { path = "classic-mceliece-multi" }
+classic-mceliece-multi = { path = "classic-mceliece-multi", version = "0.1.0" }
 
 # FHE browser matrix (FHE plan §7): on wasm32-unknown-unknown TFHE-rs has an
 # entropy seeder only with its `__wasm_api` feature (via
