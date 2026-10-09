@@ -254,10 +254,10 @@
       "id": "LEGAL-EC-PRIVATE-VALUE-LEADING-ZERO",
       "status": "legal",
       "scenario": "encoding.wrap_private_key_pkcs8|encoding.ec_private_value_leading_zero",
-      "path": "created_priv.CKA_VALUE.len|created_priv.CKA_VALUE.enc|unwrapped_priv.CKA_VALUE.len|unwrapped_priv.CKA_VALUE.enc",
-      "cpp": "30|31|RAW",
-      "rust": "32|RAW_32",
-      "justification": "For a P-256 private key whose value d has a leading 0x00 byte, the C++ engine returns CKA_VALUE as the minimal big-endian integer (31 bytes, or 30 for two zero bytes) and the Rust engine as the 32-byte field-length value. Both are valid encodings of the same integer. Found 2026-09-27 when a gate failed on the random-key scenario (about one run in 256); encoding.ec_private_value_leading_zero now exercises it with a fixed d on every run. Matches only these CKA_VALUE length/encoding observations and only the exact values: any other length on either side still fails. Adjudicated from the spec text and confirmed by an independent second read (Codex gpt-5.6-sol, 2026-09-27: 'legal difference (both conform)'; the 32768 example is illustrative, not a minimality rule).",
+      "path": "created_priv.CKA_VALUE.len|unwrapped_priv.CKA_VALUE.len",
+      "cpp": "30|31",
+      "rust": "32",
+      "justification": "For a P-256 private key whose value d has a leading 0x00 byte, the C++ engine returns CKA_VALUE as the minimal big-endian integer (31 bytes, or 30 for two zero bytes) and the Rust engine as the 32-byte field-length value. Both are valid encodings of the same integer. Found 2026-09-27 when a gate failed on the random-key scenario (about one run in 256); encoding.ec_private_value_leading_zero now exercises it with a fixed d on every run. Matches only these CKA_VALUE length observations and only the exact values: any other length on either side still fails. (Until 2026-10-09 this entry also covered the .enc class of these two paths, RAW vs RAW_32; the harness no longer classifies a private key's raw CKA_VALUE, so only the length differs.) Adjudicated from the spec text and confirmed by an independent second read (Codex gpt-5.6-sol, 2026-09-27: 'legal difference (both conform)'; the 32768 example is illustrative, not a minimality rule).",
       "citation": "PKCS#11 v3.2 §4 (Objects), attribute data types: 'Big integer — a string of CK_BYTEs representing an unsigned integer of arbitrary size, most-significant byte first (e.g., the integer 32768 is represented as the 2-byte string 0x80 0x00)'. §6.3.4 Table 65: 'CKA_VALUE — Big integer — ANSI X9.62 private value d'. Neither fixes a length. The v3.3 working draft only adds 'nonempty'."
     },
     {
