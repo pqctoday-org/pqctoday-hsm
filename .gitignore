@@ -9,6 +9,10 @@ build-pqctoday/
 build_fresh/
 build_test/
 test_tokens/
+# Compiled output of the ad-hoc executables in tests/ (see tests/README.md)
+/test_acvp_lms_sigver
+/test_classic_mceliece_kat
+/test_classic_mceliece_cross_engine
 build-wasm-fresh/
 build-wasm-native/
 build_remediation/
