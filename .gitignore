@@ -8,6 +8,7 @@ build-san/
 build-pqctoday/
 build_fresh/
 build_test/
+test_tokens/
 build-wasm-fresh/
 build-wasm-native/
 build_remediation/
