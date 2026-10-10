@@ -403,9 +403,11 @@ fn type_extension(key: &SourceKey) -> Result<Option<Vec<u8>>, u32> {
 }
 
 /// `typeConstraintHash` a replication policy must carry for `key_type`.
-fn profile_constraint_for(key_type: u32) -> [u8; 48] {
+fn profile_constraint_for(key_type: u32, attrs: &crate::crypto::handlers::Attributes) -> [u8; 48] {
     if key_type == CKK_PQCTODAY_FHE {
-        super::fhe::profile_constraint_hash()
+        // The seed's scheme selects its profile (TFHE, or streamed CKKS).
+        let scheme = attrs.get(&CKA_PQCTODAY_FHE_SCHEME).and_then(|v| std::str::from_utf8(v).ok()).unwrap_or(super::fhe::FHE_SCHEME_TFHE);
+        super::fhe::profile_constraint_hash_for(scheme).unwrap_or([0u8; 48])
     } else {
         super::sha384(b"")
     }
@@ -571,7 +573,7 @@ pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> R
     if req.domain_id.as_bytes() != src_pol.domain {
         return deny(slot, Reject("domain"));
     }
-    if src_pol.type_constraint_hash != profile_constraint_for(key.key_type) {
+    if src_pol.type_constraint_hash != profile_constraint_for(key.key_type, &key.attrs) {
         return deny(slot, Reject("policy profile does not match key type"));
     }
     // Requested destination policy: enrolled here too, equal or stricter.

@@ -24,6 +24,8 @@ pub const ROLE_FHE_DECRYPT_POLICY: u8 = 13;
 
 /// The only scheme and generator version P1 accepts.
 pub const FHE_SCHEME_TFHE: &str = "tfhe-rs";
+/// Streamed CKKS (Lattigo-compatible evaluation keys), educational-fhe only.
+pub const FHE_SCHEME_CKKS: &str = "ckks-stream";
 pub const FHE_GENERATOR_VERSIONS: &[u32] = &[1];
 /// Opaque P1 seed length (a TFHE-rs client-key seed is 128 bits; 32 bytes
 /// leaves room and is what the fixture uses).
@@ -52,8 +54,33 @@ pub const TFHE_COMMIT: [u8; 20] = [
     0xb6,
 ];
 
+/// Scheme of a registered parameter set.
+pub fn scheme_for(param_set: u32) -> Option<&'static str> {
+    if FHE_PARAM_SETS.iter().any(|(id, _)| *id == param_set) {
+        return Some(FHE_SCHEME_TFHE);
+    }
+    #[cfg(feature = "educational-fhe")]
+    if super::fhe_ckks::params::find(param_set).is_some() {
+        return Some(FHE_SCHEME_CKKS);
+    }
+    None
+}
+
 /// DER of `FheParamSetV1` for a registry ID.
 pub fn param_set_der(param_set: u32) -> Option<Vec<u8>> {
+    #[cfg(feature = "educational-fhe")]
+    if let Some(ps) = super::fhe_ckks::params::find(param_set) {
+        return asn1::to_der(&FheParamSetV1 {
+            id: ps.id,
+            library: "lattigo".into(),
+            version: "6.2.0".into(),
+            commit: asn1::octets(&super::fhe_ckks::params::fingerprint(ps)),
+            param_name: ps.name.into(),
+            config: super::fhe_ckks::params::CONFIG_V1.into(),
+            kdf: "sp800-108-ctr-hmac-sha384/v1".into(),
+        })
+        .ok();
+    }
     let (id, name) = FHE_PARAM_SETS.iter().find(|(id, _)| *id == param_set)?;
     asn1::to_der(&FheParamSetV1 {
         id: *id,
@@ -75,6 +102,15 @@ pub fn param_hash(param_set: u32) -> Option<[u8; 48]> {
 
 pub fn library_id() -> &'static str {
     "tfhe-rs 1.8.1 187fc0b9"
+}
+
+/// `CKA_PQCTODAY_FHE_LIBRARY` for a registered parameter set.
+pub fn library_for(param_set: u32) -> &'static str {
+    if scheme_for(param_set) == Some(FHE_SCHEME_CKKS) {
+        "lattigo 6.2.0 streamed-evk/v1"
+    } else {
+        library_id()
+    }
 }
 
 /// P0B §3 / amendment A1: the seed's fixed derive template, a profile
@@ -116,6 +152,38 @@ pub fn profile_constraint_der() -> Vec<u8> {
 /// `typeConstraintHash` a replication policy must carry to govern FHE seeds.
 pub fn profile_constraint_hash() -> [u8; 48] {
     super::sha384(&profile_constraint_der())
+}
+
+/// Canonical DER of the version-1 streamed-CKKS profile constraint.
+#[cfg(feature = "educational-fhe")]
+pub fn ckks_profile_constraint_der() -> Vec<u8> {
+    asn1::to_der(&FheProfileConstraint {
+        version: 1,
+        scheme: FHE_SCHEME_CKKS.to_string(),
+        param_sets: super::fhe_ckks::params::CKKS_PARAM_SETS.iter().map(|p| p.id).collect(),
+    })
+    .expect("static constraint")
+}
+
+/// `typeConstraintHash` of the streamed-CKKS seed profile.
+#[cfg(feature = "educational-fhe")]
+pub fn ckks_profile_constraint_hash() -> [u8; 48] {
+    super::sha384(&ckks_profile_constraint_der())
+}
+
+/// The profile hash that governs seeds of `scheme`.
+pub fn profile_constraint_hash_for(scheme: &str) -> Option<[u8; 48]> {
+    match scheme {
+        FHE_SCHEME_TFHE => Some(profile_constraint_hash()),
+        #[cfg(feature = "educational-fhe")]
+        FHE_SCHEME_CKKS => Some(ckks_profile_constraint_hash()),
+        _ => None,
+    }
+}
+
+/// Every FHE profile hash a replication policy may carry.
+pub fn is_fhe_profile_hash(h: &[u8; 48]) -> bool {
+    [FHE_SCHEME_TFHE, FHE_SCHEME_CKKS].iter().any(|s| profile_constraint_hash_for(s).as_ref() == Some(h))
 }
 
 // ── Typed decryption policy (FHE plan §6.3) ────────────────────────────────
@@ -297,7 +365,7 @@ pub fn validate_descriptor(der: &[u8], header_lineage: &[u8]) -> Result<FheRecov
     let bad = CKR_ENCRYPTED_DATA_INVALID;
     let d: FheRecoveryDescriptor = asn1::decode_strict(der, MAX_DESCRIPTOR_DER).map_err(|_| bad)?;
     if d.version != 1
-        || d.scheme != FHE_SCHEME_TFHE
+        || scheme_for(d.param_set) != Some(d.scheme.as_str())
         || !FHE_GENERATOR_VERSIONS.contains(&d.generator_version)
         || param_hash(d.param_set).map(|h| h.to_vec()) != Some(d.param_hash.as_bytes().to_vec())
         || d.lineage_id.as_bytes() != header_lineage
@@ -321,11 +389,38 @@ pub fn generate_fhe_seed(
     label: Option<&[u8]>,
     id: Option<&[u8]>,
 ) -> Result<u32, u32> {
+    generate_fhe_seed_inner(user_session, param_set, replication_policy, decrypt_policy, label, id, None)
+}
+
+/// KEY_GEN with a caller-chosen seed value, for known-answer runs only
+/// (test-support builds; never in a shipped artefact).
+#[cfg(feature = "test-support")]
+pub fn generate_fhe_seed_with_value_for_test(
+    user_session: u32,
+    param_set: u32,
+    replication_policy: &[u8; 48],
+    decrypt_policy: &[u8; 48],
+    seed: &[u8; 32],
+    id: &[u8],
+) -> Result<u32, u32> {
+    generate_fhe_seed_inner(user_session, param_set, replication_policy, decrypt_policy, Some(b"KAT seed (test-support)"), Some(id), Some(*seed))
+}
+
+fn generate_fhe_seed_inner(
+    user_session: u32,
+    param_set: u32,
+    replication_policy: &[u8; 48],
+    decrypt_policy: &[u8; 48],
+    label: Option<&[u8]>,
+    id: Option<&[u8]>,
+    fixed_seed: Option<[u8; 32]>,
+) -> Result<u32, u32> {
     use crate::state::{store_bool, store_ulong};
     super::require_profile()?;
     let slot = super::require_user_rw(user_session)?;
     let pol = records::parse_policy(&records::find_policy(slot, replication_policy).ok_or(CKR_TEMPLATE_INCONSISTENT)?)?;
-    if pol.type_constraint_hash != profile_constraint_hash() || find_decrypt_policy(slot, decrypt_policy).is_none() {
+    let scheme = scheme_for(param_set).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+    if Some(pol.type_constraint_hash) != profile_constraint_hash_for(scheme) || find_decrypt_policy(slot, decrypt_policy).is_none() {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
     // §6.2 F8: no caller-visible KDF on the seed; only the FHE mechanisms.
@@ -334,7 +429,10 @@ pub fn generate_fhe_seed(
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
     let ph = param_hash(param_set).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
-    let seed = super::random32()?;
+    let seed = match fixed_seed {
+        Some(v) => v,
+        None => super::random32()?,
+    };
     let lineage = super::random32()?;
     let mut a: crate::crypto::handlers::Attributes = Default::default();
     store_ulong(&mut a, CKA_CLASS, CKO_SECRET_KEY);
@@ -364,10 +462,10 @@ pub fn generate_fhe_seed(
     store_ulong(&mut a, CKA_KEY_GEN_MECHANISM, CKM_PQCTODAY_FHE_KEY_GEN);
     a.insert(CKA_VALUE, seed.to_vec());
     a.insert(CKA_DERIVE_TEMPLATE, seed_derive_template());
-    a.insert(CKA_PQCTODAY_FHE_SCHEME, FHE_SCHEME_TFHE.as_bytes().to_vec());
+    a.insert(CKA_PQCTODAY_FHE_SCHEME, scheme.as_bytes().to_vec());
     store_ulong(&mut a, CKA_PQCTODAY_FHE_PARAM_SET, param_set);
     a.insert(CKA_PQCTODAY_FHE_PARAM_HASH, ph.to_vec());
-    a.insert(CKA_PQCTODAY_FHE_LIBRARY, library_id().as_bytes().to_vec());
+    a.insert(CKA_PQCTODAY_FHE_LIBRARY, library_for(param_set).as_bytes().to_vec());
     a.insert(CKA_PQCTODAY_FHE_LINEAGE_ID, lineage.to_vec());
     a.insert(CKA_PQCTODAY_FHE_DECRYPT_POLICY, decrypt_policy.to_vec());
     a.insert(CKA_PQCTODAY_REPLICATION_POLICY_ID, replication_policy.to_vec());

@@ -115,6 +115,10 @@ pub(crate) fn seed_object(session: u32, h: u32, mechanism: u32) -> Result<(u32, 
 /// Derive fresh public material from the seed as a public SESSION object.
 pub fn derive_public(session: u32, h_seed: u32, kind: u32) -> Result<u32, u32> {
     let (slot, so) = seed_object(session, h_seed, CKM_PQCTODAY_FHE_DERIVE_PUBLIC)?;
+    if so.attrs.get(&CKA_PQCTODAY_FHE_SCHEME).map(|v| v.as_slice()) != Some(fhe::FHE_SCHEME_TFHE.as_bytes()) {
+        // A streamed-CKKS seed uses parameter version 2 (fhe_ckks::mech).
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
     if kind != PUBLIC_KIND_COMPRESSED_SERVER_KEY && kind != PUBLIC_KIND_COMPACT_PUBLIC_KEY {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
@@ -269,7 +273,7 @@ fn decrypt_value(ty: &FheType, input: &[u8], ck: &ClientKey) -> Option<u64> {
     }
 }
 
-fn refuse(slot: u32, why: &'static str) -> u32 {
+pub(crate) fn refuse(slot: u32, why: &'static str) -> u32 {
     super::note_refusal(why);
     super::oplog_event("fhe_decrypt_refused", slot, &[("reason", format!("\"{why}\""))]);
     CKR_ACTION_PROHIBITED
@@ -278,6 +282,9 @@ fn refuse(slot: u32, why: &'static str) -> u32 {
 /// `C_Decrypt(CKM_PQCTODAY_FHE_DECRYPT)`. `size_only` is the `pData == NULL`
 /// call: shape-level type gate only, no decryption, no counter (§5.3 step 3).
 pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], size_only: bool) -> Result<(usize, Option<DecryptOutput>), u32> {
+    if super::fhe_ckks::mech::is_ckks_seed(h_seed) {
+        return super::fhe_ckks::mech::decrypt(session, h_seed, recipient, input, size_only);
+    }
     let (slot, so) = seed_object(session, h_seed, CKM_PQCTODAY_FHE_DECRYPT)?;
     if input.is_empty() || input.len() > MAX_DECRYPT_INPUT {
         return Err(CKR_DATA_LEN_RANGE);
@@ -353,7 +360,7 @@ pub struct FheReleaseInfo {
 
 /// HPKE-seal the plaintext to the enrolled recipient and sign the release
 /// with this device's receipt-signing function key (§5.3, amendment A2).
-fn seal_release(slot: u32, attrs: &Attributes, policy_id: &[u8; 48], recipient: &[u8; 48], counter: u64, plain: &[u8]) -> Result<Vec<u8>, u32> {
+pub(crate) fn seal_release(slot: u32, attrs: &Attributes, policy_id: &[u8; 48], recipient: &[u8; 48], counter: u64, plain: &[u8]) -> Result<Vec<u8>, u32> {
     let lineage = attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).cloned().unwrap_or_default();
     let ek = recipient_key(slot, recipient).ok_or(CKR_ACTION_PROHIBITED)?;
     let info = asn1::to_der(&FheReleaseInfo {
@@ -522,23 +529,23 @@ mod tests {
 // on wasm32, 8 on 64-bit native), exactly as the rest of ffi.rs reads
 // CK_MECHANISM. A wrong length or version is CKR_MECHANISM_PARAM_INVALID.
 
-const W: usize = std::mem::size_of::<usize>();
+pub(crate) const W: usize = std::mem::size_of::<usize>();
 
-unsafe fn param_bytes<'a>(p: *const u8, len: usize, want: usize) -> Result<&'a [u8], u32> {
+pub(crate) unsafe fn param_bytes<'a>(p: *const u8, len: usize, want: usize) -> Result<&'a [u8], u32> {
     if p.is_null() || len != want {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     Ok(std::slice::from_raw_parts(p, len))
 }
 
-fn ulong_at(b: &[u8], off: usize) -> usize {
+pub(crate) fn ulong_at(b: &[u8], off: usize) -> usize {
     let mut v = [0u8; W];
     v.copy_from_slice(&b[off..off + W]);
     usize::from_le_bytes(v)
 }
 
 /// Raw CK_ATTRIBUTE triples → (type, value) pairs, bounded.
-unsafe fn read_template(t: *mut u8, n: u32) -> Result<Vec<(u32, Vec<u8>)>, u32> {
+pub(crate) unsafe fn read_template(t: *mut u8, n: u32) -> Result<Vec<(u32, Vec<u8>)>, u32> {
     if n == 0 {
         return Ok(Vec::new());
     }
@@ -559,7 +566,7 @@ unsafe fn read_template(t: *mut u8, n: u32) -> Result<Vec<(u32, Vec<u8>)>, u32> 
     Ok(out)
 }
 
-fn bool_of(v: &[u8]) -> Option<bool> {
+pub(crate) fn bool_of(v: &[u8]) -> Option<bool> {
     match v {
         [0] => Some(false),
         [1] => Some(true),
@@ -598,6 +605,10 @@ pub unsafe fn ffi_key_gen(session: u32, p_param: *const u8, param_len: usize, tm
 /// # Safety
 /// FFI pointers as for `C_DeriveKey`.
 pub unsafe fn ffi_derive_public(session: u32, base: u32, p_param: *const u8, param_len: usize, tmpl: *mut u8, n: u32) -> Result<u32, u32> {
+    // Parameter version 2 (six CK_ULONGs): streamed CKKS material.
+    if param_len == 6 * W {
+        return super::fhe_ckks::mech::ffi_derive_public_v2(session, base, p_param, param_len, tmpl, n);
+    }
     let b = param_bytes(p_param, param_len, 2 * W)?;
     if ulong_at(b, 0) != 1 {
         return Err(CKR_MECHANISM_PARAM_INVALID);

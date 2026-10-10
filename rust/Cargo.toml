@@ -118,6 +118,11 @@ name = "fhe_custodian"
 required-features = ["educational-fhe"]
 
 [[example]]
+# Streamed CKKS custodian (pqctoday-fhe plan docs/ckks/…-2026-10-10.md).
+name = "ckks_custodian"
+required-features = ["educational-fhe"]
+
+[[example]]
 # fips204 / ml-kem versus AWS-LC timing (`crypto::awslc_pq`); native only.
 name = "awslc_pq_bench"
 required-features = ["awslc-pq"]
