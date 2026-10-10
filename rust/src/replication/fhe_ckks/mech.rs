@@ -142,7 +142,7 @@ pub unsafe fn ffi_derive_public_v2(session: u32, base: u32, p_param: *const u8, 
     let kind = u32::try_from(f(1)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let k = u32::try_from(f(2)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let d = u32::try_from(f(3)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
-    let ul = |v: &[u8]| (v.len() == W).then(|| tf::ulong_at(v, 0) as u32);
+    let ul = tf::template_ulong;
     for (t, v) in tf::read_template(tmpl, n)? {
         let ok = match t {
             records::CKA_LABEL => true,
@@ -171,7 +171,11 @@ fn type_gate(p: &fhe::FheDecryptPolicy, ps: &CkksParamSet, input: &[u8]) -> Opti
     if pset != ps.id || level != 0 {
         return None;
     }
-    p.allowed_output_types.iter().find(|t| t.type_name == CKKS_TYPE_NAME && t.param_set == ps.id && !t.compressed_allowed).cloned()
+    // Exact type: name, parameter set, 64-bit width, serialization version 1 (`CT_MAGIC` "01").
+    p.allowed_output_types
+        .iter()
+        .find(|t| t.type_name == CKKS_TYPE_NAME && t.param_set == ps.id && t.width_bits == 64 && t.serialization_version == 1 && !t.compressed_allowed)
+        .cloned()
 }
 
 fn output_len(ps: &CkksParamSet) -> usize {

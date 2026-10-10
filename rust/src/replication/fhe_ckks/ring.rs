@@ -2,7 +2,8 @@
 //! reduction with R = 2^64, and the negacyclic NTT of the pinned Lattigo v6.2.0
 //! (`ring/ntt.go`: Cooley–Tukey, bit-reversed Montgomery twiddles from the
 //! smallest primitive root), so that every output value is byte-identical to
-//! Lattigo's. Primes must satisfy q ≡ 1 (mod 2N) and q < 2^62.
+//! Lattigo's. Primes must satisfy q ≡ 1 (mod 2N) and 6q ≤ 2^64 (the lazy
+//! butterflies hold values up to 6q; Codex #9).
 //!
 //! Variable × variable products use Montgomery reduction (owner decision
 //! 2026-10-10). This is the portable scalar layer (ladder step A1); faster
@@ -19,6 +20,8 @@ pub struct Modulus {
     roots_bwd: Vec<u64>,
     /// N^-1 in Montgomery form.
     n_inv: u64,
+    /// 2^128 mod q: mred(x, r2) = MForm(x) without a division.
+    r2: u64,
     pub n: usize,
 }
 
@@ -83,7 +86,7 @@ fn bit_reverse(x: u64, bits: u32) -> u64 {
 impl Modulus {
     /// Tables for ring degree `n` (a power of two) and the registry's primitive root `g`.
     pub fn new(q: u64, g: u64, n: usize) -> Self {
-        assert!(n.is_power_of_two() && q < (1u64 << 62) && q % (2 * n as u64) == 1);
+        assert!(n.is_power_of_two() && q <= u64::MAX / 6 && q % (2 * n as u64) == 1);
         let nth_root = 2 * n as u64;
         let mut qinv: u64 = 1;
         let mut qq = q;
@@ -105,7 +108,8 @@ impl Modulus {
             roots_fwd[next] = mred(roots_fwd[prev], psi, q, qinv);
             roots_bwd[next] = mred(roots_bwd[prev], psi_inv, q, qinv);
         }
-        Modulus { q, qinv, roots_fwd, roots_bwd, n_inv, n }
+        let r2 = ((1u128 << 64) % q as u128 * ((1u128 << 64) % q as u128) % q as u128) as u64;
+        Modulus { q, qinv, roots_fwd, roots_bwd, n_inv, r2, n }
     }
 
     /// In-place forward NTT; input in [0, q), output fully reduced in [0, q).
@@ -121,10 +125,7 @@ impl Modulus {
                 let f = self.roots_fwd[m + i];
                 for jx in j1..j1 + t {
                     let jy = jx + t;
-                    let mut u = p[jx];
-                    if u >= four_q {
-                        u -= four_q;
-                    }
+                    let u = csub(p[jx], four_q);
                     let v = mred_lazy(p[jy], f, q, qinv);
                     p[jx] = u + v;
                     p[jy] = u + two_q - v;
@@ -133,8 +134,9 @@ impl Modulus {
             m <<= 1;
             t >>= 1;
         }
+        // Values are in [0, 6q): reduce without a division.
         for x in p.iter_mut() {
-            *x %= q;
+            *x = csub(csub(csub(*x, four_q), two_q), q);
         }
     }
 
@@ -153,10 +155,7 @@ impl Modulus {
                 for jx in j1..j1 + t {
                     let jy = jx + t;
                     let (u, v) = (p[jx], p[jy]);
-                    let mut x = u + v;
-                    if x >= two_q {
-                        x -= two_q;
-                    }
+                    let x = csub(u + v, two_q);
                     p[jx] = x;
                     p[jy] = mred_lazy(u + four_q - v, f, q, qinv);
                 }
@@ -165,18 +164,27 @@ impl Modulus {
             t <<= 1;
             m >>= 1;
         }
+        // Values are in [0, 2q).
         for x in p.iter_mut() {
-            *x = mred(*x % q, self.n_inv, q, qinv);
+            *x = mred(csub(*x, q), self.n_inv, q, qinv);
         }
     }
 
-    /// Integer polynomial → MForm(NTT(x mod q)).
+    /// Integer polynomial with |x| < q (secrets and errors) → MForm(NTT(x mod q)),
+    /// branch-free and without a division.
     pub fn ntt_mform_of(&self, x: &[i64]) -> Vec<u64> {
         let q = self.q;
-        let mut p: Vec<u64> = x.iter().map(|&v| if v < 0 { (q - ((v.unsigned_abs()) % q)) % q } else { (v as u64) % q }).collect();
+        let mut p: Vec<u64> = x
+            .iter()
+            .map(|&v| {
+                debug_assert!(v.unsigned_abs() < q);
+                let neg = ((v >> 63) as u64) & q;
+                csub((v as u64).wrapping_add(neg), q)
+            })
+            .collect();
         self.ntt(&mut p);
         for v in p.iter_mut() {
-            *v = mform(*v, q);
+            *v = mred(*v, self.r2, q, self.qinv);
         }
         p
     }

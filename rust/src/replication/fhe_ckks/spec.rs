@@ -4,9 +4,15 @@
 //!
 //! KDF(label, ctx, L) = first L bytes of ‖_{i≥1} HMAC-SHA-384(seed, [i]_32 ‖
 //! "pqctoday-fhe/ckks/" ‖ label ‖ 0x00 ‖ ctx ‖ [8L]_32), ctx = LP("CKKS") ‖
-//! LP(paramName) ‖ LP("v1") ‖ LP(extra…). Streams are AES-256-CTR with a zero
-//! IV (owner decision Q4, 2026-10-10). The public `a` limbs use the key
-//! HMAC-SHA-256(aSeed, "pqctoday-fhe/ckks/a/v1" ‖ [k]_32 ‖ [d]_32 ‖ [j]_32).
+//! LP(paramName) ‖ LP(paramHash) ‖ LP("v1") ‖ LP(extra…). Streams are
+//! AES-256-CTR with a zero IV (owner decision Q4, 2026-10-10). The public `a`
+//! limbs use the key HMAC-SHA-256(aSeed, "pqctoday-fhe/ckks/a/v1" ‖ KeyID ‖
+//! [d]_32 ‖ [j]_32); `params::key_id` names a key by kind, Galois element and
+//! levels, never by list position.
+//!
+//! Secret-dependent steps (fixed-weight sampler, Gaussian CDT, reductions,
+//! Montgomery conversion) run a fixed sequence of operations with branch-free
+//! comparisons; rejection loops depend only on discarded stream words.
 
 use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 use hmac::{Hmac, Mac};
@@ -16,7 +22,6 @@ use super::params::*;
 use super::params_gen::GAUSSIAN_CDT;
 use super::ring::{automorphism_ntt_index, mform, mred, Modulus};
 
-pub const PK_KEY_INDEX: u32 = 0xFFFF_FFFF;
 const GAUSS_BOUND: i64 = 19;
 
 fn lp(fields: &[&[u8]]) -> Vec<u8> {
@@ -70,18 +75,52 @@ impl Drop for Stream {
     }
 }
 
-fn ternary(st: &mut Stream, n: usize, h: usize) -> Vec<i64> {
-    let mut out = vec![0i64; n];
-    let mut t = 0;
-    while t < h {
-        let idx = (st.u32() as usize) & (n - 1);
-        let sign = (st.byte() & 1) as i64;
-        if out[idx] != 0 {
-            continue;
+/// Uniform in [0, m) by rejection on the low bits of a u32.
+fn below(st: &mut Stream, m: u32) -> u32 {
+    let mask = if m <= 1 { 0 } else { u32::MAX >> (m - 1).leading_zeros() };
+    loop {
+        let r = st.u32() & mask;
+        if r < m {
+            return r;
         }
-        out[idx] = 1 - 2 * sign;
-        t += 1;
     }
+}
+
+/// All-ones when a == b, else zero, without a branch.
+#[inline(always)]
+fn ct_eq_mask(a: u32, b: u32) -> u64 {
+    let x = (a ^ b) as u64;
+    ((x | x.wrapping_neg()) >> 63).wrapping_sub(1)
+}
+
+/// Fixed-weight ternary polynomial (Sendrier's method as in HQC; the oracle's
+/// `ternary`): position i = i + below(n − i) with a sign byte; a backward pass
+/// replaces a position equal to any later one by i; then every coefficient is
+/// scanned against every position. Comparisons and selections are branch-free.
+fn ternary(st: &mut Stream, n: usize, h: usize) -> Vec<i64> {
+    let mut pos = vec![0u32; h];
+    let mut sgn = vec![0i64; h];
+    for i in 0..h {
+        pos[i] = i as u32 + below(st, (n - i) as u32);
+        sgn[i] = 1 - 2 * (st.byte() & 1) as i64;
+    }
+    for i in (0..h).rev() {
+        let mut dup = 0u64;
+        for j in i + 1..h {
+            dup |= ct_eq_mask(pos[j], pos[i]);
+        }
+        pos[i] = ((pos[i] as u64 & !dup) | (i as u64 & dup)) as u32;
+    }
+    let mut out = vec![0i64; n];
+    for (c, o) in out.iter_mut().enumerate() {
+        let mut v = 0u64;
+        for i in 0..h {
+            v |= (sgn[i] as u64) & ct_eq_mask(pos[i], c as u32);
+        }
+        *o = v as i64;
+    }
+    pos.zeroize();
+    sgn.zeroize();
     out
 }
 
@@ -96,10 +135,10 @@ fn gaussian(st: &mut Stream, n: usize) -> Vec<i64> {
 }
 
 /// Uniform public `a` limb, used as stored (NTT and Montgomery domains).
-pub fn uniform_a(a_seed: &[u8; 32], k: u32, d: u32, j: u32, q: u64, n: usize) -> Vec<u64> {
+pub fn uniform_a(a_seed: &[u8; 32], key_id: &[u8; 17], d: u32, j: u32, q: u64, n: usize) -> Vec<u64> {
     let mut m = <Hmac<sha2::Sha256> as Mac>::new_from_slice(a_seed).expect("any key length");
     m.update(b"pqctoday-fhe/ckks/a/v1");
-    m.update(&k.to_be_bytes());
+    m.update(key_id);
     m.update(&d.to_be_bytes());
     m.update(&j.to_be_bytes());
     let key: [u8; 32] = m.finalize().into_bytes().into();
@@ -122,6 +161,7 @@ pub struct Generator {
     s: Vec<i64>,
     ss: Vec<i64>,
     pub a_seed: [u8; 32],
+    param_hash: [u8; 32],
 }
 
 impl Drop for Generator {
@@ -134,7 +174,7 @@ impl Drop for Generator {
 
 impl Generator {
     pub fn new(ps: &'static CkksParamSet, seed: &[u8; 32]) -> Self {
-        let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32] };
+        let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32], param_hash: param_hash(ps) };
         let n = ps.n();
         let mut k = g.kdf32("secret", &[]);
         g.s = ternary(&mut Stream::new(&k), n, ps.h);
@@ -149,7 +189,7 @@ impl Generator {
     }
 
     fn kdf32(&self, label: &str, extra: &[&[u8]]) -> [u8; 32] {
-        let mut ctx = lp(&[b"CKKS", self.ps.name.as_bytes(), b"v1"]);
+        let mut ctx = lp(&[b"CKKS", self.ps.name.as_bytes(), &self.param_hash, b"v1"]);
         ctx.extend_from_slice(&lp(extra));
         let mut m = <Hmac<sha2::Sha384> as Mac>::new_from_slice(&self.seed).expect("any key length");
         m.update(&1u32.to_be_bytes());
@@ -165,8 +205,12 @@ impl Generator {
         out
     }
 
-    fn error_poly(&self, k: u32, d: u32) -> Vec<i64> {
-        let mut key = if k == PK_KEY_INDEX { self.kdf32("pk-error", &[]) } else { self.kdf32("error", &[&k.to_be_bytes(), &d.to_be_bytes()]) };
+    fn error_poly(&self, k: &KeyDesc, d: Option<u32>) -> Vec<i64> {
+        let id = key_id(k);
+        let mut key = match d {
+            None => self.kdf32("pk-error", &[&id]),
+            Some(d) => self.kdf32("error", &[&id, &d.to_be_bytes()]),
+        };
         let e = gaussian(&mut Stream::new(&key), self.ps.n());
         key.zeroize();
         e
@@ -180,7 +224,8 @@ impl Generator {
             return Err(());
         }
         let n = ps.n();
-        let mut e = self.error_poly(k_idx, d);
+        let id = key_id(&k);
+        let mut e = self.error_poly(&k, Some(d));
         let mut prod_p = num_bigint::BigUint::from(1u32);
         for p in &ps.p[..=k.level_p] {
             prod_p *= *p;
@@ -213,7 +258,7 @@ impl Generator {
             };
             s_main.zeroize();
             let mut b = m.ntt_mform_of(&e);
-            let a = uniform_a(&self.a_seed, k_idx, d, j as u32, q, n);
+            let a = uniform_a(&self.a_seed, &id, d, j as u32, q, n);
             for i in 0..n {
                 b[i] = m.sub(b[i], mred(a[i], sk_out[i], q, m.qinv));
             }
@@ -241,14 +286,16 @@ impl Generator {
             return Err(());
         }
         let n = ps.n();
-        let mut e = self.error_poly(PK_KEY_INDEX, 0);
+        let pk = ps.pk_desc();
+        let id = key_id(&pk);
+        let mut e = self.error_poly(&pk, None);
         let mut out = Vec::with_capacity((to - from) * n * 8);
         for j in from..to {
             let (q, g) = ps.pk_limb(j).ok_or(())?;
             let m = Modulus::new(q, g, n);
             let mut s = m.ntt_mform_of(&self.s);
             let mut b = m.ntt_mform_of(&e);
-            let a = uniform_a(&self.a_seed, PK_KEY_INDEX, 0, j as u32, q, n);
+            let a = uniform_a(&self.a_seed, &id, 0, j as u32, q, n);
             for i in 0..n {
                 b[i] = m.sub(b[i], mred(a[i], s[i], q, m.qinv));
             }

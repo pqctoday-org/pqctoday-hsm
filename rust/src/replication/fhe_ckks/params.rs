@@ -91,11 +91,36 @@ pub const FLOOD_LOG2: u32 = 20;
 /// `FheParamSetV1.config` for every CKKS set (generator version 1).
 pub const CONFIG_V1: &str = "streamed-evk/v1: AES-256-CTR streams, HMAC-SHA-256 a-expansion, Gaussian CDT sigma 3.2 bound 19, fixed-weight ternary";
 
+/// Canonical identity of a key in the generator's KDF contexts and
+/// a-expansion (Codex #5): kind ‖ Galois element ‖ level Q ‖ level P,
+/// big-endian (1 + 8 + 4 + 4 bytes). Never the key's list position.
+pub fn key_id(k: &KeyDesc) -> [u8; 17] {
+    let mut b = [0u8; 17];
+    b[0] = k.kind;
+    b[1..9].copy_from_slice(&k.gal_el.to_be_bytes());
+    b[9..13].copy_from_slice(&(k.level_q as u32).to_be_bytes());
+    b[13..17].copy_from_slice(&(k.level_p as u32).to_be_bytes());
+    b
+}
+
+impl CkksParamSet {
+    /// The public key as a pseudo-key of kind 0 over the residual basis.
+    pub fn pk_desc(&self) -> KeyDesc {
+        KeyDesc { kind: 0, gal_el: 0, level_q: self.residual_q.len() - 1, level_p: self.residual_p.len() - 1 }
+    }
+}
+
 /// 20-byte fingerprint of a parameter set's registry entry, carried in the
 /// canonical encoding's `commit` field (a vendored Lattigo has no git commit
-/// of its own here): SHA-256 over name, ring degree, every modulus, the
-/// secret weights and the key list, truncated.
+/// of its own here): `param_hash` truncated.
 pub fn fingerprint(ps: &CkksParamSet) -> [u8; 20] {
+    param_hash(ps)[..20].try_into().unwrap()
+}
+
+/// SHA-256 over name, ring degree, every modulus and root, the secret weights
+/// and the key list (`key_id` of each). Bound into every generator KDF context;
+/// the pqctoday-fhe oracle computes the same value (`paramHash`).
+pub fn param_hash(ps: &CkksParamSet) -> [u8; 32] {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     h.update(ps.name.as_bytes());
@@ -107,10 +132,7 @@ pub fn fingerprint(ps: &CkksParamSet) -> [u8; 20] {
     h.update((ps.h as u32).to_be_bytes());
     h.update((ps.ephemeral_h as u32).to_be_bytes());
     for k in ps.keys {
-        h.update([k.kind]);
-        h.update(k.gal_el.to_be_bytes());
-        h.update((k.level_q as u32).to_be_bytes());
-        h.update((k.level_p as u32).to_be_bytes());
+        h.update(key_id(k));
     }
-    h.finalize()[..20].try_into().unwrap()
+    h.finalize().into()
 }

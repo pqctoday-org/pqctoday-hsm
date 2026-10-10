@@ -200,7 +200,7 @@ getrandom = { version = "0.2.17", features = ["js"] }
 getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["wasm_js", "sys_rng"] }
 rand = "0.8.5"
 rand_chacha = "0.3"
-aes = "0.9"
+aes = { version = "0.9", features = ["zeroize"] }  # key schedule zeroized on drop (CKKS generator streams, Codex #6)
 aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
 # IETF ChaCha20 stream cipher (PKCS#11 v3.2 §6.20 `CKM_CHACHA20`).

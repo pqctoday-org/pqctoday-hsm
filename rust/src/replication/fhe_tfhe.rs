@@ -106,8 +106,17 @@ pub(crate) fn seed_object(session: u32, h: u32, mechanism: u32) -> Result<(u32, 
     if !allowed.contains(&mechanism) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    let seed: [u8; 32] = attrs.get(&CKA_VALUE).and_then(|v| v.as_slice().try_into().ok()).ok_or(CKR_DEVICE_ERROR)?;
+    let (attrs, seed) = take_seed(attrs).ok_or(CKR_DEVICE_ERROR)?;
     Ok((slot, SeedObject { handle: h, attrs, seed }))
+}
+
+/// Move the seed out of a cloned attribute map and zeroize the clone's copy
+/// (Codex #6), so no `CKA_VALUE` copy outlives the operation.
+fn take_seed(mut attrs: Attributes) -> Option<(Attributes, [u8; 32])> {
+    let mut v = attrs.remove(&CKA_VALUE)?;
+    let seed = v.as_slice().try_into().ok();
+    v.zeroize();
+    seed.map(|s| (attrs, s))
 }
 
 // ── §5.2 DERIVE_PUBLIC ─────────────────────────────────────────────────────
@@ -227,7 +236,7 @@ fn type_gate(policy: &fhe::FheDecryptPolicy, input: &[u8]) -> Option<Matched> {
         };
     }
     for ty in &policy.allowed_output_types {
-        if ty.param_set != 1 || ty.compressed_allowed {
+        if ty.param_set != 1 || ty.compressed_allowed || ty.serialization_version != 1 {
             continue;
         }
         let ok = match (ty.type_name.as_str(), ty.width_bits) {
@@ -501,7 +510,7 @@ pub fn encrypt_for_test(session: u32, h_seed: u32, type_name: &str, value: u64) 
 fn seed_object_any(session: u32, h: u32) -> Result<(u32, SeedObject), u32> {
     let slot = super::require_user_rw(session)?;
     let attrs = records::object_attrs(h).ok_or(CKR_KEY_HANDLE_INVALID)?;
-    let seed: [u8; 32] = attrs.get(&CKA_VALUE).and_then(|v| v.as_slice().try_into().ok()).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let (attrs, seed) = take_seed(attrs).ok_or(CKR_KEY_HANDLE_INVALID)?;
     Ok((slot, SeedObject { handle: h, attrs, seed }))
 }
 
@@ -555,7 +564,7 @@ pub(crate) unsafe fn read_template(t: *mut u8, n: u32) -> Result<Vec<(u32, Vec<u
     let p = t as *const usize;
     let mut out = Vec::new();
     for i in 0..n as usize {
-        let ty = *p.add(i * 3) as u32;
+        let ty = u32::try_from(*p.add(i * 3)).map_err(|_| CKR_ATTRIBUTE_TYPE_INVALID)?;
         let vp = *p.add(i * 3 + 1) as *const u8;
         let vl = *p.add(i * 3 + 2);
         if vl > 4096 || (vl > 0 && vp.is_null()) {
@@ -564,6 +573,12 @@ pub(crate) unsafe fn read_template(t: *mut u8, n: u32) -> Result<Vec<(u32, Vec<u
         out.push((ty, if vl == 0 { Vec::new() } else { std::slice::from_raw_parts(vp, vl).to_vec() }));
     }
     Ok(out)
+}
+
+/// A template CK_ULONG of the native width that fits in 32 bits; wider
+/// values are refused instead of truncated (Codex #10).
+pub(crate) fn template_ulong(v: &[u8]) -> Option<u32> {
+    (v.len() == W).then(|| u32::try_from(ulong_at(v, 0)).ok()).flatten()
 }
 
 pub(crate) fn bool_of(v: &[u8]) -> Option<bool> {
@@ -614,7 +629,7 @@ pub unsafe fn ffi_derive_public(session: u32, base: u32, p_param: *const u8, par
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     let kind = u32::try_from(ulong_at(b, W)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
-    let ul = |v: &[u8]| (v.len() == W).then(|| ulong_at(v, 0) as u32);
+    let ul = template_ulong;
     for (t, v) in read_template(tmpl, n)? {
         let ok = match t {
             records::CKA_LABEL => true,
