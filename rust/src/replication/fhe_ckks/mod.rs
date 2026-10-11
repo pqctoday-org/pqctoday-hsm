@@ -7,6 +7,7 @@
 //! version 2); the token never holds the set. Decryption of a release-level
 //! ciphertext runs under the seed's typed decryption policy.
 
+pub mod freeze;
 pub mod mech;
 pub mod params;
 pub mod params_gen;
