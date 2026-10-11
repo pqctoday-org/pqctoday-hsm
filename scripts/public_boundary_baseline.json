@@ -1,0 +1,94 @@
+{
+  "files": {
+    "CHANGELOG.md": {
+      "agent-config-path": 1
+    },
+    "docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md": {
+      "private-repo": 3
+    },
+    "docs/implementation-plan-fhe-wrapper-pkcs11-vendor-2026-10-02.md": {
+      "private-repo": 4
+    },
+    "docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md": {
+      "private-repo": 1
+    },
+    "docs/proposals/pqctoday-key-replication-admin-allocation-request.md": {
+      "private-repo": 2
+    },
+    "docs/proposals/pqctoday-key-replication-allocation-request.md": {
+      "private-repo": 3
+    },
+    "docs/proposals/pqctoday-key-replication-interface-1.0.md": {
+      "private-repo": 2
+    },
+    "docs/remediation-plan-ckm-hpke-and-hpke-gaps-2026-08-31.md": {
+      "internal-folder": 1,
+      "private-repo": 4
+    },
+    "kmip/docs/COMPLIANCE_FIX_PLAN.md": {
+      "private-repo": 2
+    },
+    "kmip/docs/IMPLEMENTATION_PLAN.md": {
+      "private-repo": 6
+    },
+    "kmip/docs/KMIP_3_0_DELTA.md": {
+      "private-repo": 1
+    },
+    "kmip/pkcs11-mech-manifest.json": {
+      "private-repo": 4
+    },
+    "kmip/spec/README.md": {
+      "private-repo": 1
+    },
+    "kmip/src/cert_init.rs": {
+      "private-repo": 1
+    },
+    "kmip/src/kmip30/algos.rs": {
+      "private-repo": 1
+    },
+    "kmip/tools/download_kmip_spec.py": {
+      "private-repo": 1
+    },
+    "rust/kat/hpke/PROVENANCE.md": {
+      "private-repo": 1
+    },
+    "rust/src/constants.rs": {
+      "private-repo": 8
+    },
+    "rust/src/native/hpke.rs": {
+      "private-repo": 1
+    },
+    "scripts/build-strongswan-wasm.sh": {
+      "home-path": 3
+    },
+    "scripts/check_pkcs11_constants.py": {
+      "private-repo": 3
+    },
+    "scripts/commit_changes.sh": {
+      "home-path": 3
+    },
+    "softhsm2.conf": {
+      "home-path": 1
+    },
+    "src/lib/vendor_mechanisms.h": {
+      "private-repo": 1
+    },
+    "tests/differential/p11_diff.cpp": {
+      "private-repo": 1
+    },
+    "tests/test-gate-container-root.sh": {
+      "home-path": 1
+    }
+  },
+  "rules": [
+    "private-repo",
+    "evidence-cache",
+    "home-path",
+    "session-tmp-path",
+    "run-id",
+    "internal-log",
+    "internal-folder",
+    "agent-config-path"
+  ],
+  "version": 1
+}
