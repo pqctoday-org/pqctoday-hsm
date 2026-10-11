@@ -80,26 +80,59 @@ impl CkksParamSet {
     }
 }
 
-/// Registry ID 2 is the Lattigo default bootstrappable set; 0x8002 is an
-/// INSECURE N = 2^10 ring for fast tests only.
-pub const CKKS_PARAM_SETS: &[&CkksParamSet] = &[&super::params_gen::PARAM_SET_2, &super::params_gen::PARAM_SET_32770];
+/// Registry ID 2 is the Lattigo default bootstrappable set; ID 3 is the
+/// META-BTS set for flooded third-party releases (E13, option O2b of
+/// pqctoday-fhe docs/ckks/ckks-flooding-parameter-options-2026-10-11.md:
+/// two bootstraps per refresh, scale 2^90, release over two primes); 0x8002
+/// is an INSECURE N = 2^10 ring for fast tests only.
+pub const CKKS_PARAM_SETS: &[&CkksParamSet] = &[&super::params_gen::PARAM_SET_2, &super::params_gen::PARAM_SET_32770, &super::params_gen::PARAM_SET_3];
 
 pub fn find(id: u32) -> Option<&'static CkksParamSet> {
     CKKS_PARAM_SETS.iter().copied().find(|p| p.id == id)
 }
 
-/// log2 of B, the post-bootstrap noise bound of level-0 coefficients used to
-/// size decryption flooding (plan §4.6). Measured by the pqctoday-fhe oracle
-/// (`noise` command, gate F record); a parameter set without a measurement
-/// has no flooding width and its sealed releases are refused.
+/// The level the token decrypts at: 0 (the bottom prime q0, serialization
+/// version 2) for the Lattigo default sets, 1 (q0·q1, 105 bits,
+/// serialization version 3) for the META-BTS set, whose scale 2^90 does not
+/// fit one prime.
+pub fn release_level(ps: &CkksParamSet) -> usize {
+    match ps.id {
+        3 => 1,
+        _ => 0,
+    }
+}
+
+/// Largest policy `scaleLog2` a set accepts: 60 for a one-prime release (the
+/// range of policy version 2 as first built), the set's own default scale
+/// (2^90) for the two-prime release. The lower bound stays 20.
+pub fn max_scale_log2(ps: &CkksParamSet) -> u8 {
+    if release_level(ps) == 0 {
+        60
+    } else {
+        ps.log_default_scale as u8
+    }
+}
+
+/// log2 of B, the post-bootstrap noise bound of release-level coefficients
+/// used to size decryption flooding (plan §4.6). Measured by the pqctoday-fhe
+/// oracle (`noise` command, gate F record, E4 method: largest coefficient
+/// error over the trials, rounded up to a whole bit); a parameter set without
+/// a measurement has no flooding width and its sealed releases are refused.
 pub fn noise_bound_log2(ps: &CkksParamSet) -> f64 {
     match ps.id {
         2 => NOISE_BOUND_LOG2_PS2,
+        3 => NOISE_BOUND_LOG2_PS3,
         0x8002 => NOISE_BOUND_LOG2_PS32770,
         _ => f64::INFINITY,
     }
 }
 pub const NOISE_BOUND_LOG2_PS2: f64 = 10.0; // measured 2026-10-10: max 2^9.2 over 2 bootstraps, rounded up
+/// Registry ID 3, measured 2026-10-11 with the spec generator (pqctoday-fhe
+/// `oracle noise 3 30 10000 30`, results-gate-f/noise-3.json): max 2^34.77
+/// over 30 bootstraps (median 2^33.98); the E4 rounding alone would give 35
+/// with 0.23 bits of margin, and the E13 study's Lattigo-key run reached
+/// 2^35.1, so 36 covers all 32 measured bootstraps by at least 0.9 bits.
+pub const NOISE_BOUND_LOG2_PS3: f64 = 36.0;
 pub const NOISE_BOUND_LOG2_PS32770: f64 = 12.0; // measured 2026-10-10: max 2^11.2 over 3 bootstraps, rounded up
 
 /// `FheParamSetV1.config` for every CKKS set (generator version 1).
