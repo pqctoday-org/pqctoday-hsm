@@ -48,6 +48,69 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): streamed CKKS evaluation keys.**
+  Behind the non-default cargo feature `educational-ckks` (implied by
+  `educational-fhe`; it does not pull in TFHE-rs), an FHE seed can now hold a
+  CKKS secret compatible with Lattigo v6.2.0. The token regenerates the
+  secret from the seed and never stores it. The public key and the
+  bootstrapping evaluation keys, a set of several GB, leave the token as
+  bounded, deterministic chunks through `CKM_PQCTODAY_FHE_DERIVE_PUBLIC`
+  parameter version 2 (descriptor, public-key chunk, evaluation-key chunk), so
+  the token never holds the whole set. The token records every chunk it hands
+  out for an export and, once every chunk has been exported exactly once, signs
+  a manifest of their SHA-256 hashes with its ML-DSA-65 receipt-signing key
+  (kind 6, `"PQCToday CKKS Manifest 1.0"`), so a receiver can check the set
+  against the token rather than the host. `CKM_PQCTODAY_FHE_DECRYPT` decrypts a
+  release-level ciphertext under FHE decryption policy version 2: rounding for
+  the owner, noise flooding for third-party releases by default, and caps on
+  the value count, range and scale. Registry IDs 2 (Lattigo's default
+  bootstrappable set) and 0x8002 (an insecure N = 2^10 ring for tests). The
+  chunk bytes match the pqctoday-fhe reference generator (built on Lattigo)
+  byte for byte. A new example, `ckks_custodian`, runs the export and
+  decryption from the command line.
+- **Rust engine (educational feature only): faster CKKS key export.** The
+  token keeps the regenerated secret, the last error polynomial and, per
+  modulus, the NTT tables and the secret in NTT form for the length of an
+  export, instead of rebuilding them on every call. These caches are zeroized
+  when the session closes, on logout, after 30 s idle and when the seed is
+  destroyed. The limbs of a chunk run on parallel threads, and the AES-CTR
+  keystream is produced 64 blocks at a time. Output bytes are unchanged. On
+  one M5 Max core the full registry ID 2 set went from 36.2 s to 22.3 s; six
+  threads take 12.5 s. Two environment variables set the limits:
+  `PQC_CKKS_THREADS` (default: available cores; 1 in the browser) and
+  `PQC_CKKS_CACHE_MB` (NTT cache size, default 64; 0 turns it off).
+- **Rust engine (educational feature only): CKKS key rotation by the Security
+  Officer.** `CKM_PQCTODAY_FHE_DERIVE_PUBLIC` parameter version 3 streams one
+  key-switching key from an old seed's secret to a new seed's secret, so a
+  server can move stored ciphertexts to the new secret without decrypting
+  them. Only an SO session may call it. The new seed must have been generated
+  by this token, use the same parameter set, and have an equal or stricter
+  decryption policy. A seed rotates once, to one target, and never back. The
+  token signs a rotation manifest (`"PQCToday CKKS Rotation Manifest 1.0"`)
+  once every digit has been exported. After the server reports that
+  re-encryption is finished, `retire_old_seed` lets the SO destroy the old
+  seed; it refuses a seed whose rotation manifest was not signed.
+- **Rust engine (educational feature only): CKKS registry ID 3 for flooded
+  third-party releases.** A second parameter set,
+  `CKKS_N16QP1468H192H32_METABTS2_LATTIGO_V6_2_0`, runs two bootstraps per
+  refresh at scale 2^90 and releases over two primes (q0·q1, 105 bits). That
+  leaves room for flooding at 30 bits of statistical security; with it,
+  released values kept 22.6–22.8 bits of precision on the Mac and both
+  boards. Its ciphertexts use
+  serialization version 3 (`PQCKKS03`, release type `CkksPlaintextQ1`); IDs 2
+  and 0x8002 keep version 2. Flooding is computed in 128-bit arithmetic. The
+  noise bound used to size it (log2 B = 36) was measured with the reference
+  generator. A policy may set a scale up to the set's own 2^90 only when every
+  set it lists releases over two primes.
+- **Rust engine (educational feature only): CKKS generator version 1 is
+  frozen.** Registry IDs 2, 3 and 0x8002 and the rotation key are pinned in
+  `rust/src/replication/fhe_ckks/freeze.rs`: parameter hashes, key lists, KDF
+  labels and contexts, and the SHA-256 of each known-answer file. A test fails
+  if any of them changes while the generator version stays 1, so a change to
+  the bytes needs a new generator version. Registry ID 2 now has its own
+  known-answer file (`rust/kat/fhe-ckks-kat-2.json`). The local gate also runs
+  the CKKS integration suites.
+
 - **FHE browser matrix: memory, worker recovery and a gate step (educational
   feature only).** In Chromium, WebKit and Firefox, building the token's 30 MB
   public server-key export peaks at about 101 MB of WASM memory and takes
@@ -217,6 +280,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine (educational feature only): the CKKS replication profile hash
+  changed when registry ID 3 was added.** The streamed-CKKS profile constraint
+  lists every registered CKKS parameter set, so its hash (the
+  `typeConstraintHash` a replication policy for CKKS seeds carries) is now
+  computed over IDs 2, 0x8002 and 3. A policy enrolled under the earlier hash
+  (IDs 2 and 0x8002 only) is refused at enrolment and at seed generation, and
+  a seed bound to it cannot be replicated. No release carried the earlier
+  hash: it existed only in builds made while this work was in progress. The SO
+  re-enrols the policy with the current hash; see
+  `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md` §6.5. TFHE policies are
+  not affected.
 - **Rust engine state snapshots are now `SHR3SNP3` (all builds).** The new
   format appends a trailer that records how many replication objects the
   snapshot holds, plus an end marker, so a truncated or partially written
