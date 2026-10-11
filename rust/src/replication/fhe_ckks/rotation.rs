@@ -290,7 +290,7 @@ pub fn derive_rotation(session: u32, old_lineage: &[u8; 32], new_lineage: &[u8; 
     let new_lineage = lineage(&s.new)?.to_vec();
     let value = if kind == PUBLIC_KIND_CKKS_DESCRIPTOR {
         asn1::to_der(&CkksRotationDescriptorV1 {
-            generator_version: 1,
+            generator_version: params::GENERATOR_VERSION,
             param_set: s.ps.id,
             param_hash: asn1::octets(s.new.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
             old_descriptor_hash: asn1::octets(&ctx.old_descriptor_hash),

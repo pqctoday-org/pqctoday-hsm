@@ -237,3 +237,66 @@ fn ckks_ledger_is_per_session_and_cleared_on_close() {
     assert_eq!(manifest(d, seed), Err(CKR_OPERATION_NOT_INITIALIZED));
     let _ = s;
 }
+
+/// Replication re-enrolment (WP2, G5). Registering ID 3 changed the CKKS
+/// profile constraint, which lists every registered parameter set, and so
+/// its hash. A policy enrolled under the earlier hash is refused (enrolment
+/// and KEY_GEN); the same policy re-enrolled under the current hash is
+/// accepted (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §6.5).
+#[test]
+fn ckks_policy_under_pre_id3_profile_hash_refused_reenrolled_accepted() {
+    let _g = lock();
+    let w = world(1);
+    // The registry before ID 3 (`CKKS_PARAM_SETS` at 80b82d51: PARAM_SET_2,
+    // PARAM_SET_32770), through the same constraint encoding.
+    let sha384 = |b: &[u8]| -> [u8; 48] { sha2::Sha384::digest(b).into() };
+    let old_hash = sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002]));
+    let now_hash = fhe::ckks_profile_constraint_hash();
+    assert_ne!(old_hash, now_hash, "adding ID 3 changes the profile hash");
+    assert_eq!(now_hash, sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002, 3])));
+    assert!(!fhe::is_fhe_profile_hash(&old_hash));
+
+    let rp = |h: [u8; 48]| {
+        records::build_policy_with_constraint(
+            DOMAIN, [true, true, true], w.device_ids(), w.now - 60, w.now + 30 * 86_400, 4,
+            vec![CKM_PQCTODAY_FHE_DERIVE_PUBLIC, CKM_PQCTODAY_FHE_DECRYPT], false, h,
+        )
+        .unwrap()
+    };
+    let (old_rp, new_rp) = (rp(old_hash), rp(now_hash));
+    let dpol = |ps_id: u32| {
+        use der::Encode;
+        let ps = params::find(ps_id).unwrap();
+        fhe::FheDecryptPolicy {
+            version: 2,
+            allowed_output_types: vec![mech::release_type(ps)],
+            never_release: vec![],
+            predicates: vec![],
+            recipients: vec![],
+            recipient_only: false,
+            max_decrypts: 10,
+            ckks: Some(fhe::CkksReleasePolicy { max_values: 16, precision_bits: 20, value_bound_log2: 10, scale_log2: ps.log_default_scale as u8, flood_recipients: true, flood_owner: false, stat_security_bits: 30 }),
+        }
+        .to_der()
+        .unwrap()
+    };
+
+    // This build refuses to enrol the old-hash policy.
+    assert_eq!(w.as_so(0, |so| repl::enroll_policy(so, &old_rp)), Err(CKR_DATA_INVALID));
+    // A token upgraded from the earlier build still holds it: KEY_GEN under it
+    // is refused for every registered set.
+    let s = w.tokens[0].user;
+    let old_id = w.as_so(0, |so| repl::enroll_policy_as_earlier_build_for_test(so, &old_rp).unwrap());
+    for ps_id in [2u32, 0x8002, 3] {
+        let dpid = w.as_so(0, |so| fhe::enroll_fhe_decrypt_policy(so, &dpol(ps_id)).unwrap());
+        assert_eq!(fhe::generate_fhe_seed_with_value_for_test(s, ps_id, &old_id, &dpid, &KAT_SEED, b"old-policy"), Err(CKR_TEMPLATE_INCONSISTENT), "set {ps_id}");
+    }
+
+    // Re-enrolment: the SO enrols the same policy with the current hash. It
+    // gets a new policy ID, and KEY_GEN under it succeeds.
+    let new_id = w.as_so(0, |so| repl::enroll_policy(so, &new_rp)).expect("re-enrolled policy accepted");
+    assert_ne!(new_id, old_id);
+    let dpid = w.as_so(0, |so| fhe::enroll_fhe_decrypt_policy(so, &dpol(0x8002)).unwrap());
+    let seed = fhe::generate_fhe_seed_with_value_for_test(s, 0x8002, &new_id, &dpid, &KAT_SEED, b"new-policy").expect("KEY_GEN under the re-enrolled policy");
+    assert_eq!(native::get_attribute(s, seed, CKA_PQCTODAY_REPLICATION_POLICY_ID).unwrap(), new_id.to_vec());
+}

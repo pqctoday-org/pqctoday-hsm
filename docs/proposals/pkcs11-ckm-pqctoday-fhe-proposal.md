@@ -238,6 +238,51 @@ The counter is a per-object count of decrypt calls, released or refused, kept in
 
 A replicated object starts its own counter at 0, so clones do not share a global budget (HSM plan §3). The bound across a lineage is therefore **total releases ≤ (maxReplicas + 1) × maxDecrypts**, where `maxReplicas` is the replication policy's replica limit (A4). The counter resists reuse within the current state, but cannot resist the host rolling the whole token snapshot back; that is disclosed.
 
+### 6.5 Profile hash changes and re-enrolment (streamed CKKS)
+
+A replication policy governs FHE seeds only when its `typeConstraintHash` equals the seed scheme's profile hash
+(§3, "Replication binding"). The streamed-CKKS profile constraint is
+`FheProfileConstraint { version 1, scheme "ckks-stream", paramSets }`, and `paramSets` lists every registered CKKS
+parameter set in registry order (`fhe::ckks_profile_constraint_der`). Registering a parameter set therefore changes the
+CKKS profile hash. The TFHE profile hash is separate and does not change.
+
+**The change so far.** Registry ID 3 (2026-10-11) changed `paramSets` from `[2, 0x8002]` to `[2, 0x8002, 3]`. The
+earlier hash existed only in engine builds made while the CKKS work was in progress (HSM PR #351, before commit
+`c61a5139`); no release carried it. A token initialised with such a build may still hold policies enrolled under it.
+
+**What the engine does with a policy under an earlier hash.**
+- `enroll_policy` refuses it (`CKR_DATA_INVALID`): the hash is no longer an FHE profile hash.
+- An already enrolled copy stays on the token, but `CKM_PQCTODAY_FHE_KEY_GEN` refuses to bind a new seed to it
+  (`CKR_TEMPLATE_INCONSISTENT`).
+- A seed already bound to it can no longer be replicated: the source refuses to build a package because the policy's
+  hash does not match the seed's profile. The seed itself keeps working on its own token: `DERIVE_PUBLIC` and
+  `DECRYPT` do not consult the replication policy.
+
+**Who re-enrols, and how.**
+1. The Security Officer of each token that must replicate CKKS seeds, on the source and on every destination (a
+   destination accepts only an equal or stricter policy, which requires an equal `typeConstraintHash`), enrols the
+   policy again with every field unchanged except `typeConstraintHash`, set to the current
+   `fhe::ckks_profile_constraint_hash()`. Locally this is `enroll_policy`; over KMIP it is the signed SO policy update
+   (§6.2).
+2. The policy ID is the SHA-384 of the policy DER, so the re-enrolled policy has a new ID. Users name the new ID when
+   they generate CKKS seeds.
+3. A seed bound to the old policy cannot be rebound. To make its data replicable, generate a new seed under the
+   re-enrolled policy and move the stored ciphertexts to it with the SO-only rotation key (`DERIVE_PUBLIC` parameter
+   version 3), then retire the old seed. Rotation does not check the replication policy; it needs the same parameter
+   set and an equal or stricter decryption policy. This route is described, not yet covered by a test.
+
+**How it is checked.** `enroll_policy` returns the new ID, and a seed generated under it carries that ID in
+`CKA_PQCTODAY_REPLICATION_POLICY_ID`. The test
+`ckks_policy_under_pre_id3_profile_hash_refused_reenrolled_accepted` (`rust/tests/replication_fhe_ckks.rs`) computes
+the earlier hash from the pre-ID-3 registry through the same encoding
+(`fhe::ckks_profile_constraint_der_for(&[2, 0x8002])`). It checks that enrolment refuses that hash, that a policy an
+earlier build enrolled under it refuses `KEY_GEN` for IDs 2, 0x8002 and 3, and that the re-enrolled policy is accepted.
+
+**Future registrations.** Adding a CKKS parameter set changes the hash again. Each such change says so in
+`CHANGELOG.md` and repeats the steps above for every token that holds CKKS replication policies. The generator freeze
+(gate V, `rust/src/replication/fhe_ckks/freeze.rs`) does not stop new sets from being registered: a new set is
+appended to the frozen table with its own known-answer file.
+
 ## 7. Recovery descriptor (replication type extension)
 
 The descriptor is the DER of P1's `FheRecoveryDescriptor`: `{ version 1, scheme, paramSet, paramHash, library, generatorVersion, lineageId, decryptPolicy }`. The engine recomputes it from the seed's immutable attributes, and it travels as the Key Replication Interface's `typeExtension`, bound by `typeExtensionHash` under the package signature.
@@ -317,3 +362,4 @@ Every error path zeroizes transient secrets and leaves no partial object.
 | 1 | 2026-10-03 | First normative draft, aligned with authority §1.4.5 and FHE P1 at `f48a040d` |
 | 3 | 2026-10-03 | Implementation amendment I-1 from session 7f: the recipient release uses `info = aad = DER(FheReleaseInfo)`, and the 3-byte type header moves inside the authenticated plaintext. 7f's P2 build reproduces the §5.5 KAT exactly (derived seed `0xf6eb…12dc`, client key `9f5d847e…b77b`, 24,087 B) |
 | 2 | 2026-10-03 | Review amendments from session 7f: A1 derive template re-set on install; A2 signed sealed release; A3 recipient check before decryption; A4 lineage-wide release bound; A5 size query leaks only shape. §11 resolved: header format kept, compressed lists refused, attested manifest key, placeholder hash retired |
+| 4 | 2026-10-11 | §6.5: the streamed-CKKS profile hash lists every registered CKKS set; re-enrolment after registry ID 3 changed it, and its test |

@@ -507,6 +507,20 @@ pub fn stage_enroll_policy(slot: u32, policy_der: &[u8]) -> Result<Staged, u32> 
     })
 }
 
+/// Test hook: store a replication policy the way an earlier build enrolled
+/// it, without this build's profile check (a token upgraded from that build
+/// keeps its enrolled records). Used to show such a policy is refused.
+#[cfg(feature = "test-support")]
+pub fn enroll_policy_as_earlier_build_for_test(so_session: u32, policy_der: &[u8]) -> Result<[u8; 48], u32> {
+    let _op = super::package::op_lock();
+    require_profile()?;
+    require_so(so_session)?;
+    let view = records::parse_policy(policy_der)?;
+    let rec = records::new_record(ROLE_POLICY, CKO_DATA, "replication policy", policy_der.to_vec(), Vec::new(), false);
+    crate::state::commit_objects_atomically(so_session, vec![rec], Vec::new())?;
+    Ok(view.id)
+}
+
 // ── Public read accessors (any session) ────────────────────────────────────
 
 fn any_slot(session: u32) -> Result<u32, u32> {

@@ -154,15 +154,19 @@ pub fn profile_constraint_hash() -> [u8; 48] {
     super::sha384(&profile_constraint_der())
 }
 
-/// Canonical DER of the version-1 streamed-CKKS profile constraint.
+/// Canonical DER of the version-1 streamed-CKKS profile constraint. It lists
+/// every registered CKKS parameter set, so registering a set changes the
+/// profile hash and policies enrolled under the old hash must be re-enrolled
+/// (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §6.5).
 #[cfg(feature = "educational-ckks")]
 pub fn ckks_profile_constraint_der() -> Vec<u8> {
-    asn1::to_der(&FheProfileConstraint {
-        version: 1,
-        scheme: FHE_SCHEME_CKKS.to_string(),
-        param_sets: super::fhe_ckks::params::CKKS_PARAM_SETS.iter().map(|p| p.id).collect(),
-    })
-    .expect("static constraint")
+    ckks_profile_constraint_der_for(&super::fhe_ckks::params::CKKS_PARAM_SETS.iter().map(|p| p.id).collect::<Vec<_>>())
+}
+
+/// The version-1 streamed-CKKS profile constraint over `param_sets` (in
+/// registry order). Also used to compute the hash of an earlier registry.
+pub fn ckks_profile_constraint_der_for(param_sets: &[u32]) -> Vec<u8> {
+    asn1::to_der(&FheProfileConstraint { version: 1, scheme: FHE_SCHEME_CKKS.to_string(), param_sets: param_sets.to_vec() }).expect("static constraint")
 }
 
 /// `typeConstraintHash` of the streamed-CKKS seed profile.

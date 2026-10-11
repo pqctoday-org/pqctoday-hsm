@@ -471,7 +471,7 @@ fn derive_manifest(session: u32, slot: u32, h_seed: u32, so: &tf::SeedObject, ps
 /// Kind 3 (version 2): the seed's public key-set descriptor.
 pub(super) fn keyset_descriptor_der(so: &tf::SeedObject, ps: &CkksParamSet, g: &Generator) -> Result<Vec<u8>, u32> {
     asn1::to_der(&CkksKeySetDescriptorV1 {
-        generator_version: 1,
+        generator_version: params::GENERATOR_VERSION,
         param_set: ps.id,
         param_hash: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
         lineage: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).ok_or(CKR_DEVICE_ERROR)?),

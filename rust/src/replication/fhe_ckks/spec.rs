@@ -24,6 +24,25 @@ use super::ring::{automorphism_ntt_index, mform, mred, Modulus};
 
 const GAUSS_BOUND: i64 = 19;
 
+/// KDF labels of generator version 1 (gate V: frozen, `freeze.rs`). Every
+/// generator KDF call names one of these; a new or changed label is a new
+/// generator version.
+pub mod label {
+    pub const SECRET: &str = "secret";
+    pub const SPARSE_SECRET: &str = "sparse-secret";
+    pub const A_SEED: &str = "a-seed";
+    pub const PK_ERROR: &str = "pk-error";
+    pub const ERROR: &str = "error";
+    pub const ROTATION_A_SEED: &str = "rotation-a-seed";
+    pub const ROTATION_ERROR: &str = "rotation-error";
+}
+pub const KDF_LABELS_V1: [&str; 7] = [label::SECRET, label::SPARSE_SECRET, label::A_SEED, label::PK_ERROR, label::ERROR, label::ROTATION_A_SEED, label::ROTATION_ERROR];
+/// KDF label prefix, the context's version field and the a-expansion domain
+/// of generator version 1.
+pub const KDF_PREFIX: &[u8] = b"pqctoday-fhe/ckks/";
+pub const KDF_CONTEXT_VERSION: &[u8] = b"v1";
+pub const A_EXPAND_DOMAIN: &[u8] = b"pqctoday-fhe/ckks/a/v1";
+
 fn lp(fields: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     for f in fields {
@@ -156,7 +175,7 @@ fn gaussian(st: &mut Stream, n: usize) -> Vec<i64> {
 /// Uniform public `a` limb, used as stored (NTT and Montgomery domains).
 pub fn uniform_a(a_seed: &[u8; 32], key_id: &[u8; 17], d: u32, j: u32, q: u64, n: usize) -> Vec<u64> {
     let mut m = <Hmac<sha2::Sha256> as Mac>::new_from_slice(a_seed).expect("any key length");
-    m.update(b"pqctoday-fhe/ckks/a/v1");
+    m.update(A_EXPAND_DOMAIN);
     m.update(key_id);
     m.update(&d.to_be_bytes());
     m.update(&j.to_be_bytes());
@@ -283,15 +302,15 @@ impl Generator {
     pub fn new(ps: &'static CkksParamSet, seed: &[u8; 32]) -> Self {
         let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32], param_hash: param_hash(ps), err_cache: std::sync::Mutex::new(None), limb_cache: Default::default() };
         let n = ps.n();
-        let mut k = g.kdf32("secret", &[]);
+        let mut k = g.kdf32(label::SECRET, &[]);
         g.s = ternary(&mut Stream::new(&k), n, ps.h);
         k.zeroize();
         if ps.ephemeral_h != 0 {
-            let mut k = g.kdf32("sparse-secret", &[]);
+            let mut k = g.kdf32(label::SPARSE_SECRET, &[]);
             g.ss = ternary(&mut Stream::new(&k), n, ps.ephemeral_h);
             k.zeroize();
         }
-        g.a_seed = g.kdf32("a-seed", &[]);
+        g.a_seed = g.kdf32(label::A_SEED, &[]);
         g
     }
 
@@ -342,11 +361,11 @@ impl Generator {
     }
 
     fn kdf32(&self, label: &str, extra: &[&[u8]]) -> [u8; 32] {
-        let mut ctx = lp(&[b"CKKS", self.ps.name.as_bytes(), &self.param_hash, b"v1"]);
+        let mut ctx = lp(&[b"CKKS", self.ps.name.as_bytes(), &self.param_hash, KDF_CONTEXT_VERSION]);
         ctx.extend_from_slice(&lp(extra));
         let mut m = <Hmac<sha2::Sha384> as Mac>::new_from_slice(&self.seed).expect("any key length");
         m.update(&1u32.to_be_bytes());
-        m.update(b"pqctoday-fhe/ckks/");
+        m.update(KDF_PREFIX);
         m.update(label.as_bytes());
         m.update(&[0]);
         m.update(&ctx);
@@ -361,8 +380,8 @@ impl Generator {
     fn error_poly(&self, k: &KeyDesc, d: Option<u32>) -> Vec<i64> {
         let id = key_id(k);
         let mut key = match d {
-            None => self.kdf32("pk-error", &[&id]),
-            Some(d) => self.kdf32("error", &[&id, &d.to_be_bytes()]),
+            None => self.kdf32(label::PK_ERROR, &[&id]),
+            Some(d) => self.kdf32(label::ERROR, &[&id, &d.to_be_bytes()]),
         };
         let e = gaussian(&mut Stream::new(&key), self.ps.n());
         key.zeroize();
@@ -439,7 +458,27 @@ impl Generator {
     /// Public a-seed of the rotation key from `old` to this generator's
     /// secret (E10), bound to both key-set descriptor hashes.
     pub fn rotation_a_seed(&self, ctx: &RotationCtx) -> [u8; 32] {
-        self.kdf32("rotation-a-seed", &[&ctx.old_descriptor_hash, &ctx.new_descriptor_hash])
+        self.kdf32(label::ROTATION_A_SEED, &[&ctx.old_descriptor_hash, &ctx.new_descriptor_hash])
+    }
+
+    /// Gate V change detector: SHA-256 over this generator's KDF output for
+    /// every version 1 label (fixed extra context "gate-v"), then the first
+    /// 16 words of one a-expansion under key 0's KeyID. It runs the production
+    /// `kdf32` and `uniform_a`, so a change to the label set, the prefix, the
+    /// context layout or version field, the PRF, or the a-expansion changes it.
+    #[cfg(test)]
+    pub(crate) fn kdf_fingerprint(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        for l in KDF_LABELS_V1 {
+            h.update(l.as_bytes());
+            h.update(self.kdf32(l, &[b"gate-v"]));
+        }
+        let k = &self.ps.keys[0];
+        for w in uniform_a(&self.a_seed, &key_id(k), 0, 0, self.ps.q[0], 16) {
+            h.update(w.to_le_bytes());
+        }
+        h.finalize().into()
     }
 
     /// The b limbs [from, to) of digit `d` of the rotation key (E10): the
@@ -462,7 +501,7 @@ impl Generator {
         }
         let n = ps.n();
         let id = key_id(&k);
-        let mut key = self.kdf32("rotation-error", &[&ctx.old_descriptor_hash, &ctx.new_descriptor_hash, &id, &d.to_be_bytes()]);
+        let mut key = self.kdf32(label::ROTATION_ERROR, &[&ctx.old_descriptor_hash, &ctx.new_descriptor_hash, &id, &d.to_be_bytes()]);
         let mut e = gaussian(&mut Stream::new(&key), n);
         key.zeroize();
         let mut prod_p = num_bigint::BigUint::from(1u32);
@@ -646,6 +685,55 @@ mod tests {
                 h.update(g.chunk(k as u32, d as u32, 0, key.limbs()).unwrap());
             }
             assert_eq!(hexs(&h.finalize()), want[k].as_str().unwrap(), "key {k}");
+        }
+    }
+
+    fn kat_2() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../kat/fhe-ckks-kat-2.json")).unwrap()
+    }
+
+    fn key_hash(g: &Generator, k: usize) -> String {
+        let key = &g.ps.keys[k];
+        let mut h = sha2::Sha256::new();
+        for d in 0..key.dnum() {
+            h.update(g.chunk(k as u32, d as u32, 0, key.limbs()).unwrap());
+        }
+        hexs(&h.finalize())
+    }
+
+    /// Registry ID 2 against the oracle KAT (gate V, E1′; seed 00..1f):
+    /// registry entry, a-seed, public key, the first words of key 0 and the
+    /// one-limb dense-to-sparse key. The full key list is
+    /// `kat_registry_2_all_keys` (ignored by default: GBs of chunks).
+    #[test]
+    fn kat_registry_2_matches_reference_spec() {
+        let kat = kat_2();
+        let ps = super::super::params::find(2).unwrap();
+        assert_eq!(ps.name, kat["name"].as_str().unwrap());
+        assert_eq!(hexs(&param_hash(ps)), kat["paramHash"].as_str().unwrap());
+        assert_eq!(ps.keys.len() as u64, kat["keyCount"].as_u64().unwrap());
+        let g = Generator::new(ps, &core::array::from_fn(|i| i as u8));
+        assert_eq!(hexs(&g.a_seed), kat["aSeed"].as_str().unwrap());
+        assert_eq!(g.s.iter().filter(|&&v| v != 0).count() as u64, kat["secretWeight"].as_u64().unwrap());
+        assert_eq!(hexs(&sha2::Sha256::digest(g.pk_chunk(0, ps.pk_limbs()).unwrap())), kat["pkSha256"].as_str().unwrap());
+        let first = g.chunk(0, 0, 0, 1).unwrap();
+        let words: Vec<u64> = (0..4).map(|i| u64::from_le_bytes(first[8 * i..8 * i + 8].try_into().unwrap())).collect();
+        let want: Vec<u64> = kat["firstChunkFirstWords"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+        assert_eq!(words, want);
+        let hashes = kat["keySha256"].as_array().unwrap();
+        let k = ps.keys.iter().position(|k| k.kind == KIND_DENSE_TO_SPARSE).unwrap();
+        assert_eq!(key_hash(&g, k), hashes[k].as_str().unwrap(), "key {k}");
+    }
+
+    #[test]
+    #[ignore = "GBs of chunks; run with --ignored in a release build"]
+    fn kat_registry_2_all_keys() {
+        let kat = kat_2();
+        let ps = super::super::params::find(2).unwrap();
+        let g = Generator::new(ps, &core::array::from_fn(|i| i as u8));
+        let hashes = kat["keySha256"].as_array().unwrap();
+        for k in 0..ps.keys.len() {
+            assert_eq!(key_hash(&g, k), hashes[k].as_str().unwrap(), "key {k}");
         }
     }
 

@@ -135,6 +135,12 @@ pub const NOISE_BOUND_LOG2_PS2: f64 = 10.0; // measured 2026-10-10: max 2^9.2 ov
 pub const NOISE_BOUND_LOG2_PS3: f64 = 36.0;
 pub const NOISE_BOUND_LOG2_PS32770: f64 = 12.0; // measured 2026-10-10: max 2^11.2 over 3 bootstraps, rounded up
 
+/// Streamed CKKS generator version: carried in every key-set and rotation
+/// descriptor. Version 1 is frozen (gate V): its registry, KDF contexts,
+/// samplers, key lists and known answers are pinned in `freeze.rs`, and any
+/// change to them is a new version, never an edit of version 1.
+pub const GENERATOR_VERSION: u32 = 1;
+
 /// `FheParamSetV1.config` for every CKKS set (generator version 1).
 pub const CONFIG_V1: &str = "streamed-evk/v1: AES-256-CTR streams, HMAC-SHA-256 a-expansion, Gaussian CDT sigma 3.2 bound 19, fixed-weight ternary";
 
