@@ -154,6 +154,19 @@ pub fn uniform_a(a_seed: &[u8; 32], key_id: &[u8; 17], d: u32, j: u32, q: u64, n
     out
 }
 
+/// Worker threads per chunk (A6): `PQC_CKKS_THREADS` if set (1 disables), else
+/// the available cores; always 1 on wasm32.
+pub fn chunk_threads() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("PQC_CKKS_THREADS").ok().and_then(|v| v.parse().ok()).filter(|&t: &usize| t >= 1).unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+    }
+}
+
 /// The secrets and public seed regenerated from one FHE seed. Zeroized on drop.
 pub struct Generator {
     pub ps: &'static CkksParamSet,
@@ -275,8 +288,8 @@ impl Generator {
         } else {
             None
         };
-        let mut out = Vec::with_capacity((to - from) * n * 8);
-        for j in from..to {
+        // One limb: everything below depends only on (j, shared read-only inputs).
+        let limb = |j: usize| -> Result<Vec<u8>, ()> {
             let (q, g) = ps.key_limb(&k, j).ok_or(())?;
             let m = Modulus::new(q, g, n);
             let mut s_main = m.ntt_mform_of(&self.s);
@@ -308,8 +321,31 @@ impl Generator {
             }
             sk_out.zeroize();
             sk_in.zeroize();
+            let mut bytes = Vec::with_capacity(n * 8);
             for v in &b {
-                out.extend_from_slice(&v.to_le_bytes());
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            Ok(bytes)
+        };
+        // A6: limbs are independent, so they run on up to `chunk_threads()`
+        // cores; the output keeps limb order, so bytes are unchanged.
+        let threads = chunk_threads().min(to - from);
+        let mut out = Vec::with_capacity((to - from) * n * 8);
+        if threads <= 1 {
+            for j in from..to {
+                out.extend_from_slice(&limb(j)?);
+            }
+        } else {
+            let limbs: Vec<usize> = (from..to).collect();
+            let per = limbs.len().div_ceil(threads);
+            let parts: Vec<Result<Vec<Vec<u8>>, ()>> = std::thread::scope(|sc| {
+                let hs: Vec<_> = limbs.chunks(per).map(|js| sc.spawn(|| js.iter().map(|&j| limb(j)).collect::<Result<Vec<_>, ()>>())).collect();
+                hs.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+            });
+            for part in parts {
+                for l in part? {
+                    out.extend_from_slice(&l);
+                }
             }
         }
         e.zeroize();
