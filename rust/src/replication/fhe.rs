@@ -217,6 +217,40 @@ fn default_false() -> bool {
     false
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_stat_bits() -> u8 {
+    30
+}
+
+/// Version 2 release rules for streamed-CKKS seeds (plan §4.5): what leaves the
+/// token is at most `max_values` decoded slots, rounded to 2^-precision_bits,
+/// each part bounded by 2^value_bound_log2, at the one accepted level-0 scale;
+/// flooding per audience, sized by `stat_security_bits` and `max_decrypts`.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksReleasePolicy {
+    pub max_values: u32,
+    pub precision_bits: u8,
+    pub value_bound_log2: u8,
+    pub scale_log2: u8,
+    // Context tags: two adjacent BOOLEAN DEFAULT fields would be ambiguous.
+    #[asn1(context_specific = "0", tag_mode = "IMPLICIT", default = "default_true")]
+    pub flood_recipients: bool,
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", default = "default_false")]
+    pub flood_owner: bool,
+    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", default = "default_stat_bits")]
+    pub stat_security_bits: u8,
+}
+
+impl CkksReleasePolicy {
+    /// Per-request leakage bound under model B (plan §4.5), in bits.
+    pub fn bits_per_release(&self) -> u64 {
+        self.max_values as u64 * 2 * (self.precision_bits as u64 + self.value_bound_log2 as u64 + 1)
+    }
+}
+
 /// Rules 1–5 of §6.3, as one immutable, SO-enrolled, canonical DER policy.
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct FheDecryptPolicy {
@@ -234,6 +268,10 @@ pub struct FheDecryptPolicy {
     pub recipient_only: bool,
     /// Rate limit: decrypt calls (released or refused) per object.
     pub max_decrypts: u32,
+    /// Version 2 only: CKKS release rules. Absent in version 1, so every
+    /// version 1 (TFHE) policy keeps its DER and identifier.
+    #[asn1(context_specific = "0", optional = "true")]
+    pub ckks: Option<CkksReleasePolicy>,
 }
 
 /// Validated view of an enrolled decryption policy.
@@ -246,7 +284,7 @@ pub struct DecryptPolicyView {
 pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
     let p: FheDecryptPolicy = asn1::decode_strict(der, MAX_POLICY_DER)?;
     let sorted_unique = |v: &[FheType]| v.windows(2).all(|w| w[0] < w[1]);
-    if p.version != 1
+    if !matches!((p.version, &p.ckks), (1, None) | (2, Some(_)))
         || p.allowed_output_types.is_empty()
         || p.allowed_output_types.len() > 32
         || p.never_release.len() > 32
@@ -273,6 +311,28 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
     {
         return Err(CKR_DATA_INVALID);
     }
+    // Version 1 lists TFHE types only; version 2 lists streamed-CKKS types only.
+    let scheme = if p.version == 1 { FHE_SCHEME_TFHE } else { FHE_SCHEME_CKKS };
+    if !p.allowed_output_types.iter().chain(p.never_release.iter()).all(|t| scheme_for(t.param_set) == Some(scheme)) {
+        return Err(CKR_DATA_INVALID);
+    }
+    if let Some(c) = &p.ckks {
+        #[cfg(feature = "educational-fhe")]
+        let max_slots = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(|ps| ps.n() / 2).min().unwrap_or(0);
+        #[cfg(not(feature = "educational-fhe"))]
+        let max_slots = 0usize;
+        if c.max_values == 0
+            || c.max_values as usize > max_slots
+            || !(1..=30).contains(&c.precision_bits)
+            || c.value_bound_log2 > 30
+            || !(20..=60).contains(&c.scale_log2)
+            || c.precision_bits >= c.scale_log2
+            || !(1..=64).contains(&c.stat_security_bits)
+            || !p.predicates.is_empty()
+        {
+            return Err(CKR_DATA_INVALID);
+        }
+    }
     Ok(DecryptPolicyView { id: super::sha384(der), policy: p })
 }
 
@@ -298,6 +358,21 @@ impl DecryptPolicyView {
             && d.recipients.iter().all(|r| s.recipients.contains(r))
             && (d.recipient_only || !s.recipient_only)
             && d.max_decrypts <= s.max_decrypts
+            && d.version == s.version
+            && match (&d.ckks, &s.ckks) {
+                (None, None) => true,
+                // Replication may only narrow a CKKS release (plan §4.5).
+                (Some(dc), Some(sc)) => {
+                    dc.max_values <= sc.max_values
+                        && dc.precision_bits <= sc.precision_bits
+                        && dc.value_bound_log2 <= sc.value_bound_log2
+                        && dc.scale_log2 == sc.scale_log2
+                        && dc.stat_security_bits >= sc.stat_security_bits
+                        && (dc.flood_recipients || !sc.flood_recipients)
+                        && (dc.flood_owner || !sc.flood_owner)
+                }
+                _ => false,
+            }
     }
 }
 
@@ -420,7 +495,17 @@ fn generate_fhe_seed_inner(
     let slot = super::require_user_rw(user_session)?;
     let pol = records::parse_policy(&records::find_policy(slot, replication_policy).ok_or(CKR_TEMPLATE_INCONSISTENT)?)?;
     let scheme = scheme_for(param_set).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
-    if Some(pol.type_constraint_hash) != profile_constraint_hash_for(scheme) || find_decrypt_policy(slot, decrypt_policy).is_none() {
+    if Some(pol.type_constraint_hash) != profile_constraint_hash_for(scheme) {
+        return Err(CKR_TEMPLATE_INCONSISTENT);
+    }
+    // TFHE seeds take version 1 policies; CKKS seeds take version 2 policies
+    // that release this parameter set's type (plan §4.5).
+    let dp = find_decrypt_policy(slot, decrypt_policy).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+    let fits = match scheme {
+        FHE_SCHEME_TFHE => dp.policy.version == 1,
+        _ => dp.policy.version == 2 && dp.policy.allowed_output_types.iter().any(|t| t.param_set == param_set),
+    };
+    if !fits {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
     // §6.2 F8: no caller-visible KDF on the seed; only the FHE mechanisms.
@@ -512,6 +597,7 @@ mod tests {
             recipients: vec![],
             recipient_only: false,
             max_decrypts,
+            ckks: None,
         }
     }
 
@@ -551,6 +637,88 @@ mod tests {
         let mut compressed = ty("FheBool", 1);
         compressed.compressed_allowed = true;
         assert!(bad(policy(vec![compressed], vec![], None, 1)), "compressed lists refused in v1 (P0B §5.3)");
+    }
+
+    #[cfg(feature = "educational-fhe")]
+    fn ckks_policy(c: CkksReleasePolicy) -> FheDecryptPolicy {
+        let t = FheType { type_name: "CkksPlaintextQ0".into(), width_bits: 64, param_set: 0x8002, serialization_version: 2, compressed_allowed: false };
+        FheDecryptPolicy { version: 2, allowed_output_types: vec![t], never_release: vec![], predicates: vec![], recipients: vec![], recipient_only: false, max_decrypts: 100, ckks: Some(c) }
+    }
+
+    #[cfg(feature = "educational-fhe")]
+    fn ckks_block() -> CkksReleasePolicy {
+        CkksReleasePolicy { max_values: 512, precision_bits: 20, value_bound_log2: 10, scale_log2: 40, flood_recipients: true, flood_owner: false, stat_security_bits: 30 }
+    }
+
+    /// PV1–PV3 (plan §4.5): version/scheme pairing, ranges, canonical DER with
+    /// defaults omitted, and replication may only narrow a CKKS release.
+    #[cfg(feature = "educational-fhe")]
+    #[test]
+    fn decrypt_policy_v2_ckks_rules() {
+        let der = |p: &FheDecryptPolicy| asn1::to_der(p).unwrap();
+        let ok = ckks_policy(ckks_block());
+        let v = parse_decrypt_policy(&der(&ok)).expect("valid v2");
+        // Defaults (flood_recipients = true, flood_owner = false, 30 bits) are not encoded.
+        let mut explicit = ok.clone();
+        explicit.ckks.as_mut().unwrap().stat_security_bits = 31;
+        assert!(der(&explicit).len() > der(&ok).len());
+        // A version 1 policy encodes no [0] element, so its DER and identifier are unchanged.
+        let t = policy(vec![ty("FheBool", 1)], vec![], None, 1);
+        let mut t_der = der(&t);
+        let mut with_field = t.clone();
+        with_field.ckks = Some(ckks_block());
+        assert!(der(&with_field).len() > t_der.len() && parse_decrypt_policy(&t_der).is_ok());
+        t_der.clear();
+        let bad = |p: FheDecryptPolicy| parse_decrypt_policy(&der(&p)).is_err();
+        let mut v1_with_ckks = ok.clone();
+        v1_with_ckks.version = 1;
+        assert!(bad(v1_with_ckks), "v1 must not carry ckks");
+        let mut v2_without = ok.clone();
+        v2_without.ckks = None;
+        assert!(bad(v2_without), "v2 must carry ckks");
+        let mut tfhe_in_v2 = ok.clone();
+        tfhe_in_v2.allowed_output_types = vec![ty("FheBool", 1)];
+        assert!(bad(tfhe_in_v2), "v2 lists CKKS types only");
+        let mut tfhe_v1_ckks_type = policy(vec![ty("FheBool", 1)], vec![], None, 1);
+        tfhe_v1_ckks_type.allowed_output_types = ok.allowed_output_types.clone();
+        assert!(bad(tfhe_v1_ckks_type), "v1 lists TFHE types only");
+        for f in [
+            |c: &mut CkksReleasePolicy| c.max_values = 0,
+            |c: &mut CkksReleasePolicy| c.max_values = 513,
+            |c: &mut CkksReleasePolicy| c.precision_bits = 0,
+            |c: &mut CkksReleasePolicy| c.precision_bits = 31,
+            |c: &mut CkksReleasePolicy| c.value_bound_log2 = 31,
+            |c: &mut CkksReleasePolicy| c.scale_log2 = 19,
+            |c: &mut CkksReleasePolicy| c.stat_security_bits = 0,
+        ] {
+            let mut c = ckks_block();
+            f(&mut c);
+            assert!(bad(ckks_policy(c)), "range refusal");
+        }
+        let mut with_pred = ok.clone();
+        with_pred.predicates = vec![Predicate { kind: PredicateKind::MaxValue, bound: 1 }];
+        assert!(bad(with_pred), "value predicates are not defined for CKKS");
+        // Replication ordering.
+        let narrow = |f: fn(&mut CkksReleasePolicy)| {
+            let mut c = ckks_block();
+            f(&mut c);
+            let d = parse_decrypt_policy(&der(&ckks_policy(c.clone()))).unwrap_or_else(|e| panic!("{e} {c:?}"));
+            d.is_equal_or_stricter_than(&v)
+        };
+        assert!(narrow(|c| c.max_values = 16));
+        assert!(narrow(|c| c.precision_bits = 10));
+        assert!(narrow(|c| c.stat_security_bits = 40));
+        assert!(narrow(|c| c.flood_owner = true));
+        let mut both = ckks_block();
+        both.flood_recipients = false;
+        both.flood_owner = true;
+        assert_eq!(parse_decrypt_policy(&der(&ckks_policy(both.clone()))).unwrap().policy.ckks, Some(both), "tagged defaults round-trip");
+        assert!(!narrow(|c| c.flood_recipients = false), "flooding cannot be switched off");
+        assert!(!narrow(|c| c.precision_bits = 21));
+        assert!(!narrow(|c| c.scale_log2 = 41), "scale is kept");
+        assert!(!narrow(|c| c.stat_security_bits = 29));
+        assert!(!view(&t).is_equal_or_stricter_than(&v) && !v.is_equal_or_stricter_than(&view(&t)), "no v1/v2 crossing");
+        assert_eq!(ckks_block().bits_per_release(), 512 * 2 * 31);
     }
 
     fn descriptor(version: u8, generator: u32, lineage: [u8; 32], param_hash_bytes: Vec<u8>) -> Vec<u8> {

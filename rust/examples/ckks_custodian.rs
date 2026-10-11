@@ -111,13 +111,23 @@ fn cmd_init(dir: &Path, param_set: u32, test_seed: bool) {
     let dpol = {
         use der::Encode;
         fhe::FheDecryptPolicy {
-            version: 1,
-            allowed_output_types: vec![fhe::FheType { type_name: mech::CKKS_TYPE_NAME.into(), width_bits: 64, param_set: ps.id, serialization_version: 1, compressed_allowed: false }],
+            version: 2,
+            allowed_output_types: vec![fhe::FheType { type_name: mech::CKKS_TYPE_NAME.into(), width_bits: 64, param_set: ps.id, serialization_version: mech::CT_VERSION, compressed_allowed: false }],
             never_release: vec![],
             predicates: vec![],
             recipients: vec![],
             recipient_only: false,
             max_decrypts: 10_000,
+            // Owner release: every slot, rounded to 2^-20, |value| < 2^10, at the default scale.
+            ckks: Some(fhe::CkksReleasePolicy {
+                max_values: (ps.n() / 2) as u32,
+                precision_bits: 20,
+                value_bound_log2: 10,
+                scale_log2: ps.log_default_scale as u8,
+                flood_recipients: true,
+                flood_owner: std::env::var("CKKS_FLOOD_OWNER").is_ok(),
+                stat_security_bits: 30,
+            }),
         }
         .to_der()
         .unwrap()

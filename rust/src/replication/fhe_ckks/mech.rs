@@ -34,12 +34,17 @@ pub const PUBLIC_KIND_CKKS_DESCRIPTOR: u32 = 3;
 pub const PUBLIC_KIND_CKKS_PUBLIC_KEY: u32 = 4;
 pub const PUBLIC_KIND_CKKS_EVK_CHUNK: u32 = 5;
 
-/// Decrypt input: magic ‖ param set (u32 LE) ‖ level (u32 LE, must be 0) ‖ c0 ‖ c1 (N × u64 LE each, NTT domain, mod q0).
-pub const CT_MAGIC: &[u8; 8] = b"PQCKKS01";
-/// The single CKKS release type: centered plaintext coefficients mod q0.
+/// Decrypt input, serialization version 2: magic ‖ param set ‖ level (must be
+/// 0) ‖ log2 scale ‖ reserved 0 (u32 LE each) ‖ c0 ‖ c1 (N × u64 LE each, NTT
+/// domain, mod q0). The scale is the caller's statement; the policy accepts one.
+pub const CT_MAGIC: &[u8; 8] = b"PQCKKS02";
+pub const CT_VERSION: u16 = 2;
+const CT_HEADER: usize = 24;
+/// The single CKKS release type: decoded slots of a level-0 ciphertext.
 pub const CKKS_TYPE_NAME: &str = "CkksPlaintextQ0";
-/// Owner output header: type 2 (CKKS coefficients), width 64 bits (BE).
-pub const OUT_HEADER: [u8; 3] = [2, 0, 64];
+/// Release format: type 3 (rounded CKKS slots) ‖ precision bits ‖ slot count
+/// (u16 BE), then per slot round(re·2^p), round(im·2^p) as i64 LE.
+pub const OUT_TYPE: u8 = 3;
 
 /// Public key-set descriptor: everything a receiver needs besides the chunks.
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
@@ -160,32 +165,116 @@ pub unsafe fn ffi_derive_public_v2(session: u32, base: u32, p_param: *const u8, 
 }
 
 /// Shape-level type gate: the input names this seed's parameter set, level 0,
-/// and the exact length; the policy must allow the CKKS release type.
-fn type_gate(p: &fhe::FheDecryptPolicy, ps: &CkksParamSet, input: &[u8]) -> Option<FheType> {
+/// the policy's scale and the exact length; the policy must allow the exact
+/// CKKS release type (name, set, width 64, serialization version 2).
+fn type_gate(p: &fhe::FheDecryptPolicy, c: &fhe::CkksReleasePolicy, ps: &CkksParamSet, input: &[u8]) -> Option<FheType> {
     let n = ps.n();
-    if input.len() != 16 + 16 * n || &input[..8] != CT_MAGIC {
+    if input.len() != CT_HEADER + 16 * n || &input[..8] != CT_MAGIC {
         return None;
     }
-    let pset = u32::from_le_bytes(input[8..12].try_into().ok()?);
-    let level = u32::from_le_bytes(input[12..16].try_into().ok()?);
-    if pset != ps.id || level != 0 {
+    let w = |o: usize| u32::from_le_bytes(input[o..o + 4].try_into().unwrap());
+    if w(8) != ps.id || w(12) != 0 || w(16) != c.scale_log2 as u32 || w(20) != 0 {
         return None;
     }
-    // Exact type: name, parameter set, 64-bit width, serialization version 1 (`CT_MAGIC` "01").
     p.allowed_output_types
         .iter()
-        .find(|t| t.type_name == CKKS_TYPE_NAME && t.param_set == ps.id && t.width_bits == 64 && t.serialization_version == 1 && !t.compressed_allowed)
+        .find(|t| t.type_name == CKKS_TYPE_NAME && t.param_set == ps.id && t.width_bits == 64 && t.serialization_version == CT_VERSION && !t.compressed_allowed)
         .cloned()
 }
 
-fn output_len(ps: &CkksParamSet) -> usize {
-    OUT_HEADER.len() + 8 * ps.n()
+fn output_len(c: &fhe::CkksReleasePolicy) -> usize {
+    4 + 16 * c.max_values as usize
 }
 
-/// `C_Decrypt(CKM_PQCTODAY_FHE_DECRYPT)` for a CKKS seed, in the order of the
-/// FHE spec §5.3 (requester, allowlist, size query, counter, recipient, type
-/// gate, never-release, decryption, predicates, release). CKKS values are
-/// approximate vectors, so value predicates are refused, not evaluated.
+/// Flood width in bits, log2 σ = λ_s/2 + log2(√q_max) + log2 B (plan §4.6),
+/// with B the registry's measured post-bootstrap noise bound.
+pub fn flood_sigma_log2(c: &fhe::CkksReleasePolicy, max_decrypts: u32, ps: &CkksParamSet) -> f64 {
+    c.stat_security_bits as f64 / 2.0 + (max_decrypts as f64).log2() / 2.0 + params::noise_bound_log2(ps)
+}
+
+/// Rounded Gaussian with standard deviation 2^sigma_log2 (Box–Muller on the
+/// token DRBG), one value per coefficient.
+fn flood(m: &mut [i64], sigma_log2: f64) -> Result<(), u32> {
+    let mut k = crate::replication::random32()?;
+    let mut st = super::spec::Stream::new(&k);
+    k.zeroize();
+    let sigma = sigma_log2.exp2();
+    let unit = |st: &mut super::spec::Stream| ((st.u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+    for v in m.iter_mut() {
+        let (u1, u2) = (unit(&mut st), unit(&mut st));
+        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        *v = v.saturating_add((sigma * z).round() as i64);
+    }
+    Ok(())
+}
+
+/// Lattigo's CKKS decoding of a level-0 plaintext (centered coefficients) at
+/// full slot count N/2: `polyToComplexNoCRT` then `SpecialFFTDouble`.
+pub fn decode_slots(m: &[i64], scale_log2: u8) -> Vec<(f64, f64)> {
+    let n = m.len();
+    let slots = n / 2;
+    let big_m = 2 * n;
+    let scale = (scale_log2 as f64).exp2();
+    let mut v: Vec<(f64, f64)> = (0..slots).map(|i| (m[i] as f64 / scale, m[i + slots] as f64 / scale)).collect();
+    // GetRootsComplex128(M)
+    let quarm = big_m >> 2;
+    let angle = 2.0 * std::f64::consts::PI / big_m as f64;
+    let mut roots = vec![(0f64, 0f64); big_m + 1];
+    for i in 0..quarm {
+        roots[i] = ((angle * i as f64).cos(), 0.0);
+    }
+    for i in 0..quarm {
+        roots[quarm - i].1 += roots[i].0;
+    }
+    for i in 1..quarm + 1 {
+        let r = roots[quarm - i];
+        roots[i + quarm] = (-r.0, r.1);
+        roots[i + 2 * quarm] = (-roots[i].0, -roots[i].1);
+        roots[i + 3 * quarm] = (r.0, -r.1);
+    }
+    roots[big_m] = roots[0];
+    let mut rot = vec![0usize; quarm];
+    let mut f = 1usize;
+    for r in rot.iter_mut() {
+        *r = f;
+        f = (f * 5) & (big_m - 1);
+    }
+    // SpecialFFTDouble(values, slots, M, rotGroup, roots)
+    let log_n = slots.trailing_zeros();
+    for i in 0..slots {
+        let j = if log_n == 0 { 0 } else { i.reverse_bits() >> (usize::BITS - log_n) };
+        if i < j {
+            v.swap(i, j);
+        }
+    }
+    let log_m = big_m.trailing_zeros() as i32;
+    for loglen in 1..=log_n as i32 {
+        let len = 1usize << loglen;
+        let lenh = len >> 1;
+        let lenq = len << 2;
+        let log_gap = log_m - 2 - loglen;
+        let mask = lenq - 1;
+        for i in (0..slots).step_by(len) {
+            for j in 0..lenh {
+                let (k, kh) = (i + j, i + j + lenh);
+                let r = roots[(rot[j] & mask) << log_gap];
+                let b = v[kh];
+                let t = (b.0 * r.0 - b.1 * r.1, b.0 * r.1 + b.1 * r.0);
+                let a = v[k];
+                v[k] = (a.0 + t.0, a.1 + t.1);
+                v[kh] = (a.0 - t.0, a.1 - t.1);
+            }
+        }
+    }
+    v
+}
+
+/// `C_Decrypt(CKM_PQCTODAY_FHE_DECRYPT)` for a CKKS seed under a version 2
+/// policy (plan §4.5): requester, allowlist, size query, counter, recipient,
+/// exact type and scale, never-release, decryption (+ flooding when the
+/// policy asks for it), in-token decoding to `max_values` slots, range check,
+/// rounding, release. Every refusal after the counter consumes it and is the
+/// same `CKR_ACTION_PROHIBITED`.
 pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], size_only: bool) -> Result<(usize, Option<DecryptOutput>), u32> {
     let (slot, so, ps) = ckks_seed(session, h_seed, CKM_PQCTODAY_FHE_DECRYPT)?;
     if input.is_empty() || input.len() > tf::MAX_DECRYPT_INPUT {
@@ -194,10 +283,12 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     let pid = so.attrs.get(&CKA_PQCTODAY_FHE_DECRYPT_POLICY).cloned().ok_or(CKR_DEVICE_ERROR)?;
     let policy = fhe::find_decrypt_policy(slot, &pid).ok_or_else(|| tf::refuse(slot, "decryption policy not enrolled"))?;
     let p = &policy.policy;
+    let c = p.ckks.as_ref().ok_or_else(|| tf::refuse(slot, "policy version"))?;
     let owner = *recipient == [0u8; 48];
     if size_only {
-        type_gate(p, ps, input).ok_or_else(|| tf::refuse(slot, "type gate"))?;
-        return Ok((if owner { output_len(ps) } else { 0 }, None));
+        type_gate(p, c, ps, input).ok_or_else(|| tf::refuse(slot, "type gate"))?;
+        // Exact for the owner; an upper bound for a sealed release (Codex #2).
+        return Ok((if owner { output_len(c) } else { tf::sealed_len_bound(slot, &so.attrs, recipient, output_len(c))? }, None));
     }
     let used = so.attrs.get(&tf::CKA_PRIV_FHE_DECRYPT_COUNT).and_then(|v| v.as_slice().try_into().ok()).map(u64::from_le_bytes).unwrap_or(0);
     if used >= p.max_decrypts as u64 {
@@ -208,36 +299,55 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     if (owner && p.recipient_only) || (!owner && !p.recipients.iter().any(|r| r.as_bytes() == recipient)) {
         return Err(tf::refuse(slot, "recipient not allowed"));
     }
-    let ty = type_gate(p, ps, input).ok_or_else(|| tf::refuse(slot, "type gate"))?;
+    let ty = type_gate(p, c, ps, input).ok_or_else(|| tf::refuse(slot, "type gate"))?;
     if p.never_release.contains(&ty) {
         return Err(tf::refuse(slot, "never-release type"));
     }
-    if !p.predicates.is_empty() {
-        return Err(tf::refuse(slot, "predicate"));
-    }
     let n = ps.n();
     let words = |off: usize| -> Vec<u64> { (0..n).map(|i| u64::from_le_bytes(input[off + 8 * i..off + 8 * i + 8].try_into().unwrap())).collect() };
-    let (c0, c1) = (words(16), words(16 + 8 * n));
+    let (c0, c1) = (words(CT_HEADER), words(CT_HEADER + 8 * n));
     let g = Generator::new(ps, &so.seed);
     let m = g.decrypt_q0(&c0, &c1);
     drop(g);
     let mut m = m.map_err(|_| tf::refuse(slot, "type gate"))?;
-    // Noise flooding (educational bound, params::FLOOD_LOG2), fresh randomness.
-    let mut fk = crate::replication::random32()?;
-    let mut st = super::spec::Stream::new(&fk);
-    fk.zeroize();
-    let span = (1u64 << (params::FLOOD_LOG2 + 1)) + 1;
-    let mut plain = OUT_HEADER.to_vec();
-    plain.reserve(8 * n);
-    for v in m.iter() {
-        let f = (st.u64() % span) as i64 - (1i64 << params::FLOOD_LOG2);
-        plain.extend_from_slice(&(v + f).to_le_bytes());
+    let flooded = if owner { c.flood_owner } else { c.flood_recipients };
+    if flooded {
+        let sigma_log2 = flood_sigma_log2(c, p.max_decrypts, ps);
+        if !sigma_log2.is_finite() || sigma_log2 > 62.0 {
+            m.zeroize();
+            return Err(tf::refuse(slot, "no flooding width for this parameter set"));
+        }
+        if let Err(e) = flood(&mut m, sigma_log2) {
+            m.zeroize();
+            return Err(e);
+        }
     }
+    let mut slots = decode_slots(&m, c.scale_log2);
     m.zeroize();
+    slots.truncate(c.max_values as usize);
+    let bound = (c.value_bound_log2 as f64).exp2();
+    if slots.iter().any(|&(re, im)| !(re.abs() < bound && im.abs() < bound)) {
+        slots.iter_mut().for_each(|v| *v = (0.0, 0.0));
+        return Err(tf::refuse(slot, "value range"));
+    }
+    let unit = (c.precision_bits as f64).exp2();
+    let mut plain = vec![OUT_TYPE, c.precision_bits];
+    plain.extend_from_slice(&(slots.len() as u16).to_be_bytes());
+    for (re, im) in slots.iter() {
+        plain.extend_from_slice(&((re * unit).round() as i64).to_le_bytes());
+        plain.extend_from_slice(&((im * unit).round() as i64).to_le_bytes());
+    }
+    slots.iter_mut().for_each(|v| *v = (0.0, 0.0));
     crate::replication::oplog_event(
         "fhe_decrypt_released",
         slot,
-        &[("policy", crate::replication::hex(&policy.id)), ("type", ty.type_name.clone()), ("counter", counter.to_string()), ("recipient", if owner { "owner".into() } else { crate::replication::hex(recipient) })],
+        &[
+            ("policy", crate::replication::hex(&policy.id)),
+            ("type", ty.type_name.clone()),
+            ("counter", counter.to_string()),
+            ("flooded", flooded.to_string()),
+            ("recipient", if owner { "owner".into() } else { crate::replication::hex(recipient) }),
+        ],
     );
     if owner {
         return Ok((plain.len(), Some(DecryptOutput::Owner(plain))));
@@ -246,4 +356,25 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     plain.zeroize();
     let sealed = sealed?;
     Ok((sealed.len(), Some(DecryptOutput::Sealed(sealed))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plaintext whose coefficients encode slot values through Lattigo's
+    /// encoding decodes back: the constant polynomial c·Δ gives c in every slot.
+    #[test]
+    fn decode_constant_and_monomial() {
+        let n = 1024;
+        let mut m = vec![0i64; n];
+        m[0] = 3 << 30;
+        let v = decode_slots(&m, 30);
+        assert!(v.iter().all(|&(re, im)| (re - 3.0).abs() < 1e-9 && im.abs() < 1e-9));
+        // X^(N/2) evaluates to ±i at every root: purely imaginary unit slots.
+        let mut m = vec![0i64; n];
+        m[n / 2] = 1 << 30;
+        let v = decode_slots(&m, 30);
+        assert!(v.iter().all(|&(re, im)| re.abs() < 1e-9 && (im.abs() - 1.0).abs() < 1e-9));
+    }
 }

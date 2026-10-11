@@ -304,7 +304,8 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     let owner = *recipient == [0u8; 48];
     if size_only {
         let m = type_gate(p, input).ok_or_else(|| refuse(slot, "type gate"))?;
-        return Ok((if owner { output_len(&m.ty) } else { 0 }, None));
+        // Exact for the owner; an upper bound for a sealed release (Codex #2).
+        return Ok((if owner { output_len(&m.ty) } else { sealed_len_bound(slot, &so.attrs, recipient, output_len(&m.ty))? }, None));
     }
     // Step 4: reserve one unit of the counter durably, before any work.
     let used = so.attrs.get(&CKA_PRIV_FHE_DECRYPT_COUNT).and_then(|v| v.as_slice().try_into().ok()).map(u64::from_le_bytes).unwrap_or(0);
@@ -369,6 +370,29 @@ pub struct FheReleaseInfo {
 
 /// HPKE-seal the plaintext to the enrolled recipient and sign the release
 /// with this device's receipt-signing function key (§5.3, amendment A2).
+/// Upper bound on the length of `seal_release`'s output for a plaintext of
+/// `plain_len` bytes (Codex #2): the same structure with fixed-size fields
+/// (ML-KEM-768 encapsulation 1,088 B, AES-256-GCM tag 16 B, ML-DSA-65
+/// signature 3,309 B) and the largest possible counter. Also refuses an
+/// unknown recipient before any counter unit is spent.
+pub(crate) fn sealed_len_bound(slot: u32, attrs: &Attributes, recipient: &[u8; 48], plain_len: usize) -> Result<usize, u32> {
+    let _ = attrs;
+    recipient_key(slot, recipient).ok_or(CKR_ACTION_PROHIBITED)?;
+    let chain = super::pki::chain_from_ders(&[
+        records::certificate(slot, Purpose::ReceiptSigning).ok_or(CKR_DEVICE_ERROR)?,
+        records::certificate(slot, Purpose::DeviceIssuer).ok_or(CKR_DEVICE_ERROR)?,
+    ])
+    .map_err(|_| CKR_DEVICE_ERROR)?;
+    Ok(asn1::to_der(&FheSealedReleaseV1 {
+        enc: asn1::octets(&[0u8; 1088]),
+        ciphertext: asn1::octets(&vec![0u8; plain_len + 16]),
+        counter: u64::MAX,
+        signature: asn1::octets(&[0u8; 3309]),
+        signer_chain: chain,
+    })?
+    .len())
+}
+
 pub(crate) fn seal_release(slot: u32, attrs: &Attributes, policy_id: &[u8; 48], recipient: &[u8; 48], counter: u64, plain: &[u8]) -> Result<Vec<u8>, u32> {
     let lineage = attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).cloned().unwrap_or_default();
     let ek = recipient_key(slot, recipient).ok_or(CKR_ACTION_PROHIBITED)?;

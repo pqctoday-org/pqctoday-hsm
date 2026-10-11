@@ -84,9 +84,19 @@ pub fn find(id: u32) -> Option<&'static CkksParamSet> {
     CKKS_PARAM_SETS.iter().copied().find(|p| p.id == id)
 }
 
-/// Educational decryption noise flooding: uniform in [-2^FLOOD_LOG2, 2^FLOOD_LOG2]
-/// added to every decrypted coefficient. Not a proven IND-CPA-D bound.
-pub const FLOOD_LOG2: u32 = 20;
+/// log2 of B, the post-bootstrap noise bound of level-0 coefficients used to
+/// size decryption flooding (plan §4.6). Measured by the pqctoday-fhe oracle
+/// (`noise` command, gate F record); a parameter set without a measurement
+/// has no flooding width and its sealed releases are refused.
+pub fn noise_bound_log2(ps: &CkksParamSet) -> f64 {
+    match ps.id {
+        2 => NOISE_BOUND_LOG2_PS2,
+        0x8002 => NOISE_BOUND_LOG2_PS32770,
+        _ => f64::INFINITY,
+    }
+}
+pub const NOISE_BOUND_LOG2_PS2: f64 = 10.0; // measured 2026-10-10: max 2^9.2 over 2 bootstraps, rounded up
+pub const NOISE_BOUND_LOG2_PS32770: f64 = 12.0; // measured 2026-10-10: max 2^11.2 over 3 bootstraps, rounded up
 
 /// `FheParamSetV1.config` for every CKKS set (generator version 1).
 pub const CONFIG_V1: &str = "streamed-evk/v1: AES-256-CTR streams, HMAC-SHA-256 a-expansion, Gaussian CDT sigma 3.2 bound 19, fixed-weight ternary";
