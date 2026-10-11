@@ -61,6 +61,49 @@ pub(crate) fn seed_object(session: u32, h: u32, mechanism: u32) -> Result<(u32, 
     Ok((slot, SeedObject { handle: h, attrs, seed }))
 }
 
+/// Resolve an FHE seed on the SO session's slot, by its lineage, for the
+/// CKKS rotation ceremony (E10; owner decision 2026-10-11: only the SO may
+/// start a rotation). The single, deliberate exception to "the SO cannot use
+/// a user's private key": the SO never receives secret material through it,
+/// only the public rotation key, its descriptor and the token-signed
+/// manifest. The seed is named by `CKA_PQCTODAY_FHE_LINEAGE_ID`, not by a
+/// handle: an SO session cannot find private objects, and handles to private
+/// token objects are re-keyed at every logout (S6). Exactly one token FHE
+/// seed on the slot must carry the lineage; same object checks as
+/// `seed_object` otherwise.
+pub(crate) fn so_seed_by_lineage(so_session: u32, lineage: &[u8; 32], mechanism: u32) -> Result<(u32, SeedObject), u32> {
+    super::require_profile()?;
+    let slot = super::require_so(so_session)?;
+    let found: Vec<(u32, Attributes)> = crate::state::OBJECTS.with(|o| {
+        o.borrow()
+            .iter()
+            .filter(|(_, a)| {
+                crate::state::object_slot_of(a) == slot
+                    && crate::state::read_bool_attr(a, CKA_TOKEN)
+                    && crate::state::get_object_attr_u32_from(a, CKA_KEY_TYPE) == Some(CKK_PQCTODAY_FHE)
+                    && a.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).map(|v| v.as_slice()) == Some(lineage.as_slice())
+            })
+            .map(|(h, a)| (*h, a.clone()))
+            .collect()
+    });
+    if found.len() != 1 {
+        // None, or ambiguous: zeroize the cloned values before refusing.
+        for (_, mut a) in found {
+            if let Some(v) = a.get_mut(&CKA_VALUE) {
+                v.zeroize();
+            }
+        }
+        return Err(CKR_KEY_HANDLE_INVALID);
+    }
+    let (h, attrs) = found.into_iter().next().expect("one");
+    let allowed = crate::state::parse_allowed_mechanisms(attrs.get(&CKA_ALLOWED_MECHANISMS).map(|v| v.as_slice()).unwrap_or(&[]));
+    if !allowed.contains(&mechanism) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    let (attrs, seed) = take_seed(attrs).ok_or(CKR_DEVICE_ERROR)?;
+    Ok((slot, SeedObject { handle: h, attrs, seed }))
+}
+
 /// Move the seed out of a cloned attribute map and zeroize the clone's copy
 /// (Codex #6), so no `CKA_VALUE` copy outlives the operation.
 fn take_seed(mut attrs: Attributes) -> Option<(Attributes, [u8; 32])> {
@@ -409,6 +452,11 @@ pub unsafe fn ffi_derive_public(session: u32, base: u32, p_param: *const u8, par
     // Parameter version 2 (six CK_ULONGs): streamed CKKS material.
     if param_len == 6 * W {
         return super::fhe_ckks::mech::ffi_derive_public_v2(session, base, p_param, param_len, tmpl, n);
+    }
+    // Parameter version 3 (six CK_ULONGs and two 32-byte lineages): the CKKS
+    // rotation key (E10).
+    if param_len == 6 * W + 64 {
+        return super::fhe_ckks::mech::ffi_derive_public_v3(session, base, p_param, param_len, tmpl, n);
     }
     // Parameter version 1: TFHE public material (TFHE-rs builds only).
     #[cfg(feature = "educational-fhe")]

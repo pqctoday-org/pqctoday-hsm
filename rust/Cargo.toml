@@ -184,6 +184,11 @@ name = "replication_fhe_ckks"
 required-features = ["educational-ckks", "test-support"]
 
 [[test]]
+# CKKS rotation key old -> new (E10): SO-only DERIVE_PUBLIC v3, manifest, retirement.
+name = "replication_fhe_ckks_rotation"
+required-features = ["educational-ckks", "test-support"]
+
+[[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
 # the process-global token store with distinct test ceremonies.
 name = "hierarchy_attestation_spikes"

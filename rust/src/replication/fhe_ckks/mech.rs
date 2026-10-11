@@ -143,20 +143,23 @@ pub fn verify_ckks_manifest(der: &[u8], trust: &crate::replication::pki::TrustIn
 
 // ── Session ledger (E3) ────────────────────────────────────────────────────
 
-type LedgerKey = (u32, u32, u32, u32); // (kind, key, digit, from)
+pub(super) type LedgerKey = (u32, u32, u32, u32); // (kind, key, digit, from)
 
-struct Ledger {
-    slot: u32,
-    seed_handle: u32,
-    descriptor_hash: [u8; 32],
-    entries: BTreeMap<LedgerKey, (u32, [u8; 32])>,
+pub(super) struct Ledger {
+    pub(super) slot: u32,
+    pub(super) seed_handle: u32,
+    /// Rotation ledgers (parameter version 3): the old seed. `None` for a
+    /// key-set ledger (version 2); the two never stand in for each other.
+    pub(super) old_seed: Option<u32>,
+    pub(super) descriptor_hash: [u8; 32],
+    pub(super) entries: BTreeMap<LedgerKey, (u32, [u8; 32])>,
     /// An overlapping range or a different hash for a repeated range was
     /// seen: the manifest is refused until a new descriptor restarts the ledger.
-    invalid: bool,
+    pub(super) invalid: bool,
 }
 
 impl Ledger {
-    fn record(&mut self, kind: u32, k: u32, d: u32, from: u32, to: u32, hash: [u8; 32]) {
+    pub(super) fn record(&mut self, kind: u32, k: u32, d: u32, from: u32, to: u32, hash: [u8; 32]) {
         use std::ops::Bound::{Excluded, Unbounded};
         let key = (kind, k, d, from);
         if let Some(&(t, h)) = self.entries.get(&key) {
@@ -178,12 +181,23 @@ impl Ledger {
 
     /// The public key and every (key, digit) of `ps` covered exactly once.
     fn covers(&self, ps: &CkksParamSet) -> bool {
-        if self.invalid {
-            return false;
-        }
         let mut groups = vec![(PUBLIC_KIND_CKKS_PUBLIC_KEY, 0u32, 0u32, ps.pk_limbs())];
         for (k, key) in ps.keys.iter().enumerate() {
             groups.extend((0..key.dnum()).map(|d| (PUBLIC_KIND_CKKS_EVK_CHUNK, k as u32, d as u32, key.limbs())));
+        }
+        self.covers_groups(groups)
+    }
+
+    /// Every digit of the rotation key covered exactly once (key index 0).
+    pub(super) fn covers_rotation(&self, ps: &CkksParamSet) -> bool {
+        let k = ps.rotation_desc();
+        self.covers_groups((0..k.dnum()).map(|d| (PUBLIC_KIND_CKKS_EVK_CHUNK, 0u32, d as u32, k.limbs())).collect())
+    }
+
+    /// Each (kind, key, digit, limbs) group tiled exactly once, nothing else.
+    fn covers_groups(&self, groups: Vec<(u32, u32, u32, usize)>) -> bool {
+        if self.invalid {
+            return false;
         }
         let mut used = 0usize;
         for (kind, k, d, limbs) in groups {
@@ -206,7 +220,7 @@ impl Ledger {
 /// One ledger per session, keyed by session handle.
 static LEDGERS: std::sync::Mutex<BTreeMap<u32, Ledger>> = std::sync::Mutex::new(BTreeMap::new());
 
-fn ledgers() -> std::sync::MutexGuard<'static, BTreeMap<u32, Ledger>> {
+pub(super) fn ledgers() -> std::sync::MutexGuard<'static, BTreeMap<u32, Ledger>> {
     LEDGERS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -226,7 +240,7 @@ pub fn clear_ledgers() {
 }
 
 fn clear_ledgers_for_seed(h: u32) {
-    ledgers().retain(|_, l| l.seed_handle != h);
+    ledgers().retain(|_, l| l.seed_handle != h && l.old_seed != Some(h));
 }
 
 /// True when `h` is an FHE seed of a streamed-CKKS parameter set (no access
@@ -292,6 +306,23 @@ pub fn clear_generator_cache_for(h: u32) {
     let _ = h;
 }
 
+/// The seed handle the cached generator was built from (tests only).
+#[cfg(feature = "test-support")]
+pub fn generator_cache_seed_for_test() -> Option<u32> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        GEN_CACHE.lock().ok().and_then(|c| c.as_ref().map(|e| e.seed_handle))
+    }
+    #[cfg(target_arch = "wasm32")]
+    None
+}
+
+/// Whether `session` holds a ledger, and for which (seed, old seed) (tests only).
+#[cfg(feature = "test-support")]
+pub fn ledger_for_test(session: u32) -> Option<(u32, Option<u32>)> {
+    ledgers().get(&session).map(|l| (l.seed_handle, l.old_seed))
+}
+
 fn generator_for(session: u32, h_seed: u32, ps: &'static CkksParamSet, seed: &[u8; 32]) -> std::sync::Arc<Generator> {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -341,20 +372,12 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
         return Err(CKR_DEVICE_MEMORY);
     }
     // A chunk needs this session's ledger for this seed (refused before any work).
-    if kind != PUBLIC_KIND_CKKS_DESCRIPTOR && !ledgers().get(&session).is_some_and(|l| l.seed_handle == h_seed) {
+    if kind != PUBLIC_KIND_CKKS_DESCRIPTOR && !ledgers().get(&session).is_some_and(|l| l.seed_handle == h_seed && l.old_seed.is_none()) {
         return Err(CKR_OPERATION_NOT_INITIALIZED);
     }
     let g = generator_for(session, h_seed, ps, &so.seed);
     let value = match kind {
-        PUBLIC_KIND_CKKS_DESCRIPTOR => asn1::to_der(&CkksKeySetDescriptorV1 {
-            generator_version: 1,
-            param_set: ps.id,
-            param_hash: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
-            lineage: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).ok_or(CKR_DEVICE_ERROR)?),
-            a_seed: asn1::octets(&g.a_seed),
-            key_count: ps.keys.len() as u32,
-            pk_limbs: ps.pk_limbs() as u32,
-        })?,
+        PUBLIC_KIND_CKKS_DESCRIPTOR => keyset_descriptor_der(&so, ps, &g)?,
         PUBLIC_KIND_CKKS_PUBLIC_KEY => g.pk_chunk(from, to).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?,
         _ => g.chunk(k, d, from, to).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?,
     };
@@ -363,10 +386,10 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
         let mut l = ledgers();
         let hash = crate::replication::sha256(&value);
         if kind == PUBLIC_KIND_CKKS_DESCRIPTOR {
-            l.insert(session, Ledger { slot, seed_handle: h_seed, descriptor_hash: hash, entries: BTreeMap::new(), invalid: false });
+            l.insert(session, Ledger { slot, seed_handle: h_seed, old_seed: None, descriptor_hash: hash, entries: BTreeMap::new(), invalid: false });
         } else {
             // Re-checked under the lock: a close or destroy may have run meanwhile.
-            let led = l.get_mut(&session).filter(|x| x.seed_handle == h_seed).ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            let led = l.get_mut(&session).filter(|x| x.seed_handle == h_seed && x.old_seed.is_none()).ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
             led.record(kind, k, d, from as u32, to as u32, hash);
         }
     }
@@ -385,7 +408,7 @@ fn derive_manifest(session: u32, slot: u32, h_seed: u32, so: &tf::SeedObject, ps
     };
     let (descriptor_hash, entries) = {
         let l = ledgers();
-        let led = l.get(&session).filter(|x| x.seed_handle == h_seed).ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let led = l.get(&session).filter(|x| x.seed_handle == h_seed && x.old_seed.is_none()).ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         if led.invalid {
             return Err(refuse("overlapping or conflicting chunk"));
         }
@@ -414,7 +437,7 @@ fn derive_manifest(session: u32, slot: u32, h_seed: u32, so: &tf::SeedObject, ps
     let h = public_object(session, so, PUBLIC_KIND_CKKS_MANIFEST, value)?;
     // Signed once: the next manifest needs a fresh descriptor and full export.
     let mut l = ledgers();
-    if l.get(&session).is_some_and(|x| x.seed_handle == h_seed && x.descriptor_hash == descriptor_hash) {
+    if l.get(&session).is_some_and(|x| x.seed_handle == h_seed && x.old_seed.is_none() && x.descriptor_hash == descriptor_hash) {
         l.remove(&session);
     }
     drop(l);
@@ -422,8 +445,21 @@ fn derive_manifest(session: u32, slot: u32, h_seed: u32, so: &tf::SeedObject, ps
     Ok(h)
 }
 
+/// Kind 3 (version 2): the seed's public key-set descriptor.
+pub(super) fn keyset_descriptor_der(so: &tf::SeedObject, ps: &CkksParamSet, g: &Generator) -> Result<Vec<u8>, u32> {
+    asn1::to_der(&CkksKeySetDescriptorV1 {
+        generator_version: 1,
+        param_set: ps.id,
+        param_hash: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
+        lineage: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).ok_or(CKR_DEVICE_ERROR)?),
+        a_seed: asn1::octets(&g.a_seed),
+        key_count: ps.keys.len() as u32,
+        pk_limbs: ps.pk_limbs() as u32,
+    })
+}
+
 /// Store `value` as a public, non-token session object of `kind`.
-fn public_object(session: u32, so: &tf::SeedObject, kind: u32, value: Vec<u8>) -> Result<u32, u32> {
+pub(super) fn public_object(session: u32, so: &tf::SeedObject, kind: u32, value: Vec<u8>) -> Result<u32, u32> {
     let mut a: Attributes = Default::default();
     crate::state::store_ulong(&mut a, CKA_CLASS, CKO_PUBLIC_KEY);
     crate::state::store_ulong(&mut a, CKA_KEY_TYPE, CKK_PQCTODAY_FHE_PUBLIC);
@@ -454,6 +490,16 @@ pub unsafe fn ffi_derive_public_v2(session: u32, base: u32, p_param: *const u8, 
     let kind = u32::try_from(f(1)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let k = u32::try_from(f(2)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let d = u32::try_from(f(3)).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    check_public_template(tmpl, n)?;
+    derive_public_v2(session, base, kind, k, d, f(4), f(5))
+}
+
+/// The derive template may only restate the fixed public-object template
+/// plus CKA_LABEL/CKA_ID.
+///
+/// # Safety
+/// FFI pointers as for `C_DeriveKey`.
+pub(super) unsafe fn check_public_template(tmpl: *mut u8, n: u32) -> Result<(), u32> {
     let ul = tf::template_ulong;
     for (t, v) in tf::read_template(tmpl, n)? {
         let ok = match t {
@@ -468,7 +514,30 @@ pub unsafe fn ffi_derive_public_v2(session: u32, base: u32, p_param: *const u8, 
             return Err(CKR_TEMPLATE_INCONSISTENT);
         }
     }
-    derive_public_v2(session, base, kind, k, d, f(4), f(5))
+    Ok(())
+}
+
+/// `C_DeriveKey(CKM_PQCTODAY_FHE_DERIVE_PUBLIC)` with parameter version 3:
+/// the CKKS rotation key (E10, `rotation`). The two seeds are named by their
+/// lineages in the parameter; `hBaseKey` must be `CK_INVALID_HANDLE`.
+///
+/// # Safety
+/// FFI pointers as for `C_DeriveKey`.
+pub unsafe fn ffi_derive_public_v3(session: u32, base: u32, p_param: *const u8, param_len: usize, tmpl: *mut u8, n: u32) -> Result<u32, u32> {
+    let b = tf::param_bytes(p_param, param_len, 6 * W + 64)?;
+    if tf::ulong_at(b, 0) != 3 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if base != 0 {
+        return Err(CKR_KEY_HANDLE_INVALID);
+    }
+    let f = |i: usize| tf::ulong_at(b, i * W);
+    let u = |i: usize| u32::try_from(f(i)).map_err(|_| CKR_MECHANISM_PARAM_INVALID);
+    let (kind, k, d) = (u(1)?, u(2)?, u(3)?);
+    let old: [u8; 32] = b[6 * W..6 * W + 32].try_into().unwrap();
+    let new: [u8; 32] = b[6 * W + 32..6 * W + 64].try_into().unwrap();
+    check_public_template(tmpl, n)?;
+    super::rotation::derive_rotation(session, &old, &new, kind, k, d, f(4), f(5))
 }
 
 /// Shape-level type gate: the input names this seed's parameter set, level 0,

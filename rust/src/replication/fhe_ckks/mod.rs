@@ -11,4 +11,5 @@ pub mod mech;
 pub mod params;
 pub mod params_gen;
 pub mod ring;
+pub mod rotation;
 pub mod spec;
