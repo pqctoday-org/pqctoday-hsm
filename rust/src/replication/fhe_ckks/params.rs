@@ -6,6 +6,10 @@ pub const KIND_RELIN: u8 = 1;
 pub const KIND_GALOIS: u8 = 2;
 pub const KIND_DENSE_TO_SPARSE: u8 = 3;
 pub const KIND_SPARSE_TO_DENSE: u8 = 4;
+/// Rotation key (E10): key-switching key from an old seed's secret to a new
+/// seed's secret over the residual basis. Never part of `keys`; its KeyID
+/// kind keeps its KDF contexts and `a` limbs apart from every key-set key.
+pub const KIND_ROTATION: u8 = 5;
 
 /// One evaluation key of the canonical key list. Its limb basis is
 /// Q[0..=level_q] followed by P[0..=level_p].
@@ -117,6 +121,11 @@ impl CkksParamSet {
     /// The public key as a pseudo-key of kind 0 over the residual basis.
     pub fn pk_desc(&self) -> KeyDesc {
         KeyDesc { kind: 0, gal_el: 0, level_q: self.residual_q.len() - 1, level_p: self.residual_p.len() - 1 }
+    }
+    /// The rotation key (E10) over the residual basis (the levels stored
+    /// ciphertexts use): limb j has modulus `pk_limb(j)`.
+    pub fn rotation_desc(&self) -> KeyDesc {
+        KeyDesc { kind: KIND_ROTATION, gal_el: 0, level_q: self.residual_q.len() - 1, level_p: self.residual_p.len() - 1 }
     }
 }
 

@@ -186,6 +186,43 @@ pub fn chunk_threads() -> usize {
     }
 }
 
+/// Limbs [from, to) of one chunk (A6): limbs are independent, so they run on
+/// up to `chunk_threads()` cores; the output keeps limb order, so the bytes do
+/// not depend on the thread count.
+fn run_limbs(from: usize, to: usize, n: usize, limb: impl Fn(usize) -> Result<Vec<u8>, ()> + Sync) -> Result<Vec<u8>, ()> {
+    let threads = chunk_threads().min(to - from);
+    let mut out = Vec::with_capacity((to - from) * n * 8);
+    if threads <= 1 {
+        for j in from..to {
+            out.extend_from_slice(&limb(j)?);
+        }
+    } else {
+        let limbs: Vec<usize> = (from..to).collect();
+        let per = limbs.len().div_ceil(threads);
+        let limb = &limb;
+        let parts: Vec<Result<Vec<Vec<u8>>, ()>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = limbs.chunks(per).map(|js| sc.spawn(move || js.iter().map(|&j| limb(j)).collect::<Result<Vec<_>, ()>>())).collect();
+            hs.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+        });
+        for part in parts {
+            for l in part? {
+                out.extend_from_slice(&l);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Public inputs of a rotation key (E10): the SHA-256 of each seed's key-set
+/// descriptor (`CkksKeySetDescriptorV1` DER, which carries its lineage and
+/// a-seed) and the rotation key's public a-seed (`rotation_a_seed`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotationCtx {
+    pub old_descriptor_hash: [u8; 32],
+    pub new_descriptor_hash: [u8; 32],
+    pub a_seed: [u8; 32],
+}
+
 /// The secrets and public seed regenerated from one FHE seed. Zeroized on drop.
 pub struct Generator {
     pub ps: &'static CkksParamSet,
@@ -394,29 +431,71 @@ impl Generator {
             }
             Ok(bytes)
         };
-        // A6: limbs are independent, so they run on up to `chunk_threads()`
-        // cores; the output keeps limb order, so bytes are unchanged.
-        let threads = chunk_threads().min(to - from);
-        let mut out = Vec::with_capacity((to - from) * n * 8);
-        if threads <= 1 {
-            for j in from..to {
-                out.extend_from_slice(&limb(j)?);
+        let out = run_limbs(from, to, n, limb);
+        e.zeroize();
+        out
+    }
+
+    /// Public a-seed of the rotation key from `old` to this generator's
+    /// secret (E10), bound to both key-set descriptor hashes.
+    pub fn rotation_a_seed(&self, ctx: &RotationCtx) -> [u8; 32] {
+        self.kdf32("rotation-a-seed", &[&ctx.old_descriptor_hash, &ctx.new_descriptor_hash])
+    }
+
+    /// The b limbs [from, to) of digit `d` of the rotation key (E10): the
+    /// key-switching key from `old`'s secret (input) to this generator's
+    /// secret (output) over the residual basis,
+    /// b_j = MForm(NTT_j(e)) − a_j ⊙ Ŝ_new + [j in digit d's Q range] · MForm(P_res mod q_j) ⊙ Ŝ_old,
+    /// Lattigo's `GenEvaluationKeyNew(skInput = s_old, skOutput = s_new)` at
+    /// the residual levels. The error is keyed by this (the new) seed under
+    /// the label "rotation-error" with both descriptor hashes, the KeyID and
+    /// the digit; `a` is expanded from `ctx.a_seed` under the KeyID (kind 5),
+    /// so no limb can coincide with a key-set limb.
+    pub fn rotation_chunk(&self, old: &Generator, ctx: &RotationCtx, d: u32, from: usize, to: usize) -> Result<Vec<u8>, ()> {
+        let ps = self.ps;
+        if old.ps.id != ps.id {
+            return Err(());
+        }
+        let k = ps.rotation_desc();
+        if (d as usize) >= k.dnum() || from >= to || to > k.limbs() {
+            return Err(());
+        }
+        let n = ps.n();
+        let id = key_id(&k);
+        let mut key = self.kdf32("rotation-error", &[&ctx.old_descriptor_hash, &ctx.new_descriptor_hash, &id, &d.to_be_bytes()]);
+        let mut e = gaussian(&mut Stream::new(&key), n);
+        key.zeroize();
+        let mut prod_p = num_bigint::BigUint::from(1u32);
+        for p in ps.residual_p {
+            prod_p *= *p;
+        }
+        let digit = k.level_p + 1;
+        let limb = |j: usize| -> Result<Vec<u8>, ()> {
+            let (q, g) = ps.pk_limb(j).ok_or(())?;
+            let new_ctx = self.limb_ctx(q, g, n);
+            let old_ctx = old.limb_ctx(q, g, n);
+            let m = &new_ctx.m;
+            let mut b = m.ntt_mform_of(&e);
+            let a = uniform_a(&ctx.a_seed, &id, d, j as u32, q, n);
+            for i in 0..n {
+                b[i] = m.sub(b[i], mred(a[i], new_ctx.s_ntt[i], q, m.qinv));
             }
-        } else {
-            let limbs: Vec<usize> = (from..to).collect();
-            let per = limbs.len().div_ceil(threads);
-            let parts: Vec<Result<Vec<Vec<u8>>, ()>> = std::thread::scope(|sc| {
-                let hs: Vec<_> = limbs.chunks(per).map(|js| sc.spawn(|| js.iter().map(|&j| limb(j)).collect::<Result<Vec<_>, ()>>())).collect();
-                hs.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
-            });
-            for part in parts {
-                for l in part? {
-                    out.extend_from_slice(&l);
+            if j <= k.level_q && j >= d as usize * digit && j < (d as usize + 1) * digit {
+                let pm = (&prod_p % q).to_u64_digits().first().copied().unwrap_or(0);
+                let pm = mform(pm, q);
+                for i in 0..n {
+                    b[i] = m.add(b[i], mred(old_ctx.s_ntt[i], pm, q, m.qinv));
                 }
             }
-        }
+            let mut bytes = Vec::with_capacity(n * 8);
+            for v in &b {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            Ok(bytes)
+        };
+        let out = run_limbs(from, to, n, limb);
         e.zeroize();
-        Ok(out)
+        out
     }
 
     /// The public-key b limbs [from, to) over the residual basis.
@@ -501,6 +580,38 @@ mod tests {
             }
             assert_eq!(hexs(&h.finalize()), want[k].as_str().unwrap(), "key {k}");
         }
+    }
+
+    /// Rotation key (E10) known answers from the pqctoday-fhe rotation check
+    /// (`reference-runs/ckks-rotation-check`, command `kat`): old seed 00..1f,
+    /// new seed 20..3f, descriptor hashes 40..5f and 60..7f, test ring.
+    #[test]
+    fn rotation_kat_matches_reference_spec_test_ring() {
+        let kat: serde_json::Value = serde_json::from_str(include_str!("../../../kat/fhe-ckks-rotation-kat-32770.json")).unwrap();
+        let ps = super::super::params::find(0x8002).unwrap();
+        let old = Generator::new(ps, &core::array::from_fn(|i| i as u8));
+        let new = Generator::new(ps, &core::array::from_fn(|i| 0x20 + i as u8));
+        let mut ctx = RotationCtx { old_descriptor_hash: core::array::from_fn(|i| 0x40 + i as u8), new_descriptor_hash: core::array::from_fn(|i| 0x60 + i as u8), a_seed: [0; 32] };
+        ctx.a_seed = new.rotation_a_seed(&ctx);
+        assert_eq!(hexs(&ctx.a_seed), kat["aSeed"].as_str().unwrap());
+        let k = ps.rotation_desc();
+        assert_eq!(k.dnum() as u64, kat["digits"].as_u64().unwrap());
+        assert_eq!(k.limbs() as u64, kat["limbs"].as_u64().unwrap());
+        let mut h = sha2::Sha256::new();
+        for d in 0..k.dnum() {
+            let all = new.rotation_chunk(&old, &ctx, d as u32, 0, k.limbs()).unwrap();
+            // Limb ranges compose.
+            let parts: Vec<u8> = (0..k.limbs()).flat_map(|j| new.rotation_chunk(&old, &ctx, d as u32, j, j + 1).unwrap()).collect();
+            assert_eq!(all, parts);
+            h.update(&all);
+        }
+        assert_eq!(hexs(&h.finalize()), kat["keySha256"].as_str().unwrap());
+        // Direction matters: the key from new to old is a different key.
+        assert_ne!(old.rotation_chunk(&new, &ctx, 0, 0, 1).unwrap(), new.rotation_chunk(&old, &ctx, 0, 0, 1).unwrap());
+        // Bounds.
+        assert!(new.rotation_chunk(&old, &ctx, k.dnum() as u32, 0, 1).is_err() && new.rotation_chunk(&old, &ctx, 0, 0, k.limbs() + 1).is_err());
+        let other = Generator::new(super::super::params::find(2).unwrap(), &[1; 32]);
+        assert!(new.rotation_chunk(&other, &ctx, 0, 0, 1).is_err(), "parameter sets differ");
     }
 
     /// Determinism (S2): limb ranges compose, and a repeat gives identical bytes.
