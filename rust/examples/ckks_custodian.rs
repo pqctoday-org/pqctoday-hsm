@@ -169,19 +169,38 @@ fn derive(s: u32, seed: u32, kind: u32, k: u32, d: u32, from: usize, to: usize) 
     v
 }
 
-fn cmd_export(dir: &Path, per_chunk: usize) {
+/// `stream`: write every output file as a frame to stdout instead of to disk
+/// (`PQCKF1` ‖ u16 BE path length ‖ path ‖ u64 BE length ‖ bytes), so a board
+/// never stores the key set; the report goes to stderr. Receiver:
+/// pqctoday-fhe `reference-runs/ckks-stream-e2e/receive.py`.
+fn cmd_export(dir: &Path, per_chunk: usize, stream: bool) {
     open(dir);
     let s = ok("user login", native::open_session(0, USER));
     let seed = find(s, SEED_ID, CKO_SECRET_KEY);
     let signer = find(s, SIGNER_ID, CKO_PRIVATE_KEY);
     let ps = params::find(native::get_attribute_u32(s, seed, CKA_PQCTODAY_FHE_PARAM_SET).unwrap()).unwrap();
     let out = dir.join("out");
-    let _ = std::fs::remove_dir_all(out.join("pk"));
-    let _ = std::fs::remove_dir_all(out.join("evk"));
-    std::fs::create_dir_all(out.join("pk")).unwrap();
+    if !stream {
+        let _ = std::fs::remove_dir_all(out.join("pk"));
+        let _ = std::fs::remove_dir_all(out.join("evk"));
+        std::fs::create_dir_all(out.join("pk")).unwrap();
+    }
+    let stdout = std::cell::RefCell::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout().lock()));
+    let emit = |rel: &str, bytes: &[u8]| {
+        if stream {
+            let mut w = stdout.borrow_mut();
+            w.write_all(b"PQCKF1").unwrap();
+            w.write_all(&(rel.len() as u16).to_be_bytes()).unwrap();
+            w.write_all(rel.as_bytes()).unwrap();
+            w.write_all(&(bytes.len() as u64).to_be_bytes()).unwrap();
+            w.write_all(bytes).unwrap();
+        } else {
+            std::fs::write(out.join(rel), bytes).unwrap();
+        }
+    };
     let mut manifest = String::new();
     let mut put = |rel: String, bytes: &[u8]| {
-        std::fs::write(out.join(&rel), bytes).unwrap();
+        emit(&rel, bytes);
         manifest.push_str(&format!("{rel} {}\n", sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()));
         bytes.len() as u64
     };
@@ -193,7 +212,9 @@ fn cmd_export(dir: &Path, per_chunk: usize) {
     }
     let (mut calls, mut slowest) = (0u64, 0f64);
     for (k, key) in ps.keys.iter().enumerate() {
-        std::fs::create_dir_all(out.join(format!("evk/k{k:03}"))).unwrap();
+        if !stream {
+            std::fs::create_dir_all(out.join(format!("evk/k{k:03}"))).unwrap();
+        }
         for d in 0..key.dnum() {
             for from in (0..key.limbs()).step_by(per_chunk) {
                 let to = (from + per_chunk).min(key.limbs());
@@ -204,20 +225,24 @@ fn cmd_export(dir: &Path, per_chunk: usize) {
                 calls += 1;
             }
         }
-        eprint!("\rkey {}/{}", k + 1, ps.keys.len());
+        if !stream {
+            eprint!("\rkey {}/{}", k + 1, ps.keys.len());
+        }
     }
-    eprintln!();
+    if !stream {
+        eprintln!();
+    }
     let secs = t0.elapsed().as_secs_f64();
     // Manifest: one SHA-256 per file in export order, signed (TFHE model, spec
     // §5.2): the application signs with the token-resident ML-DSA-65 key.
-    std::fs::write(out.join("manifest.txt"), &manifest).unwrap();
+    emit("manifest.txt", manifest.as_bytes());
     let lineage = native::get_attribute(s, seed, CKA_PQCTODAY_FHE_LINEAGE_ID).unwrap();
     let ph = native::get_attribute(s, seed, CKA_PQCTODAY_FHE_PARAM_HASH).unwrap();
     let mder = ok("manifest", tf::public_manifest(&lineage, &ph, mech::PUBLIC_KIND_CKKS_EVK_CHUNK, manifest.as_bytes()));
-    std::fs::write(out.join("manifest.der"), &mder).unwrap();
-    std::fs::write(out.join("manifest.sig"), ok("C_Sign(CKM_ML_DSA)", native::sign(s, signer, CKM_ML_DSA, &mder))).unwrap();
+    emit("manifest.der", &mder);
+    emit("manifest.sig", &ok("C_Sign(CKM_ML_DSA)", native::sign(s, signer, CKM_ML_DSA, &mder)));
     let signer_pub = find(s, SIGNER_ID, CKO_PUBLIC_KEY);
-    std::fs::write(out.join("signer_spki.der"), native::get_attribute(s, signer_pub, CKA_PUBLIC_KEY_INFO).unwrap()).unwrap();
+    emit("signer_spki.der", &native::get_attribute(s, signer_pub, CKA_PUBLIC_KEY_INFO).unwrap());
     let report = format!(
         "{{\n \"paramSet\": {},\n \"name\": \"{}\",\n \"keys\": {},\n \"limbsPerCall\": {per_chunk},\n \"evkCalls\": {calls},\n \"bytes\": {total},\n \"seconds\": {secs:.3},\n \"mbPerSecond\": {:.1},\n \"slowestCallSeconds\": {slowest:.4},\n \"peakRssKiB\": {}\n}}\n",
         ps.id,
@@ -226,8 +251,13 @@ fn cmd_export(dir: &Path, per_chunk: usize) {
         total as f64 / 1e6 / secs,
         peak_rss_kib().map(|v| v.to_string()).unwrap_or_else(|| "null".into())
     );
-    std::fs::write(out.join("export.json"), &report).unwrap();
-    std::io::stdout().write_all(report.as_bytes()).unwrap();
+    if stream {
+        stdout.borrow_mut().flush().unwrap();
+        eprint!("{report}");
+    } else {
+        std::fs::write(out.join("export.json"), &report).unwrap();
+        std::io::stdout().write_all(report.as_bytes()).unwrap();
+    }
 }
 
 fn cmd_decrypt(dir: &Path, ct: &Path, dst: &Path) {
@@ -267,10 +297,10 @@ fn main() {
             let ps = u32::from_str_radix(a[3].trim_start_matches("0x"), if a[3].starts_with("0x") { 16 } else { 10 }).expect("param set");
             cmd_init(&PathBuf::from(&a[2]), ps, a.get(4).map(String::as_str) == Some("--test-seed"))
         }
-        Some("export") if a.len() >= 3 => cmd_export(&PathBuf::from(&a[2]), a.get(3).map(|v| v.parse().unwrap()).unwrap_or(8)),
+        Some(c @ ("export" | "export-stream")) if a.len() >= 3 => cmd_export(&PathBuf::from(&a[2]), a.get(3).map(|v| v.parse().unwrap()).unwrap_or(8), c == "export-stream"),
         Some("decrypt") if a.len() == 5 => cmd_decrypt(&PathBuf::from(&a[2]), &PathBuf::from(&a[3]), &PathBuf::from(&a[4])),
         _ => {
-            eprintln!("usage: ckks_custodian init <dir> <param-set> [--test-seed] | export <dir> [limbs-per-chunk] | decrypt <dir> <ct.bin> <out>");
+            eprintln!("usage: ckks_custodian init <dir> <param-set> [--test-seed] | export|export-stream <dir> [limbs-per-chunk] | decrypt <dir> <ct.bin> <out>");
             std::process::exit(2);
         }
     }
