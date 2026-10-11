@@ -34,38 +34,57 @@ fn lp(fields: &[&[u8]]) -> Vec<u8> {
 }
 
 /// AES-256-CTR keystream, 128-bit big-endian counter from zero (Go `cipher.NewCTR`).
+/// The keystream is produced `STREAM_BLOCKS` blocks at a time so the AES
+/// instructions run pipelined (A7); the bytes are identical to block-by-block CTR.
 pub struct Stream {
     cipher: aes::Aes256,
     ctr: u128,
-    buf: [u8; 16],
+    buf: [u8; 16 * STREAM_BLOCKS],
     pos: usize,
 }
 
+const STREAM_BLOCKS: usize = 64;
+
 impl Stream {
     pub fn new(key: &[u8; 32]) -> Self {
-        Stream { cipher: aes::Aes256::new_from_slice(key).expect("32-byte key"), ctr: 0, buf: [0; 16], pos: 16 }
+        Stream { cipher: aes::Aes256::new_from_slice(key).expect("32-byte key"), ctr: 0, buf: [0; 16 * STREAM_BLOCKS], pos: 16 * STREAM_BLOCKS }
+    }
+    fn refill(&mut self) {
+        let mut blocks = [Block::<aes::Aes256>::default(); STREAM_BLOCKS];
+        for b in blocks.iter_mut() {
+            *b = Block::<aes::Aes256>::from(self.ctr.to_be_bytes());
+            self.ctr = self.ctr.wrapping_add(1);
+        }
+        self.cipher.encrypt_blocks(&mut blocks);
+        for (i, b) in blocks.iter().enumerate() {
+            self.buf[16 * i..16 * i + 16].copy_from_slice(b);
+        }
+        blocks.iter_mut().for_each(|b| b.as_mut_slice().zeroize());
+        self.pos = 0;
     }
     fn byte(&mut self) -> u8 {
-        if self.pos == 16 {
-            let mut b = Block::<aes::Aes256>::from(self.ctr.to_be_bytes());
-            self.cipher.encrypt_block(&mut b);
-            self.buf.copy_from_slice(&b);
-            self.ctr = self.ctr.wrapping_add(1);
-            self.pos = 0;
+        if self.pos == self.buf.len() {
+            self.refill();
         }
         let v = self.buf[self.pos];
         self.pos += 1;
         v
     }
+    fn take<const L: usize>(&mut self) -> [u8; L] {
+        let mut out = [0u8; L];
+        if self.pos + L <= self.buf.len() {
+            out.copy_from_slice(&self.buf[self.pos..self.pos + L]);
+            self.pos += L;
+        } else {
+            out.iter_mut().for_each(|x| *x = self.byte());
+        }
+        out
+    }
     pub fn u64(&mut self) -> u64 {
-        let mut b = [0u8; 8];
-        b.iter_mut().for_each(|x| *x = self.byte());
-        u64::from_le_bytes(b)
+        u64::from_le_bytes(self.take::<8>())
     }
     pub fn u32(&mut self) -> u32 {
-        let mut b = [0u8; 4];
-        b.iter_mut().for_each(|x| *x = self.byte());
-        u32::from_le_bytes(b)
+        u32::from_le_bytes(self.take::<4>())
     }
 }
 
@@ -179,6 +198,34 @@ pub struct Generator {
     /// export walks a digit's limbs over several calls (A9). Zeroized on
     /// replacement and on drop.
     err_cache: std::sync::Mutex<Option<([u8; 17], u32, Vec<i64>)>>,
+    /// Per-modulus NTT tables and MForm(NTT(s)) (A7): both depend only on the
+    /// modulus, yet every key and digit used to rebuild them. Bounded by
+    /// `PQC_CKKS_CACHE_MB` (default 64; 0 disables); the secret part is
+    /// zeroized on drop. Bytes are unchanged.
+    limb_cache: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<LimbCtx>>>,
+}
+
+/// Cached per-modulus context: public NTT tables and the secret in NTT form.
+pub struct LimbCtx {
+    pub m: Modulus,
+    pub s_ntt: Vec<u64>,
+}
+
+impl Drop for LimbCtx {
+    fn drop(&mut self) {
+        self.s_ntt.zeroize();
+    }
+}
+
+fn limb_cache_budget() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("PQC_CKKS_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64) << 20
+    }
 }
 
 impl Drop for Generator {
@@ -197,7 +244,7 @@ impl Drop for Generator {
 
 impl Generator {
     pub fn new(ps: &'static CkksParamSet, seed: &[u8; 32]) -> Self {
-        let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32], param_hash: param_hash(ps), err_cache: std::sync::Mutex::new(None) };
+        let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32], param_hash: param_hash(ps), err_cache: std::sync::Mutex::new(None), limb_cache: Default::default() };
         let n = ps.n();
         let mut k = g.kdf32("secret", &[]);
         g.s = ternary(&mut Stream::new(&k), n, ps.h);
@@ -209,6 +256,25 @@ impl Generator {
         }
         g.a_seed = g.kdf32("a-seed", &[]);
         g
+    }
+
+    /// NTT tables and MForm(NTT(s)) for modulus `q`, from the cache when it
+    /// fits the budget (each entry ≈ 24·N bytes).
+    fn limb_ctx(&self, q: u64, g: u64, n: usize) -> std::sync::Arc<LimbCtx> {
+        if let Ok(c) = self.limb_cache.lock() {
+            if let Some(e) = c.get(&q) {
+                return e.clone();
+            }
+        }
+        let m = Modulus::new(q, g, n);
+        let s_ntt = m.ntt_mform_of(&self.s);
+        let ctx = std::sync::Arc::new(LimbCtx { m, s_ntt });
+        if let Ok(mut c) = self.limb_cache.lock() {
+            if (c.len() + 1) * 24 * n <= limb_cache_budget() {
+                c.insert(q, ctx.clone());
+            }
+        }
+        ctx
     }
 
     /// Constant-time check that this generator was built from `seed`.
@@ -291,8 +357,9 @@ impl Generator {
         // One limb: everything below depends only on (j, shared read-only inputs).
         let limb = |j: usize| -> Result<Vec<u8>, ()> {
             let (q, g) = ps.key_limb(&k, j).ok_or(())?;
-            let m = Modulus::new(q, g, n);
-            let mut s_main = m.ntt_mform_of(&self.s);
+            let ctx = self.limb_ctx(q, g, n);
+            let m = &ctx.m;
+            let mut s_main = ctx.s_ntt.clone();
             let (mut sk_out, mut sk_in): (Vec<u64>, Vec<u64>) = match k.kind {
                 KIND_RELIN => {
                     let sq = s_main.iter().map(|&x| mred(x, x, q, m.qinv)).collect();
@@ -483,5 +550,26 @@ mod profile {
         let eight = g.chunk(1, 0, 0, 8).unwrap();
         let chunk8 = t.elapsed();
         eprintln!("Generator::new {g_new:?} (ternary alone {tern_t:?}); error_poly {err:?}; chunk(1 limb) {chunk1:?}; chunk(8 limbs) {chunk8:?}; {} {} {}", e.len(), tern.len(), one.len() + eight.len());
+        // Per-limb parts (A7): NTT of the secret, NTT of the error, a-expansion, pointwise work.
+        let (q, gr) = ps.key_limb(&k, 0).unwrap();
+        let t = Instant::now();
+        let m = Modulus::new(q, gr, n);
+        let tables = t.elapsed();
+        let t = Instant::now();
+        let sn = m.ntt_mform_of(&g.s);
+        let ntt_s = t.elapsed();
+        let t = Instant::now();
+        let en = m.ntt_mform_of(&e);
+        let ntt_e = t.elapsed();
+        let t = Instant::now();
+        let a = uniform_a(&g.a_seed, &key_id(&k), 0, 0, q, n);
+        let a_t = t.elapsed();
+        let t = Instant::now();
+        let mut acc = 0u64;
+        for i in 0..n {
+            acc ^= m.sub(en[i], mred(a[i], sn[i], q, m.qinv));
+        }
+        let pw = t.elapsed();
+        eprintln!("per limb: Modulus::new (tables) {tables:?}; NTT(s) {ntt_s:?}; NTT(e) {ntt_e:?}; uniform_a {a_t:?}; pointwise {pw:?} ({acc})");
     }
 }
