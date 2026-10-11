@@ -110,6 +110,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the bytes needs a new generator version. Registry ID 2 now has its own
   known-answer file (`rust/kat/fhe-ckks-kat-2.json`). The local gate also runs
   the CKKS integration suites.
+- **Rust engine (educational feature only): signed record when an old CKKS
+  seed is retired.** Before `retire_old_seed` destroys the old seed of a
+  rotation, it now writes a retirement record to the token: a public token
+  object that cannot be changed or deleted, signed with the receipt-signing key
+  (`"PQCToday CKKS Rotation Retirement 1.0"`). It names both seeds' lineages,
+  the parameter hash and the retirement time, and links to the signed rotation
+  manifest through the rotation descriptor's hash. `retire_old_seed` now
+  returns the record's handle, `verify_ckks_rotation_retirement` checks it, and
+  the `ckks_custodian` example saves it. Before, retirement was recorded only in
+  the audit log. Generator output is unchanged.
+- **Rust engine (educational feature only): a replicated seed stays refused as
+  the new seed of a CKKS rotation.** This now has its own test with a real
+  replica of a seed generated on another token, and the documentation says why:
+  replication of a rotation is not designed, because copies of the new secret
+  on other tokens would be outside this token's rotation rules. A replica may
+  still be the old seed.
+- **Documentation (educational feature only): how CKKS releases are flooded.**
+  The FHE mechanism specification
+  (`docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md` §6.6) now states that
+  the flooding noise is a rounded continuous Gaussian (Box–Muller on the token
+  DRBG), not the discrete Gaussian of the published analysis (Li, Micciancio,
+  Schultz and Sorrell, CRYPTO 2022). The time of a single draw depends on the
+  value drawn: on the MX95 Pro, about 21 ns out of 230–390 ns per draw,
+  depending on the Box–Muller angle. The time of whole releases showed no
+  measurable dependence on the noise. A constant-time discrete Gaussian
+  sampler is not implemented. §6.7 records the rotation retirement record,
+  the replica rule, and an open question: whether someone who holds the old
+  secret can read a switched ciphertext without the original is not
+  established.
 
 - **FHE browser matrix: memory, worker recovery and a gate step (educational
   feature only).** In Chromium, WebKit and Firefox, building the token's 30 MB
