@@ -162,6 +162,10 @@ pub struct Generator {
     ss: Vec<i64>,
     pub a_seed: [u8; 32],
     param_hash: [u8; 32],
+    /// The last digit's error polynomial (key id, digit, coefficients): the
+    /// export walks a digit's limbs over several calls (A9). Zeroized on
+    /// replacement and on drop.
+    err_cache: std::sync::Mutex<Option<([u8; 17], u32, Vec<i64>)>>,
 }
 
 impl Drop for Generator {
@@ -169,12 +173,18 @@ impl Drop for Generator {
         self.seed.zeroize();
         self.s.zeroize();
         self.ss.zeroize();
+        if let Ok(mut c) = self.err_cache.lock() {
+            if let Some((_, _, e)) = c.as_mut() {
+                e.zeroize();
+            }
+            *c = None;
+        }
     }
 }
 
 impl Generator {
     pub fn new(ps: &'static CkksParamSet, seed: &[u8; 32]) -> Self {
-        let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32], param_hash: param_hash(ps) };
+        let mut g = Generator { ps, seed: *seed, s: Vec::new(), ss: Vec::new(), a_seed: [0; 32], param_hash: param_hash(ps), err_cache: std::sync::Mutex::new(None) };
         let n = ps.n();
         let mut k = g.kdf32("secret", &[]);
         g.s = ternary(&mut Stream::new(&k), n, ps.h);
@@ -186,6 +196,33 @@ impl Generator {
         }
         g.a_seed = g.kdf32("a-seed", &[]);
         g
+    }
+
+    /// Constant-time check that this generator was built from `seed`.
+    pub fn same_seed(&self, ps: &CkksParamSet, seed: &[u8; 32]) -> bool {
+        let diff = self.seed.iter().zip(seed).fold(0u8, |a, (x, y)| a | (x ^ y));
+        diff == 0 && self.ps.id == ps.id
+    }
+
+    /// The digit's error polynomial, from the one-entry cache when the
+    /// previous call used the same key and digit (bytes are unchanged).
+    fn cached_error(&self, k: &KeyDesc, d: u32) -> Vec<i64> {
+        let id = key_id(k);
+        if let Ok(c) = self.err_cache.lock() {
+            if let Some((cid, cd, e)) = c.as_ref() {
+                if *cid == id && *cd == d {
+                    return e.clone();
+                }
+            }
+        }
+        let e = self.error_poly(k, Some(d));
+        if let Ok(mut c) = self.err_cache.lock() {
+            if let Some((_, _, old)) = c.as_mut() {
+                old.zeroize();
+            }
+            *c = Some((id, d, e.clone()));
+        }
+        e
     }
 
     fn kdf32(&self, label: &str, extra: &[&[u8]]) -> [u8; 32] {
@@ -225,7 +262,7 @@ impl Generator {
         }
         let n = ps.n();
         let id = key_id(&k);
-        let mut e = self.error_poly(&k, Some(d));
+        let mut e = self.cached_error(&k, d);
         let mut prod_p = num_bigint::BigUint::from(1u32);
         for p in &ps.p[..=k.level_p] {
             prod_p *= *p;
@@ -377,5 +414,38 @@ mod tests {
         }
         assert_eq!(all, parts);
         assert!(g.chunk(99, 0, 0, 1).is_err() && g.chunk(1, 99, 0, 1).is_err() && g.chunk(1, 0, 0, 99).is_err());
+    }
+}
+
+#[cfg(test)]
+mod profile {
+    use super::*;
+    use std::time::Instant;
+
+    /// Per-call fixed cost at N = 2^16 (plan §8.2, A9): where does it go?
+    #[test]
+    #[ignore]
+    fn profile_per_call_cost() {
+        let ps = super::super::params::find(2).unwrap();
+        let seed = [7u8; 32];
+        let t = Instant::now();
+        let g = Generator::new(ps, &seed);
+        let g_new = t.elapsed();
+        let k = ps.keys[1];
+        let t = Instant::now();
+        let e = g.error_poly(&k, Some(0));
+        let err = t.elapsed();
+        let t = Instant::now();
+        let n = ps.n();
+        let mut st = Stream::new(&[1u8; 32]);
+        let tern = ternary(&mut st, n, ps.h);
+        let tern_t = t.elapsed();
+        let t = Instant::now();
+        let one = g.chunk(1, 0, 0, 1).unwrap();
+        let chunk1 = t.elapsed();
+        let t = Instant::now();
+        let eight = g.chunk(1, 0, 0, 8).unwrap();
+        let chunk8 = t.elapsed();
+        eprintln!("Generator::new {g_new:?} (ternary alone {tern_t:?}); error_poly {err:?}; chunk(1 limb) {chunk1:?}; chunk(8 limbs) {chunk8:?}; {} {} {}", e.len(), tern.len(), one.len() + eight.len());
     }
 }

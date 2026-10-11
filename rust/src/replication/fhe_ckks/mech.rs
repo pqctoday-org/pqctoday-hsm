@@ -75,6 +75,70 @@ fn ckks_seed(session: u32, h: u32, mechanism: u32) -> Result<(u32, tf::SeedObjec
     Ok((slot, so, ps))
 }
 
+/// One cached generator for the whole token (A9): regenerating the secret
+/// costs about 6 ms per call on an M4 Pro core and about 10x that on a
+/// Cortex-A55, a fixed cost that dominates small chunks. The entry is bound
+/// to the session, the seed handle and the seed bytes, expires after
+/// `GEN_CACHE_IDLE_SECS` without use, and is zeroized on C_CloseSession,
+/// C_CloseAllSessions, C_Logout and C_Finalize (`clear_generator_cache`) and
+/// when the seed object is destroyed or modified (`clear_generator_cache_for`).
+/// Not hooked into `drop_key_caches`: C_DestroyObject on each exported chunk
+/// would empty it on every call.
+/// Output bytes are unchanged; the trade-off is that the expanded secret stays
+/// in token memory for the duration of an export.
+#[cfg(not(target_arch = "wasm32"))]
+struct GenCacheEntry {
+    session: u32,
+    seed_handle: u32,
+    last_used: std::time::Instant,
+    generator: std::sync::Arc<Generator>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static GEN_CACHE: std::sync::Mutex<Option<GenCacheEntry>> = std::sync::Mutex::new(None);
+#[cfg(not(target_arch = "wasm32"))]
+pub const GEN_CACHE_IDLE_SECS: u64 = 30;
+
+/// Drop (and so zeroize) the cached generator.
+pub fn clear_generator_cache() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(mut c) = GEN_CACHE.lock() {
+        *c = None;
+    }
+}
+
+/// Drop the cached generator if it was built from object `h` (its seed is
+/// being destroyed or changed).
+pub fn clear_generator_cache_for(h: u32) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(mut c) = GEN_CACHE.lock() {
+        if c.as_ref().is_some_and(|e| e.seed_handle == h) {
+            *c = None;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = h;
+}
+
+fn generator_for(session: u32, h_seed: u32, ps: &'static CkksParamSet, seed: &[u8; 32]) -> std::sync::Arc<Generator> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(mut c) = GEN_CACHE.lock() {
+            let fresh = c.as_ref().is_some_and(|e| {
+                e.session == session && e.seed_handle == h_seed && e.last_used.elapsed().as_secs() < GEN_CACHE_IDLE_SECS && e.generator.same_seed(ps, seed)
+            });
+            if !fresh {
+                *c = Some(GenCacheEntry { session, seed_handle: h_seed, last_used: std::time::Instant::now(), generator: std::sync::Arc::new(Generator::new(ps, seed)) });
+            }
+            let e = c.as_mut().expect("just set");
+            e.last_used = std::time::Instant::now();
+            return e.generator.clone();
+        }
+    }
+    let _ = (session, h_seed);
+    std::sync::Arc::new(Generator::new(ps, seed))
+}
+
 /// Derive one bounded piece of public CKKS material as a public session object.
 pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, from: usize, to: usize) -> Result<u32, u32> {
     let (slot, so, ps) = ckks_seed(session, h_seed, CKM_PQCTODAY_FHE_DERIVE_PUBLIC)?;
@@ -98,7 +162,7 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
     if kind != PUBLIC_KIND_CKKS_DESCRIPTOR && (to - from).saturating_mul(n * 8) > tf::MAX_PUBLIC_OBJECT {
         return Err(CKR_DEVICE_MEMORY);
     }
-    let g = Generator::new(ps, &so.seed);
+    let g = generator_for(session, h_seed, ps, &so.seed);
     let value = match kind {
         PUBLIC_KIND_CKKS_DESCRIPTOR => asn1::to_der(&CkksKeySetDescriptorV1 {
             generator_version: 1,
