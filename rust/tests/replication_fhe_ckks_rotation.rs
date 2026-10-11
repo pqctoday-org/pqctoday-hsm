@@ -2,7 +2,8 @@
 //! version 3 (pqctoday-fhe docs/ckks/ckks-threshold-and-rotation-study-2026-10-11.md
 //! §5; plan §3.4). SO-only ceremony, token-generated new seed, distinct seeds
 //! of one parameter set, rotation descriptor and token-signed manifest, one
-//! direction and one target, SO retirement of the old seed. INSECURE test
+//! direction and one target, SO retirement of the old seed with a signed
+//! record in the retirement ledger, no replica as the target. INSECURE test
 //! ring 0x8002 only; the generator's bytes are pinned by the unit KAT
 //! (`spec.rs`, `kat/fhe-ckks-rotation-kat-32770.json`).
 #![cfg(all(feature = "educational-ckks", feature = "test-support"))]
@@ -297,7 +298,8 @@ fn rotation_export_manifest_and_determinism() {
     let find = |id: &[u8]| native::find_all_by_cka_id(e.user, id).unwrap()[0];
     let mut rec = ln.to_vec();
     rec.push(1);
-    assert_eq!(rotation_record(find(b"rot-old")), Some(rec));
+    rec.extend_from_slice(&sha2::Sha256::digest(&desc));
+    assert_eq!(rotation_record(find(b"rot-old")), Some(rec), "signed, with the rotation descriptor hash");
     assert_eq!(rotation_record(find(b"rot-new")), None);
 }
 
@@ -351,4 +353,118 @@ fn rotation_retire_old_seed_and_caches_cleared() {
     assert!(native::find_all_by_cka_id(e.user, b"rot-old").unwrap().is_empty());
     let new = native::find_all_by_cka_id(e.user, b"rot-new").unwrap()[0];
     keyset_descriptor(e.user, new);
+}
+
+/// WP5 (a): retirement is recorded in the token's retirement ledger as a
+/// signed record bound to the rotation manifest, before the seed is
+/// destroyed; the record verifies, is immutable, and tampering is detected.
+#[test]
+fn rotation_retirement_record_signed_in_ledger() {
+    let _g = lock();
+    let (e, old, new) = setup();
+    let (lo, ln) = (e.lin(old), e.lin(new));
+    let ph = native::get_attribute(e.user, old, CKA_PQCTODAY_FHE_PARAM_HASH).unwrap();
+    let slot = e.w.tokens[0].slot;
+    let (desc, manifest, rec_h, value) = e.w.as_so(0, |so| {
+        assert!(rot::retirement_records(slot).is_empty());
+        let (desc, _) = rot_export(so, &ln, &lo, 3);
+        let manifest = rot_manifest(so, &ln, &lo).unwrap();
+        assert!(rot::retirement_records(slot).is_empty(), "signing the manifest writes no retirement record");
+        let h = rot::retire_old_seed(so, &lo).expect("retire");
+        // The record is a public token object the SO (and anyone) can read.
+        let value = native::get_attribute(so, h, CKA_VALUE).expect("public CKA_VALUE");
+        assert_eq!(native::get_attribute_bool(so, h, CKA_TOKEN), Some(true));
+        assert_eq!(native::get_attribute_bool(so, h, CKA_PRIVATE), Some(false));
+        assert_eq!(native::get_attribute_bool(so, h, CKA_MODIFIABLE), Some(false));
+        assert_eq!(native::get_attribute_bool(so, h, CKA_DESTROYABLE), Some(false));
+        // Immutable: neither changed nor destroyed through the interface.
+        let mut v = vec![0u8; 4];
+        let mut t = [CKA_VALUE as usize, v.as_mut_ptr() as usize, v.len()];
+        assert_ne!(softhsmrustv3::ffi::C_SetAttributeValue(so, h, t.as_mut_ptr() as *mut u8, 1), CKR_OK, "record not modifiable");
+        assert_ne!(softhsmrustv3::ffi::C_DestroyObject(so, h), CKR_OK, "record not destroyable");
+        // Retiring again: the seed is gone, and no second record is written.
+        assert_eq!(rot::retire_old_seed(so, &lo), Err(CKR_KEY_HANDLE_INVALID));
+        (desc, manifest, h, value)
+    });
+    // One ledger entry, the same bytes the object holds.
+    let ledger = rot::retirement_records(slot);
+    assert_eq!(ledger, vec![(rec_h, value.clone())]);
+    // It verifies against this token and binds the rotation it retires.
+    let (tbs, device) = rot::verify_ckks_rotation_retirement(&value, &trust_of(&e.w, 0), e.w.now).expect("retirement record verifies");
+    assert_eq!(device, e.w.device_ids()[0]);
+    let (mtbs, _) = rot::verify_ckks_rotation_manifest(&manifest, &trust_of(&e.w, 0), e.w.now).unwrap();
+    assert_eq!(tbs.version, 1);
+    assert_eq!(tbs.rotation_descriptor_hash.as_bytes(), sha2::Sha256::digest(&desc).as_slice());
+    assert_eq!(tbs.rotation_descriptor_hash, mtbs.rotation_descriptor_hash, "linked to the signed rotation manifest");
+    assert_eq!((tbs.old_lineage.as_bytes(), tbs.new_lineage.as_bytes()), (lo.as_slice(), ln.as_slice()));
+    assert_eq!(tbs.param_hash.as_bytes(), ph.as_slice());
+    assert_eq!(tbs.retired_at, e.w.now);
+    // Tampering: any TBS field, the signature, or a domain swap is refused.
+    let m: rot::CkksSignedRotationRetirementV1 = der::Decode::from_der(&value).unwrap();
+    let enc = |x: &rot::CkksSignedRotationRetirementV1| der::Encode::to_der(x).unwrap();
+    let t = trust_of(&e.w, 0);
+    let mut bad = m.clone();
+    bad.tbs.retired_at += 1;
+    assert_eq!(rot::verify_ckks_rotation_retirement(&enc(&bad), &t, e.w.now), Err(CKR_SIGNATURE_INVALID), "retiredAt");
+    let mut bad = m.clone();
+    bad.tbs.old_lineage = der::asn1::OctetString::new(ln.to_vec()).unwrap();
+    assert_eq!(rot::verify_ckks_rotation_retirement(&enc(&bad), &t, e.w.now), Err(CKR_SIGNATURE_INVALID), "oldLineage");
+    let mut bad = m.clone();
+    bad.tbs.rotation_descriptor_hash = der::asn1::OctetString::new(vec![0u8; 32]).unwrap();
+    assert_eq!(rot::verify_ckks_rotation_retirement(&enc(&bad), &t, e.w.now), Err(CKR_SIGNATURE_INVALID), "rotationDescriptorHash");
+    let mut bad = m.clone();
+    let mut sig = bad.signature.as_bytes().to_vec();
+    sig[0] ^= 1;
+    bad.signature = der::asn1::OctetString::new(sig).unwrap();
+    assert_eq!(rot::verify_ckks_rotation_retirement(&enc(&bad), &t, e.w.now), Err(CKR_SIGNATURE_INVALID), "signature");
+    let mut raw = value.clone();
+    let last = raw.len() - 1;
+    raw[last] ^= 1;
+    assert!(rot::verify_ckks_rotation_retirement(&raw, &t, e.w.now).is_err(), "flipped byte");
+    // Separate domains: a manifest is not a retirement record and vice versa.
+    assert!(rot::verify_ckks_rotation_retirement(&manifest, &t, e.w.now).is_err());
+    assert!(rot::verify_ckks_rotation_manifest(&value, &t, e.w.now).is_err());
+}
+
+/// WP5 (b), decision D3 (keep refusing): a replica of a seed that another
+/// token generated with `CKM_PQCTODAY_FHE_KEY_GEN` is refused as the new seed
+/// of a rotation (the replica is not `CKA_LOCAL` here); the same replica may
+/// be the OLD seed. Replication of a rotation is not designed.
+#[test]
+fn rotation_refuses_replica_of_token_made_seed_as_new() {
+    let _g = lock();
+    let w = world(2);
+    let rpol = records::build_policy_with_constraint(
+        DOMAIN, [true, true, true], w.device_ids(), w.now - 60, w.now + 30 * 86_400, 4,
+        vec![CKM_PQCTODAY_FHE_DERIVE_PUBLIC, CKM_PQCTODAY_FHE_DECRYPT], false, fhe::ckks_profile_constraint_hash(),
+    )
+    .unwrap();
+    let mut ids = ([0u8; 48], [0u8; 48]);
+    for i in 0..2 {
+        ids = w.as_so(i, |so| (repl::enroll_policy(so, &rpol).unwrap(), fhe::enroll_fhe_decrypt_policy(so, &dpol(PS, 100)).unwrap()));
+    }
+    let (rp, dp) = ids;
+    let (u0, u1) = (w.tokens[0].user, w.tokens[1].user);
+    // Token 0 generates the seed; token 1 receives a live clone of it.
+    let src = fhe::generate_fhe_seed_with_value_for_test(u0, PS, &rp, &dp, &seed_of(0x20), b"rot-src").expect("KEY_GEN on token 0");
+    assert_eq!(native::get_attribute_bool(u0, src, CKA_LOCAL), Some(true));
+    let pkg = repl::create_replication_package(u0, src, &request(&w, 0, 1, softhsmrustv3::replication::asn1::Operation::LiveClone, &rp)).expect("package");
+    let (replica, _) = repl::import_replication_package(u1, &pkg, &[]).expect("live clone to token 1");
+    assert_eq!(native::get_attribute_bool(u1, replica, CKA_LOCAL), Some(false));
+    // An imported object carries no key-generation mechanism of its own
+    // (CK_UNAVAILABLE_INFORMATION), unlike its source.
+    let kgm = |s: u32, h: u32| native::get_attribute(s, h, CKA_KEY_GEN_MECHANISM).map(|v| v[..4].to_vec());
+    assert_eq!(kgm(u0, src), Some((CKM_PQCTODAY_FHE_KEY_GEN as u32).to_le_bytes().to_vec()));
+    assert_ne!(kgm(u1, replica), kgm(u0, src));
+    // Token 1's own seed.
+    let local = fhe::generate_fhe_seed_with_value_for_test(u1, PS, &rp, &dp, &OLD_SEED, b"rot-local").expect("KEY_GEN on token 1");
+    let lin = |h: u32| -> L { native::get_attribute(u1, h, CKA_PQCTODAY_FHE_LINEAGE_ID).unwrap().try_into().unwrap() };
+    let (l_replica, l_local) = (lin(replica), lin(local));
+    w.as_so(1, |so| {
+        assert_eq!(rot_desc(so, &l_replica, &l_local), Err(CKR_KEY_FUNCTION_NOT_PERMITTED), "replica as the new seed");
+        assert_eq!(repl::last_refusal(), Some("new seed not generated by this token"));
+        assert!(rot::retirement_records(w.tokens[1].slot).is_empty());
+        // The other direction is allowed: the replica is the old seed.
+        rot_desc(so, &l_local, &l_replica).expect("a replica may be rotated away from");
+    });
 }

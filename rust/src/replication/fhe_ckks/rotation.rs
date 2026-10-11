@@ -39,6 +39,12 @@
 //!   `CKA_KEY_GEN_MECHANISM` = `CKM_PQCTODAY_FHE_KEY_GEN`. An imported or
 //!   replicated seed is refused, so a caller can never name a secret it knows
 //!   as the target (holding s_new and the rotation key reveals s_old).
+//!   This includes a replica of a seed another token generated (decision D3,
+//!   2026-10-11: keep refusing). Replication of a rotation is not designed: a
+//!   replica's secret also exists on the source token and on every other
+//!   replica, which this token's rotation rules (one target, never back,
+//!   retirement of the old seed) neither see nor bind, so the token accepts
+//!   only a target whose secret was made here and nowhere else.
 //! * The new seed's decryption policy is equal to or stricter than the old
 //!   one's (the replication rule): rotation never widens what may be released.
 //! * One direction, one target: a seed that has been rotated away from can
@@ -53,7 +59,8 @@
 //! version 2 evaluation-key chunks. Kind 6 returns a DER
 //! `CkksSignedRotationManifestV1` signed by the device's receipt-signing key,
 //! only when the ledger covers every digit exactly once, then marks the old
-//! seed as rotated (state byte 0x01) and clears the ledger:
+//! seed as rotated (state byte 0x01, followed by the SHA-256 of the rotation
+//! descriptor the signed ledger started from) and clears the ledger:
 //!
 //! ```text
 //! CkksRotationDescriptorV1 ::= SEQUENCE { generatorVersion INTEGER (1),
@@ -81,12 +88,42 @@
 //! reports that every stored ciphertext was switched, the SO calls
 //! `retire_old_seed(so_session, old_lineage)`, an SO operation like the policy
 //! enrollments (an SO cannot name the private seed in `C_DestroyObject`). It
-//! destroys the old seed only when its rotation manifest was signed (state
-//! byte 0x01), clears the generator cache and every ledger that names it, and
-//! logs `fhe_ckks_rotation_old_seed_destroyed` with both lineages. The token
-//! cannot verify the server's re-encryption itself; no further protocol is
-//! added. The seed's user can still destroy it with `C_DestroyObject` as
-//! before.
+//! acts only when the seed's rotation manifest was signed (state byte 0x01).
+//! It first commits a signed retirement record to the token's retirement
+//! ledger, then destroys the old seed, clears the generator cache and every
+//! session ledger that names it, and logs
+//! `fhe_ckks_rotation_old_seed_destroyed` with both lineages and the record's
+//! hash. The token cannot verify the server's re-encryption itself; no
+//! further protocol is added. The seed's user can still destroy it with
+//! `C_DestroyObject` as before (that path writes no retirement record).
+//!
+//! The retirement ledger is a set of public, immutable token objects
+//! (`CKO_DATA`, engine role 15, `CKA_TOKEN`, not modifiable, copyable or
+//! destroyable, at most `MAX_RETIREMENT_RECORDS` per slot). `CKA_VALUE` of
+//! each is a DER `CkksSignedRotationRetirementV1`, signed by the same
+//! receipt-signing key as the rotation manifest, under its own domain:
+//!
+//! ```text
+//! CkksRotationRetirementTbsV1 ::= SEQUENCE { version INTEGER (1),
+//!     rotationDescriptorHash OCTET STRING (SIZE(32)),  -- as in the rotation manifest
+//!     paramHash OCTET STRING, oldLineage OCTET STRING, newLineage OCTET STRING,
+//!     retiredAt INTEGER }                               -- token clock, Unix seconds
+//! CkksSignedRotationRetirementV1 ::= SEQUENCE { tbs CkksRotationRetirementTbsV1,
+//!     signature OCTET STRING, signerChain SEQUENCE OF Certificate }
+//! signed bytes = "PQCToday CKKS Rotation Retirement 1.0" || 0x00 || DER(tbs)
+//! ```
+//!
+//! `rotationDescriptorHash` equals the `rotationDescriptorHash` of every
+//! rotation manifest the token signed for this pair, so a receiver links the
+//! retirement to the manifest it holds. The rotation manifest itself is not
+//! changed: it is signed before re-encryption starts and cannot carry a later
+//! event. The record is written before the seed is destroyed, so a retired
+//! seed always has a record; if the engine stops between the two, the next
+//! `retire_old_seed` call reuses the existing record. A seed whose manifest
+//! was signed by an engine before this record existed (33-byte rotation
+//! record, no descriptor hash) is refused until the SO signs its rotation
+//! manifest again. Retirement records are not generator output: the frozen
+//! generator bytes (`freeze.rs`) do not change.
 
 use std::collections::BTreeMap;
 
@@ -105,11 +142,20 @@ use crate::replication::{asn1, fhe};
 pub const ROTATION_MANIFEST_DOMAIN: &[u8] = b"PQCToday CKKS Rotation Manifest 1.0";
 
 /// Engine-private rotation record on the OLD seed: new lineage (32 bytes) ‖
-/// state (0x00 rotation started, 0x01 rotation manifest signed). Never
+/// state (0x00 rotation started, 0x01 rotation manifest signed) and, once
+/// signed, ‖ SHA-256 of the rotation descriptor (32 bytes). Never
 /// client-writable (engine-private range).
 pub const CKA_PRIV_FHE_ROTATION: u32 = 0xFFFF_000D;
 const ROTATION_STARTED: u8 = 0;
 const ROTATION_SIGNED: u8 = 1;
+
+/// Domain separator of the retirement record; never equal to the manifests'.
+pub const RETIREMENT_DOMAIN: &[u8] = b"PQCToday CKKS Rotation Retirement 1.0";
+/// Engine record role of a retirement-ledger entry (module comment).
+pub const ROLE_FHE_ROTATION_RETIREMENT: u8 = 15;
+/// Retirement-ledger entries per slot; beyond it `retire_old_seed` returns
+/// `CKR_DEVICE_MEMORY` and the old seed is kept.
+pub const MAX_RETIREMENT_RECORDS: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct CkksRotationDescriptorV1 {
@@ -143,6 +189,52 @@ pub struct CkksSignedRotationManifestV1 {
     pub tbs: CkksRotationManifestTbsV1,
     pub signature: OctetString,
     pub signer_chain: Vec<Certificate>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksRotationRetirementTbsV1 {
+    pub version: u32,
+    pub rotation_descriptor_hash: OctetString,
+    pub param_hash: OctetString,
+    pub old_lineage: OctetString,
+    pub new_lineage: OctetString,
+    pub retired_at: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksSignedRotationRetirementV1 {
+    pub tbs: CkksRotationRetirementTbsV1,
+    pub signature: OctetString,
+    pub signer_chain: Vec<Certificate>,
+}
+
+pub fn retirement_signed_bytes(tbs: &CkksRotationRetirementTbsV1) -> Result<Vec<u8>, u32> {
+    let mut msg = RETIREMENT_DOMAIN.to_vec();
+    msg.push(0);
+    msg.extend_from_slice(&asn1::to_der(tbs)?);
+    Ok(msg)
+}
+
+/// Receiver side of a retirement record, as `verify_ckks_rotation_manifest`.
+pub fn verify_ckks_rotation_retirement(der: &[u8], trust: &crate::replication::pki::TrustInputs, now: u64) -> Result<(CkksRotationRetirementTbsV1, [u8; 32]), u32> {
+    use crate::replication::{oids::Purpose, pki};
+    let m: CkksSignedRotationRetirementV1 = asn1::decode_strict(der, tf::MAX_PUBLIC_OBJECT)?;
+    let t = &m.tbs;
+    if t.version != 1 || t.rotation_descriptor_hash.as_bytes().len() != 32 || t.old_lineage.as_bytes().len() != 32 || t.new_lineage.as_bytes().len() != 32 {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    let chain = pki::validate_chain(&m.signer_chain, Purpose::ReceiptSigning, trust, now, crate::replication::Profile::Educational).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    let pk = pki::mldsa65_public(&chain.leaf).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    if !crate::replication::mldsa65_verify(pk, &retirement_signed_bytes(&m.tbs)?, m.signature.as_bytes()) {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    Ok((m.tbs, chain.device_id))
+}
+
+/// The retirement ledger of a slot: (object handle, signed record DER), in
+/// creation order.
+pub fn retirement_records(slot: u32) -> Vec<(u32, Vec<u8>)> {
+    crate::replication::records::list(slot, ROLE_FHE_ROTATION_RETIREMENT).into_iter().map(|(h, a)| (h, crate::replication::records::value_bytes(&a).to_vec())).collect()
 }
 
 pub fn rotation_manifest_signed_bytes(tbs: &CkksRotationManifestTbsV1) -> Result<Vec<u8>, u32> {
@@ -187,10 +279,15 @@ fn ckks_param_set(so: &SeedObject) -> Result<&'static CkksParamSet, u32> {
     crate::state::get_object_attr_u32_from(&so.attrs, CKA_PQCTODAY_FHE_PARAM_SET).and_then(params::find).ok_or(CKR_KEY_TYPE_INCONSISTENT)
 }
 
-/// The rotation record of a seed: (new lineage, state).
-fn rotation_record(attrs: &crate::crypto::handlers::Attributes) -> Option<(&[u8], u8)> {
+/// The rotation record of a seed: (new lineage, state, rotation descriptor
+/// hash once signed; `None` for a record signed before the hash was kept).
+fn rotation_record(attrs: &crate::crypto::handlers::Attributes) -> Option<(&[u8], u8, Option<&[u8]>)> {
     let v = attrs.get(&CKA_PRIV_FHE_ROTATION)?;
-    (v.len() == 33).then(|| (&v[..32], v[32]))
+    match v.len() {
+        33 => Some((&v[..32], v[32], None)),
+        65 => Some((&v[..32], v[32], Some(&v[33..]))),
+        _ => None,
+    }
 }
 
 /// Every rule of the module comment, in order, before any generation.
@@ -229,15 +326,18 @@ fn rotation_seeds(session: u32, old_lineage: &[u8; 32], new_lineage: &[u8; 32]) 
     if rotation_record(&new.attrs).is_some() {
         return Err(refuse("new seed was rotated away from"));
     }
-    if rotation_record(&old.attrs).is_some_and(|(target, _)| target != lineage(&new).unwrap_or(&[])) {
+    if rotation_record(&old.attrs).is_some_and(|(target, _, _)| target != lineage(&new).unwrap_or(&[])) {
         return Err(refuse("old seed already rotates to another seed"));
     }
     Ok(Seeds { slot, new, old, ps })
 }
 
-fn set_rotation_record(session: u32, old: &SeedObject, new_lineage: &[u8], state: u8) -> Result<(), u32> {
+fn set_rotation_record(session: u32, old: &SeedObject, new_lineage: &[u8], state: u8, descriptor_hash: Option<&[u8; 32]>) -> Result<(), u32> {
     let mut v = new_lineage.to_vec();
     v.push(state);
+    if let Some(h) = descriptor_hash {
+        v.extend_from_slice(h);
+    }
     if old.attrs.get(&CKA_PRIV_FHE_ROTATION) == Some(&v) {
         return Ok(());
     }
@@ -320,7 +420,7 @@ pub fn derive_rotation(session: u32, old_lineage: &[u8; 32], new_lineage: &[u8; 
         // Recorded before any key byte leaves: the old seed now rotates to
         // this new seed only (a signed record stays signed).
         if rotation_record(&s.old.attrs).is_none() {
-            set_rotation_record(session, &s.old, &new_lineage, ROTATION_STARTED)?;
+            set_rotation_record(session, &s.old, &new_lineage, ROTATION_STARTED, None)?;
         }
         crate::replication::oplog_event(
             "fhe_ckks_rotation_started",
@@ -369,7 +469,7 @@ fn derive_rotation_manifest(session: u32, s: &Seeds) -> Result<u32, u32> {
         return Err(CKR_DEVICE_MEMORY);
     }
     let h = mech::public_object(session, &s.new, PUBLIC_KIND_CKKS_MANIFEST, value)?;
-    set_rotation_record(session, &s.old, &new_lineage, ROTATION_SIGNED)?;
+    set_rotation_record(session, &s.old, &new_lineage, ROTATION_SIGNED, Some(&rot_hash))?;
     let mut l = mech::ledgers();
     if l.get(&session).is_some_and(|x| x.seed_handle == s.new.handle && x.old_seed == Some(s.old.handle) && x.descriptor_hash == rot_hash) {
         l.remove(&session);
@@ -383,29 +483,71 @@ fn derive_rotation_manifest(session: u32, s: &Seeds) -> Result<u32, u32> {
     Ok(h)
 }
 
-/// Retire the old seed of a signed rotation (SO, R/W): destroy it, clear the
-/// generator cache and every ledger that names it, and log both lineages.
+/// Retire the old seed of a signed rotation (SO, R/W): commit a signed
+/// retirement record to the slot's retirement ledger, then destroy the seed,
+/// clear the generator cache and every ledger that names it, and log both
+/// lineages. Returns the handle of the retirement record (a public token
+/// object; its `CKA_VALUE` is the DER `CkksSignedRotationRetirementV1`).
 /// `CKR_KEY_HANDLE_INVALID` when the lineage names no seed (or more than one),
-/// `CKR_ACTION_PROHIBITED` unless the seed's rotation manifest was signed.
-pub fn retire_old_seed(so_session: u32, old_lineage: &[u8; 32]) -> Result<(), u32> {
+/// `CKR_ACTION_PROHIBITED` unless the seed's rotation manifest was signed
+/// (by an engine that keeps the rotation descriptor hash),
+/// `CKR_DEVICE_MEMORY` when the retirement ledger is full.
+pub fn retire_old_seed(so_session: u32, old_lineage: &[u8; 32]) -> Result<u32, u32> {
+    use crate::replication::records;
     let (slot, old) = tf::so_seed_by_lineage(so_session, old_lineage, CKM_PQCTODAY_FHE_DERIVE_PUBLIC)?;
-    let new_lineage = match rotation_record(&old.attrs) {
-        Some((target, ROTATION_SIGNED)) => target.to_vec(),
-        _ => {
-            crate::replication::oplog_event("fhe_ckks_rotation_refused", slot, &[("reason", "\"retire before a signed rotation manifest\"".into())]);
-            return Err(CKR_ACTION_PROHIBITED);
-        }
+    let refuse = |why: &'static str| {
+        crate::replication::note_refusal(why);
+        crate::replication::oplog_event("fhe_ckks_rotation_refused", slot, &[("reason", format!("\"{why}\""))]);
+        CKR_ACTION_PROHIBITED
+    };
+    let (new_lineage, rot_hash) = match rotation_record(&old.attrs) {
+        Some((target, ROTATION_SIGNED, Some(h))) => (target.to_vec(), h.to_vec()),
+        Some((_, ROTATION_SIGNED, None)) => return Err(refuse("retire needs the rotation manifest signed again")),
+        _ => return Err(refuse("retire before a signed rotation manifest")),
     };
     if old.attrs.get(&CKA_DESTROYABLE).is_some_and(|v| v.first() == Some(&0)) {
         return Err(CKR_ACTION_PROHIBITED);
     }
+    // The ledger entry first: a retired seed always has its record. An entry
+    // left by an interrupted earlier call for this pair is reused.
+    let ledger = retirement_records(slot);
+    let existing = ledger.iter().find_map(|(h, der)| {
+        let m: CkksSignedRotationRetirementV1 = asn1::decode_strict(der, tf::MAX_PUBLIC_OBJECT).ok()?;
+        (m.tbs.old_lineage.as_bytes() == old_lineage && m.tbs.new_lineage.as_bytes() == new_lineage.as_slice() && m.tbs.rotation_descriptor_hash.as_bytes() == rot_hash.as_slice())
+            .then(|| (*h, crate::replication::sha256(der)))
+    });
+    let (record, record_hash) = match existing {
+        Some(e) => e,
+        None => {
+            if ledger.len() >= MAX_RETIREMENT_RECORDS {
+                return Err(CKR_DEVICE_MEMORY);
+            }
+            let tbs = CkksRotationRetirementTbsV1 {
+                version: 1,
+                rotation_descriptor_hash: asn1::octets(&rot_hash),
+                param_hash: asn1::octets(old.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
+                old_lineage: asn1::octets(old_lineage),
+                new_lineage: asn1::octets(&new_lineage),
+                retired_at: crate::replication::now_unix(),
+            };
+            let (sig, chain) = tf::receipt_sign(slot, &retirement_signed_bytes(&tbs)?)?;
+            let der = asn1::to_der(&CkksSignedRotationRetirementV1 { tbs, signature: asn1::octets(&sig), signer_chain: chain })?;
+            let hash = crate::replication::sha256(&der);
+            let obj = records::new_record(ROLE_FHE_ROTATION_RETIREMENT, CKO_DATA, "CKKS rotation retirement record", der, Vec::new(), false);
+            (crate::state::commit_objects_atomically(so_session, vec![obj], Vec::new())?[0], hash)
+        }
+    };
     mech::clear_generator_cache_for(old.handle);
     crate::ffi::drop_key_caches();
     crate::replication::discard_object(old.handle);
     crate::replication::oplog_event(
         "fhe_ckks_rotation_old_seed_destroyed",
         slot,
-        &[("old_lineage", crate::replication::hex(old_lineage)), ("new_lineage", crate::replication::hex(&new_lineage))],
+        &[
+            ("old_lineage", crate::replication::hex(old_lineage)),
+            ("new_lineage", crate::replication::hex(&new_lineage)),
+            ("retirement_record_sha256", crate::replication::hex(&record_hash)),
+        ],
     );
-    Ok(())
+    Ok(record)
 }
