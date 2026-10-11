@@ -10,10 +10,19 @@
 //!   ckks_custodian init <dir> <param-set> [--test-seed]   token, policies, seed (0x8002 = INSECURE test ring)
 //!   ckks_custodian export <dir> [limbs-per-chunk]          descriptor, public key, every key chunk, token-signed
 //!                                                          manifest (manifest-token.der) and host-signed manifest
-//!   ckks_custodian decrypt <dir> <ct_level0.bin> <out>     policy-gated decryption → owner output
+//!   ckks_custodian decrypt <dir> <ct_level0.bin> <out> [--new]
+//!                                                          policy-gated decryption → owner output
+//!                                                          (--new: with the rotation's new seed)
+//!   ckks_custodian rotate <dir> [limbs-per-chunk] [--test-seed]
+//!                                                          E10: the user generates a new seed in the token; the SO
+//!                                                          streams the rotation key old → new (DERIVE_PUBLIC v3)
+//!                                                          and its token-signed manifest to out/rotation/
+//!   ckks_custodian retire-old <dir>                        E10: the SO retires the old seed (after the FHE server
+//!                                                          confirms re-encryption), named by the rotation descriptor
 //!
-//! `--test-seed` (test-support builds only) installs the seed 00..1f so the
-//! export can be byte-compared with the pqctoday-fhe oracle.
+//! `--test-seed` (test-support builds only) installs the seed 00..1f (init)
+//! or 20..3f (rotate) so the export can be byte-compared with the
+//! pqctoday-fhe oracle and rotation check.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,6 +37,7 @@ use softhsmrustv3::replication::{self as repl, fhe, fhe_custody as tf, records, 
 const SO: &str = "edu-ckks-so";
 const USER: &str = "edu-ckks-user";
 const SEED_ID: &[u8] = b"ckks-custodian-seed";
+const NEW_SEED_ID: &[u8] = b"ckks-custodian-seed-rotated";
 const SIGNER_ID: &[u8] = b"ckks-custodian-manifest-signer";
 const DOMAIN: [u8; 32] = *b"pqctoday-ckks-custodian-domainv1";
 
@@ -265,10 +275,10 @@ fn cmd_export(dir: &Path, per_chunk: usize, stream: bool) {
     }
 }
 
-fn cmd_decrypt(dir: &Path, ct: &Path, dst: &Path) {
+fn cmd_decrypt(dir: &Path, ct: &Path, dst: &Path, new_seed: bool) {
     open(dir);
     let s = ok("user login", native::open_session(0, USER));
-    let seed = find(s, SEED_ID, CKO_SECRET_KEY);
+    let seed = find(s, if new_seed { NEW_SEED_ID } else { SEED_ID }, CKO_SECRET_KEY);
     let input = std::fs::read(ct).expect("read ciphertext");
     let p = [1usize; 1];
     let mut prm = vec![0u8; (std::mem::size_of::<usize>() + 48).next_multiple_of(std::mem::size_of::<usize>())];
@@ -295,6 +305,107 @@ fn cmd_decrypt(dir: &Path, ct: &Path, dst: &Path) {
     println!("released {} B in {:.3} s", outb.len(), t.elapsed().as_secs_f64());
 }
 
+/// One bounded `C_DeriveKey(CKM_PQCTODAY_FHE_DERIVE_PUBLIC, version 3)` in the
+/// SO session: hBaseKey = CK_INVALID_HANDLE, both seeds named by lineage.
+#[allow(clippy::too_many_arguments)]
+fn derive_rotation(so: u32, old: &[u8], new: &[u8], kind: u32, d: u32, from: usize, to: usize) -> Vec<u8> {
+    let mut p: Vec<u8> = [3usize, kind as usize, 0, d as usize, from, to].iter().flat_map(|w| w.to_le_bytes()).collect();
+    p.extend_from_slice(old);
+    p.extend_from_slice(new);
+    let mut m = [CKM_PQCTODAY_FHE_DERIVE_PUBLIC as usize, p.as_ptr() as usize, p.len()];
+    let mut h = 0u32;
+    let rv = softhsmrustv3::ffi::C_DeriveKey(so, m.as_mut_ptr() as *mut u8, 0, std::ptr::null_mut(), 0, &mut h);
+    if rv != CKR_OK {
+        die(&format!("C_DeriveKey(v3 kind {kind}, digit {d}, limbs {from}..{to})"), rv);
+    }
+    let v = native::get_attribute(so, h, CKA_VALUE).unwrap_or_else(|| die("C_GetAttributeValue", CKR_DEVICE_ERROR));
+    let rv = softhsmrustv3::ffi::C_DestroyObject(so, h);
+    if rv != CKR_OK {
+        die("C_DestroyObject", rv);
+    }
+    v
+}
+
+/// E10: the user generates the new seed (token KEY_GEN, same policies as the
+/// old seed) and hands both lineages to the SO, who streams the rotation key.
+fn cmd_rotate(dir: &Path, per_chunk: usize, test_seed: bool) {
+    open(dir);
+    let s = ok("user login", native::open_session(0, USER));
+    let old = find(s, SEED_ID, CKO_SECRET_KEY);
+    let ps = params::find(native::get_attribute_u32(s, old, CKA_PQCTODAY_FHE_PARAM_SET).unwrap()).unwrap();
+    let attr48 = |t: u32| -> [u8; 48] { native::get_attribute(s, old, t).and_then(|v| v.try_into().ok()).unwrap_or_else(|| die("seed policy attribute", CKR_DEVICE_ERROR)) };
+    let (rp, dp) = (attr48(CKA_PQCTODAY_REPLICATION_POLICY_ID), attr48(CKA_PQCTODAY_FHE_DECRYPT_POLICY));
+    if !ok("find", native::find_all_by_cka_id(s, NEW_SEED_ID)).is_empty() {
+        die("a rotated seed already exists in this token", CKR_ACTION_PROHIBITED);
+    }
+    let new = if test_seed {
+        #[cfg(feature = "test-support")]
+        {
+            ok("KEY_GEN (test seed 20..3f)", fhe::generate_fhe_seed_with_value_for_test(s, ps.id, &rp, &dp, &core::array::from_fn(|i| 0x20 + i as u8), NEW_SEED_ID))
+        }
+        #[cfg(not(feature = "test-support"))]
+        die("--test-seed needs a test-support build", CKR_FUNCTION_NOT_SUPPORTED)
+    } else {
+        ok("KEY_GEN", fhe::generate_fhe_seed(s, ps.id, &rp, &dp, Some(b"CKKS custodian seed (rotated)"), Some(NEW_SEED_ID)))
+    };
+    let lin = |h: u32| native::get_attribute(s, h, CKA_PQCTODAY_FHE_LINEAGE_ID).unwrap();
+    let (lo, ln) = (lin(old), lin(new));
+    ok("user logout", native::logout(s));
+    ok("close", native::close_session(s));
+
+    let so = ok("SO login", native::open_session_so(0, SO));
+    let out = dir.join("out").join("rotation");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    let t0 = Instant::now();
+    let desc = derive_rotation(so, &lo, &ln, mech::PUBLIC_KIND_CKKS_DESCRIPTOR, 0, 0, 0);
+    std::fs::write(out.join("descriptor.der"), &desc).unwrap();
+    let k = ps.rotation_desc();
+    let (mut bytes, mut calls, mut slowest) = (0usize, 0u64, 0f64);
+    for d in 0..k.dnum() {
+        for from in (0..k.limbs()).step_by(per_chunk) {
+            let to = (from + per_chunk).min(k.limbs());
+            let tc = Instant::now();
+            let b = derive_rotation(so, &lo, &ln, mech::PUBLIC_KIND_CKKS_EVK_CHUNK, d as u32, from, to);
+            slowest = slowest.max(tc.elapsed().as_secs_f64());
+            bytes += b.len();
+            calls += 1;
+            std::fs::write(out.join(format!("d{d:02}_{from}_{to}.bin")), &b).unwrap();
+        }
+    }
+    let secs = t0.elapsed().as_secs_f64();
+    let manifest = derive_rotation(so, &lo, &ln, mech::PUBLIC_KIND_CKKS_MANIFEST, 0, 0, 0);
+    std::fs::write(out.join("manifest-token.der"), &manifest).unwrap();
+    ok("SO logout", native::logout(so));
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let report = format!(
+        "{{\n \"paramSet\": {},\n \"digits\": {},\n \"limbs\": {},\n \"limbsPerCall\": {per_chunk},\n \"chunkCalls\": {calls},\n \"bBytes\": {bytes},\n \"seconds\": {secs:.4},\n \"slowestCallSeconds\": {slowest:.4},\n \"oldLineage\": \"{}\",\n \"newLineage\": \"{}\",\n \"manifestBytes\": {},\n \"peakRssKiB\": {}\n}}\n",
+        ps.id,
+        k.dnum(),
+        k.limbs(),
+        hex(&lo),
+        hex(&ln),
+        manifest.len(),
+        peak_rss_kib().map(|v| v.to_string()).unwrap_or_else(|| "null".into())
+    );
+    std::fs::write(out.join("rotate.json"), &report).unwrap();
+    print!("{report}");
+}
+
+/// E10: the SO retires the old seed once the FHE server has confirmed
+/// re-encryption. The SO names it by the old lineage in the public rotation
+/// descriptor; the token refuses unless the rotation manifest was signed.
+fn cmd_retire_old(dir: &Path) {
+    let desc = std::fs::read(dir.join("out").join("rotation").join("descriptor.der")).unwrap_or_else(|_| die("no rotation descriptor (run rotate first)", CKR_OPERATION_NOT_INITIALIZED));
+    let d: softhsmrustv3::replication::fhe_ckks::rotation::CkksRotationDescriptorV1 = der::Decode::from_der(&desc).unwrap_or_else(|_| die("rotation descriptor", CKR_DATA_INVALID));
+    let lo: [u8; 32] = d.old_lineage.as_bytes().try_into().unwrap_or_else(|_| die("old lineage", CKR_DATA_INVALID));
+    open(dir);
+    let so = ok("SO login", native::open_session_so(0, SO));
+    ok("retire old seed", softhsmrustv3::replication::fhe_ckks::rotation::retire_old_seed(so, &lo));
+    ok("SO logout", native::logout(so));
+    println!("old seed retired (lineage {})", lo.iter().map(|x| format!("{x:02x}")).collect::<String>());
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
@@ -303,9 +414,14 @@ fn main() {
             cmd_init(&PathBuf::from(&a[2]), ps, a.get(4).map(String::as_str) == Some("--test-seed"))
         }
         Some(c @ ("export" | "export-stream")) if a.len() >= 3 => cmd_export(&PathBuf::from(&a[2]), a.get(3).map(|v| v.parse().unwrap()).unwrap_or(8), c == "export-stream"),
-        Some("decrypt") if a.len() == 5 => cmd_decrypt(&PathBuf::from(&a[2]), &PathBuf::from(&a[3]), &PathBuf::from(&a[4])),
+        Some("decrypt") if a.len() == 5 || (a.len() == 6 && a[5] == "--new") => cmd_decrypt(&PathBuf::from(&a[2]), &PathBuf::from(&a[3]), &PathBuf::from(&a[4]), a.len() == 6),
+        Some("rotate") if a.len() >= 3 => {
+            let per = a.get(3).filter(|v| !v.starts_with("--")).map(|v| v.parse().unwrap()).unwrap_or(8);
+            cmd_rotate(&PathBuf::from(&a[2]), per, a.iter().any(|v| v == "--test-seed"))
+        }
+        Some("retire-old") if a.len() == 3 => cmd_retire_old(&PathBuf::from(&a[2])),
         _ => {
-            eprintln!("usage: ckks_custodian init <dir> <param-set> [--test-seed] | export|export-stream <dir> [limbs-per-chunk] | decrypt <dir> <ct.bin> <out>");
+            eprintln!("usage: ckks_custodian init <dir> <param-set> [--test-seed] | export|export-stream <dir> [limbs-per-chunk] | decrypt <dir> <ct.bin> <out> [--new] | rotate <dir> [limbs-per-chunk] [--test-seed] | retire-old <dir>");
             std::process::exit(2);
         }
     }
