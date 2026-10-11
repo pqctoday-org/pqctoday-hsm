@@ -28,6 +28,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **CKKS decryption flooding now follows the published analysis (educational
+  feature only).** The flood width now follows Corollary 2 of Li, Micciancio,
+  Schultz and Sorrell (CRYPTO 2022, ePrint 2022/816): the noise added to each
+  coefficient has standard deviation √(24·q·n)·2^(λ_s/2)·B, where n is the
+  ring degree and B the registry's bound on the release-level error. q is now
+  the total number of releases a seed's lineage can make, (maxReplicas + 1) ×
+  maxDecrypts, because each replica keeps its own decrypt counter. The previous
+  width, 2^(λ_s/2)·√maxDecrypts·B, was about 10.3 bits narrower than the
+  analysis requires (the √24 and √n factors) and counted one copy only.
+  For registry ID 3 under the test policy (λ_s = 30, 10,000 decrypts,
+  4 replicas), σ goes from 2^57.64 to 2^69.10.
+  Two related changes: a CKKS seed replica is now installed only under a
+  replication policy with the same `maxReplicas` as its source, so that every
+  copy computes the same q. Two-prime releases (registry ID 3) may now flood up
+  to σ = 2^80; one-prime sets keep the 2^62 limit. Details:
+  `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md` §6.4 and §6.6.
 - **FHE browser build no longer panics on first use (educational feature
   only).** A new test-only browser build of the token's TFHE code, with a
   Playwright runner, checks the client-key known-answer vector in desktop
