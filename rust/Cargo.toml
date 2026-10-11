@@ -62,7 +62,13 @@ educational-replication = ["dep:x509-cert", "dep:der", "dep:spki07", "dep:const-
 # reference-runs/tfhe-custody pin) with only the `integer` feature. TFHE-rs is
 # BSD-3-Clause-Clear; Zama states that commercial use needs a separate patent
 # licence, so this feature must never ship in a commercial artefact.
-educational-fhe = ["educational-replication", "dep:tfhe"]
+educational-fhe = ["educational-replication", "dep:tfhe", "educational-ckks"]
+
+# Streamed CKKS custody (pqctoday-fhe plan docs/ckks/…-2026-10-10.md) WITHOUT
+# TFHE-rs: the scheme-neutral custody code plus the CKKS mechanisms only.
+# OPT-IN, NOT default, EDUCATIONAL ONLY. `educational-fhe` implies it, so every
+# educational-fhe build keeps CKKS exactly as before.
+educational-ckks = ["educational-replication"]
 
 # ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
 # mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
@@ -120,7 +126,7 @@ required-features = ["educational-fhe"]
 [[example]]
 # Streamed CKKS custodian (pqctoday-fhe plan docs/ckks/…-2026-10-10.md).
 name = "ckks_custodian"
-required-features = ["educational-fhe"]
+required-features = ["educational-ckks"]
 
 [[example]]
 # fips204 / ml-kem versus AWS-LC timing (`crypto::awslc_pq`); native only.

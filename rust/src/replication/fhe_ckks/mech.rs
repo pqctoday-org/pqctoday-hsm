@@ -27,7 +27,7 @@ use super::spec::Generator;
 use crate::constants::*;
 use crate::crypto::handlers::Attributes;
 use crate::replication::fhe::{self, FheType};
-use crate::replication::fhe_tfhe::{self as tf, DecryptOutput, W};
+use crate::replication::fhe_custody::{self as tf, DecryptOutput, W};
 use crate::replication::{asn1, records};
 
 pub const PUBLIC_KIND_CKKS_DESCRIPTOR: u32 = 3;

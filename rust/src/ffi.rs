@@ -4553,13 +4553,14 @@ pub fn C_GenerateKey(
     // inspection (the _impl below repeats these checks; they are idempotent).
     require_init!();
     require_session!(_h_session);
-    // FHE P2 (P0B §5.1): CKM_PQCTODAY_FHE_KEY_GEN, educational-fhe only.
-    #[cfg(feature = "educational-fhe")]
+    // FHE P2 (P0B §5.1): CKM_PQCTODAY_FHE_KEY_GEN, educational-ckks (CKKS) /
+    // educational-fhe (adds TFHE) only.
+    #[cfg(feature = "educational-ckks")]
     if !p_mechanism.is_null() && !ph_key.is_null() {
         let m = unsafe { ck_param::mech(p_mechanism) };
         if m.mechanism == CKM_PQCTODAY_FHE_KEY_GEN {
             return match unsafe {
-                crate::replication::fhe_tfhe::ffi_key_gen(_h_session, m.p_parameter, m.ul_parameter_len, p_template, ul_count)
+                crate::replication::fhe_custody::ffi_key_gen(_h_session, m.p_parameter, m.ul_parameter_len, p_template, ul_count)
             } {
                 Ok(h) => {
                     unsafe { *ph_key = h };
@@ -10342,13 +10343,13 @@ pub fn C_Encrypt(
 pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
-    // FHE P2 (P0B §5.3): single-part CKM_PQCTODAY_FHE_DECRYPT, educational-fhe only.
-    #[cfg(feature = "educational-fhe")]
+    // FHE P2 (P0B §5.3): single-part CKM_PQCTODAY_FHE_DECRYPT, educational-ckks only.
+    #[cfg(feature = "educational-ckks")]
     {
-        if p_mechanism.is_null() && crate::replication::fhe_tfhe::cancel(h_session) {
+        if p_mechanism.is_null() && crate::replication::fhe_custody::cancel(h_session) {
             return CKR_OK;
         }
-        if crate::replication::fhe_tfhe::active(h_session).is_some() {
+        if crate::replication::fhe_custody::active(h_session).is_some() {
             return CKR_OPERATION_ACTIVE;
         }
         if !p_mechanism.is_null() {
@@ -10357,7 +10358,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if DECRYPT_STATE.shard(h_session).contains_key(&h_session) {
                     return CKR_OPERATION_ACTIVE;
                 }
-                return match unsafe { crate::replication::fhe_tfhe::ffi_decrypt_init(h_session, h_key, m.p_parameter, m.ul_parameter_len) } {
+                return match unsafe { crate::replication::fhe_custody::ffi_decrypt_init(h_session, h_key, m.p_parameter, m.ul_parameter_len) } {
                     Ok(()) => CKR_OK,
                     Err(rv) => rv,
                 };
@@ -10640,9 +10641,9 @@ pub fn C_Decrypt(
     // takes MANDATORY precedence over argument and capability codes, so
     // this must precede every other check in the function.
     require_session!(h_session);
-    #[cfg(feature = "educational-fhe")]
-    if let Some(crate::replication::fhe_tfhe::FheOp::Decrypt { .. }) = crate::replication::fhe_tfhe::active(h_session) {
-        return unsafe { crate::replication::fhe_tfhe::ffi_decrypt(h_session, p_encrypted_data, ul_encrypted_data_len, p_data, pul_data_len) };
+    #[cfg(feature = "educational-ckks")]
+    if let Some(crate::replication::fhe_custody::FheOp::Decrypt { .. }) = crate::replication::fhe_custody::active(h_session) {
+        return unsafe { crate::replication::fhe_custody::ffi_decrypt(h_session, p_encrypted_data, ul_encrypted_data_len, p_data, pul_data_len) };
     }
     // Remove state on entry — consumed on all paths except null-buffer size query
     let ctx = DECRYPT_STATE.shard(h_session).remove(&h_session);
@@ -12217,13 +12218,14 @@ pub fn C_DeriveKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
-    // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, educational-fhe only.
-    #[cfg(feature = "educational-fhe")]
+    // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, educational-ckks only
+    // (TFHE kinds additionally need educational-fhe).
+    #[cfg(feature = "educational-ckks")]
     if !p_mechanism.is_null() && !ph_key.is_null() {
         let m = unsafe { ck_param::mech(p_mechanism) };
         if m.mechanism == CKM_PQCTODAY_FHE_DERIVE_PUBLIC {
             return match unsafe {
-                crate::replication::fhe_tfhe::ffi_derive_public(
+                crate::replication::fhe_custody::ffi_derive_public(
                     _h_session, h_base_key, m.p_parameter, m.ul_parameter_len, p_template, ul_attribute_count,
                 )
             } {
@@ -15512,9 +15514,9 @@ pub fn C_DecryptUpdate(
     // this must precede every other check in the function.
     require_session!(h_session);
     // FHE decrypt is single-part only (P0B §5.3).
-    #[cfg(feature = "educational-fhe")]
-    if crate::replication::fhe_tfhe::active(h_session).is_some() {
-        crate::replication::fhe_tfhe::cancel(h_session);
+    #[cfg(feature = "educational-ckks")]
+    if crate::replication::fhe_custody::active(h_session).is_some() {
+        crate::replication::fhe_custody::cancel(h_session);
         return CKR_FUNCTION_NOT_SUPPORTED;
     }
     multipart_update(
@@ -15581,9 +15583,9 @@ pub fn C_DecryptFinal(h_session: u32, p_last_part: *mut u8, pul_last_part_len: *
     // this must precede every other check in the function.
     require_session!(h_session);
     // FHE decrypt is single-part only (P0B §5.3).
-    #[cfg(feature = "educational-fhe")]
-    if crate::replication::fhe_tfhe::active(h_session).is_some() {
-        crate::replication::fhe_tfhe::cancel(h_session);
+    #[cfg(feature = "educational-ckks")]
+    if crate::replication::fhe_custody::active(h_session).is_some() {
+        crate::replication::fhe_custody::cancel(h_session);
         return CKR_FUNCTION_NOT_SUPPORTED;
     }
     multipart_final(

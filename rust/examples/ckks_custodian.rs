@@ -22,7 +22,7 @@ use sha2::Digest;
 use softhsmrustv3::constants::*;
 use softhsmrustv3::native;
 use softhsmrustv3::replication::fhe_ckks::{mech, params};
-use softhsmrustv3::replication::{self as repl, fhe, fhe_tfhe as tf, records, test_ca::TestManufacturingCa};
+use softhsmrustv3::replication::{self as repl, fhe, fhe_custody as tf, records, test_ca::TestManufacturingCa};
 
 const SO: &str = "edu-ckks-so";
 const USER: &str = "edu-ckks-user";

@@ -24,7 +24,7 @@ pub const ROLE_FHE_DECRYPT_POLICY: u8 = 13;
 
 /// The only scheme and generator version P1 accepts.
 pub const FHE_SCHEME_TFHE: &str = "tfhe-rs";
-/// Streamed CKKS (Lattigo-compatible evaluation keys), educational-fhe only.
+/// Streamed CKKS (Lattigo-compatible evaluation keys), educational-ckks only.
 pub const FHE_SCHEME_CKKS: &str = "ckks-stream";
 pub const FHE_GENERATOR_VERSIONS: &[u32] = &[1];
 /// Opaque P1 seed length (a TFHE-rs client-key seed is 128 bits; 32 bytes
@@ -59,7 +59,7 @@ pub fn scheme_for(param_set: u32) -> Option<&'static str> {
     if FHE_PARAM_SETS.iter().any(|(id, _)| *id == param_set) {
         return Some(FHE_SCHEME_TFHE);
     }
-    #[cfg(feature = "educational-fhe")]
+    #[cfg(feature = "educational-ckks")]
     if super::fhe_ckks::params::find(param_set).is_some() {
         return Some(FHE_SCHEME_CKKS);
     }
@@ -68,7 +68,7 @@ pub fn scheme_for(param_set: u32) -> Option<&'static str> {
 
 /// DER of `FheParamSetV1` for a registry ID.
 pub fn param_set_der(param_set: u32) -> Option<Vec<u8>> {
-    #[cfg(feature = "educational-fhe")]
+    #[cfg(feature = "educational-ckks")]
     if let Some(ps) = super::fhe_ckks::params::find(param_set) {
         return asn1::to_der(&FheParamSetV1 {
             id: ps.id,
@@ -155,7 +155,7 @@ pub fn profile_constraint_hash() -> [u8; 48] {
 }
 
 /// Canonical DER of the version-1 streamed-CKKS profile constraint.
-#[cfg(feature = "educational-fhe")]
+#[cfg(feature = "educational-ckks")]
 pub fn ckks_profile_constraint_der() -> Vec<u8> {
     asn1::to_der(&FheProfileConstraint {
         version: 1,
@@ -166,7 +166,7 @@ pub fn ckks_profile_constraint_der() -> Vec<u8> {
 }
 
 /// `typeConstraintHash` of the streamed-CKKS seed profile.
-#[cfg(feature = "educational-fhe")]
+#[cfg(feature = "educational-ckks")]
 pub fn ckks_profile_constraint_hash() -> [u8; 48] {
     super::sha384(&ckks_profile_constraint_der())
 }
@@ -175,7 +175,7 @@ pub fn ckks_profile_constraint_hash() -> [u8; 48] {
 pub fn profile_constraint_hash_for(scheme: &str) -> Option<[u8; 48]> {
     match scheme {
         FHE_SCHEME_TFHE => Some(profile_constraint_hash()),
-        #[cfg(feature = "educational-fhe")]
+        #[cfg(feature = "educational-ckks")]
         FHE_SCHEME_CKKS => Some(ckks_profile_constraint_hash()),
         _ => None,
     }
@@ -317,9 +317,9 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
         return Err(CKR_DATA_INVALID);
     }
     if let Some(c) = &p.ckks {
-        #[cfg(feature = "educational-fhe")]
+        #[cfg(feature = "educational-ckks")]
         let max_slots = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(|ps| ps.n() / 2).min().unwrap_or(0);
-        #[cfg(not(feature = "educational-fhe"))]
+        #[cfg(not(feature = "educational-ckks"))]
         let max_slots = 0usize;
         if c.max_values == 0
             || c.max_values as usize > max_slots
@@ -639,20 +639,20 @@ mod tests {
         assert!(bad(policy(vec![compressed], vec![], None, 1)), "compressed lists refused in v1 (P0B §5.3)");
     }
 
-    #[cfg(feature = "educational-fhe")]
+    #[cfg(feature = "educational-ckks")]
     fn ckks_policy(c: CkksReleasePolicy) -> FheDecryptPolicy {
         let t = FheType { type_name: "CkksPlaintextQ0".into(), width_bits: 64, param_set: 0x8002, serialization_version: 2, compressed_allowed: false };
         FheDecryptPolicy { version: 2, allowed_output_types: vec![t], never_release: vec![], predicates: vec![], recipients: vec![], recipient_only: false, max_decrypts: 100, ckks: Some(c) }
     }
 
-    #[cfg(feature = "educational-fhe")]
+    #[cfg(feature = "educational-ckks")]
     fn ckks_block() -> CkksReleasePolicy {
         CkksReleasePolicy { max_values: 512, precision_bits: 20, value_bound_log2: 10, scale_log2: 40, flood_recipients: true, flood_owner: false, stat_security_bits: 30 }
     }
 
     /// PV1–PV3 (plan §4.5): version/scheme pairing, ranges, canonical DER with
     /// defaults omitted, and replication may only narrow a CKKS release.
-    #[cfg(feature = "educational-fhe")]
+    #[cfg(feature = "educational-ckks")]
     #[test]
     fn decrypt_policy_v2_ckks_rules() {
         let der = |p: &FheDecryptPolicy| asn1::to_der(p).unwrap();
