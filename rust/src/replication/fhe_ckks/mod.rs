@@ -4,7 +4,7 @@
 //! The FHE seed regenerates the CKKS secret inside the token. The public key
 //! and the GB-sized bootstrapping evaluation-key set leave as bounded,
 //! deterministic chunks through `CKM_PQCTODAY_FHE_DERIVE_PUBLIC` (parameter
-//! version 2); the token never holds the set. Decryption of a level-0
+//! version 2); the token never holds the set. Decryption of a release-level
 //! ciphertext runs under the seed's typed decryption policy.
 
 pub mod mech;

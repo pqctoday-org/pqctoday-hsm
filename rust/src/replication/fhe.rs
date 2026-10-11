@@ -321,11 +321,17 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
         let max_slots = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(|ps| ps.n() / 2).min().unwrap_or(0);
         #[cfg(not(feature = "educational-ckks"))]
         let max_slots = 0usize;
+        // scaleLog2: 20..=60 for one-prime releases; up to 90 only when every
+        // listed set releases over two primes (registry ID 3, E13).
+        #[cfg(feature = "educational-ckks")]
+        let max_scale = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(super::fhe_ckks::params::max_scale_log2).min().unwrap_or(60);
+        #[cfg(not(feature = "educational-ckks"))]
+        let max_scale = 60u8;
         if c.max_values == 0
             || c.max_values as usize > max_slots
             || !(1..=30).contains(&c.precision_bits)
             || c.value_bound_log2 > 30
-            || !(20..=60).contains(&c.scale_log2)
+            || !(20..=max_scale).contains(&c.scale_log2)
             || c.precision_bits >= c.scale_log2
             || !(1..=64).contains(&c.stat_security_bits)
             || !p.predicates.is_empty()
@@ -689,6 +695,8 @@ mod tests {
             |c: &mut CkksReleasePolicy| c.precision_bits = 31,
             |c: &mut CkksReleasePolicy| c.value_bound_log2 = 31,
             |c: &mut CkksReleasePolicy| c.scale_log2 = 19,
+            |c: &mut CkksReleasePolicy| c.scale_log2 = 61,
+            |c: &mut CkksReleasePolicy| c.scale_log2 = 90,
             |c: &mut CkksReleasePolicy| c.stat_security_bits = 0,
         ] {
             let mut c = ckks_block();
@@ -719,6 +727,34 @@ mod tests {
         assert!(!narrow(|c| c.stat_security_bits = 29));
         assert!(!view(&t).is_equal_or_stricter_than(&v) && !v.is_equal_or_stricter_than(&view(&t)), "no v1/v2 crossing");
         assert_eq!(ckks_block().bits_per_release(), 512 * 2 * 31);
+    }
+
+    /// E13: scaleLog2 up to 90 only for the two-prime set (registry ID 3);
+    /// a policy that also lists a one-prime set keeps the 20..=60 range.
+    #[cfg(feature = "educational-ckks")]
+    #[test]
+    fn decrypt_policy_v2_scale_range_per_set() {
+        use super::super::fhe_ckks::{mech, params};
+        let der = |p: &FheDecryptPolicy| asn1::to_der(p).unwrap();
+        let ps3 = params::find(3).unwrap();
+        let with = |types: Vec<FheType>, scale: u8| {
+            let mut c = ckks_block();
+            c.scale_log2 = scale;
+            let mut p = ckks_policy(c);
+            p.allowed_output_types = types;
+            p.allowed_output_types.sort();
+            parse_decrypt_policy(&der(&p))
+        };
+        let t3 = mech::release_type(ps3);
+        assert_eq!((t3.type_name.as_str(), t3.serialization_version), ("CkksPlaintextQ1", 3));
+        let t2 = mech::release_type(params::find(2).unwrap());
+        assert_eq!((t2.type_name.as_str(), t2.serialization_version), ("CkksPlaintextQ0", 2));
+        assert!(with(vec![t3.clone()], 90).is_ok(), "set 3 releases at 2^90");
+        assert!(with(vec![t3.clone()], 40).is_ok(), "a lower scale stays allowed");
+        assert!(with(vec![t3.clone()], 91).is_err(), "above the set's scale");
+        assert!(with(vec![t2.clone()], 90).is_err(), "set 2 keeps 20..=60");
+        assert!(with(vec![t2.clone()], 60).is_ok());
+        assert!(with(vec![t2, t3], 90).is_err(), "a mixed policy keeps the narrower range");
     }
 
     fn descriptor(version: u8, generator: u32, lineage: [u8; 32], param_hash_bytes: Vec<u8>) -> Vec<u8> {

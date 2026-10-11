@@ -527,27 +527,94 @@ impl Generator {
         Ok(out)
     }
 
-    /// m = c0 + c1·s mod q0 for a level-0 ciphertext in the NTT domain
-    /// (standard form), returned as centered integer coefficients.
-    pub fn decrypt_q0(&self, c0: &[u64], c1: &[u64]) -> Result<Vec<i64>, ()> {
+    /// m = c0 + c1·s mod Q_L, Q_L = q0·…·q_L, for a level-`level` ciphertext
+    /// over the residual basis in the NTT domain (standard form); `c0` and
+    /// `c1` hold limbs 0..=level, limb-major (N words each). Returned as
+    /// centered integer coefficients in (−Q_L/2, Q_L/2]. Levels 0 and 1 only
+    /// (Q_1 < 2^106 fits i128): limb 1 is joined to limb 0 by Garner's CRT,
+    /// x = a0 + q0·((a1 − a0)·q0⁻¹ mod q1), and centered without a branch on
+    /// the secret-dependent value. Level 0 is the one-prime release of
+    /// registry IDs 2 and 0x8002, as first built.
+    pub fn decrypt_level(&self, level: usize, c0: &[u64], c1: &[u64]) -> Result<Vec<i128>, ()> {
         let ps = self.ps;
         let n = ps.n();
-        if c0.len() != n || c1.len() != n {
+        let limbs = level + 1;
+        if level > 1 || level >= ps.residual_q.len() || c0.len() != limbs * n || c1.len() != limbs * n {
             return Err(());
         }
-        let (q, g) = ps.pk_limb(0).ok_or(())?;
-        if c0.iter().chain(c1).any(|&v| v >= q) {
-            return Err(());
+        let mut a: Vec<Vec<u64>> = Vec::with_capacity(limbs);
+        for j in 0..limbs {
+            let (q, g) = ps.pk_limb(j).ok_or(())?;
+            let (x0, x1) = (&c0[j * n..(j + 1) * n], &c1[j * n..(j + 1) * n]);
+            if x0.iter().chain(x1).any(|&v| v >= q) {
+                a.iter_mut().for_each(|v| v.zeroize());
+                return Err(());
+            }
+            let m = Modulus::new(q, g, n);
+            let mut s = m.ntt_mform_of(&self.s);
+            let mut p: Vec<u64> = (0..n).map(|i| m.add(x0[i], mred(x1[i], s[i], q, m.qinv))).collect();
+            s.zeroize();
+            m.intt(&mut p);
+            a.push(p);
         }
-        let m = Modulus::new(q, g, n);
-        let mut s = m.ntt_mform_of(&self.s);
-        let mut p: Vec<u64> = (0..n).map(|i| m.add(c0[i], mred(c1[i], s[i], q, m.qinv))).collect();
-        s.zeroize();
-        m.intt(&mut p);
-        let half = q / 2;
-        let out = p.iter().map(|&v| if v > half { -((q - v) as i64) } else { v as i64 }).collect();
-        p.zeroize();
+        let q0 = ps.residual_q[0] as u128;
+        let (big_q, inv) = if level == 1 {
+            let q1 = ps.residual_q[1];
+            (q0 * q1 as u128, super::ring::pow_mod(ps.residual_q[0] % q1, q1 - 2, q1) as u128)
+        } else {
+            (q0, 0)
+        };
+        let half = big_q / 2;
+        let out = (0..n)
+            .map(|i| {
+                let a0 = a[0][i] as u128;
+                let x = if level == 1 {
+                    let q1 = ps.residual_q[1] as u128;
+                    let a1 = a[1][i] as u128;
+                    // (a1 − a0 mod q1)·q0⁻¹ mod q1; all products < 2^90.
+                    let t = ((a1 + q1 - a0 % q1) % q1) * inv % q1;
+                    a0 + q0 * t
+                } else {
+                    a0
+                };
+                // x − Q if x > Q/2, by mask.
+                let over = ((half.wrapping_sub(x)) >> 127) as u64; // 1 when x > half
+                let mask = 0u128.wrapping_sub(over as u128);
+                (x as i128).wrapping_sub((big_q & mask) as i128)
+            })
+            .collect();
+        a.iter_mut().for_each(|v| v.zeroize());
         Ok(out)
+    }
+
+    /// Test support: a level-`level` ciphertext of the integer plaintext `m`
+    /// (centered coefficients, |m| < Q_L/2) under this generator's secret,
+    /// c1 uniform from `rand`, c0 = NTT(m + e) − c1·s with e from the
+    /// Gaussian CDT; limb-major NTT-domain words, as `decrypt_level` reads.
+    #[cfg(feature = "test-support")]
+    pub fn encrypt_for_test(&self, level: usize, m: &[i128], rand: &[u8; 32]) -> Result<(Vec<u64>, Vec<u64>), ()> {
+        let ps = self.ps;
+        let n = ps.n();
+        if m.len() != n || level >= ps.residual_q.len() {
+            return Err(());
+        }
+        let e = gaussian(&mut Stream::new(rand), n);
+        let (mut c0, mut c1) = (Vec::with_capacity((level + 1) * n), Vec::with_capacity((level + 1) * n));
+        for j in 0..=level {
+            let (q, g) = ps.pk_limb(j).ok_or(())?;
+            let md = Modulus::new(q, g, n);
+            let a = uniform_a(rand, &[0xEE; 17], 0, j as u32, q, n);
+            let s = md.ntt_mform_of(&self.s);
+            let qi = q as i128;
+            let mut p: Vec<u64> = (0..n).map(|i| (((m[i] + e[i] as i128) % qi + qi) % qi) as u64).collect();
+            md.ntt(&mut p);
+            for i in 0..n {
+                p[i] = md.sub(p[i], mred(a[i], s[i], q, md.qinv));
+            }
+            c0.extend_from_slice(&p);
+            c1.extend_from_slice(&a);
+        }
+        Ok((c0, c1))
     }
 }
 

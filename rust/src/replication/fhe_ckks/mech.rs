@@ -62,14 +62,37 @@ pub const PUBLIC_KIND_CKKS_MANIFEST: u32 = 6;
 /// Domain separator of the token-signed manifest (signed bytes are this ‖ 0x00 ‖ DER(tbs)).
 pub const MANIFEST_DOMAIN: &[u8] = b"PQCToday CKKS Manifest 1.0";
 
-/// Decrypt input, serialization version 2: magic ‖ param set ‖ level (must be
-/// 0) ‖ log2 scale ‖ reserved 0 (u32 LE each) ‖ c0 ‖ c1 (N × u64 LE each, NTT
-/// domain, mod q0). The scale is the caller's statement; the policy accepts one.
+/// Decrypt input, serialization version 2 (one-prime sets, release level 0):
+/// magic ‖ param set ‖ level (must be 0) ‖ log2 scale ‖ reserved 0 (u32 LE
+/// each) ‖ c0 ‖ c1 (N × u64 LE each, NTT domain, mod q0). The scale is the
+/// caller's statement; the policy accepts one.
 pub const CT_MAGIC: &[u8; 8] = b"PQCKKS02";
 pub const CT_VERSION: u16 = 2;
+/// Decrypt input, serialization version 3 (E13): the same header with the
+/// level the set releases at (`params::release_level`, 1 for registry ID 3),
+/// then c0 limbs 0..=level and c1 limbs 0..=level (N × u64 LE each, NTT
+/// domain, limb-major). Version 2 stays the format of the level-0 sets.
+pub const CT_MAGIC_V3: &[u8; 8] = b"PQCKKS03";
+pub const CT_VERSION_V3: u16 = 3;
 const CT_HEADER: usize = 24;
-/// The single CKKS release type: decoded slots of a level-0 ciphertext.
+/// CKKS release type of a level-0 ciphertext: its decoded slots.
 pub const CKKS_TYPE_NAME: &str = "CkksPlaintextQ0";
+/// CKKS release type of a level-1 ciphertext (two primes, registry ID 3).
+pub const CKKS_TYPE_NAME_Q1: &str = "CkksPlaintextQ1";
+
+/// The release type a decryption policy lists for a parameter set: its
+/// release level's type name, width 64, serialization version 2 for level 0
+/// and 3 above.
+pub fn release_type(ps: &CkksParamSet) -> FheType {
+    let level = params::release_level(ps);
+    FheType {
+        type_name: if level == 0 { CKKS_TYPE_NAME } else { CKKS_TYPE_NAME_Q1 }.into(),
+        width_bits: 64,
+        param_set: ps.id,
+        serialization_version: if level == 0 { CT_VERSION } else { CT_VERSION_V3 },
+        compressed_allowed: false,
+    }
+}
 /// Release format: type 3 (rounded CKKS slots) ‖ precision bits ‖ slot count
 /// (u16 BE), then per slot round(re·2^p), round(im·2^p) as i64 LE.
 pub const OUT_TYPE: u8 = 3;
@@ -540,22 +563,27 @@ pub unsafe fn ffi_derive_public_v3(session: u32, base: u32, p_param: *const u8, 
     super::rotation::derive_rotation(session, &old, &new, kind, k, d, f(4), f(5))
 }
 
-/// Shape-level type gate: the input names this seed's parameter set, level 0,
-/// the policy's scale and the exact length; the policy must allow the exact
-/// CKKS release type (name, set, width 64, serialization version 2).
-fn type_gate(p: &fhe::FheDecryptPolicy, c: &fhe::CkksReleasePolicy, ps: &CkksParamSet, input: &[u8]) -> Option<FheType> {
+/// Shape-level type gate: the input names this seed's parameter set, the
+/// set's release level, the policy's scale and the exact length, in the
+/// serialization version of that level (2 for level 0, 3 above); the policy
+/// must allow the exact CKKS release type (`release_type`). Returns the type
+/// and the level.
+fn type_gate(p: &fhe::FheDecryptPolicy, c: &fhe::CkksReleasePolicy, ps: &CkksParamSet, input: &[u8]) -> Option<(FheType, usize)> {
     let n = ps.n();
-    if input.len() != CT_HEADER + 16 * n || &input[..8] != CT_MAGIC {
+    let level = params::release_level(ps);
+    if input.len() < CT_HEADER {
+        return None;
+    }
+    let magic = if level == 0 { CT_MAGIC } else { CT_MAGIC_V3 };
+    if input.len() != CT_HEADER + 16 * n * (level + 1) || &input[..8] != magic {
         return None;
     }
     let w = |o: usize| u32::from_le_bytes(input[o..o + 4].try_into().unwrap());
-    if w(8) != ps.id || w(12) != 0 || w(16) != c.scale_log2 as u32 || w(20) != 0 {
+    if w(8) != ps.id || w(12) != level as u32 || w(16) != c.scale_log2 as u32 || w(20) != 0 {
         return None;
     }
-    p.allowed_output_types
-        .iter()
-        .find(|t| t.type_name == CKKS_TYPE_NAME && t.param_set == ps.id && t.width_bits == 64 && t.serialization_version == CT_VERSION && !t.compressed_allowed)
-        .cloned()
+    let want = release_type(ps);
+    p.allowed_output_types.iter().find(|t| **t == want).cloned().map(|t| (t, level))
 }
 
 fn output_len(c: &fhe::CkksReleasePolicy) -> usize {
@@ -568,18 +596,46 @@ pub fn flood_sigma_log2(c: &fhe::CkksReleasePolicy, max_decrypts: u32, ps: &Ckks
     c.stat_security_bits as f64 / 2.0 + (max_decrypts as f64).log2() / 2.0 + params::noise_bound_log2(ps)
 }
 
+/// Width (log2 σ) up to which one rounded double-precision draw has full
+/// integer resolution: |σ·z| < 2^(45+4) for every Box–Muller output
+/// (|z| < 8.7), so the spacing of doubles stays below 1.
+pub const FLOOD_SINGLE_DRAW_MAX_LOG2: f64 = 45.0;
+/// Width of the fine component of a split draw (see `flood`).
+pub const FLOOD_FINE_LOG2: f64 = 44.0;
+
 /// Rounded Gaussian with standard deviation 2^sigma_log2 (Box–Muller on the
-/// token DRBG), one value per coefficient.
-fn flood(m: &mut [i64], sigma_log2: f64) -> Result<(), u32> {
+/// token DRBG), one value per coefficient, added in 128-bit arithmetic.
+///
+/// Up to 2^45 (registry IDs 2 and 0x8002) this is one draw, round(σ·z), as
+/// first built. Above it a single double would leave the low bits of the
+/// sum on a coarse grid (spacing 2^(log2 σ + 4 − 52), e.g. 2^9 at σ = 2^57.6)
+/// and so reveal them; the draw is split into two independent rounded
+/// Gaussians, round(σ_c·z1) + round(σ_f·z2) with σ_f = 2^44 and
+/// σ_c = √(σ² − σ_f²). The sum has variance σ², and the fine component has
+/// full integer resolution and is far wider than the coarse one's grid, so
+/// the low bits are covered.
+fn flood(m: &mut [i128], sigma_log2: f64) -> Result<(), u32> {
     let mut k = crate::replication::random32()?;
     let mut st = super::spec::Stream::new(&k);
     k.zeroize();
-    let sigma = sigma_log2.exp2();
     let unit = |st: &mut super::spec::Stream| ((st.u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
-    for v in m.iter_mut() {
-        let (u1, u2) = (unit(&mut st), unit(&mut st));
-        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        *v = v.saturating_add((sigma * z).round() as i64);
+    let normal = |st: &mut super::spec::Stream| {
+        let (u1, u2) = (unit(st), unit(st));
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    };
+    if sigma_log2 <= FLOOD_SINGLE_DRAW_MAX_LOG2 {
+        let sigma = sigma_log2.exp2();
+        for v in m.iter_mut() {
+            *v = v.saturating_add((sigma * normal(&mut st)).round() as i128);
+        }
+    } else {
+        let fine = FLOOD_FINE_LOG2.exp2();
+        let coarse = ((2.0 * sigma_log2).exp2() - fine * fine).sqrt();
+        for v in m.iter_mut() {
+            let c = (coarse * normal(&mut st)).round() as i128;
+            let f = (fine * normal(&mut st)).round() as i128;
+            *v = v.saturating_add(c).saturating_add(f);
+        }
     }
     Ok(())
 }
@@ -587,6 +643,13 @@ fn flood(m: &mut [i64], sigma_log2: f64) -> Result<(), u32> {
 /// Lattigo's CKKS decoding of a level-0 plaintext (centered coefficients) at
 /// full slot count N/2: `polyToComplexNoCRT` then `SpecialFFTDouble`.
 pub fn decode_slots(m: &[i64], scale_log2: u8) -> Vec<(f64, f64)> {
+    decode_slots_wide(&m.iter().map(|&x| x as i128).collect::<Vec<_>>(), scale_log2)
+}
+
+/// `decode_slots` for 128-bit coefficients (a level-1 plaintext of registry
+/// ID 3, |m| < 2^105). Each coefficient is rounded to the nearest double
+/// before scaling, a relative error of at most 2^-53.
+pub fn decode_slots_wide(m: &[i128], scale_log2: u8) -> Vec<(f64, f64)> {
     let n = m.len();
     let slots = n / 2;
     let big_m = 2 * n;
@@ -675,15 +738,15 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     if (owner && p.recipient_only) || (!owner && !p.recipients.iter().any(|r| r.as_bytes() == recipient)) {
         return Err(tf::refuse(slot, "recipient not allowed"));
     }
-    let ty = type_gate(p, c, ps, input).ok_or_else(|| tf::refuse(slot, "type gate"))?;
+    let (ty, level) = type_gate(p, c, ps, input).ok_or_else(|| tf::refuse(slot, "type gate"))?;
     if p.never_release.contains(&ty) {
         return Err(tf::refuse(slot, "never-release type"));
     }
-    let n = ps.n();
-    let words = |off: usize| -> Vec<u64> { (0..n).map(|i| u64::from_le_bytes(input[off + 8 * i..off + 8 * i + 8].try_into().unwrap())).collect() };
-    let (c0, c1) = (words(CT_HEADER), words(CT_HEADER + 8 * n));
+    let len = ps.n() * (level + 1);
+    let words = |off: usize| -> Vec<u64> { (0..len).map(|i| u64::from_le_bytes(input[off + 8 * i..off + 8 * i + 8].try_into().unwrap())).collect() };
+    let (c0, c1) = (words(CT_HEADER), words(CT_HEADER + 8 * len));
     let g = Generator::new(ps, &so.seed);
-    let m = g.decrypt_q0(&c0, &c1);
+    let m = g.decrypt_level(level, &c0, &c1);
     drop(g);
     let mut m = m.map_err(|_| tf::refuse(slot, "type gate"))?;
     let flooded = if owner { c.flood_owner } else { c.flood_recipients };
@@ -698,7 +761,7 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
             return Err(e);
         }
     }
-    let mut slots = decode_slots(&m, c.scale_log2);
+    let mut slots = decode_slots_wide(&m, c.scale_log2);
     m.zeroize();
     slots.truncate(c.max_values as usize);
     let bound = (c.value_bound_log2 as f64).exp2();
@@ -752,5 +815,33 @@ mod tests {
         m[n / 2] = 1 << 30;
         let v = decode_slots(&m, 30);
         assert!(v.iter().all(|&(re, im)| re.abs() < 1e-9 && (im.abs() - 1.0).abs() < 1e-9));
+        // The 128-bit path agrees, and decodes a scale-2^90 constant.
+        let m: Vec<i64> = (0..n as i64).map(|i| (i * 7919 - 4000) << 20).collect();
+        assert_eq!(decode_slots(&m, 40), decode_slots_wide(&m.iter().map(|&x| x as i128).collect::<Vec<_>>(), 40));
+        let mut w = vec![0i128; n];
+        w[0] = 3 << 90;
+        assert!(decode_slots_wide(&w, 90).iter().all(|&(re, im)| (re - 3.0).abs() < 1e-12 && im.abs() < 1e-12));
+    }
+
+    /// The split draw above 2^45 (E13): standard deviation within 2 % of σ at
+    /// σ = 2^57.6, and the low bits are not on a grid (a single double at
+    /// this width leaves the low 9 bits of every draw at zero).
+    #[test]
+    fn wide_flood_width_and_low_bits() {
+        let n = 1 << 14;
+        let sigma_log2 = 15.0 + (10_000f64).log2() / 2.0 + 36.0;
+        let mut m = vec![0i128; n];
+        flood(&mut m, sigma_log2).unwrap();
+        let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
+        let ratio = var.sqrt() / sigma_log2.exp2();
+        assert!((0.98..1.02).contains(&ratio), "std/σ = {ratio}");
+        let odd = m.iter().filter(|&&v| v & 1 == 1).count() as f64 / n as f64;
+        assert!((0.45..0.55).contains(&odd), "low bit {odd}");
+        assert!(m.iter().any(|&v| v & 0x1ff != 0));
+        // Below 2^45: one draw, as first built (still full resolution).
+        let mut m = vec![0i128; n];
+        flood(&mut m, 31.6).unwrap();
+        let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
+        assert!((0.98..1.02).contains(&(var.sqrt() / 31.6f64.exp2())));
     }
 }

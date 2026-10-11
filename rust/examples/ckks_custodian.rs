@@ -10,7 +10,7 @@
 //!   ckks_custodian init <dir> <param-set> [--test-seed]   token, policies, seed (0x8002 = INSECURE test ring)
 //!   ckks_custodian export <dir> [limbs-per-chunk]          descriptor, public key, every key chunk, token-signed
 //!                                                          manifest (manifest-token.der) and host-signed manifest
-//!   ckks_custodian decrypt <dir> <ct_level0.bin> <out> [--new]
+//!   ckks_custodian decrypt <dir> <ct_level0.bin|ct_level1.bin> <out> [--new]
 //!                                                          policy-gated decryption → owner output
 //!                                                          (--new: with the rotation's new seed)
 //!   ckks_custodian rotate <dir> [limbs-per-chunk] [--test-seed]
@@ -123,16 +123,17 @@ fn cmd_init(dir: &Path, param_set: u32, test_seed: bool) {
         use der::Encode;
         fhe::FheDecryptPolicy {
             version: 2,
-            allowed_output_types: vec![fhe::FheType { type_name: mech::CKKS_TYPE_NAME.into(), width_bits: 64, param_set: ps.id, serialization_version: mech::CT_VERSION, compressed_allowed: false }],
+            allowed_output_types: vec![mech::release_type(ps)],
             never_release: vec![],
             predicates: vec![],
             recipients: vec![],
             recipient_only: false,
             max_decrypts: 10_000,
-            // Owner release: every slot, rounded to 2^-20, |value| < 2^10, at the default scale.
+            // Owner release: every slot, rounded to 2^-20 (2^-CKKS_PRECISION_BITS when set, e.g. 30 to
+            // measure a flooded release without the rounding floor), |value| < 2^10, at the default scale.
             ckks: Some(fhe::CkksReleasePolicy {
                 max_values: (ps.n() / 2) as u32,
-                precision_bits: 20,
+                precision_bits: std::env::var("CKKS_PRECISION_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(20),
                 value_bound_log2: 10,
                 scale_log2: ps.log_default_scale as u8,
                 flood_recipients: true,
