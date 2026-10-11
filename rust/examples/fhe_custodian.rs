@@ -175,6 +175,7 @@ fn cmd_init(dir: &Path) {
             recipients: vec![],
             recipient_only: false,
             max_decrypts: 10_000,
+            ckks: None,
         }
         .to_der()
         .unwrap()

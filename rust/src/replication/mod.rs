@@ -30,8 +30,12 @@ pub mod asn1;
 pub mod enroll;
 pub mod evidence;
 pub mod fhe;
+#[cfg(feature = "educational-ckks")]
+pub mod fhe_custody;
 #[cfg(feature = "educational-fhe")]
 pub mod fhe_tfhe;
+#[cfg(feature = "educational-ckks")]
+pub mod fhe_ckks;
 pub mod host_verify;
 pub mod oids;
 pub mod package;

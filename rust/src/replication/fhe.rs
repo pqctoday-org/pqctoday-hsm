@@ -24,6 +24,8 @@ pub const ROLE_FHE_DECRYPT_POLICY: u8 = 13;
 
 /// The only scheme and generator version P1 accepts.
 pub const FHE_SCHEME_TFHE: &str = "tfhe-rs";
+/// Streamed CKKS (Lattigo-compatible evaluation keys), educational-ckks only.
+pub const FHE_SCHEME_CKKS: &str = "ckks-stream";
 pub const FHE_GENERATOR_VERSIONS: &[u32] = &[1];
 /// Opaque P1 seed length (a TFHE-rs client-key seed is 128 bits; 32 bytes
 /// leaves room and is what the fixture uses).
@@ -52,8 +54,33 @@ pub const TFHE_COMMIT: [u8; 20] = [
     0xb6,
 ];
 
+/// Scheme of a registered parameter set.
+pub fn scheme_for(param_set: u32) -> Option<&'static str> {
+    if FHE_PARAM_SETS.iter().any(|(id, _)| *id == param_set) {
+        return Some(FHE_SCHEME_TFHE);
+    }
+    #[cfg(feature = "educational-ckks")]
+    if super::fhe_ckks::params::find(param_set).is_some() {
+        return Some(FHE_SCHEME_CKKS);
+    }
+    None
+}
+
 /// DER of `FheParamSetV1` for a registry ID.
 pub fn param_set_der(param_set: u32) -> Option<Vec<u8>> {
+    #[cfg(feature = "educational-ckks")]
+    if let Some(ps) = super::fhe_ckks::params::find(param_set) {
+        return asn1::to_der(&FheParamSetV1 {
+            id: ps.id,
+            library: "lattigo".into(),
+            version: "6.2.0".into(),
+            commit: asn1::octets(&super::fhe_ckks::params::fingerprint(ps)),
+            param_name: ps.name.into(),
+            config: super::fhe_ckks::params::CONFIG_V1.into(),
+            kdf: "sp800-108-ctr-hmac-sha384/v1".into(),
+        })
+        .ok();
+    }
     let (id, name) = FHE_PARAM_SETS.iter().find(|(id, _)| *id == param_set)?;
     asn1::to_der(&FheParamSetV1 {
         id: *id,
@@ -75,6 +102,15 @@ pub fn param_hash(param_set: u32) -> Option<[u8; 48]> {
 
 pub fn library_id() -> &'static str {
     "tfhe-rs 1.8.1 187fc0b9"
+}
+
+/// `CKA_PQCTODAY_FHE_LIBRARY` for a registered parameter set.
+pub fn library_for(param_set: u32) -> &'static str {
+    if scheme_for(param_set) == Some(FHE_SCHEME_CKKS) {
+        "lattigo 6.2.0 streamed-evk/v1"
+    } else {
+        library_id()
+    }
 }
 
 /// P0B §3 / amendment A1: the seed's fixed derive template, a profile
@@ -118,6 +154,38 @@ pub fn profile_constraint_hash() -> [u8; 48] {
     super::sha384(&profile_constraint_der())
 }
 
+/// Canonical DER of the version-1 streamed-CKKS profile constraint.
+#[cfg(feature = "educational-ckks")]
+pub fn ckks_profile_constraint_der() -> Vec<u8> {
+    asn1::to_der(&FheProfileConstraint {
+        version: 1,
+        scheme: FHE_SCHEME_CKKS.to_string(),
+        param_sets: super::fhe_ckks::params::CKKS_PARAM_SETS.iter().map(|p| p.id).collect(),
+    })
+    .expect("static constraint")
+}
+
+/// `typeConstraintHash` of the streamed-CKKS seed profile.
+#[cfg(feature = "educational-ckks")]
+pub fn ckks_profile_constraint_hash() -> [u8; 48] {
+    super::sha384(&ckks_profile_constraint_der())
+}
+
+/// The profile hash that governs seeds of `scheme`.
+pub fn profile_constraint_hash_for(scheme: &str) -> Option<[u8; 48]> {
+    match scheme {
+        FHE_SCHEME_TFHE => Some(profile_constraint_hash()),
+        #[cfg(feature = "educational-ckks")]
+        FHE_SCHEME_CKKS => Some(ckks_profile_constraint_hash()),
+        _ => None,
+    }
+}
+
+/// Every FHE profile hash a replication policy may carry.
+pub fn is_fhe_profile_hash(h: &[u8; 48]) -> bool {
+    [FHE_SCHEME_TFHE, FHE_SCHEME_CKKS].iter().any(|s| profile_constraint_hash_for(s).as_ref() == Some(h))
+}
+
 // ── Typed decryption policy (FHE plan §6.3) ────────────────────────────────
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Sequence)]
@@ -149,6 +217,40 @@ fn default_false() -> bool {
     false
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_stat_bits() -> u8 {
+    30
+}
+
+/// Version 2 release rules for streamed-CKKS seeds (plan §4.5): what leaves the
+/// token is at most `max_values` decoded slots, rounded to 2^-precision_bits,
+/// each part bounded by 2^value_bound_log2, at the one accepted level-0 scale;
+/// flooding per audience, sized by `stat_security_bits` and `max_decrypts`.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksReleasePolicy {
+    pub max_values: u32,
+    pub precision_bits: u8,
+    pub value_bound_log2: u8,
+    pub scale_log2: u8,
+    // Context tags: two adjacent BOOLEAN DEFAULT fields would be ambiguous.
+    #[asn1(context_specific = "0", tag_mode = "IMPLICIT", default = "default_true")]
+    pub flood_recipients: bool,
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", default = "default_false")]
+    pub flood_owner: bool,
+    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", default = "default_stat_bits")]
+    pub stat_security_bits: u8,
+}
+
+impl CkksReleasePolicy {
+    /// Per-request leakage bound under model B (plan §4.5), in bits.
+    pub fn bits_per_release(&self) -> u64 {
+        self.max_values as u64 * 2 * (self.precision_bits as u64 + self.value_bound_log2 as u64 + 1)
+    }
+}
+
 /// Rules 1–5 of §6.3, as one immutable, SO-enrolled, canonical DER policy.
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct FheDecryptPolicy {
@@ -166,6 +268,10 @@ pub struct FheDecryptPolicy {
     pub recipient_only: bool,
     /// Rate limit: decrypt calls (released or refused) per object.
     pub max_decrypts: u32,
+    /// Version 2 only: CKKS release rules. Absent in version 1, so every
+    /// version 1 (TFHE) policy keeps its DER and identifier.
+    #[asn1(context_specific = "0", optional = "true")]
+    pub ckks: Option<CkksReleasePolicy>,
 }
 
 /// Validated view of an enrolled decryption policy.
@@ -178,7 +284,7 @@ pub struct DecryptPolicyView {
 pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
     let p: FheDecryptPolicy = asn1::decode_strict(der, MAX_POLICY_DER)?;
     let sorted_unique = |v: &[FheType]| v.windows(2).all(|w| w[0] < w[1]);
-    if p.version != 1
+    if !matches!((p.version, &p.ckks), (1, None) | (2, Some(_)))
         || p.allowed_output_types.is_empty()
         || p.allowed_output_types.len() > 32
         || p.never_release.len() > 32
@@ -205,6 +311,28 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
     {
         return Err(CKR_DATA_INVALID);
     }
+    // Version 1 lists TFHE types only; version 2 lists streamed-CKKS types only.
+    let scheme = if p.version == 1 { FHE_SCHEME_TFHE } else { FHE_SCHEME_CKKS };
+    if !p.allowed_output_types.iter().chain(p.never_release.iter()).all(|t| scheme_for(t.param_set) == Some(scheme)) {
+        return Err(CKR_DATA_INVALID);
+    }
+    if let Some(c) = &p.ckks {
+        #[cfg(feature = "educational-ckks")]
+        let max_slots = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(|ps| ps.n() / 2).min().unwrap_or(0);
+        #[cfg(not(feature = "educational-ckks"))]
+        let max_slots = 0usize;
+        if c.max_values == 0
+            || c.max_values as usize > max_slots
+            || !(1..=30).contains(&c.precision_bits)
+            || c.value_bound_log2 > 30
+            || !(20..=60).contains(&c.scale_log2)
+            || c.precision_bits >= c.scale_log2
+            || !(1..=64).contains(&c.stat_security_bits)
+            || !p.predicates.is_empty()
+        {
+            return Err(CKR_DATA_INVALID);
+        }
+    }
     Ok(DecryptPolicyView { id: super::sha384(der), policy: p })
 }
 
@@ -230,6 +358,21 @@ impl DecryptPolicyView {
             && d.recipients.iter().all(|r| s.recipients.contains(r))
             && (d.recipient_only || !s.recipient_only)
             && d.max_decrypts <= s.max_decrypts
+            && d.version == s.version
+            && match (&d.ckks, &s.ckks) {
+                (None, None) => true,
+                // Replication may only narrow a CKKS release (plan §4.5).
+                (Some(dc), Some(sc)) => {
+                    dc.max_values <= sc.max_values
+                        && dc.precision_bits <= sc.precision_bits
+                        && dc.value_bound_log2 <= sc.value_bound_log2
+                        && dc.scale_log2 == sc.scale_log2
+                        && dc.stat_security_bits >= sc.stat_security_bits
+                        && (dc.flood_recipients || !sc.flood_recipients)
+                        && (dc.flood_owner || !sc.flood_owner)
+                }
+                _ => false,
+            }
     }
 }
 
@@ -297,7 +440,7 @@ pub fn validate_descriptor(der: &[u8], header_lineage: &[u8]) -> Result<FheRecov
     let bad = CKR_ENCRYPTED_DATA_INVALID;
     let d: FheRecoveryDescriptor = asn1::decode_strict(der, MAX_DESCRIPTOR_DER).map_err(|_| bad)?;
     if d.version != 1
-        || d.scheme != FHE_SCHEME_TFHE
+        || scheme_for(d.param_set) != Some(d.scheme.as_str())
         || !FHE_GENERATOR_VERSIONS.contains(&d.generator_version)
         || param_hash(d.param_set).map(|h| h.to_vec()) != Some(d.param_hash.as_bytes().to_vec())
         || d.lineage_id.as_bytes() != header_lineage
@@ -321,11 +464,48 @@ pub fn generate_fhe_seed(
     label: Option<&[u8]>,
     id: Option<&[u8]>,
 ) -> Result<u32, u32> {
+    generate_fhe_seed_inner(user_session, param_set, replication_policy, decrypt_policy, label, id, None)
+}
+
+/// KEY_GEN with a caller-chosen seed value, for known-answer runs only
+/// (test-support builds; never in a shipped artefact).
+#[cfg(feature = "test-support")]
+pub fn generate_fhe_seed_with_value_for_test(
+    user_session: u32,
+    param_set: u32,
+    replication_policy: &[u8; 48],
+    decrypt_policy: &[u8; 48],
+    seed: &[u8; 32],
+    id: &[u8],
+) -> Result<u32, u32> {
+    generate_fhe_seed_inner(user_session, param_set, replication_policy, decrypt_policy, Some(b"KAT seed (test-support)"), Some(id), Some(*seed))
+}
+
+fn generate_fhe_seed_inner(
+    user_session: u32,
+    param_set: u32,
+    replication_policy: &[u8; 48],
+    decrypt_policy: &[u8; 48],
+    label: Option<&[u8]>,
+    id: Option<&[u8]>,
+    fixed_seed: Option<[u8; 32]>,
+) -> Result<u32, u32> {
     use crate::state::{store_bool, store_ulong};
     super::require_profile()?;
     let slot = super::require_user_rw(user_session)?;
     let pol = records::parse_policy(&records::find_policy(slot, replication_policy).ok_or(CKR_TEMPLATE_INCONSISTENT)?)?;
-    if pol.type_constraint_hash != profile_constraint_hash() || find_decrypt_policy(slot, decrypt_policy).is_none() {
+    let scheme = scheme_for(param_set).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+    if Some(pol.type_constraint_hash) != profile_constraint_hash_for(scheme) {
+        return Err(CKR_TEMPLATE_INCONSISTENT);
+    }
+    // TFHE seeds take version 1 policies; CKKS seeds take version 2 policies
+    // that release this parameter set's type (plan §4.5).
+    let dp = find_decrypt_policy(slot, decrypt_policy).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+    let fits = match scheme {
+        FHE_SCHEME_TFHE => dp.policy.version == 1,
+        _ => dp.policy.version == 2 && dp.policy.allowed_output_types.iter().any(|t| t.param_set == param_set),
+    };
+    if !fits {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
     // §6.2 F8: no caller-visible KDF on the seed; only the FHE mechanisms.
@@ -334,7 +514,10 @@ pub fn generate_fhe_seed(
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
     let ph = param_hash(param_set).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
-    let seed = super::random32()?;
+    let seed = match fixed_seed {
+        Some(v) => v,
+        None => super::random32()?,
+    };
     let lineage = super::random32()?;
     let mut a: crate::crypto::handlers::Attributes = Default::default();
     store_ulong(&mut a, CKA_CLASS, CKO_SECRET_KEY);
@@ -364,10 +547,10 @@ pub fn generate_fhe_seed(
     store_ulong(&mut a, CKA_KEY_GEN_MECHANISM, CKM_PQCTODAY_FHE_KEY_GEN);
     a.insert(CKA_VALUE, seed.to_vec());
     a.insert(CKA_DERIVE_TEMPLATE, seed_derive_template());
-    a.insert(CKA_PQCTODAY_FHE_SCHEME, FHE_SCHEME_TFHE.as_bytes().to_vec());
+    a.insert(CKA_PQCTODAY_FHE_SCHEME, scheme.as_bytes().to_vec());
     store_ulong(&mut a, CKA_PQCTODAY_FHE_PARAM_SET, param_set);
     a.insert(CKA_PQCTODAY_FHE_PARAM_HASH, ph.to_vec());
-    a.insert(CKA_PQCTODAY_FHE_LIBRARY, library_id().as_bytes().to_vec());
+    a.insert(CKA_PQCTODAY_FHE_LIBRARY, library_for(param_set).as_bytes().to_vec());
     a.insert(CKA_PQCTODAY_FHE_LINEAGE_ID, lineage.to_vec());
     a.insert(CKA_PQCTODAY_FHE_DECRYPT_POLICY, decrypt_policy.to_vec());
     a.insert(CKA_PQCTODAY_REPLICATION_POLICY_ID, replication_policy.to_vec());
@@ -414,6 +597,7 @@ mod tests {
             recipients: vec![],
             recipient_only: false,
             max_decrypts,
+            ckks: None,
         }
     }
 
@@ -453,6 +637,88 @@ mod tests {
         let mut compressed = ty("FheBool", 1);
         compressed.compressed_allowed = true;
         assert!(bad(policy(vec![compressed], vec![], None, 1)), "compressed lists refused in v1 (P0B §5.3)");
+    }
+
+    #[cfg(feature = "educational-ckks")]
+    fn ckks_policy(c: CkksReleasePolicy) -> FheDecryptPolicy {
+        let t = FheType { type_name: "CkksPlaintextQ0".into(), width_bits: 64, param_set: 0x8002, serialization_version: 2, compressed_allowed: false };
+        FheDecryptPolicy { version: 2, allowed_output_types: vec![t], never_release: vec![], predicates: vec![], recipients: vec![], recipient_only: false, max_decrypts: 100, ckks: Some(c) }
+    }
+
+    #[cfg(feature = "educational-ckks")]
+    fn ckks_block() -> CkksReleasePolicy {
+        CkksReleasePolicy { max_values: 512, precision_bits: 20, value_bound_log2: 10, scale_log2: 40, flood_recipients: true, flood_owner: false, stat_security_bits: 30 }
+    }
+
+    /// PV1–PV3 (plan §4.5): version/scheme pairing, ranges, canonical DER with
+    /// defaults omitted, and replication may only narrow a CKKS release.
+    #[cfg(feature = "educational-ckks")]
+    #[test]
+    fn decrypt_policy_v2_ckks_rules() {
+        let der = |p: &FheDecryptPolicy| asn1::to_der(p).unwrap();
+        let ok = ckks_policy(ckks_block());
+        let v = parse_decrypt_policy(&der(&ok)).expect("valid v2");
+        // Defaults (flood_recipients = true, flood_owner = false, 30 bits) are not encoded.
+        let mut explicit = ok.clone();
+        explicit.ckks.as_mut().unwrap().stat_security_bits = 31;
+        assert!(der(&explicit).len() > der(&ok).len());
+        // A version 1 policy encodes no [0] element, so its DER and identifier are unchanged.
+        let t = policy(vec![ty("FheBool", 1)], vec![], None, 1);
+        let mut t_der = der(&t);
+        let mut with_field = t.clone();
+        with_field.ckks = Some(ckks_block());
+        assert!(der(&with_field).len() > t_der.len() && parse_decrypt_policy(&t_der).is_ok());
+        t_der.clear();
+        let bad = |p: FheDecryptPolicy| parse_decrypt_policy(&der(&p)).is_err();
+        let mut v1_with_ckks = ok.clone();
+        v1_with_ckks.version = 1;
+        assert!(bad(v1_with_ckks), "v1 must not carry ckks");
+        let mut v2_without = ok.clone();
+        v2_without.ckks = None;
+        assert!(bad(v2_without), "v2 must carry ckks");
+        let mut tfhe_in_v2 = ok.clone();
+        tfhe_in_v2.allowed_output_types = vec![ty("FheBool", 1)];
+        assert!(bad(tfhe_in_v2), "v2 lists CKKS types only");
+        let mut tfhe_v1_ckks_type = policy(vec![ty("FheBool", 1)], vec![], None, 1);
+        tfhe_v1_ckks_type.allowed_output_types = ok.allowed_output_types.clone();
+        assert!(bad(tfhe_v1_ckks_type), "v1 lists TFHE types only");
+        for f in [
+            |c: &mut CkksReleasePolicy| c.max_values = 0,
+            |c: &mut CkksReleasePolicy| c.max_values = 513,
+            |c: &mut CkksReleasePolicy| c.precision_bits = 0,
+            |c: &mut CkksReleasePolicy| c.precision_bits = 31,
+            |c: &mut CkksReleasePolicy| c.value_bound_log2 = 31,
+            |c: &mut CkksReleasePolicy| c.scale_log2 = 19,
+            |c: &mut CkksReleasePolicy| c.stat_security_bits = 0,
+        ] {
+            let mut c = ckks_block();
+            f(&mut c);
+            assert!(bad(ckks_policy(c)), "range refusal");
+        }
+        let mut with_pred = ok.clone();
+        with_pred.predicates = vec![Predicate { kind: PredicateKind::MaxValue, bound: 1 }];
+        assert!(bad(with_pred), "value predicates are not defined for CKKS");
+        // Replication ordering.
+        let narrow = |f: fn(&mut CkksReleasePolicy)| {
+            let mut c = ckks_block();
+            f(&mut c);
+            let d = parse_decrypt_policy(&der(&ckks_policy(c.clone()))).unwrap_or_else(|e| panic!("{e} {c:?}"));
+            d.is_equal_or_stricter_than(&v)
+        };
+        assert!(narrow(|c| c.max_values = 16));
+        assert!(narrow(|c| c.precision_bits = 10));
+        assert!(narrow(|c| c.stat_security_bits = 40));
+        assert!(narrow(|c| c.flood_owner = true));
+        let mut both = ckks_block();
+        both.flood_recipients = false;
+        both.flood_owner = true;
+        assert_eq!(parse_decrypt_policy(&der(&ckks_policy(both.clone()))).unwrap().policy.ckks, Some(both), "tagged defaults round-trip");
+        assert!(!narrow(|c| c.flood_recipients = false), "flooding cannot be switched off");
+        assert!(!narrow(|c| c.precision_bits = 21));
+        assert!(!narrow(|c| c.scale_log2 = 41), "scale is kept");
+        assert!(!narrow(|c| c.stat_security_bits = 29));
+        assert!(!view(&t).is_equal_or_stricter_than(&v) && !v.is_equal_or_stricter_than(&view(&t)), "no v1/v2 crossing");
+        assert_eq!(ckks_block().bits_per_release(), 512 * 2 * 31);
     }
 
     fn descriptor(version: u8, generator: u32, lineage: [u8; 32], param_hash_bytes: Vec<u8>) -> Vec<u8> {

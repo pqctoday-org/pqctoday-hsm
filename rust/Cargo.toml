@@ -62,7 +62,13 @@ educational-replication = ["dep:x509-cert", "dep:der", "dep:spki07", "dep:const-
 # reference-runs/tfhe-custody pin) with only the `integer` feature. TFHE-rs is
 # BSD-3-Clause-Clear; Zama states that commercial use needs a separate patent
 # licence, so this feature must never ship in a commercial artefact.
-educational-fhe = ["educational-replication", "dep:tfhe"]
+educational-fhe = ["educational-replication", "dep:tfhe", "educational-ckks"]
+
+# Streamed CKKS custody (pqctoday-fhe plan docs/ckks/…-2026-10-10.md) WITHOUT
+# TFHE-rs: the scheme-neutral custody code plus the CKKS mechanisms only.
+# OPT-IN, NOT default, EDUCATIONAL ONLY. `educational-fhe` implies it, so every
+# educational-fhe build keeps CKKS exactly as before.
+educational-ckks = ["educational-replication"]
 
 # ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
 # mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
@@ -118,6 +124,11 @@ name = "fhe_custodian"
 required-features = ["educational-fhe"]
 
 [[example]]
+# Streamed CKKS custodian (pqctoday-fhe plan docs/ckks/…-2026-10-10.md).
+name = "ckks_custodian"
+required-features = ["educational-ckks"]
+
+[[example]]
 # fips204 / ml-kem versus AWS-LC timing (`crypto::awslc_pq`); native only.
 name = "awslc_pq_bench"
 required-features = ["awslc-pq"]
@@ -168,6 +179,11 @@ name = "replication_fhe_p2"
 required-features = ["educational-fhe", "test-support"]
 
 [[test]]
+# Streamed-CKKS ledger and token-signed manifest (E3, S5).
+name = "replication_fhe_ckks"
+required-features = ["educational-ckks", "test-support"]
+
+[[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
 # the process-global token store with distinct test ceremonies.
 name = "hierarchy_attestation_spikes"
@@ -195,7 +211,7 @@ getrandom = { version = "0.2.17", features = ["js"] }
 getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["wasm_js", "sys_rng"] }
 rand = "0.8.5"
 rand_chacha = "0.3"
-aes = "0.9"
+aes = { version = "0.9", features = ["zeroize"] }  # key schedule zeroized on drop (CKKS generator streams, Codex #6)
 aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
 # IETF ChaCha20 stream cipher (PKCS#11 v3.2 §6.20 `CKM_CHACHA20`).
