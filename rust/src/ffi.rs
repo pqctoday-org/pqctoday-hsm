@@ -386,7 +386,10 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     require_init!();
     drop_key_caches();
     #[cfg(feature = "educational-ckks")]
-    crate::replication::fhe_ckks::mech::clear_generator_cache();
+    {
+        crate::replication::fhe_ckks::mech::clear_generator_cache();
+        crate::replication::fhe_ckks::mech::clear_ledgers();
+    }
     // PQC_HW_STAGE_PROFILE=1 diagnostics: the accelerator host-path stage
     // table, printed once per process lifetime of the engine.
     #[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
@@ -725,7 +728,10 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
 #[wasm_bindgen(js_name = _C_InitToken)]
 pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut u8) -> u32 {
     #[cfg(feature = "educational-ckks")]
-    crate::replication::fhe_ckks::mech::clear_generator_cache();
+    {
+        crate::replication::fhe_ckks::mech::clear_generator_cache();
+        crate::replication::fhe_ckks::mech::clear_ledgers_for_slot(slot_id);
+    }
     require_init!();
     drop_key_caches();
     if p_pin.is_null() || p_label.is_null() {
@@ -922,7 +928,10 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     crate::state::destroy_session_objects(h_session);
     drop_key_caches();
     #[cfg(feature = "educational-ckks")]
-    crate::replication::fhe_ckks::mech::clear_generator_cache();
+    {
+        crate::replication::fhe_ckks::mech::clear_generator_cache();
+        crate::replication::fhe_ckks::mech::clear_ledger_for_session(h_session);
+    }
     // PKCS#11 v3.2 §5.6 — closing a session terminates all of its active
     // operations. Clear every per-session state map, zeroizing any that hold
     // raw key material (the message-based AEAD contexts).
@@ -963,7 +972,10 @@ pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     require_init!();
     drop_key_caches();
     #[cfg(feature = "educational-ckks")]
-    crate::replication::fhe_ckks::mech::clear_generator_cache();
+    {
+        crate::replication::fhe_ckks::mech::clear_generator_cache();
+        crate::replication::fhe_ckks::mech::clear_ledgers_for_slot(slot_id);
+    }
     let valid = TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id));
     if !valid {
         return CKR_SLOT_ID_INVALID;
@@ -1226,6 +1238,8 @@ pub fn C_Logout(h_session: u32) -> u32 {
     };
     let slot_id = session.slot_id;
     let context = session.context;
+    #[cfg(feature = "educational-ckks")]
+    crate::replication::fhe_ckks::mech::clear_ledgers_for_slot(slot_id);
     let outcome = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
         store

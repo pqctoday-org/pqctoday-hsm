@@ -8,7 +8,8 @@
 //! docs/ckks/ckks-streamed-evaluation-keys-plan-2026-10-10.md §3).
 //!
 //!   ckks_custodian init <dir> <param-set> [--test-seed]   token, policies, seed (0x8002 = INSECURE test ring)
-//!   ckks_custodian export <dir> [limbs-per-chunk]          descriptor, public key, every key chunk, signed manifest
+//!   ckks_custodian export <dir> [limbs-per-chunk]          descriptor, public key, every key chunk, token-signed
+//!                                                          manifest (manifest-token.der) and host-signed manifest
 //!   ckks_custodian decrypt <dir> <ct_level0.bin> <out>     policy-gated decryption → owner output
 //!
 //! `--test-seed` (test-support builds only) installs the seed 00..1f so the
@@ -233,7 +234,11 @@ fn cmd_export(dir: &Path, per_chunk: usize, stream: bool) {
         eprintln!();
     }
     let secs = t0.elapsed().as_secs_f64();
-    // Manifest: one SHA-256 per file in export order, signed (TFHE model, spec
+    // Token-signed manifest (kind 6, E3): the token's own ledger of every chunk
+    // it served this session, signed with its receipt-signing key. Refused
+    // unless the export above covered the set exactly once.
+    emit("manifest-token.der", &derive(s, seed, mech::PUBLIC_KIND_CKKS_MANIFEST, 0, 0, 0, 0));
+    // Host-signed manifest (kept for compatibility): one SHA-256 per file in export order, signed (TFHE model, spec
     // §5.2): the application signs with the token-resident ML-DSA-65 key.
     emit("manifest.txt", manifest.as_bytes());
     let lineage = native::get_attribute(s, seed, CKA_PQCTODAY_FHE_LINEAGE_ID).unwrap();

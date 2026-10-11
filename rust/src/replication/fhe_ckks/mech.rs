@@ -4,7 +4,7 @@
 //! ```c
 //! typedef struct CK_PQCTODAY_FHE_DERIVE_PUBLIC_PARAMS_V2 {
 //!     CK_ULONG ulVersion;      /* 2 */
-//!     CK_ULONG ulPublicKind;   /* 3 key-set descriptor, 4 public key, 5 evaluation-key chunk */
+//!     CK_ULONG ulPublicKind;   /* 3 key-set descriptor, 4 public key, 5 evaluation-key chunk, 6 manifest */
 //!     CK_ULONG ulKeyIndex;     /* kind 5: index into the registry's key list */
 //!     CK_ULONG ulDigit;        /* kind 5: gadget digit */
 //!     CK_ULONG ulLimbFrom;     /* kinds 4, 5: first limb */
@@ -17,9 +17,34 @@
 //! Chunk bytes are deterministic in (seed, parameter set, index), so any
 //! chunk can be requested again, in any order, on any token holding a replica
 //! of the seed, and gives the same bytes. The token never holds the key set.
+//!
+//! Ledger and manifest (plan §3.2, E3): kind 3 starts (or restarts) a
+//! per-session ledger for the seed; every kind-4/5 object is recorded in it as
+//! `(kind, key, digit, from, to, SHA-256(value))` and needs a ledger for the
+//! same seed (`CKR_OPERATION_NOT_INITIALIZED` otherwise). Kind 6 (key, digit
+//! and limbs all 0) returns a DER `CkksSignedManifestV1` signed by the device's
+//! receipt-signing key, only when the ledger covers the public key and every
+//! (key, digit) exactly once (`CKR_FUNCTION_FAILED` otherwise), and then
+//! clears the ledger:
+//!
+//! ```text
+//! CkksChunkHash ::= SEQUENCE { kind INTEGER, key INTEGER, digit INTEGER,
+//!     from INTEGER, to INTEGER, sha256 OCTET STRING (SIZE(32)) }
+//! CkksManifestTbsV1 ::= SEQUENCE { version INTEGER (1),
+//!     descriptorHash OCTET STRING (SIZE(32)), paramHash OCTET STRING,
+//!     lineage OCTET STRING, entries SEQUENCE OF CkksChunkHash }
+//! CkksSignedManifestV1 ::= SEQUENCE { tbs CkksManifestTbsV1,
+//!     signature OCTET STRING, signerChain SEQUENCE OF Certificate }
+//! signed bytes = "PQCToday CKKS Manifest 1.0" || 0x00 || DER(tbs)
+//! ```
+//!
+//! Entries are in ledger order: (kind, key, digit, from) ascending.
+
+use std::collections::BTreeMap;
 
 use der::asn1::OctetString;
 use der::Sequence;
+use x509_cert::Certificate;
 use zeroize::Zeroize;
 
 use super::params::{self, CkksParamSet};
@@ -33,6 +58,9 @@ use crate::replication::{asn1, records};
 pub const PUBLIC_KIND_CKKS_DESCRIPTOR: u32 = 3;
 pub const PUBLIC_KIND_CKKS_PUBLIC_KEY: u32 = 4;
 pub const PUBLIC_KIND_CKKS_EVK_CHUNK: u32 = 5;
+pub const PUBLIC_KIND_CKKS_MANIFEST: u32 = 6;
+/// Domain separator of the token-signed manifest (signed bytes are this ‖ 0x00 ‖ DER(tbs)).
+pub const MANIFEST_DOMAIN: &[u8] = b"PQCToday CKKS Manifest 1.0";
 
 /// Decrypt input, serialization version 2: magic ‖ param set ‖ level (must be
 /// 0) ‖ log2 scale ‖ reserved 0 (u32 LE each) ‖ c0 ‖ c1 (N × u64 LE each, NTT
@@ -56,6 +84,149 @@ pub struct CkksKeySetDescriptorV1 {
     pub a_seed: OctetString,
     pub key_count: u32,
     pub pk_limbs: u32,
+}
+
+/// One ledger entry of the token-signed manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksChunkHash {
+    pub kind: u32,
+    pub key: u32,
+    pub digit: u32,
+    pub from: u32,
+    pub to: u32,
+    pub sha256: OctetString,
+}
+
+/// What the token signs: the descriptor it served and every chunk hash.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksManifestTbsV1 {
+    pub version: u32,
+    pub descriptor_hash: OctetString,
+    pub param_hash: OctetString,
+    pub lineage: OctetString,
+    pub entries: Vec<CkksChunkHash>,
+}
+
+/// Kind 6 output.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct CkksSignedManifestV1 {
+    pub tbs: CkksManifestTbsV1,
+    pub signature: OctetString,
+    pub signer_chain: Vec<Certificate>,
+}
+
+/// The bytes the receipt-signing key signs for a manifest.
+pub fn manifest_signed_bytes(tbs: &CkksManifestTbsV1) -> Result<Vec<u8>, u32> {
+    let mut msg = MANIFEST_DOMAIN.to_vec();
+    msg.push(0);
+    msg.extend_from_slice(&asn1::to_der(tbs)?);
+    Ok(msg)
+}
+
+/// Receiver side: decode a `CkksSignedManifestV1`, validate its signer chain
+/// for the receipt-signing purpose against `trust` at `now`, and verify the
+/// ML-DSA-65 signature. Returns the TBS and the signer's device id. Coverage
+/// and chunk hashes are the caller's to check against the files it holds.
+pub fn verify_ckks_manifest(der: &[u8], trust: &crate::replication::pki::TrustInputs, now: u64) -> Result<(CkksManifestTbsV1, [u8; 32]), u32> {
+    use crate::replication::{oids::Purpose, pki};
+    let m: CkksSignedManifestV1 = asn1::decode_strict(der, tf::MAX_PUBLIC_OBJECT)?;
+    if m.tbs.version != 1 || m.tbs.descriptor_hash.as_bytes().len() != 32 || m.tbs.entries.iter().any(|e| e.sha256.as_bytes().len() != 32) {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    let chain = pki::validate_chain(&m.signer_chain, Purpose::ReceiptSigning, trust, now, crate::replication::Profile::Educational).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    let pk = pki::mldsa65_public(&chain.leaf).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    if !crate::replication::mldsa65_verify(pk, &manifest_signed_bytes(&m.tbs)?, m.signature.as_bytes()) {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    Ok((m.tbs, chain.device_id))
+}
+
+// ── Session ledger (E3) ────────────────────────────────────────────────────
+
+type LedgerKey = (u32, u32, u32, u32); // (kind, key, digit, from)
+
+struct Ledger {
+    slot: u32,
+    seed_handle: u32,
+    descriptor_hash: [u8; 32],
+    entries: BTreeMap<LedgerKey, (u32, [u8; 32])>,
+    /// An overlapping range or a different hash for a repeated range was
+    /// seen: the manifest is refused until a new descriptor restarts the ledger.
+    invalid: bool,
+}
+
+impl Ledger {
+    fn record(&mut self, kind: u32, k: u32, d: u32, from: u32, to: u32, hash: [u8; 32]) {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let key = (kind, k, d, from);
+        if let Some(&(t, h)) = self.entries.get(&key) {
+            // An identical repeat is idempotent; anything else is a conflict.
+            if t != to || h != hash {
+                self.invalid = true;
+            }
+            return;
+        }
+        let same = |o: &LedgerKey| (o.0, o.1, o.2) == (kind, k, d);
+        let before = self.entries.range(..key).next_back().is_some_and(|(o, &(t, _))| same(o) && t > from);
+        let after = self.entries.range((Excluded(key), Unbounded)).next().is_some_and(|(o, _)| same(o) && o.3 < to);
+        if before || after {
+            self.invalid = true;
+            return;
+        }
+        self.entries.insert(key, (to, hash));
+    }
+
+    /// The public key and every (key, digit) of `ps` covered exactly once.
+    fn covers(&self, ps: &CkksParamSet) -> bool {
+        if self.invalid {
+            return false;
+        }
+        let mut groups = vec![(PUBLIC_KIND_CKKS_PUBLIC_KEY, 0u32, 0u32, ps.pk_limbs())];
+        for (k, key) in ps.keys.iter().enumerate() {
+            groups.extend((0..key.dnum()).map(|d| (PUBLIC_KIND_CKKS_EVK_CHUNK, k as u32, d as u32, key.limbs())));
+        }
+        let mut used = 0usize;
+        for (kind, k, d, limbs) in groups {
+            let mut at = 0u32;
+            while (at as usize) < limbs {
+                match self.entries.get(&(kind, k, d, at)) {
+                    Some(&(to, _)) if to > at => at = to,
+                    _ => return false,
+                }
+                used += 1;
+            }
+            if at as usize != limbs {
+                return false;
+            }
+        }
+        used == self.entries.len()
+    }
+}
+
+/// One ledger per session, keyed by session handle.
+static LEDGERS: std::sync::Mutex<BTreeMap<u32, Ledger>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn ledgers() -> std::sync::MutexGuard<'static, BTreeMap<u32, Ledger>> {
+    LEDGERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Drop the ledger of `session` (C_CloseSession).
+pub fn clear_ledger_for_session(session: u32) {
+    ledgers().remove(&session);
+}
+
+/// Drop every ledger on `slot` (C_CloseAllSessions, C_Logout, C_InitToken).
+pub fn clear_ledgers_for_slot(slot: u32) {
+    ledgers().retain(|_, l| l.slot != slot);
+}
+
+/// Drop every ledger (C_Finalize).
+pub fn clear_ledgers() {
+    ledgers().clear();
+}
+
+fn clear_ledgers_for_seed(h: u32) {
+    ledgers().retain(|_, l| l.seed_handle != h);
 }
 
 /// True when `h` is an FHE seed of a streamed-CKKS parameter set (no access
@@ -108,8 +279,9 @@ pub fn clear_generator_cache() {
 }
 
 /// Drop the cached generator if it was built from object `h` (its seed is
-/// being destroyed or changed).
+/// being destroyed or changed), and every ledger for that seed.
 pub fn clear_generator_cache_for(h: u32) {
+    clear_ledgers_for_seed(h);
     #[cfg(not(target_arch = "wasm32"))]
     if let Ok(mut c) = GEN_CACHE.lock() {
         if c.as_ref().is_some_and(|e| e.seed_handle == h) {
@@ -146,6 +318,12 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
     // Size and index checks before any allocation (FHE plan §6.6).
     match kind {
         PUBLIC_KIND_CKKS_DESCRIPTOR => {}
+        PUBLIC_KIND_CKKS_MANIFEST => {
+            if (k, d, from, to) != (0, 0, 0, 0) {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            return derive_manifest(session, slot, h_seed, &so, ps);
+        }
         PUBLIC_KIND_CKKS_PUBLIC_KEY => {
             if from >= to || to > ps.pk_limbs() {
                 return Err(CKR_MECHANISM_PARAM_INVALID);
@@ -162,6 +340,10 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
     if kind != PUBLIC_KIND_CKKS_DESCRIPTOR && (to - from).saturating_mul(n * 8) > tf::MAX_PUBLIC_OBJECT {
         return Err(CKR_DEVICE_MEMORY);
     }
+    // A chunk needs this session's ledger for this seed (refused before any work).
+    if kind != PUBLIC_KIND_CKKS_DESCRIPTOR && !ledgers().get(&session).is_some_and(|l| l.seed_handle == h_seed) {
+        return Err(CKR_OPERATION_NOT_INITIALIZED);
+    }
     let g = generator_for(session, h_seed, ps, &so.seed);
     let value = match kind {
         PUBLIC_KIND_CKKS_DESCRIPTOR => asn1::to_der(&CkksKeySetDescriptorV1 {
@@ -177,6 +359,71 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
         _ => g.chunk(k, d, from, to).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?,
     };
     drop(g);
+    {
+        let mut l = ledgers();
+        let hash = crate::replication::sha256(&value);
+        if kind == PUBLIC_KIND_CKKS_DESCRIPTOR {
+            l.insert(session, Ledger { slot, seed_handle: h_seed, descriptor_hash: hash, entries: BTreeMap::new(), invalid: false });
+        } else {
+            // Re-checked under the lock: a close or destroy may have run meanwhile.
+            let led = l.get_mut(&session).filter(|x| x.seed_handle == h_seed).ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            led.record(kind, k, d, from as u32, to as u32, hash);
+        }
+    }
+    let h = public_object(session, &so, kind, value)?;
+    if kind != PUBLIC_KIND_CKKS_EVK_CHUNK {
+        crate::replication::oplog_event("fhe_ckks_derive_public", slot, &[("kind", kind.to_string())]);
+    }
+    Ok(h)
+}
+
+/// Kind 6: sign the session's ledger if it covers the set exactly once.
+fn derive_manifest(session: u32, slot: u32, h_seed: u32, so: &tf::SeedObject, ps: &'static CkksParamSet) -> Result<u32, u32> {
+    let refuse = |why: &str| {
+        crate::replication::oplog_event("fhe_ckks_manifest_refused", slot, &[("reason", format!("\"{why}\""))]);
+        CKR_FUNCTION_FAILED
+    };
+    let (descriptor_hash, entries) = {
+        let l = ledgers();
+        let led = l.get(&session).filter(|x| x.seed_handle == h_seed).ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if led.invalid {
+            return Err(refuse("overlapping or conflicting chunk"));
+        }
+        if !led.covers(ps) {
+            return Err(refuse("incomplete coverage"));
+        }
+        let entries: Vec<CkksChunkHash> = led
+            .entries
+            .iter()
+            .map(|(&(kind, key, digit, from), &(to, h))| CkksChunkHash { kind, key, digit, from, to, sha256: asn1::octets(&h) })
+            .collect();
+        (led.descriptor_hash, entries)
+    };
+    let tbs = CkksManifestTbsV1 {
+        version: 1,
+        descriptor_hash: asn1::octets(&descriptor_hash),
+        param_hash: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
+        lineage: asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).ok_or(CKR_DEVICE_ERROR)?),
+        entries,
+    };
+    let (sig, chain) = tf::receipt_sign(slot, &manifest_signed_bytes(&tbs)?)?;
+    let value = asn1::to_der(&CkksSignedManifestV1 { tbs, signature: asn1::octets(&sig), signer_chain: chain })?;
+    if value.len() > tf::MAX_PUBLIC_OBJECT {
+        return Err(CKR_DEVICE_MEMORY);
+    }
+    let h = public_object(session, so, PUBLIC_KIND_CKKS_MANIFEST, value)?;
+    // Signed once: the next manifest needs a fresh descriptor and full export.
+    let mut l = ledgers();
+    if l.get(&session).is_some_and(|x| x.seed_handle == h_seed && x.descriptor_hash == descriptor_hash) {
+        l.remove(&session);
+    }
+    drop(l);
+    crate::replication::oplog_event("fhe_ckks_derive_public", slot, &[("kind", PUBLIC_KIND_CKKS_MANIFEST.to_string())]);
+    Ok(h)
+}
+
+/// Store `value` as a public, non-token session object of `kind`.
+fn public_object(session: u32, so: &tf::SeedObject, kind: u32, value: Vec<u8>) -> Result<u32, u32> {
     let mut a: Attributes = Default::default();
     crate::state::store_ulong(&mut a, CKA_CLASS, CKO_PUBLIC_KEY);
     crate::state::store_ulong(&mut a, CKA_KEY_TYPE, CKK_PQCTODAY_FHE_PUBLIC);
@@ -191,11 +438,7 @@ pub fn derive_public_v2(session: u32, h_seed: u32, kind: u32, k: u32, d: u32, fr
         }
     }
     a.insert(CKA_VALUE, value);
-    let h = crate::state::commit_objects_atomically(session, vec![a], Vec::new())?[0];
-    if kind != PUBLIC_KIND_CKKS_EVK_CHUNK {
-        crate::replication::oplog_event("fhe_ckks_derive_public", slot, &[("kind", kind.to_string())]);
-    }
-    Ok(h)
+    Ok(crate::state::commit_objects_atomically(session, vec![a], Vec::new())?[0])
 }
 
 /// `C_DeriveKey(CKM_PQCTODAY_FHE_DERIVE_PUBLIC)` with parameter version 2.

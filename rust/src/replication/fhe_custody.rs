@@ -196,13 +196,7 @@ pub(crate) fn seal_release(slot: u32, attrs: &Attributes, policy_id: &[u8; 48], 
         counter,
         sealed_hash: asn1::octets(&super::sha384(&[enc.as_slice(), ct.as_slice()].concat())),
     };
-    let (_, sk) = records::function_secret(slot, Purpose::ReceiptSigning).ok_or(CKR_DEVICE_ERROR)?;
-    let sig = super::mldsa65_sign(&sk, &release_signed_bytes(&tbs)?)?;
-    let chain = super::pki::chain_from_ders(&[
-        records::certificate(slot, Purpose::ReceiptSigning).ok_or(CKR_DEVICE_ERROR)?,
-        records::certificate(slot, Purpose::DeviceIssuer).ok_or(CKR_DEVICE_ERROR)?,
-    ])
-    .map_err(|_| CKR_DEVICE_ERROR)?;
+    let (sig, chain) = receipt_sign(slot, &release_signed_bytes(&tbs)?)?;
     asn1::to_der(&FheSealedReleaseV1 {
         enc: asn1::octets(&enc),
         ciphertext: asn1::octets(&ct),
@@ -210,6 +204,21 @@ pub(crate) fn seal_release(slot: u32, attrs: &Attributes, policy_id: &[u8; 48], 
         signature: asn1::octets(&sig),
         signer_chain: chain,
     })
+}
+
+/// Sign `msg` with the device's internal receipt-signing function key
+/// (ML-DSA-65, empty context) and return the signature with its signer chain
+/// `[receipt-signing certificate, device certificate]`.
+pub(crate) fn receipt_sign(slot: u32, msg: &[u8]) -> Result<(Vec<u8>, Vec<Certificate>), u32> {
+    let (_, mut sk) = records::function_secret(slot, Purpose::ReceiptSigning).ok_or(CKR_DEVICE_ERROR)?;
+    let sig = super::mldsa65_sign(&sk, msg);
+    sk.zeroize();
+    let chain = super::pki::chain_from_ders(&[
+        records::certificate(slot, Purpose::ReceiptSigning).ok_or(CKR_DEVICE_ERROR)?,
+        records::certificate(slot, Purpose::DeviceIssuer).ok_or(CKR_DEVICE_ERROR)?,
+    ])
+    .map_err(|_| CKR_DEVICE_ERROR)?;
+    Ok((sig?, chain))
 }
 
 fn release_signed_bytes(tbs: &FheReleaseTbs) -> Result<Vec<u8>, u32> {

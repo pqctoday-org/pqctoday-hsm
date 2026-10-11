@@ -179,6 +179,11 @@ name = "replication_fhe_p2"
 required-features = ["educational-fhe", "test-support"]
 
 [[test]]
+# Streamed-CKKS ledger and token-signed manifest (E3, S5).
+name = "replication_fhe_ckks"
+required-features = ["educational-ckks", "test-support"]
+
+[[test]]
 # Uses the established downstream-test reset hook because both spikes exercise
 # the process-global token store with distinct test ceremonies.
 name = "hierarchy_attestation_spikes"
