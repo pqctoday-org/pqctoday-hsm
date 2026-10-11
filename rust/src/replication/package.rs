@@ -1109,7 +1109,8 @@ pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32
     let Some(src_der) = records::find_policy(slot, h.source_policy.as_bytes()) else {
         return deny(slot, Reject("source policy not enrolled at destination"));
     };
-    if !dst_pol.is_equal_or_stricter_than(&records::parse_policy(&src_der)?) {
+    let src_pol = records::parse_policy(&src_der)?;
+    if !dst_pol.is_equal_or_stricter_than(&src_pol) {
         return deny(slot, Reject("destination policy weaker than source policy"));
     }
     let own_device = evidence::platform_device_id(slot)?;
@@ -1160,6 +1161,14 @@ pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32
     if let Some(d) = &staged.fhe {
         if super::fhe::find_decrypt_policy(slot, d.decrypt_policy.as_bytes()).is_none() {
             return deny(slot, Reject("FHE decryption policy not enrolled at destination"));
+        }
+        // A CKKS seed sizes its decryption flooding with the lineage's total
+        // number of releases, (maxReplicas + 1) × maxDecrypts (LMSS22
+        // Corollary 2, FHE proposal §6.6). Each copy computes it from its own
+        // replication policy, so every copy keeps the source's replica limit:
+        // a narrower limit here would understate q for the whole lineage.
+        if d.scheme == super::fhe::FHE_SCHEME_CKKS && dst_pol.max_replicas != src_pol.max_replicas {
+            return deny(slot, Reject("CKKS seed replica must keep the source policy's maxReplicas"));
         }
     }
     crash_check(CrashPoint::ImportAfterDecrypt)?;

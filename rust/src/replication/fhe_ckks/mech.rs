@@ -590,10 +590,52 @@ fn output_len(c: &fhe::CkksReleasePolicy) -> usize {
     4 + 16 * c.max_values as usize
 }
 
-/// Flood width in bits, log2 σ = λ_s/2 + log2(√q_max) + log2 B (plan §4.6),
-/// with B the registry's measured post-bootstrap noise bound.
-pub fn flood_sigma_log2(c: &fhe::CkksReleasePolicy, max_decrypts: u32, ps: &CkksParamSet) -> f64 {
-    c.stat_security_bits as f64 / 2.0 + (max_decrypts as f64).log2() / 2.0 + params::noise_bound_log2(ps)
+/// q of the flooding analysis: the number of decryptions an adversary can
+/// obtain under one secret. Every copy of a lineage (the original and at most
+/// `maxReplicas` replicas, which keep the source's replication limit and its
+/// decryption policy unchanged, §6.3–§6.4 of the FHE proposal) starts its own
+/// counter at 0, so the lineage releases at most (maxReplicas + 1) × maxDecrypts.
+pub fn lineage_releases(max_decrypts: u32, max_replicas: u32) -> u64 {
+    (max_replicas as u64 + 1) * max_decrypts as u64
+}
+
+/// Flood width in bits: the standard deviation of the noise added to each
+/// coefficient, following Li, Micciancio, Schultz and Sorrell (CRYPTO 2022,
+/// ePrint 2022/816) exactly. Definition 18 adds N_Z^n(0, σ²·t²·I_n) to the
+/// decrypted ring element, and Corollary 2 sets σ = √(24·q·n)·2^(s/2) for
+/// (c, s)-bit q-IND-CPA^D security. So
+///
+///   log2(σ·t) = s/2 + ½·log2(24·q·n) + log2 t,
+///
+/// with s = λ_s (`statSecurityBits`), q = `releases` (the lineage total,
+/// `lineage_releases`), n the ring degree of the set, and t = B, the
+/// registry's per-coefficient ∞-norm bound of the release-level error
+/// (`params::noise_bound_log2`). The √n converts that ∞-norm bound into the
+/// ℓ2 bound the Gaussian mechanism needs (‖e‖₂ ≤ √n·‖e‖∞), as in the proof of
+/// Corollary 2.
+pub fn flood_sigma_log2(c: &fhe::CkksReleasePolicy, releases: u64, ps: &CkksParamSet) -> f64 {
+    c.stat_security_bits as f64 / 2.0 + (24.0 * releases as f64 * ps.n() as f64).log2() / 2.0 + params::noise_bound_log2(ps)
+}
+
+/// Widest flood (log2 σ) the token draws for a one-prime release (registry
+/// IDs 2 and 0x8002, release modulus q0 ≈ 2^55–2^60), unchanged from the
+/// first build.
+pub const FLOOD_MAX_LOG2_ONE_PRIME: f64 = 62.0;
+/// Widest flood (log2 σ) for a two-prime release (registry ID 3, q0·q1 ≈
+/// 2^105, scale 2^90). Every draw is below 8.7·σ < 2^83.2, 20 bits under
+/// q0·q1/2 ≈ 2^104, so a flooded coefficient keeps the size of a level-1
+/// plaintext and stays far inside i128. A wider width would serve nothing: at
+/// σ = 2^80 the decoded slot noise (about σ·√n·4.5 ≈ 2^90.2 at n = 2^16) is
+/// already as large as the scale, so the release carries no bits.
+pub const FLOOD_MAX_LOG2_TWO_PRIME: f64 = 80.0;
+
+/// The flood width cap of a set, by the number of primes it releases over.
+pub fn flood_max_log2(ps: &CkksParamSet) -> f64 {
+    if params::release_level(ps) == 0 {
+        FLOOD_MAX_LOG2_ONE_PRIME
+    } else {
+        FLOOD_MAX_LOG2_TWO_PRIME
+    }
 }
 
 /// Width (log2 σ) up to which one rounded double-precision draw has full
@@ -613,7 +655,9 @@ pub const FLOOD_FINE_LOG2: f64 = 44.0;
 /// Gaussians, round(σ_c·z1) + round(σ_f·z2) with σ_f = 2^44 and
 /// σ_c = √(σ² − σ_f²). The sum has variance σ², and the fine component has
 /// full integer resolution and is far wider than the coarse one's grid, so
-/// the low bits are covered.
+/// the low bits are covered. At the two-prime cap (σ = 2^80) the coarse grid
+/// is 2^(80 + 3.2 − 52) ≈ 2^31, still 13 bits below σ_f, and every draw is
+/// below 2^83.2, so the sum cannot overflow i128.
 fn flood(m: &mut [i128], sigma_log2: f64) -> Result<(), u32> {
     let mut k = crate::replication::random32()?;
     let mut st = super::spec::Stream::new(&k);
@@ -751,8 +795,23 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     let mut m = m.map_err(|_| tf::refuse(slot, "type gate"))?;
     let flooded = if owner { c.flood_owner } else { c.flood_recipients };
     if flooded {
-        let sigma_log2 = flood_sigma_log2(c, p.max_decrypts, ps);
-        if !sigma_log2.is_finite() || sigma_log2 > 62.0 {
+        // q is the lineage total (LMSS22 Corollary 2): this seed's replication
+        // limit, which every replica keeps (package import refuses a CKKS
+        // replica under a different limit), and the shared decryption policy.
+        // The engine-written binding names the policy (the public attribute
+        // alone is not trusted).
+        let max_replicas = so
+            .attrs
+            .get(&CKA_PRIV_REPL_BINDING)
+            .and_then(|id| records::find_policy(slot, id))
+            .and_then(|der| records::parse_policy(&der).ok())
+            .map(|rp| rp.max_replicas);
+        let Some(max_replicas) = max_replicas else {
+            m.zeroize();
+            return Err(tf::refuse(slot, "no flooding width: replication policy not enrolled"));
+        };
+        let sigma_log2 = flood_sigma_log2(c, lineage_releases(p.max_decrypts, max_replicas), ps);
+        if !sigma_log2.is_finite() || sigma_log2 > flood_max_log2(ps) {
             m.zeroize();
             return Err(tf::refuse(slot, "no flooding width for this parameter set"));
         }
@@ -823,25 +882,63 @@ mod tests {
         assert!(decode_slots_wide(&w, 90).iter().all(|&(re, im)| (re - 3.0).abs() < 1e-12 && im.abs() < 1e-12));
     }
 
-    /// The split draw above 2^45 (E13): standard deviation within 2 % of σ at
-    /// σ = 2^57.6, and the low bits are not on a grid (a single double at
-    /// this width leaves the low 9 bits of every draw at zero).
+    /// The split draw above 2^45 (E13): standard deviation within 2 % of σ,
+    /// and the low bits are not on a grid (a single double at these widths
+    /// leaves the low 9 to 31 bits of every draw at zero). Checked at the
+    /// old registry ID 3 width (2^57.6), the LMSS22 Corollary 2 width
+    /// (2^69.1, `flood_formula_lmss22_corollary2`) and just under the
+    /// two-prime cap (2^79.9), where draws reach 2^83 and must neither
+    /// overflow nor lose their low bits.
     #[test]
     fn wide_flood_width_and_low_bits() {
         let n = 1 << 14;
-        let sigma_log2 = 15.0 + (10_000f64).log2() / 2.0 + 36.0;
-        let mut m = vec![0i128; n];
-        flood(&mut m, sigma_log2).unwrap();
-        let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
-        let ratio = var.sqrt() / sigma_log2.exp2();
-        assert!((0.98..1.02).contains(&ratio), "std/σ = {ratio}");
-        let odd = m.iter().filter(|&&v| v & 1 == 1).count() as f64 / n as f64;
-        assert!((0.45..0.55).contains(&odd), "low bit {odd}");
-        assert!(m.iter().any(|&v| v & 0x1ff != 0));
+        for sigma_log2 in [15.0 + (10_000f64).log2() / 2.0 + 36.0, 69.0973015, FLOOD_MAX_LOG2_TWO_PRIME - 0.1] {
+            let mut m = vec![0i128; n];
+            flood(&mut m, sigma_log2).unwrap();
+            let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
+            let ratio = var.sqrt() / sigma_log2.exp2();
+            assert!((0.98..1.02).contains(&ratio), "σ = 2^{sigma_log2}: std/σ = {ratio}");
+            for bit in [0, 8, 20] {
+                let set = m.iter().filter(|&&v| (v >> bit) & 1 == 1).count() as f64 / n as f64;
+                assert!((0.45..0.55).contains(&set), "σ = 2^{sigma_log2}: bit {bit} set in {set}");
+            }
+            assert!(m.iter().all(|&v| v.unsigned_abs() < 1u128 << 84), "σ = 2^{sigma_log2}: a draw beyond 2^84");
+        }
         // Below 2^45: one draw, as first built (still full resolution).
         let mut m = vec![0i128; n];
         flood(&mut m, 31.6).unwrap();
         let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
         assert!((0.98..1.02).contains(&(var.sqrt() / 31.6f64.exp2())));
+    }
+    /// LMSS22 Corollary 2 pinned by hand. Policy as in the gate F custodian:
+    /// λ_s = 30, maxDecrypts = 10,000, maxReplicas = 4, so
+    /// q = (4 + 1) × 10,000 = 50,000.
+    ///   24·q = 1,200,000; log2 1.2e6 = log2 1.2 + 6·log2 10
+    ///        = 0.2630344 + 19.9315686 = 20.1946030
+    ///   n = 2^16 (IDs 2, 3): ½·log2(24·q·n) = ½·(20.1946030 + 16) = 18.0973015
+    ///   n = 2^10 (0x8002):   ½·log2(24·q·n) = ½·(20.1946030 + 10) = 15.0973015
+    ///   ID 3 (log2 B = 36): 15 + 18.0973015 + 36 = 69.0973015
+    ///   ID 2 (log2 B = 10): 15 + 18.0973015 + 10 = 43.0973015
+    ///   0x8002 (log2 B = 12): 15 + 15.0973015 + 12 = 42.0973015
+    /// The width before this change, λ_s/2 + ½·log2(maxDecrypts) + log2 B,
+    /// was 57.6438562 for ID 3: ½·log2(24·n) = 10.2924813 narrower (the √24
+    /// and √n of Corollary 2), plus ½·log2 5 = 1.1609640 for the replicas.
+    #[test]
+    fn flood_formula_lmss22_corollary2() {
+        let c = fhe::CkksReleasePolicy { max_values: 1, precision_bits: 30, value_bound_log2: 10, scale_log2: 90, flood_recipients: true, flood_owner: true, stat_security_bits: 30 };
+        let q = lineage_releases(10_000, 4);
+        assert_eq!(q, 50_000);
+        let at = |id: u32| flood_sigma_log2(&c, q, params::find(id).unwrap());
+        for (id, want, cap) in [(3u32, 69.0973015, 80.0), (2, 43.0973015, 62.0), (0x8002, 42.0973015, 62.0)] {
+            let got = at(id);
+            assert!((got - want).abs() < 1e-6, "ID {id}: log2 σ = {got}, hand value {want}");
+            assert_eq!(flood_max_log2(params::find(id).unwrap()), cap);
+            assert!(got < cap, "ID {id} within its cap");
+        }
+        let old = 15.0 + (10_000f64).log2() / 2.0 + 36.0;
+        assert!((old - 57.6438562).abs() < 1e-6);
+        assert!((at(3) - old - (10.2924813 + 1.1609640)).abs() < 1e-6);
+        // One copy, one decryption: q = 1 gives s/2 + ½·log2(24·n) + log2 B.
+        assert!((flood_sigma_log2(&c, lineage_releases(1, 0), params::find(3).unwrap()) - (15.0 + 10.2924813 + 36.0)).abs() < 1e-6);
     }
 }

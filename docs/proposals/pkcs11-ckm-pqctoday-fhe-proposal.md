@@ -232,11 +232,16 @@ A destination installs a replicated seed only under an enrolled policy that is e
 - `recipientOnly` preserved;
 - `maxDecrypts` not larger.
 
+A streamed-CKKS seed adds one rule: the destination's replication policy must have the same `maxReplicas` as the
+source's policy (refusal reason "CKKS seed replica must keep the source policy's maxReplicas"). Every copy then
+computes the same lineage-wide q for its decryption flooding (§6.6). The FHE replica already keeps the source's
+decryption policy unchanged (§7), so `maxDecrypts` is the same on every copy.
+
 ### 6.4 Counter
 
 The counter is a per-object count of decrypt calls, released or refused, kept in an engine-private attribute. It is reserved durably before any decryption work, in the same atomic snapshot commit as the audit record.
 
-A replicated object starts its own counter at 0, so clones do not share a global budget (HSM plan §3). The bound across a lineage is therefore **total releases ≤ (maxReplicas + 1) × maxDecrypts**, where `maxReplicas` is the replication policy's replica limit (A4). The counter resists reuse within the current state, but cannot resist the host rolling the whole token snapshot back; that is disclosed.
+A replicated object starts its own counter at 0, so clones do not share a global budget (HSM plan §3). The bound across a lineage is therefore **total releases ≤ (maxReplicas + 1) × maxDecrypts**, where `maxReplicas` is the replication policy's replica limit (A4). The budget rule of the Key Replication Interface (each export costs one, a backup carries at most one onward restore, and source plus descendants never exceed the source's budget) keeps the copies of a lineage to at most `maxReplicas` + 1. Streamed-CKKS flooding uses this bound as q (§6.6). The counter resists reuse within the current state, but cannot resist the host rolling the whole token snapshot back; that is disclosed.
 
 ### 6.5 Profile hash changes and re-enrolment (streamed CKKS)
 
@@ -287,15 +292,42 @@ appended to the frozen table with its own known-answer file.
 
 A CKKS release that the policy floods (`floodRecipients`, by default for every release that is not the owner's) adds
 one noise value to each coefficient of the decrypted plaintext before it is decoded
-(`rust/src/replication/fhe_ckks/mech.rs`, `flood`). The width is `flood_sigma_log2` = λ_s/2 + log₂(maxDecrypts)/2 +
-log₂ B, with B the registry's measured post-bootstrap noise bound of the release-level coefficients
-(`params::noise_bound_log2`). This section records how the noise is drawn and what that means.
+(`rust/src/replication/fhe_ckks/mech.rs`, `flood`). This section records how wide the noise is, how it is drawn and
+what that means.
 
+- **Width (corrected 2026-10-11).** The width follows Li, Micciancio, Schultz and Sorrell (CRYPTO 2022, ePrint
+  2022/816). Definition 18: "S-CKKS_σ.Dec_sk(ct) = CKKS.Dec_sk(ct.c) + N_{Z^n}(0, σ²·ct.t²·I_n)". Corollary 2: "Let
+  σ = √(24qn)·2^{s/2}. If CKKS is (c + log₂ 24)-bit IND-CPA-secure, then S-CKKS_σ is (c, s)-bit q-IND-CPA^D-secure."
+  The proof bounds the ℓ2 norm of the error by √n times its ∞-norm bound ct.t. The token therefore adds noise of
+  standard deviation σ·t, with
+
+  `flood_sigma_log2` = λ_s/2 + ½·log₂(24·q·n) + log₂ B,
+
+  where s = λ_s (`statSecurityBits`), n is the set's ring degree, t = B is the registry's bound on the release-level
+  error (`params::noise_bound_log2`), and q = (maxReplicas + 1) × maxDecrypts (§6.4, `lineage_releases`), with
+  `maxReplicas` read from the seed's bound replication policy. B is measured as the largest absolute coefficient
+  error (an ∞-norm in the coefficient domain, the domain the noise is added in), so ‖e‖₂ ≤ √n·B holds as the proof
+  needs. A flooded release whose replication policy is not enrolled is refused.
+  The previous width, λ_s/2 + ½·log₂(maxDecrypts) + log₂ B, omitted √24 and √n (½·log₂(24·n) = 10.29 bits at
+  n = 2^16) and counted one copy only. For the test policy (λ_s = 30, maxDecrypts = 10,000, maxReplicas = 4,
+  q = 50,000):
+
+  | Set | n | log₂ B | Previous log₂ σ | Corollary 2 log₂ σ | Cap |
+  |---|---|---|---|---|---|
+  | 3 (two primes, scale 2^90) | 2^16 | 36 | 57.64 | 69.10 | 80 |
+  | 2 (one prime) | 2^16 | 10 | 31.64 | 43.10 | 62 |
+  | 0x8002 (test ring) | 2^10 | 12 | 33.64 | 42.10 | 62 |
+
+  Corollary 2 also requires CKKS itself to be (c + log₂ 24)-bit IND-CPA-secure; that is a property of the parameter
+  set, not of the flooding. The table in the paper's §4.5 fixes n = 2^15, so it does not apply to n = 2^16 directly.
+- **Cap.** The token refuses a width above 2^62 for one-prime releases (unchanged) and above 2^80 for two-prime
+  releases (registry ID 3, q0·q1 ≈ 2^105). At 2^80 every draw is below 2^83.2, about 20 bits under q0·q1/2, and the
+  decoded slot noise (about σ·√n·4.5) already equals the scale 2^90, so a wider width would only release noise.
 - **Distribution.** The noise is a rounded continuous Gaussian: Box–Muller on the token DRBG (an AES-256-CTR stream
   keyed from the operating system's random source), with the platform's `ln` and `cos`, rounded to an integer. Above
-  σ = 2^45 (registry ID 3, σ = 2^57.64 at λ_s = 30 and maxDecrypts = 10,000) each value is the sum of two independent
-  rounded draws (σ_f = 2^44 and σ_c = √(σ² − σ_f²)), so the low bits of the sum are not left on the coarse grid of a
-  single double.
+  σ = 2^45 (registry ID 3, σ = 2^69.10 under the test policy) each value is the sum of two independent rounded draws
+  (σ_f = 2^44 and σ_c = √(σ² − σ_f²)), so the low bits of the sum are not left on the coarse grid of a single double
+  (2^20 at σ = 2^69, 2^31 at the cap; both well below σ_f).
 - **Per-value timing is not constant.** The time of one draw depends on the value drawn, through the `cos` code path
   of the C library. Measured on the MX95 Pro (Cortex-A55, glibc 2.43): when the Box–Muller angle is below 0.855 rad, a
   draw is about 21 ns faster than average, out of about 230 ns per draw for one rounded draw and about 390 ns for the
@@ -448,3 +480,4 @@ Every error path zeroizes transient secrets and leaves no partial object.
 | 2 | 2026-10-03 | Review amendments from session 7f: A1 derive template re-set on install; A2 signed sealed release; A3 recipient check before decryption; A4 lineage-wide release bound; A5 size query leaks only shape. §11 resolved: header format kept, compressed lists refused, attested manifest key, placeholder hash retired |
 | 4 | 2026-10-11 | §6.5: the streamed-CKKS profile hash lists every registered CKKS set; re-enrolment after registry ID 3 changed it, and its test |
 | 5 | 2026-10-11 | §6.6: the CKKS flood sampler as built (rounded continuous Gaussian, per-value timing measured, owner decision not to build a constant-time discrete sampler). §6.7: signed rotation retirement record in the token's retirement ledger, replicas refused as the new rotation seed (D3), and the open question on old-secret holders |
+| 6 | 2026-10-11 | §6.6: flood width corrected to LMSS22 Corollary 2 (√(24·q·n), q = lineage total), two-prime cap 2^80; §6.3: a CKKS replica keeps the source's `maxReplicas`; §6.4: lineage bound used as q |

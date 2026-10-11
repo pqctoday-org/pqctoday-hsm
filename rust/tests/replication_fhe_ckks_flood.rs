@@ -160,11 +160,14 @@ fn owner_release(s: u32, seed: u32, input: &[u8]) -> Result<Vec<u8>, u32> {
     }
 }
 
-/// Gate F floor on registry ID 3: a level-1 ciphertext decrypted over q0·q1
-/// and flooded with σ = 2^(15 + ½·log2 10,000 + log2 B) (= 2^57.6 at
-/// log2 B = 36) keeps at least 20 bits on all 32,768 slots (the study
-/// measured 22.7 bits after a real bootstrap; the bar is 10). Unflooded, the
-/// same ciphertext releases at the 2^-30 rounding.
+/// Gate F on registry ID 3: a level-1 ciphertext decrypted over q0·q1 and
+/// flooded with the LMSS22 Corollary 2 width, σ = 2^(15 + ½·log2(24·q·n) +
+/// log2 B) with q = (4 + 1) × 10,000 = 50,000 (the policy's replica limit and
+/// decrypt budget), n = 2^16, log2 B = 36: σ = 2^69.10. The release keeps
+/// about 90 − 69.1 − 9.7 ≈ 11.2 bits on all 32,768 slots (the decoded noise
+/// grows by √n and the maximum over the slots adds about 2.2 bits). The
+/// earlier width, 2^57.64, left about 22.7 bits. Unflooded, the same
+/// ciphertext releases at the 2^-30 rounding.
 #[test]
 fn flooded_two_prime_release_precision_registry_3() {
     let _g = lock();
@@ -180,14 +183,15 @@ fn flooded_two_prime_release_precision_registry_3() {
     drop(g);
     let input = ct_bytes(mech::CT_MAGIC_V3, 3, 1, 90, &c0, &c1);
 
-    let sigma = mech::flood_sigma_log2(&fhe::CkksReleasePolicy { max_values: 1, precision_bits: 30, value_bound_log2: 10, scale_log2: 90, flood_recipients: true, flood_owner: true, stat_security_bits: 30 }, 10_000, ps);
-    assert!(sigma > mech::FLOOD_SINGLE_DRAW_MAX_LOG2 && sigma < 62.0, "σ = 2^{sigma}");
+    let sigma = mech::flood_sigma_log2(&fhe::CkksReleasePolicy { max_values: 1, precision_bits: 30, value_bound_log2: 10, scale_log2: 90, flood_recipients: true, flood_owner: true, stat_security_bits: 30 }, mech::lineage_releases(10_000, 4), ps);
+    // Above the one-prime cap (2^62), within the two-prime cap (2^80).
+    assert!(sigma > mech::FLOOD_MAX_LOG2_ONE_PRIME && sigma < mech::flood_max_log2(ps), "σ = 2^{sigma}");
 
     let (_w, s, seed) = setup(3, 30, true);
     let p = release_precision(&owner_release(s, seed, &input).unwrap(), &want);
     eprintln!("registry 3 flooded release (σ = 2^{sigma:.2}): {p:.2} bits");
-    assert!(p >= 20.0, "flooded precision {p}");
-    assert!(p <= 26.0, "flooding must cost precision: {p}");
+    assert!(p >= 10.5, "flooded precision {p}");
+    assert!(p <= 12.5, "flooding at the Corollary 2 width: {p}");
     drop(_w);
 
     let (_w, s, seed) = setup(3, 30, false);
@@ -229,4 +233,68 @@ fn serialization_versions_per_set() {
     let out = owner_release(s, seed, &ct_bytes(mech::CT_MAGIC, 0x8002, 0, 40, &c0, &c1)).expect("version 2 on the test ring");
     assert!(release_precision(&out, &want) >= 19.0);
     assert_eq!(owner_release(s, seed, &ct_bytes(mech::CT_MAGIC_V3, 0x8002, 0, 40, &c0, &c1)), refused, "v3 on a level-0 set");
+}
+
+/// q of LMSS22 Corollary 2 is the lineage total, (maxReplicas + 1) ×
+/// maxDecrypts, and each copy computes it from its own replication policy.
+/// A CKKS replica is therefore installed only under the source's replica
+/// limit: a narrower limit (1 under a source of 4, which the generic
+/// "equal or stricter" rule allows) is refused and installs nothing; the
+/// same limit is accepted, and the replica floods an owner release.
+#[test]
+fn ckks_replica_keeps_the_source_replica_limit() {
+    use der::Encode;
+    use softhsmrustv3::native;
+    use softhsmrustv3::replication::asn1::Operation;
+    let _g = lock();
+    let w = world(2);
+    let ps = params::find(0x8002).unwrap();
+    let mk = |max| {
+        records::build_policy_with_constraint(
+            DOMAIN, [true, true, true], w.device_ids(), w.now - 60, w.now + 30 * 86_400, max,
+            vec![CKM_PQCTODAY_FHE_DERIVE_PUBLIC, CKM_PQCTODAY_FHE_DECRYPT], false, fhe::ckks_profile_constraint_hash(),
+        )
+        .unwrap()
+    };
+    let dpol = fhe::FheDecryptPolicy {
+        version: 2,
+        allowed_output_types: vec![mech::release_type(ps)],
+        never_release: vec![],
+        predicates: vec![],
+        recipients: vec![],
+        recipient_only: false,
+        max_decrypts: 100,
+        ckks: Some(fhe::CkksReleasePolicy { max_values: (ps.n() / 2) as u32, precision_bits: 20, value_bound_log2: 10, scale_log2: ps.log_default_scale as u8, flood_recipients: true, flood_owner: true, stat_security_bits: 30 }),
+    }
+    .to_der()
+    .unwrap();
+    let (rp4, rp1) = (w.enroll_policy_everywhere(&mk(4)), w.enroll_policy_everywhere(&mk(1)));
+    let mut dp = [0u8; 48];
+    for i in 0..2 {
+        dp = w.as_so(i, |so| fhe::enroll_fhe_decrypt_policy(so, &dpol).unwrap());
+    }
+    let (u0, u1) = (w.tokens[0].user, w.tokens[1].user);
+    let src = fhe::generate_fhe_seed_with_value_for_test(u0, ps.id, &rp4, &dp, &KAT_SEED, b"ckks-replica-src").expect("KEY_GEN");
+    let lineage = native::get_attribute(u0, src, CKA_PQCTODAY_FHE_LINEAGE_ID).unwrap();
+
+    let narrow = repl::create_replication_package(u0, src, &request(&w, 0, 1, Operation::LiveClone, &rp1)).expect("package");
+    assert_eq!(repl::import_replication_package(u1, &narrow, &[]).map(|_| ()), Err(CKR_ACTION_PROHIBITED));
+    assert_eq!(repl::last_refusal(), Some("CKKS seed replica must keep the source policy's maxReplicas"));
+    assert_eq!(replicas_with_lineage(w.tokens[1].slot, &lineage), 0, "nothing installed");
+
+    let same = repl::create_replication_package(u0, src, &request(&w, 0, 1, Operation::LiveClone, &rp4)).expect("package");
+    let (replica, _) = repl::import_replication_package(u1, &same, &[]).expect("replica under the source's limit");
+    let m = plaintext(ps.n(), 30);
+    let g = Generator::new(ps, &KAT_SEED);
+    let (c0, c1) = g.encrypt_for_test(0, &m, &[3u8; 32]).unwrap();
+    drop(g);
+    let input = ct_bytes(mech::CT_MAGIC, ps.id, 0, ps.log_default_scale, &c0, &c1);
+    // Flooded at q = (4 + 1) × 100 on both copies: σ = 2^(15 + ½·log2(24·500·2^10) + 12) = 2^38.78.
+    let sigma = mech::flood_sigma_log2(&fhe::CkksReleasePolicy { max_values: 1, precision_bits: 20, value_bound_log2: 10, scale_log2: 40, flood_recipients: true, flood_owner: true, stat_security_bits: 30 }, mech::lineage_releases(100, 4), ps);
+    assert!((sigma - 38.7753730).abs() < 1e-6, "σ = 2^{sigma}");
+    let want = mech::decode_slots_wide(&m, ps.log_default_scale as u8);
+    for (s, h) in [(u0, src), (u1, replica)] {
+        let p = release_precision(&owner_release(s, h, &input).expect("flooded owner release"), &want);
+        assert!(p < 0.0, "a 2^38.8 flood at scale 2^40 leaves no bits: {p}");
+    }
 }
