@@ -283,6 +283,90 @@ earlier build enrolled under it refuses `KEY_GEN` for IDs 2, 0x8002 and 3, and t
 (gate V, `rust/src/replication/fhe_ckks/freeze.rs`) does not stop new sets from being registered: a new set is
 appended to the frozen table with its own known-answer file.
 
+### 6.6 Streamed CKKS: the flood sampler (owner decision 2026-10-11)
+
+A CKKS release that the policy floods (`floodRecipients`, by default for every release that is not the owner's) adds
+one noise value to each coefficient of the decrypted plaintext before it is decoded
+(`rust/src/replication/fhe_ckks/mech.rs`, `flood`). The width is `flood_sigma_log2` = λ_s/2 + log₂(maxDecrypts)/2 +
+log₂ B, with B the registry's measured post-bootstrap noise bound of the release-level coefficients
+(`params::noise_bound_log2`). This section records how the noise is drawn and what that means.
+
+- **Distribution.** The noise is a rounded continuous Gaussian: Box–Muller on the token DRBG (an AES-256-CTR stream
+  keyed from the operating system's random source), with the platform's `ln` and `cos`, rounded to an integer. Above
+  σ = 2^45 (registry ID 3, σ = 2^57.64 at λ_s = 30 and maxDecrypts = 10,000) each value is the sum of two independent
+  rounded draws (σ_f = 2^44 and σ_c = √(σ² − σ_f²)), so the low bits of the sum are not left on the coarse grid of a
+  single double.
+- **Per-value timing is not constant.** The time of one draw depends on the value drawn, through the `cos` code path
+  of the C library. Measured on the MX95 Pro (Cortex-A55, glibc 2.43): when the Box–Muller angle is below 0.855 rad, a
+  draw is about 21 ns faster than average, out of about 230 ns per draw for one rounded draw and about 390 ns for the
+  split draw of registry ID 3. The angle range reveals the sign of the value and a bound on its size relative to the
+  radius. Seeing this signal needs fine-grained timing of single draws, for example by code running on the token's
+  CPU.
+- **Whole-release timing showed no measurable dependence.** Over 2,000–4,000 releases of 2^14 coefficients on the
+  MX95 Pro and on an M5 Max (Linux container), the time of a release did not correlate with the noise drawn
+  (|r| ≤ 0.04, not significant): per-draw differences of a few nanoseconds average out under 18–48 µs of
+  call-to-call variation. This is what a recipient that only sees release times can observe.
+- **The published analysis assumes a different distribution.** The flooding analysis for CKKS (Li, Micciancio,
+  Schultz and Sorrell, CRYPTO 2022, ePrint 2022/816, Definition 18 and Corollary 2) adds a *discrete* Gaussian and
+  bounds the leakage in KL divergence. It does not analyse a rounded continuous Gaussian, and no source found bounds
+  the distance between this sampler's output and a discrete Gaussian at these widths. The security argument of the
+  published analysis therefore does not apply to this sampler as it stands.
+- **Not implemented.** A constant-time discrete Gaussian sampler, for example the convolution sampler of Micciancio
+  and Walter (CRYPTO 2017, ePrint 2017/259) over a constant-time table sampler, would address both points. The owner
+  decided on 2026-10-11 not to build it for now and to document the sampler as it is. OpenFHE v1.6.0 floods with an
+  exact discrete Gaussian that its own header says may be vulnerable to timing attacks; Lattigo v6.2.0 rounds CKKS
+  results and does not flood them.
+
+Source of the measurements and the method: pqctoday-fhe `docs/ckks/ckks-flood-sampler-timing-note-2026-10-11.md`
+and `reference-runs/ckks-sampler-timing/`.
+
+### 6.7 Streamed CKKS: key rotation records, replicas and an open question
+
+Key rotation (`CKM_PQCTODAY_FHE_DERIVE_PUBLIC` parameter version 3, SO only) is specified in the module comment of
+`rust/src/replication/fhe_ckks/rotation.rs`. Three points are recorded here.
+
+**Retirement is recorded in the token's retirement ledger.** `retire_old_seed` acts only on a seed whose rotation
+manifest was signed. Before it destroys the old seed, it commits a retirement record: a public, immutable token object
+(`CKO_DATA`, not modifiable, copyable or destroyable) whose `CKA_VALUE` is the DER of `CkksSignedRotationRetirementV1`.
+The record names both lineages, the parameter hash, the token time of retirement and the SHA-256 of the rotation
+descriptor. That hash is the `rotationDescriptorHash` of the signed rotation manifest, so the record links to the
+manifest a receiver already holds. It is signed with the receipt-signing key under its own domain
+(`"PQCToday CKKS Rotation Retirement 1.0"`) and checked with `verify_ckks_rotation_retirement`. The rotation manifest
+itself is unchanged: it is signed before re-encryption starts, so it cannot also record the retirement. Retirement
+records are not generator output, and the frozen generator bytes (§5.5, `freeze.rs`) do not change. The audit log
+entry `fhe_ckks_rotation_old_seed_destroyed` now also carries the record's SHA-256. Tests:
+`rotation_retirement_record_signed_in_ledger` (`rust/tests/replication_fhe_ckks_rotation.rs`).
+
+**A replica is never the new seed (decision D3, 2026-10-11: keep refusing).** The new seed of a rotation must have
+been generated by this token (`CKA_LOCAL` true and `CKA_KEY_GEN_MECHANISM` = `CKM_PQCTODAY_FHE_KEY_GEN`). A seed
+received through the Key Replication Interface is refused as the target, even when another token generated it,
+because replication of a rotation is not designed: the replica's secret also exists on its source and on any other
+replica, and the rotation rules of this token (one target, never back, retirement of the old seed) do not reach those
+copies. A replica may still be the *old* seed. Test: `rotation_refuses_replica_of_token_made_seed_as_new`.
+
+**Open question: can a holder of the old secret read a switched ciphertext without the original?** Not established.
+
+- What is known. A switched ciphertext is c′ = (c₀ + ⌊⟨D(c₁), b⟩/P⌉, ⌊⟨D(c₁), a⟩/P⌉), where D is the RNS gadget
+  decomposition and (b, a) is the rotation key, b = −a·s_new + w·P·s_old + e (Lattigo v6.2.0
+  `core/rlwe/evaluator_evaluationkey.go` `applyEvaluationKey` and `evaluator_gadget_product.go` `GadgetProduct`).
+  Key switching there adds no fresh randomness: c′₁ is a deterministic function of c₁ and the key.
+- Whoever holds s_old *and* the rotation key can turn the key into RLWE samples of s_new (b − w·P·s_old = −a·s_new +
+  e). If they could also recover the digits D(c₁) from c′₁ = ⌊⟨D(c₁), a⟩/P⌉, they could rebuild c₁ and then c₀,
+  and decrypt with s_old. The RNS digits are not small (each is a residue modulo its group of primes), so this is not
+  an ordinary short-solution problem, and no source found states how hard it is.
+- Lattigo's own documents describe an evaluation key as enabling "the public and non interactive re-encryption of
+  any ciphertext encrypted under skIn to a new ciphertext encrypted under skOut" and claim IND-CPA only
+  (`SECURITY.md`); they say nothing about a party that holds skIn. Lattigo's *multiparty* key-switching protocols, in
+  which parties hold shares of the input key, add smudging noise to the output for this kind of reason
+  (`multiparty/README.md`, `multiparty/keyswitch_sk.go`); single-party key switching does not.
+- What would settle it. Either (1) a published reduction showing that, given s_old and the rotation key, a switched
+  ciphertext is indistinguishable from a fresh encryption under s_new; or (2) a change that makes the question moot:
+  after switching, the server adds a fresh public-key encryption of zero under s_new (and, to be safe, smudging
+  noise). Under RLWE the added encryption of zero is pseudorandom, so the result no longer reveals c′₁, and its
+  secrecy rests on RLWE for the new key set, as for any fresh ciphertext. Option (2) is our reasoning, not a sourced result, and is not built.
+- Until then, the rule stands that the server deletes the rotation key after use and the SO retires the old seed once
+  re-encryption is confirmed. Rotation does not protect ciphertexts that someone holding s_old has already copied.
+
 ## 7. Recovery descriptor (replication type extension)
 
 The descriptor is the DER of P1's `FheRecoveryDescriptor`: `{ version 1, scheme, paramSet, paramHash, library, generatorVersion, lineageId, decryptPolicy }`. The engine recomputes it from the seed's immutable attributes, and it travels as the Key Replication Interface's `typeExtension`, bound by `typeExtensionHash` under the package signature.
@@ -363,3 +447,4 @@ Every error path zeroizes transient secrets and leaves no partial object.
 | 3 | 2026-10-03 | Implementation amendment I-1 from session 7f: the recipient release uses `info = aad = DER(FheReleaseInfo)`, and the 3-byte type header moves inside the authenticated plaintext. 7f's P2 build reproduces the §5.5 KAT exactly (derived seed `0xf6eb…12dc`, client key `9f5d847e…b77b`, 24,087 B) |
 | 2 | 2026-10-03 | Review amendments from session 7f: A1 derive template re-set on install; A2 signed sealed release; A3 recipient check before decryption; A4 lineage-wide release bound; A5 size query leaks only shape. §11 resolved: header format kept, compressed lists refused, attested manifest key, placeholder hash retired |
 | 4 | 2026-10-11 | §6.5: the streamed-CKKS profile hash lists every registered CKKS set; re-enrolment after registry ID 3 changed it, and its test |
+| 5 | 2026-10-11 | §6.6: the CKKS flood sampler as built (rounded continuous Gaussian, per-value timing measured, owner decision not to build a constant-time discrete sampler). §6.7: signed rotation retirement record in the token's retirement ledger, replicas refused as the new rotation seed (D3), and the open question on old-secret holders |

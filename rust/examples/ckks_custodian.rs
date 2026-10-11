@@ -396,15 +396,20 @@ fn cmd_rotate(dir: &Path, per_chunk: usize, test_seed: bool) {
 /// E10: the SO retires the old seed once the FHE server has confirmed
 /// re-encryption. The SO names it by the old lineage in the public rotation
 /// descriptor; the token refuses unless the rotation manifest was signed.
+/// The token's signed retirement record is written to out/rotation/retirement.der.
 fn cmd_retire_old(dir: &Path) {
     let desc = std::fs::read(dir.join("out").join("rotation").join("descriptor.der")).unwrap_or_else(|_| die("no rotation descriptor (run rotate first)", CKR_OPERATION_NOT_INITIALIZED));
     let d: softhsmrustv3::replication::fhe_ckks::rotation::CkksRotationDescriptorV1 = der::Decode::from_der(&desc).unwrap_or_else(|_| die("rotation descriptor", CKR_DATA_INVALID));
     let lo: [u8; 32] = d.old_lineage.as_bytes().try_into().unwrap_or_else(|_| die("old lineage", CKR_DATA_INVALID));
     open(dir);
     let so = ok("SO login", native::open_session_so(0, SO));
-    ok("retire old seed", softhsmrustv3::replication::fhe_ckks::rotation::retire_old_seed(so, &lo));
+    let rec = ok("retire old seed", softhsmrustv3::replication::fhe_ckks::rotation::retire_old_seed(so, &lo));
+    // The signed retirement record from the token's retirement ledger.
+    let der = native::get_attribute(so, rec, CKA_VALUE).unwrap_or_else(|| die("retirement record", CKR_DEVICE_ERROR));
     ok("SO logout", native::logout(so));
-    println!("old seed retired (lineage {})", lo.iter().map(|x| format!("{x:02x}")).collect::<String>());
+    let path = dir.join("out").join("rotation").join("retirement.der");
+    std::fs::write(&path, &der).unwrap_or_else(|_| die("write retirement record", CKR_DEVICE_ERROR));
+    println!("old seed retired (lineage {}); signed retirement record {}", lo.iter().map(|x| format!("{x:02x}")).collect::<String>(), path.display());
 }
 
 fn main() {
