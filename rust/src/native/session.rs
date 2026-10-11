@@ -140,12 +140,26 @@ pub fn close_session(session: u32) -> Result<(), CkRv> {
 ///
 /// `label` is padded with spaces to PKCS#11's required 32 bytes by the
 /// engine; callers pass any printable string.
+/// A PKCS#11 token label field: exactly 32 bytes, blank-padded, longer
+/// labels truncated (at a UTF-8 character boundary).
+pub(crate) fn token_label_32(label: &str) -> [u8; 32] {
+    let mut out = [b' '; 32];
+    let mut end = label.len().min(32);
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    out[..end].copy_from_slice(&label.as_bytes()[..end]);
+    out
+}
+
 pub fn init_token(slot: u32, so_pin: &str, label: &str) -> Result<(), CkRv> {
     let mut pin_bytes: Vec<u8> = so_pin.as_bytes().to_vec();
-    // PKCS#11 §11.5: label is 32 bytes, space-padded. Engine does the
-    // padding internally but expects a buffer pointer here; we pass the
-    // raw label and let the engine pad.
-    let mut label_bytes: Vec<u8> = label.as_bytes().to_vec();
+    // PKCS#11 v3.2 §5.6 C_InitToken: pLabel points to a 32-byte, blank-padded
+    // label (not NUL-terminated), and the engine reads exactly 32 bytes.
+    // Passing the bare label (17 bytes for "pqctoday-remoting") made it read
+    // past the end of the buffer: the label came back over the wire with
+    // trailing NULs and heap bytes (found on the FRDM boards 2026-10-11).
+    let mut label_bytes = token_label_32(label);
     let rv = ffi::C_InitToken(
         slot,
         pin_bytes.as_mut_ptr(),
@@ -353,5 +367,25 @@ mod tests {
         let _guard = test_lock::acquire();
         let _ = finalize(); // works whether engine had state or not
         let _ = finalize(); // and a second time
+    }
+}
+
+#[cfg(test)]
+mod token_label_tests {
+    use super::token_label_32;
+
+    #[test]
+    fn label_is_32_bytes_blank_padded() {
+        let l = token_label_32("pqctoday-remoting");
+        assert_eq!(&l[..17], b"pqctoday-remoting");
+        assert!(l[17..].iter().all(|&b| b == b' '));
+    }
+
+    #[test]
+    fn long_label_is_truncated_on_a_char_boundary() {
+        assert_eq!(token_label_32(&"x".repeat(40)), [b'x'; 32]);
+        let l = token_label_32(&format!("{}é", "a".repeat(31))); // é is 2 bytes
+        assert_eq!(&l[..31], "a".repeat(31).as_bytes());
+        assert_eq!(l[31], b' ');
     }
 }

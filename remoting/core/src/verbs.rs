@@ -25,11 +25,19 @@
 //! `C_OpenSession` per worker thread... no per-worker login because login
 //! state is per-token not per-session").
 //!
-//! Single-tenant by design (plan §1.3's inherited-gap note applies): the
-//! bootstrap PIN is a well-known benchmark constant, not a security
-//! boundary, matching the existing bench-harness/KMIP in-process control
-//! arm's own convention (`kmip.rs`'s `bootstrap_default_token(0, "so-pin",
-//! "1234", "bench-control")`).
+//! Single-tenant by design (plan §1.3's inherited-gap note applies). The
+//! user PIN defaults to the well-known benchmark value "1234" so the sandbox,
+//! bench-harness and developer runs keep working unchanged. A deployment sets
+//! a real one (2026-10-11, owner decision for the CACP appliance boards):
+//!
+//! - `PKCS11_REMOTE_USER_PIN_FILE` — path of a file holding the PIN (first
+//!   line, surrounding whitespace ignored); wins over the variable below.
+//!   Set but unreadable, empty or out of range is a startup error, never a
+//!   silent fall back to the benchmark PIN.
+//! - `PKCS11_REMOTE_USER_PIN` — the PIN itself (for containers/tests).
+//! - `PKCS11_REMOTE_TOKEN_LABEL` — token label, default `pqctoday-remoting`.
+//!
+//! The SO PIN is never used by a client, so it is random per process.
 
 use crate::algorithm::Algorithm;
 use crate::error::CkError;
@@ -38,11 +46,71 @@ use softhsmrustv3::constants::{
 };
 use softhsmrustv3::{ffi, native};
 
-/// Benchmark-only constants — not a security boundary. See module doc.
 const SLOT: u32 = 0;
-const SO_PIN: &str = "so-pin";
-const USER_PIN: &str = "1234";
-const TOKEN_LABEL: &str = "pqctoday-remoting";
+/// Default user PIN: the well-known benchmark value. See module doc.
+const DEFAULT_USER_PIN: &str = "1234";
+const DEFAULT_TOKEN_LABEL: &str = "pqctoday-remoting";
+/// The engine's advertised `ulMinPinLen` / `ulMaxPinLen`.
+const PIN_LEN: std::ops::RangeInclusive<usize> = 4..=256;
+
+struct Credentials {
+    user_pin: String,
+    so_pin: String,
+    label: String,
+}
+
+static CREDENTIALS: std::sync::OnceLock<Credentials> = std::sync::OnceLock::new();
+
+fn credentials() -> Result<&'static Credentials, CkError> {
+    if let Some(c) = CREDENTIALS.get() {
+        return Ok(c);
+    }
+    let c = load_credentials(|k| std::env::var(k).ok())?;
+    Ok(CREDENTIALS.get_or_init(|| c))
+}
+
+fn load_credentials(var: impl Fn(&str) -> Option<String>) -> Result<Credentials, CkError> {
+    let user_pin = if let Some(path) = var("PKCS11_REMOTE_USER_PIN_FILE").filter(|p| !p.is_empty()) {
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            eprintln!("pqctoday-remoting: cannot read PKCS11_REMOTE_USER_PIN_FILE {path}: {e}");
+            CkError(softhsmrustv3::constants::CKR_GENERAL_ERROR)
+        })?;
+        text.lines().next().unwrap_or("").trim().to_string()
+    } else if let Some(pin) = var("PKCS11_REMOTE_USER_PIN") {
+        pin.trim().to_string()
+    } else {
+        DEFAULT_USER_PIN.to_string()
+    };
+    if !PIN_LEN.contains(&user_pin.len()) {
+        eprintln!(
+            "pqctoday-remoting: user PIN must be {}-{} bytes, got {}",
+            PIN_LEN.start(),
+            PIN_LEN.end(),
+            user_pin.len()
+        );
+        return Err(CkError(softhsmrustv3::constants::CKR_PIN_LEN_RANGE));
+    }
+    let label = var("PKCS11_REMOTE_TOKEN_LABEL")
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| DEFAULT_TOKEN_LABEL.to_string());
+    Ok(Credentials { user_pin, so_pin: random_hex(16)?, label })
+}
+
+fn random_hex(bytes: usize) -> Result<String, CkError> {
+    use std::io::Read;
+    let mut buf = vec![0u8; bytes];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .map_err(|_| CkError(softhsmrustv3::constants::CKR_GENERAL_ERROR))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Compare without an early exit on the first differing byte.
+fn pin_matches(given: &str, expected: &str) -> bool {
+    let (a, b) = (given.as_bytes(), expected.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 
 /// One-time engine + token bootstrap. Call exactly once per process before
 /// serving any request. Idempotent is NOT guaranteed by the engine for
@@ -51,7 +119,8 @@ const TOKEN_LABEL: &str = "pqctoday-remoting";
 /// the bootstrap session handle itself is intentionally discarded (client
 /// sessions are opened separately by [`open_session`]).
 pub fn bootstrap() -> Result<(), CkError> {
-    native::bootstrap_default_token(SLOT, SO_PIN, USER_PIN, TOKEN_LABEL)
+    let c = credentials()?;
+    native::bootstrap_default_token(SLOT, &c.so_pin, &c.user_pin, &c.label)
         .map(|_| ())
         .map_err(CkError::from)
 }
@@ -65,14 +134,14 @@ pub fn health() -> HealthInfo {
     HealthInfo { ok: true, remoting_core_version: env!("CARGO_PKG_VERSION") }
 }
 
-/// Open a new session as the benchmark user. `pin` must equal the
-/// well-known [`USER_PIN`] — checked here at the application layer (see
+/// Open a new session as the configured user. `pin` must equal the user
+/// PIN from [`credentials`] — checked here at the application layer (see
 /// module doc for why this can't be a real per-session `C_Login`); a
 /// mismatch returns the real spec `CKR_PIN_INCORRECT` numeric code, so the
 /// wire error-mapping contract (WP5a) is exercised identically to a
 /// genuine engine-sourced error even though the check itself is ours.
 pub fn open_session(pin: &str) -> Result<u32, CkError> {
-    if pin != USER_PIN {
+    if !pin_matches(pin, &credentials()?.user_pin) {
         return Err(CkError(CKR_PIN_INCORRECT));
     }
     let mut handle: u32 = 0;
@@ -212,4 +281,54 @@ pub fn get_self_signed_certificate(
     validity_days: i64,
 ) -> Result<Vec<u8>, CkError> {
     crate::cert::self_signed_certificate(session, public_handle, private_handle, algorithm, subject_cn, validity_days)
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn load(vars: &[(&str, &str)]) -> Result<Credentials, CkError> {
+        let m: HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        load_credentials(|k| m.get(k).cloned())
+    }
+
+    #[test]
+    fn defaults_keep_the_benchmark_pin_and_label() {
+        let c = load(&[]).unwrap();
+        assert_eq!((c.user_pin.as_str(), c.label.as_str()), ("1234", "pqctoday-remoting"));
+        assert_eq!(c.so_pin.len(), 32);
+        assert_ne!(c.so_pin, load(&[]).unwrap().so_pin, "SO PIN is random per load");
+    }
+
+    #[test]
+    fn pin_file_wins_over_the_variable() {
+        let dir = std::env::temp_dir().join(format!("remoting-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("pin");
+        std::fs::write(&f, "  board-pin-77 \nignored second line\n").unwrap();
+        let c = load(&[("PKCS11_REMOTE_USER_PIN_FILE", f.to_str().unwrap()), ("PKCS11_REMOTE_USER_PIN", "env-pin")]).unwrap();
+        assert_eq!(c.user_pin, "board-pin-77");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn variable_and_label_are_used() {
+        let c = load(&[("PKCS11_REMOTE_USER_PIN", "env-pin"), ("PKCS11_REMOTE_TOKEN_LABEL", "mx95-remote")]).unwrap();
+        assert_eq!((c.user_pin.as_str(), c.label.as_str()), ("env-pin", "mx95-remote"));
+    }
+
+    #[test]
+    fn a_configured_but_unusable_pin_is_an_error_not_the_default() {
+        assert!(load(&[("PKCS11_REMOTE_USER_PIN_FILE", "/nonexistent/remoting-pin")]).is_err());
+        assert_eq!(load(&[("PKCS11_REMOTE_USER_PIN", "123")]).err().map(|e| e.0), Some(softhsmrustv3::constants::CKR_PIN_LEN_RANGE));
+        assert!(load(&[("PKCS11_REMOTE_USER_PIN", "")]).is_err());
+    }
+
+    #[test]
+    fn pin_comparison() {
+        assert!(pin_matches("1234", "1234"));
+        assert!(!pin_matches("1235", "1234"));
+        assert!(!pin_matches("12345", "1234"));
+    }
 }
