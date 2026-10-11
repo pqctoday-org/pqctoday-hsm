@@ -24,6 +24,7 @@ fn decrypt_policy_der() -> Vec<u8> {
         recipients: vec![],
         recipient_only: false,
         max_decrypts: 1000,
+        ckks: None,
     }
     .to_der()
     .unwrap()

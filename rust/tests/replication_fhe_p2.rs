@@ -27,6 +27,7 @@ fn dp(recipients: Vec<[u8; 48]>, recipient_only: bool, max: u32) -> Vec<u8> {
         recipients: r.iter().map(|x| der::asn1::OctetString::new(x.to_vec()).unwrap()).collect(),
         recipient_only,
         max_decrypts: max,
+        ckks: None,
     }
     .to_der()
     .unwrap()

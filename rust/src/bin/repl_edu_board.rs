@@ -275,6 +275,7 @@ mod fhe_cmd {
             recipients: vec![],
             recipient_only: false,
             max_decrypts: 10_000,
+            ckks: None,
         }
         .to_der()
         .map_err(|e| format!("decrypt policy DER: {e}"))?;

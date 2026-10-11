@@ -487,7 +487,7 @@ pub fn stage_enroll_policy(slot: u32, policy_der: &[u8]) -> Result<Staged, u32> 
     let view = records::parse_policy(policy_der)?;
     // Version 1 profiles: no per-type constraint (AES / ML-KEM-768 /
     // ML-DSA-65), or the FHE seed profile (FHE P1).
-    if view.type_constraint_hash != super::sha384(b"") && view.type_constraint_hash != super::fhe::profile_constraint_hash() {
+    if view.type_constraint_hash != super::sha384(b"") && !super::fhe::is_fhe_profile_hash(&view.type_constraint_hash) {
         return Err(CKR_DATA_INVALID);
     }
     let id = view.id;
