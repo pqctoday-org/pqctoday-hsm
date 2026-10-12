@@ -4,6 +4,11 @@
 //! against the pqctoday-fhe oracle (Lattigo-based reference spec), the
 //! two-prime decryption with flooding sized by the registry noise bound
 //! (gate F floor), serialization versions 2 and 3, and the policy scale range.
+//!
+//! Registry ID 4 (OpenFHE v1.6.0 `match128`; pqctoday-fhe
+//! docs/ckks/ckks-openfhe-registry-entry-spec-2026-10-12.md): known answers
+//! against the oracle, and the owner-release-only rule of a set without a
+//! measured flood bound.
 #![cfg(all(feature = "educational-ckks", feature = "test-support"))]
 
 mod replication_common;
@@ -297,4 +302,115 @@ fn ckks_replica_keeps_the_source_replica_limit() {
         let p = release_precision(&owner_release(s, h, &input).expect("flooded owner release"), &want);
         assert!(p < 0.0, "a 2^38.8 flood at scale 2^40 leaves no bits: {p}");
     }
+}
+
+// ── Registry ID 4: OpenFHE v1.6.0 match128 ─────────────────────────────────
+
+fn kat4() -> serde_json::Value {
+    serde_json::from_str(include_str!("../kat/fhe-ckks-kat-4.json")).unwrap()
+}
+
+/// Registry entry, a-seed, public key, the first words of key 0 and the two
+/// sparse-encapsulation keys (dense-to-sparse over Q[0] ‖ P', sparse-to-dense
+/// over Q ‖ P) against the oracle KAT (seed 00..1f). The full key list is
+/// `kat_registry_4_all_keys` (ignored by default: 6.5 GB of chunks).
+#[test]
+fn kat_registry_4_matches_reference_spec() {
+    let kat = kat4();
+    let ps = params::find(4).unwrap();
+    assert_eq!(ps.name, kat["name"].as_str().unwrap());
+    assert_eq!(hexs(&params::param_hash(ps)), kat["paramHash"].as_str().unwrap());
+    assert_eq!(ps.keys.len() as u64, kat["keyCount"].as_u64().unwrap());
+    let g = Generator::new(ps, &KAT_SEED);
+    assert_eq!(hexs(&g.a_seed), kat["aSeed"].as_str().unwrap());
+    assert_eq!(kat["secretWeight"].as_u64().unwrap(), 192);
+    assert_eq!(hexs(&sha2::Sha256::digest(g.pk_chunk(0, ps.pk_limbs()).unwrap())), kat["pkSha256"].as_str().unwrap());
+    let first = g.chunk(0, 0, 0, 1).unwrap();
+    let words: Vec<u64> = (0..4).map(|i| u64::from_le_bytes(first[8 * i..8 * i + 8].try_into().unwrap())).collect();
+    let want: Vec<u64> = kat["firstChunkFirstWords"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    assert_eq!(words, want);
+    let hashes = kat["keySha256"].as_array().unwrap();
+    for (k, key) in ps.keys.iter().enumerate() {
+        if key.kind == params::KIND_DENSE_TO_SPARSE_AUX || key.kind == params::KIND_SPARSE_TO_DENSE {
+            assert_eq!(key_hash(&g, k), hashes[k].as_str().unwrap(), "key {k}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "6.5 GB of chunks; run with --ignored in a release build"]
+fn kat_registry_4_all_keys() {
+    let kat = kat4();
+    let ps = params::find(4).unwrap();
+    let g = Generator::new(ps, &KAT_SEED);
+    let hashes = kat["keySha256"].as_array().unwrap();
+    for k in 0..ps.keys.len() {
+        assert_eq!(key_hash(&g, k), hashes[k].as_str().unwrap(), "key {k}");
+    }
+}
+
+/// A version 2 decryption policy for `ps_ids` (owner release of every slot at 2^-20, |v| < 2^10).
+fn policy_der(ps_ids: &[u32], recipients: Vec<der::asn1::OctetString>, flood_owner: bool) -> Vec<u8> {
+    use der::Encode;
+    let mut types: Vec<_> = ps_ids.iter().map(|&i| mech::release_type(params::find(i).unwrap())).collect();
+    types.sort();
+    fhe::FheDecryptPolicy {
+        version: 2,
+        allowed_output_types: types,
+        never_release: vec![],
+        predicates: vec![],
+        recipients,
+        recipient_only: false,
+        max_decrypts: 100,
+        ckks: Some(fhe::CkksReleasePolicy { max_values: 16, precision_bits: 20, value_bound_log2: 10, scale_log2: 52, flood_recipients: true, flood_owner, stat_security_bits: 30 }),
+    }
+    .to_der()
+    .unwrap()
+}
+
+/// Registry ID 4 has no measured flood bound, so it is owner-release-only: a
+/// policy that names a third-party recipient or floods the owner release for
+/// it is refused when it is parsed and enrolled, the decryption gate refuses
+/// both again, and the owner's unflooded release works at the policy's
+/// rounding. The sets with a bound (here ID 3) take the same policies as before.
+#[test]
+fn registry_4_is_owner_release_only() {
+    let _g = lock();
+    let recipient = der::asn1::OctetString::new(vec![7u8; 48]).unwrap();
+    let ok = |der: &[u8]| fhe::parse_decrypt_policy(der).is_ok();
+    // The owner-only, unflooded policy is accepted; a recipient or an owner flood is not.
+    assert!(ok(&policy_der(&[4], vec![], false)));
+    assert!(!ok(&policy_der(&[4], vec![recipient.clone()], false)), "a third-party recipient");
+    assert!(!ok(&policy_der(&[4], vec![], true)), "a flooded owner release");
+    assert!(!ok(&policy_der(&[4, 3], vec![recipient.clone()], false)), "a mixed list that includes ID 4");
+    // The same policies on a set with a bound are unchanged. (Scale 52 is within the one-prime range only.)
+    assert!(ok(&policy_der(&[2], vec![recipient.clone()], true)));
+    assert!(ok(&policy_der(&[0x8002], vec![recipient], true)));
+
+    // The token enrols the owner-only policy and refuses the others.
+    let w = world(1);
+    let enroll = |der: &[u8]| w.as_so(0, |so| fhe::enroll_fhe_decrypt_policy(so, der));
+    assert!(enroll(&policy_der(&[4], vec![], false)).is_ok());
+    assert_eq!(enroll(&policy_der(&[4], vec![], true)), Err(CKR_DATA_INVALID));
+    drop(w);
+
+    // Owner release at ID 4: one prime, serialization version 2, scale 2^52, rounding 2^-20.
+    let ps = params::find(4).unwrap();
+    let n = ps.n();
+    let m = plaintext(n, 52);
+    let want = mech::decode_slots_wide(&m, 52);
+    let g = Generator::new(ps, &KAT_SEED);
+    let (c0, c1) = g.encrypt_for_test(0, &m, &[11u8; 32]).unwrap();
+    // The decryption itself returns m + e (|e| < 20).
+    let back = g.decrypt_level(0, &c0, &c1).unwrap();
+    assert!(back.iter().zip(&m).all(|(a, b)| (a - b).abs() < 20));
+    drop(g);
+    let (_w, s, seed) = setup(4, 20, false);
+    let out = owner_release(s, seed, &ct_bytes(mech::CT_MAGIC, 4, 0, 52, &c0, &c1)).expect("owner release at ID 4");
+    let p = release_precision(&out, &want);
+    eprintln!("registry 4 owner release: {p:.2} bits");
+    assert!(p >= 19.0, "owner release precision {p}");
+    let refused = Err(CKR_ACTION_PROHIBITED);
+    assert_eq!(owner_release(s, seed, &ct_bytes(mech::CT_MAGIC_V3, 4, 0, 52, &c0, &c1)), refused, "v3 magic on a one-prime set");
+    assert_eq!(owner_release(s, seed, &ct_bytes(mech::CT_MAGIC, 4, 0, 51, &c0, &c1)), refused, "scale differs from the policy");
 }

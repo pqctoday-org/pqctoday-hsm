@@ -238,23 +238,30 @@ fn ckks_ledger_is_per_session_and_cleared_on_close() {
     let _ = s;
 }
 
-/// Replication re-enrolment (WP2, G5). Registering ID 3 changed the CKKS
-/// profile constraint, which lists every registered parameter set, and so
-/// its hash. A policy enrolled under the earlier hash is refused (enrolment
-/// and KEY_GEN); the same policy re-enrolled under the current hash is
-/// accepted (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §6.5).
+/// Replication re-enrolment (WP2, G5). Registering a set changes the CKKS
+/// profile constraint, which lists every registered parameter set, and so its
+/// hash (ID 3 changed it once; ID 4, the OpenFHE `match128` set, changed it
+/// again). A policy enrolled under an earlier hash is refused (enrolment and
+/// KEY_GEN); the same policy re-enrolled under the current hash is accepted
+/// (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §6.5).
 #[test]
-fn ckks_policy_under_pre_id3_profile_hash_refused_reenrolled_accepted() {
+fn ckks_policy_under_earlier_profile_hashes_refused_reenrolled_accepted() {
     let _g = lock();
     let w = world(1);
     // The registry before ID 3 (`CKKS_PARAM_SETS` at 80b82d51: PARAM_SET_2,
-    // PARAM_SET_32770), through the same constraint encoding.
+    // PARAM_SET_32770) and before ID 4 (those two and PARAM_SET_3), through
+    // the same constraint encoding.
     let sha384 = |b: &[u8]| -> [u8; 48] { sha2::Sha384::digest(b).into() };
-    let old_hash = sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002]));
+    let pre_id3_hash = sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002]));
+    let pre_id4_hash = sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002, 3]));
     let now_hash = fhe::ckks_profile_constraint_hash();
-    assert_ne!(old_hash, now_hash, "adding ID 3 changes the profile hash");
-    assert_eq!(now_hash, sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002, 3])));
-    assert!(!fhe::is_fhe_profile_hash(&old_hash));
+    assert_ne!(pre_id3_hash, now_hash, "adding ID 3 changed the profile hash");
+    assert_ne!(pre_id4_hash, now_hash, "adding ID 4 changed the profile hash");
+    assert_ne!(pre_id3_hash, pre_id4_hash);
+    assert_eq!(now_hash, sha384(&fhe::ckks_profile_constraint_der_for(&[2, 0x8002, 3, 4])));
+    assert!(!fhe::is_fhe_profile_hash(&pre_id3_hash));
+    assert!(!fhe::is_fhe_profile_hash(&pre_id4_hash));
+    let old_hash = pre_id4_hash;
 
     let rp = |h: [u8; 48]| {
         records::build_policy_with_constraint(
@@ -287,7 +294,7 @@ fn ckks_policy_under_pre_id3_profile_hash_refused_reenrolled_accepted() {
     // is refused for every registered set.
     let s = w.tokens[0].user;
     let old_id = w.as_so(0, |so| repl::enroll_policy_as_earlier_build_for_test(so, &old_rp).unwrap());
-    for ps_id in [2u32, 0x8002, 3] {
+    for ps_id in [2u32, 0x8002, 3, 4] {
         let dpid = w.as_so(0, |so| fhe::enroll_fhe_decrypt_policy(so, &dpol(ps_id)).unwrap());
         assert_eq!(fhe::generate_fhe_seed_with_value_for_test(s, ps_id, &old_id, &dpid, &KAT_SEED, b"old-policy"), Err(CKR_TEMPLATE_INCONSISTENT), "set {ps_id}");
     }

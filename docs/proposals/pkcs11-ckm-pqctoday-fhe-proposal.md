@@ -251,9 +251,12 @@ A replication policy governs FHE seeds only when its `typeConstraintHash` equals
 parameter set in registry order (`fhe::ckks_profile_constraint_der`). Registering a parameter set therefore changes the
 CKKS profile hash. The TFHE profile hash is separate and does not change.
 
-**The change so far.** Registry ID 3 (2026-10-11) changed `paramSets` from `[2, 0x8002]` to `[2, 0x8002, 3]`. The
+**The changes so far.** Registry ID 3 (2026-10-11) changed `paramSets` from `[2, 0x8002]` to `[2, 0x8002, 3]`. The
 earlier hash existed only in engine builds made while the CKKS work was in progress (HSM PR #351, before commit
 `c61a5139`); no release carried it. A token initialised with such a build may still hold policies enrolled under it.
+Registry ID 4 (2026-10-12, §6.8) changed it again, from `[2, 0x8002, 3]` to `[2, 0x8002, 3, 4]`. Unlike the first
+change, the `[2, 0x8002, 3]` hash may exist on tokens that ran the build with ID 3 (HSM `main` at `d6b23452` and
+later): those tokens' CKKS replication policies need the same re-enrolment, with the same steps below.
 
 **What the engine does with a policy under an earlier hash.**
 - `enroll_policy` refuses it (`CKR_DATA_INVALID`): the hash is no longer an FHE profile hash.
@@ -278,10 +281,11 @@ earlier hash existed only in engine builds made while the CKKS work was in progr
 
 **How it is checked.** `enroll_policy` returns the new ID, and a seed generated under it carries that ID in
 `CKA_PQCTODAY_REPLICATION_POLICY_ID`. The test
-`ckks_policy_under_pre_id3_profile_hash_refused_reenrolled_accepted` (`rust/tests/replication_fhe_ckks.rs`) computes
-the earlier hash from the pre-ID-3 registry through the same encoding
-(`fhe::ckks_profile_constraint_der_for(&[2, 0x8002])`). It checks that enrolment refuses that hash, that a policy an
-earlier build enrolled under it refuses `KEY_GEN` for IDs 2, 0x8002 and 3, and that the re-enrolled policy is accepted.
+`ckks_policy_under_earlier_profile_hashes_refused_reenrolled_accepted` (`rust/tests/replication_fhe_ckks.rs`) computes
+the earlier hashes from the pre-ID-3 and pre-ID-4 registries through the same encoding
+(`fhe::ckks_profile_constraint_der_for(&[2, 0x8002])` and `(&[2, 0x8002, 3])`). It checks that enrolment refuses both,
+that a policy an earlier build enrolled under the pre-ID-4 hash refuses `KEY_GEN` for IDs 2, 0x8002, 3 and 4, and that
+the re-enrolled policy is accepted.
 
 **Future registrations.** Adding a CKKS parameter set changes the hash again. Each such change says so in
 `CHANGELOG.md` and repeats the steps above for every token that holds CKKS replication policies. The generator freeze
@@ -398,6 +402,36 @@ copies. A replica may still be the *old* seed. Test: `rotation_refuses_replica_o
   secrecy rests on RLWE for the new key set, as for any fresh ciphertext. Option (2) is our reasoning, not a sourced result, and is not built.
 - Until then, the rule stands that the server deletes the rotation key after use and the SO retires the old seed once
   re-encryption is confirmed. Rotation does not protect ciphertexts that someone holding s_old has already copied.
+
+### 6.8 Streamed CKKS: registry ID 4, OpenFHE v1.6.0 `match128` (owner release only)
+
+Registry ID 4, `CKKS_N16QP1720H192H32_OPENFHE_V1_6_0_MATCH128`, makes the token's own key export usable in OpenFHE
+v1.6.0. Its moduli, digit layout and key list are those OpenFHE builds for the settings in the pqctoday-fhe note
+`docs/ckks/ckks-openfhe-registry-entry-spec-2026-10-12.md` (N = 2^16; a 60-bit first prime and twenty-five primes of
+52 bits; six 60-bit key-switching primes; five digits; 128-bit security checked by OpenFHE at log QP = 1720; main
+secret Hamming weight 192, sparse secret 32). The key list is OpenFHE's closed bootstrapping list: the
+relinearization key, 75 rotation keys, the conjugation key and OpenFHE's two sparse-secret keys, 79 keys in all
+(13.09 GB with the `a` halves, 6.54 GB of `b` halves streamed). It holds no rotation key for a user's own use.
+
+- **One new key kind, additive.** OpenFHE's dense-to-sparse key is a one-digit key over the bottom prime and two
+  auxiliary 33-bit primes P′, not over the set's P. Key kind 6 (`KIND_DENSE_TO_SPARSE_AUX`) has the same equation as
+  kind 3 over `Q[0] ‖ aux_p`. The sparse-to-dense key is an ordinary hybrid key (kind 4). The new fields `aux_p` and
+  `aux_p_roots` are empty for IDs 2, 3 and 0x8002 and are hashed into `param_hash` only when present, so those sets'
+  hashes, key lists and known answers are byte-identical. Generator version 1 stays; the freeze table gains a row.
+- **Owner release only.** No flood bound has been measured for ID 4: its refresh runs in OpenFHE, and a bound measured
+  through Lattigo's refresh says nothing about it. A set without a measured bound (`params::owner_release_only`)
+  therefore releases to its owner only, unflooded, rounded to the policy's precision. The policy parser refuses a
+  policy that lists a third-party recipient, or floods the owner release, for such a set
+  (`CKR_DATA_INVALID`); the decrypt path refuses both again (`mech::release_gate`, the same `CKR_ACTION_PROHIBITED` as
+  every other refusal) for a policy that predates the set's registration. IDs 2, 3 and 0x8002 have a bound and keep
+  their behaviour. Adding a bound to `noise_bound_log2` is what turns a set into one that may flood.
+- **Release.** One prime (serialization version 2, `PQCKKS02`, release type `CkksPlaintextQ0`), the default scale
+  2^52. OpenFHE's ciphertexts at a level have a scale within about 7.4·10^-9 (relative) of 2^52, so a release read at
+  2^52 carries that relative error, far below the 2^-20 rounding.
+- **Re-enrolment.** The CKKS profile hash changes (§6.5).
+- **Tests.** `kat_registry_4_matches_reference_spec` and the ignored `kat_registry_4_all_keys`
+  (`rust/tests/replication_fhe_ckks_flood.rs`), `registry_4_is_owner_release_only` in the same file, and the unit
+  tests in `params.rs` and `mech.rs`.
 
 ## 7. Recovery descriptor (replication type extension)
 

@@ -752,6 +752,25 @@ pub fn decode_slots_wide(m: &[i128], scale_log2: u8) -> Vec<(f64, f64)> {
     v
 }
 
+/// Who may receive a release, and whether it may be flooded, for a set. A set
+/// without a measured flood bound (`params::owner_release_only`, registry ID 4)
+/// releases to its owner only and unflooded: flooding needs the bound B
+/// (`flood_sigma_log2`) and a third-party release needs flooding. The rule is
+/// explicit, and also enforced when the policy is parsed
+/// (`fhe::parse_decrypt_policy`); it is checked here again for a policy that
+/// predates the set's registration. Sets with a bound are never refused here.
+pub fn release_gate(ps: &CkksParamSet, owner: bool, flooded: bool) -> Result<(), &'static str> {
+    if params::owner_release_only(ps) {
+        if !owner {
+            return Err("owner-release-only parameter set: no third-party release");
+        }
+        if flooded {
+            return Err("owner-release-only parameter set: no measured flood bound");
+        }
+    }
+    Ok(())
+}
+
 /// `C_Decrypt(CKM_PQCTODAY_FHE_DECRYPT)` for a CKKS seed under a version 2
 /// policy (plan §4.5): requester, allowlist, size query, counter, recipient,
 /// exact type and scale, never-release, decryption (+ flooding when the
@@ -786,6 +805,8 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     if p.never_release.contains(&ty) {
         return Err(tf::refuse(slot, "never-release type"));
     }
+    let flooded = if owner { c.flood_owner } else { c.flood_recipients };
+    release_gate(ps, owner, flooded).map_err(|why| tf::refuse(slot, why))?;
     let len = ps.n() * (level + 1);
     let words = |off: usize| -> Vec<u64> { (0..len).map(|i| u64::from_le_bytes(input[off + 8 * i..off + 8 * i + 8].try_into().unwrap())).collect() };
     let (c0, c1) = (words(CT_HEADER), words(CT_HEADER + 8 * len));
@@ -793,7 +814,6 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     let m = g.decrypt_level(level, &c0, &c1);
     drop(g);
     let mut m = m.map_err(|_| tf::refuse(slot, "type gate"))?;
-    let flooded = if owner { c.flood_owner } else { c.flood_recipients };
     if flooded {
         // q is the lineage total (LMSS22 Corollary 2): this seed's replication
         // limit, which every replica keeps (package import refuses a CKKS
@@ -910,6 +930,23 @@ mod tests {
         let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
         assert!((0.98..1.02).contains(&(var.sqrt() / 31.6f64.exp2())));
     }
+    /// The explicit owner-release-only rule (registry ID 4: no measured flood
+    /// bound). Sets with a bound are never refused by the gate.
+    #[test]
+    fn release_gate_refuses_third_party_and_flooded_for_unbounded_sets() {
+        let ps4 = params::find(4).unwrap();
+        assert_eq!(release_gate(ps4, true, false), Ok(()), "owner, unflooded");
+        assert!(release_gate(ps4, true, true).is_err(), "owner, flooded");
+        assert!(release_gate(ps4, false, true).is_err(), "third party, flooded");
+        assert!(release_gate(ps4, false, false).is_err(), "third party, unflooded");
+        for id in [2u32, 3, 0x8002] {
+            let ps = params::find(id).unwrap();
+            for (owner, flooded) in [(true, false), (true, true), (false, true), (false, false)] {
+                assert_eq!(release_gate(ps, owner, flooded), Ok(()), "set {id}, owner {owner}, flooded {flooded}");
+            }
+        }
+    }
+
     /// LMSS22 Corollary 2 pinned by hand. Policy as in the gate F custodian:
     /// λ_s = 30, maxDecrypts = 10,000, maxReplicas = 4, so
     /// q = (4 + 1) × 10,000 = 50,000.

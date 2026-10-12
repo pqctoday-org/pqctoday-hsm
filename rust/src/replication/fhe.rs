@@ -72,8 +72,8 @@ pub fn param_set_der(param_set: u32) -> Option<Vec<u8>> {
     if let Some(ps) = super::fhe_ckks::params::find(param_set) {
         return asn1::to_der(&FheParamSetV1 {
             id: ps.id,
-            library: "lattigo".into(),
-            version: "6.2.0".into(),
+            library: ps.library.into(),
+            version: ps.library_version.into(),
             commit: asn1::octets(&super::fhe_ckks::params::fingerprint(ps)),
             param_name: ps.name.into(),
             config: super::fhe_ckks::params::CONFIG_V1.into(),
@@ -105,12 +105,13 @@ pub fn library_id() -> &'static str {
 }
 
 /// `CKA_PQCTODAY_FHE_LIBRARY` for a registered parameter set.
-pub fn library_for(param_set: u32) -> &'static str {
-    if scheme_for(param_set) == Some(FHE_SCHEME_CKKS) {
-        "lattigo 6.2.0 streamed-evk/v1"
-    } else {
-        library_id()
+pub fn library_for(param_set: u32) -> String {
+    #[cfg(feature = "educational-ckks")]
+    if let Some(ps) = super::fhe_ckks::params::find(param_set) {
+        return format!("{} {} streamed-evk/v1", ps.library, ps.library_version);
     }
+    let _ = param_set;
+    library_id().to_string()
 }
 
 /// P0B §3 / amendment A1: the seed's fixed derive template, a profile
@@ -331,6 +332,14 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
         let max_scale = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(super::fhe_ckks::params::max_scale_log2).min().unwrap_or(60);
         #[cfg(not(feature = "educational-ckks"))]
         let max_scale = 60u8;
+        // A set without a measured flood bound (registry ID 4) is owner-release-only:
+        // no third-party recipient and no flooded release (params::owner_release_only).
+        #[cfg(feature = "educational-ckks")]
+        if p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).any(super::fhe_ckks::params::owner_release_only)
+            && (!p.recipients.is_empty() || p.recipient_only || c.flood_owner)
+        {
+            return Err(CKR_DATA_INVALID);
+        }
         if c.max_values == 0
             || c.max_values as usize > max_slots
             || !(1..=30).contains(&c.precision_bits)
