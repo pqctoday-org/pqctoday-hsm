@@ -105,6 +105,15 @@ jobs:
       - name: Scan tracked files against the baseline
         run: python3 scripts/check_public_boundary.py --tree . --tracked --baseline scripts/public_boundary_baseline.json --mode enforce
 
+  engines-tool:
+    name: Engine release tool (unit tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Packages nothing and uploads nothing: tests the release tooling only.
+      - name: Unit tests for scripts/publish_engines.py
+        run: python3 -m unittest tests/test_publish_engines.py
+
   rust-test:
     name: Rust Tests (engine + KMIP)
     runs-on: ubuntu-24.04

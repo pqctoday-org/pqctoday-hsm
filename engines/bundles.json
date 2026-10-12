@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. The Hub's sixth bundle (openssl-pkcs11, public/wasm/openssl.*) is linked outside this repository and is deliberately not declared here yet.",
+  "bundles": [
+    {
+      "name": "cacp-kmip",
+      "files": [
+        "public/wasm/rust-kmip/pqctoday_kmip_wasm_bg.wasm",
+        "src/wasm/kmip/"
+      ],
+      "buildScript": "scripts/build-kmip-wasm.sh",
+      "cargoManifest": "wasm/Cargo.toml"
+    },
+    {
+      "name": "softhsmrustv3-engine",
+      "files": [
+        "public/wasm/rust/softhsmrustv3_bg.wasm",
+        "src/wasm/softhsmrustv3_bg.wasm",
+        "src/vendor/softhsm-wasm/wasm/softhsmrustv3_bg.wasm"
+      ],
+      "buildScript": "rust/build-wasm-bundle.sh",
+      "cargoManifest": "rust/Cargo.toml"
+    },
+    {
+      "name": "softhsm-cpp-engine",
+      "files": [
+        "public/wasm/softhsm.wasm",
+        "public/wasm/libsofthsmv3.wasm",
+        "src/vendor/softhsm-wasm/wasm/softhsm.wasm"
+      ],
+      "buildScript": "scripts/build-wasm.sh"
+    },
+    {
+      "name": "openssh-pkcs11",
+      "files": [
+        "public/wasm/openssh-server.js",
+        "public/wasm/openssh-server.wasm"
+      ],
+      "buildScript": "openssh-pkcs11/scripts/build-wasm.sh"
+    },
+    {
+      "name": "strongswan",
+      "files": [
+        "public/wasm/strongswan.wasm"
+      ],
+      "buildScript": "scripts/build-strongswan-wasm.sh"
+    }
+  ]
+}
