@@ -1,6 +1,6 @@
 [submodule "src/lib/crypto/stateful/hash-sigs"]
 	path = src/lib/crypto/stateful/hash-sigs
-	url = https://github.com/pqctoday/hash-sigs.git
+	url = https://github.com/pqctoday-org/hash-sigs.git
 [submodule "src/lib/crypto/stateful/xmss-reference"]
 	path = src/lib/crypto/stateful/xmss-reference
 	url = https://github.com/XMSS/xmss-reference.git
