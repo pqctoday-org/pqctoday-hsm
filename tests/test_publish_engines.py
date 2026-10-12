@@ -33,11 +33,7 @@ class Base(unittest.TestCase):
         self.src = os.path.join(self.tmp, "consumer")
         for b in BUNDLES:
             for entry in b["files"]:
-                if entry.endswith("/"):
-                    for n in ("a.js", "b.d.ts"):
-                        self.put(entry + n, f"{b['name']}:{entry}{n}")
-                else:
-                    self.put(entry, f"{b['name']}:{entry}")
+                self.put(entry, f"{b['name']}:{entry}")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -59,9 +55,21 @@ class Declaration(unittest.TestCase):
         for b in BUNDLES:
             self.assertTrue(os.path.isfile(os.path.join(ROOT, b["buildScript"])), b["name"])
             self.assertTrue(b["files"])
+            for entry in b["files"]:
+                self.assertFalse(entry.endswith("/"), f"{b['name']}: folder entry {entry}")
         text = open(pe.BUNDLES_FILE).read().lower()
         for forbidden in ("-".join(["pqctoday", "priv"]), "/".join(["", "users", ""]), "-".join(["local", "evidence", "cache"])):
             self.assertNotIn(forbidden, text)
+
+
+class FolderEntries(unittest.TestCase):
+    def test_a_folder_entry_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bundles.json")
+            with open(path, "w") as handle:
+                json.dump({"schema": 1, "bundles": [{"name": "x", "files": ["src/wasm/kmip/"]}]}, handle)
+            with self.assertRaises(pe.ToolError):
+                pe.load_bundles(path)
 
 
 class Packaging(Base):

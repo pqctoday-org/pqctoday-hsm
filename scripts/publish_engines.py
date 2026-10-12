@@ -16,7 +16,8 @@ are built where the toolchain lives, and the release attests which files were
 published, not that they rebuild bit-for-bit from source.
 
 Input layout: --from is any directory laid out the way the consumer expects
-(paths in engines/bundles.json are consumer-relative, e.g. public/wasm/...).
+(paths in engines/bundles.json are consumer-relative files, e.g. public/wasm/...;
+folders are rejected because a folder can hold consumer-authored code).
 Today that is the Hub checkout; the goal is a staging folder the build scripts
 fill.
 
@@ -65,25 +66,21 @@ def load_bundles(path: str = BUNDLES_FILE) -> list[dict]:
         doc = json.load(handle)
     if doc.get("schema") != 1 or not isinstance(doc.get("bundles"), list):
         raise ToolError(f"{path}: not a schema 1 bundle declaration")
+    for bundle in doc["bundles"]:
+        for entry in bundle.get("files", []):
+            if entry.endswith("/"):
+                raise ToolError(
+                    f"bundle {bundle.get('name')}: folder entry {entry} is not allowed; "
+                    "list the produced files explicitly (a folder can hold consumer-authored code)"
+                )
     return doc["bundles"]
 
 
 def expand(root: str, entry: str) -> list[str]:
-    """Consumer-relative files for one declared entry (a file, or a folder ending in /)."""
-    if not entry.endswith("/"):
-        if not os.path.isfile(os.path.join(root, entry)):
-            raise ToolError(f"declared file not found under --from: {entry}")
-        return [entry]
-    base = os.path.join(root, entry)
-    if not os.path.isdir(base):
-        raise ToolError(f"declared folder not found under --from: {entry}")
-    found = []
-    for folder, _dirs, names in os.walk(base):
-        for name in names:
-            found.append(os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/"))
-    if not found:
-        raise ToolError(f"declared folder is empty: {entry}")
-    return sorted(found)
+    """A declared entry is one consumer-relative file that must exist."""
+    if not os.path.isfile(os.path.join(root, entry)):
+        raise ToolError(f"declared file not found under --from: {entry}")
+    return [entry]
 
 
 def bundle_files(root: str, bundle: dict) -> list[str]:
