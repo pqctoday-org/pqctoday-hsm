@@ -90,6 +90,21 @@ jobs:
       - name: Check PKCS#11 constants (rust + js + kmip manifest vs pkcs11t.h)
         run: python3 scripts/check_pkcs11_constants.py
 
+  public-boundary:
+    name: Public boundary (no new private paths)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Owner decision 2026-10-11: findings that already exist are frozen in
+      # scripts/public_boundary_baseline.json; a NEW private path, run
+      # identifier or internal folder in the tracked files fails this job.
+      # The baseline only shrinks. Output names the rule and file, never the
+      # matched text.
+      - name: Unit tests for the scanner
+        run: python3 -m unittest tests/test_check_public_boundary.py
+      - name: Scan tracked files against the baseline
+        run: python3 scripts/check_public_boundary.py --tree . --tracked --baseline scripts/public_boundary_baseline.json --mode enforce
+
   rust-test:
     name: Rust Tests (engine + KMIP)
     runs-on: ubuntu-24.04
