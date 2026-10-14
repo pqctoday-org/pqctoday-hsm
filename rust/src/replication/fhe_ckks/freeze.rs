@@ -1,8 +1,8 @@
 //! Gate V: the frozen streamed-CKKS generator (pqctoday-fhe
 //! docs/ckks/ckks-streamed-evaluation-keys-plan-2026-10-10.md §5.3).
 //!
-//! Generator version 1 is frozen for registry IDs 2, 3 and 0x8002 and for the
-//! rotation key kind. Boards, exported key sets and published evidence rely on
+//! Generator version 1 is frozen for registry IDs 2, 3, 0x8002 and 4 and for
+//! the rotation key kind. Boards, exported key sets and published evidence rely on
 //! its bytes, so nothing below may change while `params::GENERATOR_VERSION`
 //! is 1. A change to the registry, a key list, a KDF label or context, a
 //! sampler or a known-answer file is a new generator version: bump
@@ -100,6 +100,22 @@ pub const FROZEN: &[FrozenGenerator] = &[FrozenGenerator {
             kat_sha256: "6470bc8e2eb3ec1f2cb2c881deb0c3b2cb8c252593f2498d2be12a95fc292372",
             kdf_fingerprint: "484966af1c6620198f6f26ec835d4883e8462c05c32a7ec0916dc9db868c8567",
         },
+        // Appended under generator version 1 (additive: existing rows are untouched). The OpenFHE v1.6.0
+        // `match128` set: OpenFHE's moduli and closed bootstrapping key list (79 keys), the dense-to-sparse
+        // key over the auxiliary primes (key kind 6). Every value below was reproduced outside the engine: the param
+        // hash, key-list hash and KDF fingerprint by the oracle (`oracle kat 4`, `oracle kdf-fingerprint 4`), the FheParamSetV1
+        // hash by an independent DER encoder. pqctoday-fhe docs/ckks/ckks-openfhe-registry-entry-spec-2026-10-12.md.
+        FrozenSet {
+            id: 4,
+            name: "CKKS_N16QP1720H192H32_OPENFHE_V1_6_0_MATCH128",
+            param_hash: "f2bd4160132f114e1acacd168795f9dea1b3354f2e8caf8865beb8a6cdf676d4",
+            fhe_param_hash: "edb9b44ed0622d08d2e0f58199ac948446c515fd469332338769647d021404d2b405195aead8de7083d9553ab4c95495",
+            key_list_sha256: "b506a82af182b28f390255e7ec3dd83e4fb9ccc77b7083fc003d89b1bbe08bf8",
+            key_count: 79,
+            kat_file: "fhe-ckks-kat-4.json",
+            kat_sha256: "8cff4290d0d915fdf065687e655208f8ac0fbd9abd0749975e0bc9ab0ad0fa0f",
+            kdf_fingerprint: "239dbfa06378ec1479353710e2a91dc68a8c6f7ac851e2ac5a6a2484cee472bd",
+        },
     ],
     rotation: FrozenRotation {
         param_set: 0x8002,
@@ -122,6 +138,7 @@ pub fn kat_bytes(file: &str) -> Option<&'static [u8]> {
         "fhe-ckks-kat-2.json" => Some(include_bytes!("../../../kat/fhe-ckks-kat-2.json")),
         "fhe-ckks-kat-3.json" => Some(include_bytes!("../../../kat/fhe-ckks-kat-3.json")),
         "fhe-ckks-kat-32770.json" => Some(include_bytes!("../../../kat/fhe-ckks-kat-32770.json")),
+        "fhe-ckks-kat-4.json" => Some(include_bytes!("../../../kat/fhe-ckks-kat-4.json")),
         "fhe-ckks-rotation-kat-32770.json" => Some(include_bytes!("../../../kat/fhe-ckks-rotation-kat-32770.json")),
         _ => None,
     }

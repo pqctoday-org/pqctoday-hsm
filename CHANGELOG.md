@@ -64,6 +64,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine (educational feature only): CKKS registry ID 4 makes the token's key export usable in OpenFHE
+  v1.6.0.** The new set, `CKKS_N16QP1720H192H32_OPENFHE_V1_6_0_MATCH128`, uses the
+  moduli, digit layout and bootstrapping key list that OpenFHE builds for ring degree 2^16 with its 128-bit
+  security check passing: 79 keys, 6.54 GB of streamed halves. That includes the two keys OpenFHE needs for its
+  sparse secret. One of them lives over two auxiliary primes, so there is one new key kind (6); existing sets,
+  key lists and known answers are byte-identical, and the generator stays at version 1 with one more row in its
+  freeze table. The set releases to its owner only, without noise flooding: no flood bound has been measured for
+  it, and the token now states that rule explicitly. A decryption policy that lists a third-party recipient, or
+  floods the owner release, for such a set is refused at enrolment, and the decrypt path refuses both again. IDs 2,
+  3 and 0x8002 are not affected. The reference notes and the OpenFHE end-to-end run are in the pqctoday-fhe
+  repository (`docs/ckks/ckks-openfhe-registry-entry-spec-2026-10-12.md`).
 - **Rust engine (educational feature only): streamed CKKS evaluation keys.**
   Behind the non-default cargo feature `educational-ckks` (implied by
   `educational-fhe`; it does not pull in TFHE-rs), an FHE seed can now hold a
@@ -325,6 +336,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Rust engine (educational feature only): the CKKS replication profile hash
+  changes again with registry ID 4.** The streamed-CKKS profile constraint now lists IDs 2, 0x8002, 3 and 4. A CKKS
+  replication policy enrolled under the previous hash (IDs 2, 0x8002 and 3) is refused at enrolment and at seed
+  generation, and a seed bound to it cannot be replicated. That hash can exist on tokens that ran an earlier build
+  with ID 3. The SO re-enrols the policy with the current hash, as for the previous change; see
+  `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md` §6.5. TFHE policies are not affected.
 - **Rust engine (educational feature only): the CKKS replication profile hash
   changed when registry ID 3 was added.** The streamed-CKKS profile constraint
   lists every registered CKKS parameter set, so its hash (the

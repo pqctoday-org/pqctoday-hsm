@@ -399,7 +399,7 @@ impl Generator {
         let id = key_id(&k);
         let mut e = self.cached_error(&k, d);
         let mut prod_p = num_bigint::BigUint::from(1u32);
-        for p in &ps.p[..=k.level_p] {
+        for p in &ps.key_p(&k).0[..=k.level_p] {
             prod_p *= *p;
         }
         let digit = k.level_p + 1;
@@ -425,7 +425,7 @@ impl Generator {
                     let idx = gal_idx.as_ref().ok_or(())?;
                     (idx.iter().map(|&i| s_main[i]).collect(), s_main.clone())
                 }
-                KIND_DENSE_TO_SPARSE => (m.ntt_mform_of(&self.ss), s_main.clone()),
+                KIND_DENSE_TO_SPARSE | KIND_DENSE_TO_SPARSE_AUX => (m.ntt_mform_of(&self.ss), s_main.clone()),
                 KIND_SPARSE_TO_DENSE => (s_main.clone(), m.ntt_mform_of(&self.ss)),
                 _ => return Err(()),
             };
