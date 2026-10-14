@@ -1,12 +1,17 @@
 {
   "schema": 1,
-  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. The Hub's sixth bundle (openssl-pkcs11, public/wasm/openssl.*) is linked outside this repository and is deliberately not declared here yet.",
+  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. List files explicitly: a folder entry would sweep in consumer-authored code, so the tool rejects folders. The Hub's sixth bundle (openssl-pkcs11, public/wasm/openssl.*) is linked outside this repository and is deliberately not declared here yet.",
   "bundles": [
     {
       "name": "cacp-kmip",
       "files": [
         "public/wasm/rust-kmip/pqctoday_kmip_wasm_bg.wasm",
-        "src/wasm/kmip/"
+        "src/wasm/kmip/pqctoday_kmip_wasm.d.ts",
+        "src/wasm/kmip/pqctoday_kmip_wasm.js",
+        "src/wasm/kmip/pqctoday_kmip_wasm_bg.d.ts",
+        "src/wasm/kmip/pqctoday_kmip_wasm_bg.js",
+        "src/wasm/kmip/pqctoday_kmip_wasm_bg.wasm",
+        "src/wasm/kmip/pqctoday_kmip_wasm_bg.wasm.d.ts"
       ],
       "buildScript": "scripts/build-kmip-wasm.sh",
       "cargoManifest": "wasm/Cargo.toml"

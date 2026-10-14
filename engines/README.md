@@ -5,7 +5,8 @@ The Hub ships WebAssembly engines that are built from this repository. An
 `engines-2`, ... (not the product version), that attaches:
 
 - one tarball per bundle, `<bundle>-<commit8>.tar.gz`, holding the files exactly
-  as the consumer lays them out (the paths in `bundles.json`);
+  as the consumer lays them out (the explicit file paths in `bundles.json`; folder
+  entries are rejected because a folder can hold consumer-authored code);
 - `engines-manifest.json`: for every bundle the build commit, the tarball
   SHA-256 and the SHA-256 and size of every file;
 - `SHA256SUMS`.
