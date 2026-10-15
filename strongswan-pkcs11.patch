@@ -40,10 +40,15 @@
 # invisible overwrite.
 #
 diff --git a/src/libstrongswan/plugins/pkcs11/Makefile.am b/src/libstrongswan/plugins/pkcs11/Makefile.am
-index a2a1bcf..6a95b74 100644
+index a2a1bcf..4119fb1 100644
 --- a/src/libstrongswan/plugins/pkcs11/Makefile.am
 +++ b/src/libstrongswan/plugins/pkcs11/Makefile.am
-@@ -19,6 +19,7 @@ libstrongswan_pkcs11_la_SOURCES = \
+@@ -1,3 +1,4 @@
++# Modified by PQC Today, LLC, 2026: adds pkcs11_kem.c/.h (ML-KEM key exchange).
+ AM_CPPFLAGS = \
+ 	-I$(top_srcdir)/src/libstrongswan
+ 
+@@ -19,6 +20,7 @@ libstrongswan_pkcs11_la_SOURCES = \
  	pkcs11_hasher.h pkcs11_hasher.c \
  	pkcs11_rng.h pkcs11_rng.c \
  	pkcs11_dh.h pkcs11_dh.c \
@@ -53,18 +58,18 @@ index a2a1bcf..6a95b74 100644
  libstrongswan_pkcs11_la_LDFLAGS = -module -avoid-version
 diff --git b/src/libstrongswan/plugins/pkcs11/README.md b/src/libstrongswan/plugins/pkcs11/README.md
 new file mode 100644
-index 0000000..2db9311
+index 0000000..2367fe6
 --- /dev/null
 +++ b/src/libstrongswan/plugins/pkcs11/README.md
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,108 @@
 +# strongswan-pkcs11 — PQC-enabled strongSwan PKCS#11 plugin
 +
 +A drop-in replacement for strongSwan's stock `pkcs11` plugin, extended so that
 +IKEv2 can perform **ML-KEM key exchange** (all three sizes: ML-KEM-512/768/1024)
-+and **ML-DSA (44/65/87) or SLH-DSA-SHA2 (128s/192s/256s) authentication**
-+through a PKCS#11 v3.2 token — i.e. against the softhsmv3 module. Private keys
-+stay inside the token; charon calls `C_EncapsulateKey` / `C_DecapsulateKey` and
-+`C_Sign` on the module.
++and **ML-DSA (44/65/87), SLH-DSA-SHA2 (128s/192s/256s), Ed448, or Ed25519
++authentication** through a PKCS#11 v3.2 token — i.e. against the softhsmv3
++module. Private keys stay inside the token; charon calls `C_EncapsulateKey` /
++`C_DecapsulateKey` and `C_Sign` on the module.
 +
 +## What it is
 +
@@ -75,7 +80,7 @@ index 0000000..2db9311
 +| File | Role |
 +|---|---|
 +| `pkcs11_kem.c/.h` | `key_exchange_t` backed by ML-KEM `C_EncapsulateKey`/`C_DecapsulateKey` (IKEv2 KE payload), all three sizes (512/768/1024) |
-+| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA (44/65/87) and SLH-DSA-SHA2 (128s/192s/256s) sign/verify + SPKI handling via the token |
++| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA (44/65/87), SLH-DSA-SHA2 (128s/192s/256s), Ed448, and Ed25519 sign/verify + SPKI handling via the token |
 +| `pkcs11_library.c`, `pkcs11_manager.c` | Module load + slot/token management |
 +| `pkcs11_creds.c`, `pkcs11_hasher.c`, `pkcs11_rng.c`, `pkcs11_dh.c` | Credentials, hashing, RNG, classical DH |
 +| `test_ss.c` | Minimal standalone smoke of the key-type constants |
@@ -96,7 +101,8 @@ index 0000000..2db9311
 +`../strongswan-pqc-slhdsa.patch` + `../strongswan-pkcs11.patch`, applied with
 +`patch -p1` against a pristine 6.0.7 tree) and is the one to follow; that exact
 +sequence was used to build a real `libstrongswan-pkcs11.so` and pass a live
-+ML-DSA-44/65/87 + SLH-DSA-SHA2-128s/192s/256s sign/verify test (2026-09-01/02).
++ML-DSA-44/65/87 + SLH-DSA-SHA2-128s/192s/256s + Ed448 + Ed25519 sign/verify
++test (2026-09-01/02, extended with Ed25519 2026-09-02).
 +
 +Once patched, configure with the plugin enabled:
 +
@@ -112,9 +118,10 @@ index 0000000..2db9311
 +
 +`tests/test_pkcs11_conn.c` links directly against a real `libstrongswan.so` +
 +this plugin and drives the actual credential-layer sign/verify path IKEv2
-+peer auth uses, for all 6 signature key types this connector supports
-+(ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s) — see `tests/README.md` for
-+the full build/run steps and the last confirmed pass/fail table.
++peer auth uses, for all 8 signature key types this connector supports
++(ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s, Ed448, Ed25519) — see
++`tests/README.md` for the full build/run steps and the last confirmed
++pass/fail table.
 +
 +## Test against softhsmv3 (full IKEv2 handshake)
 +
@@ -164,10 +171,20 @@ index 0000000..2db9311
 +`../docs/softhsmv3opsguide.md` §4 for the equivalent `swanctl.conf`
 +`proposals =` line.
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11.h b/src/libstrongswan/plugins/pkcs11/pkcs11.h
-index b27bd84..1818d0b 100644
+index b27bd84..90eafca 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11.h
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11.h
-@@ -380,6 +380,13 @@ typedef unsigned long ck_key_type_t;
+@@ -2,6 +2,9 @@
+    Copyright 2006, 2007 g10 Code GmbH
+    Copyright 2006 Andreas Jellinghaus
+ 
++   Modified by PQC Today, LLC, 2026: PKCS#11 v3.2 ML-KEM, ML-DSA and
++   SLH-DSA constants.
++
+    This file is free software; as a special exception the author gives
+    unlimited permission to copy and/or distribute it, with or without
+    modifications, as long as this notice is preserved.
+@@ -380,6 +383,13 @@ typedef unsigned long ck_key_type_t;
  #define CKK_GOST28147           (0x32UL)
  #define CKK_EC_EDWARDS          (0x40UL)
  #define CKK_EC_MONTGOMERY       (0x41UL)
@@ -181,7 +198,7 @@ index b27bd84..1818d0b 100644
  #define CKK_VENDOR_DEFINED      (1UL << 31)
  
  
-@@ -457,6 +464,7 @@ typedef unsigned long ck_attribute_type_t;
+@@ -457,6 +467,7 @@ typedef unsigned long ck_attribute_type_t;
  #define CKA_ECDSA_PARAMS                (0x180UL)
  #define CKA_EC_PARAMS                   (0x180UL)
  #define CKA_EC_POINT                    (0x181UL)
@@ -189,7 +206,7 @@ index b27bd84..1818d0b 100644
  #define CKA_SECONDARY_AUTH              (0x200UL)
  #define CKA_AUTH_PIN_FLAGS              (0x201UL)
  #define CKA_ALWAYS_AUTHENTICATE         (0x202UL)
-@@ -499,8 +507,46 @@ typedef unsigned long ck_attribute_type_t;
+@@ -499,8 +510,46 @@ typedef unsigned long ck_attribute_type_t;
  #define CKA_OTP_TIME                    (0x22FUL)
  #define CKA_ALLOWED_MECHANISMS          (CKF_ARRAY_ATTRIBUTE | 0x600UL)
  #define CKA_PROFILE_ID                  (0x601UL)
@@ -236,7 +253,7 @@ index b27bd84..1818d0b 100644
  
  struct ck_attribute
  {
-@@ -748,6 +794,19 @@ typedef unsigned long ck_mechanism_type_t;
+@@ -748,6 +797,19 @@ typedef unsigned long ck_mechanism_type_t;
  #define CKM_EC_EDWARDS_KEY_PAIR_GEN     (0x1055UL)
  #define CKM_EC_MONTGOMERY_KEY_PAIR_GEN  (0x1056UL)
  #define CKM_EDDSA                       (0x1057UL)
@@ -256,7 +273,7 @@ index b27bd84..1818d0b 100644
  #define CKM_JUNIPER_KEY_GEN             (0x1060UL)
  #define CKM_JUNIPER_ECB128              (0x1061UL)
  #define CKM_JUNIPER_CBC128              (0x1062UL)
-@@ -1543,6 +1602,27 @@ struct ck_function_list_3_0
+@@ -1543,6 +1605,27 @@ struct ck_function_list_3_0
    CK_C_VerifyMessageBegin C_VerifyMessageBegin;
    CK_C_VerifyMessageNext C_VerifyMessageNext;
    CK_C_MessageVerifyFinal C_MessageVerifyFinal;
@@ -285,10 +302,19 @@ index b27bd84..1818d0b 100644
  
  
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c b/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c
-index 892bb5b..9453e91 100644
+index 892bb5b..c0183b7 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c
-@@ -61,10 +61,22 @@ struct private_pkcs11_dh_t {
+@@ -3,6 +3,8 @@
+  *
+  * Copyright (C) secunet Security Networks AG
+  *
++ * Modified by PQC Today, LLC, 2026: keep the ECDH peer value alive until derive; derived secret readable.
++ *
+  * This program is free software; you can redistribute it and/or modify it
+  * under the terms of the GNU General Public License as published by the
+  * Free Software Foundation; either version 2 of the License, or (at your
+@@ -61,10 +63,22 @@ struct private_pkcs11_dh_t {
  	chunk_t pub_key;
  
  	/**
@@ -312,7 +338,7 @@ index 892bb5b..9453e91 100644
  	/**
  	 * Shared secret
  	 */
-@@ -91,9 +103,20 @@ static bool derive_secret(private_pkcs11_dh_t *this, chunk_t other)
+@@ -91,9 +105,20 @@ static bool derive_secret(private_pkcs11_dh_t *this, chunk_t other)
  {
  	CK_OBJECT_CLASS klass = CKO_SECRET_KEY;
  	CK_KEY_TYPE type = CKK_GENERIC_SECRET;
@@ -335,7 +361,7 @@ index 892bb5b..9453e91 100644
  	};
  	CK_MECHANISM mech = {
  		this->mech_derive,
-@@ -136,15 +159,19 @@ METHOD(key_exchange_t, set_public_key, bool,
+@@ -136,15 +161,19 @@ METHOD(key_exchange_t, set_public_key, bool,
  		case ECP_384_BIT:
  		case ECP_521_BIT:
  		{	/* we expect the public value to just be the concatenated x and y
@@ -360,7 +386,7 @@ index 892bb5b..9453e91 100644
  			};
  			this->other = chunk_clone(chunk_from_thing(params));
  			break;
-@@ -188,6 +215,7 @@ METHOD(key_exchange_t, destroy, void,
+@@ -188,6 +217,7 @@ METHOD(key_exchange_t, destroy, void,
  	chunk_clear(&this->pub_key);
  	chunk_clear(&this->secret);
  	chunk_clear(&this->other);
@@ -368,7 +394,7 @@ index 892bb5b..9453e91 100644
  	free(this);
  }
  
-@@ -307,6 +335,26 @@ static pkcs11_library_t *find_token(private_pkcs11_dh_t *this,
+@@ -307,6 +337,26 @@ static pkcs11_library_t *find_token(private_pkcs11_dh_t *this,
  				if (current->f->C_OpenSession(slot, CKF_SERIAL_SESSION,
  											  NULL, NULL, session) == CKR_OK)
  				{
@@ -397,12 +423,12 @@ index 892bb5b..9453e91 100644
  				}
 diff --git b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c
 new file mode 100644
-index 0000000..8cd5ca9
+index 0000000..ab2f867
 --- /dev/null
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c
 @@ -0,0 +1,571 @@
 +/*
-+ * Copyright (C) 2026 PQC Timeline Project
++ * Copyright (C) 2026 PQC Today
 + *
 + * This program is free software; you can redistribute it and/or modify it
 + * under the terms of the GNU General Public License as published by the
@@ -974,12 +1000,12 @@ index 0000000..8cd5ca9
 +}
 diff --git b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.h b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.h
 new file mode 100644
-index 0000000..976b635
+index 0000000..bf3efc9
 --- /dev/null
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.h
 @@ -0,0 +1,40 @@
 +/*
-+ * Copyright (C) 2026
++ * Copyright (C) 2026 PQC Today
 + *
 + * This program is free software; you can redistribute it and/or modify it
 + * under the terms of the GNU General Public License as published by the
@@ -1019,10 +1045,19 @@ index 0000000..976b635
 +
 +#endif
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c b/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
-index aa27f1e..d4aca45 100644
+index aa27f1e..b86a01f 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
-@@ -30,6 +30,7 @@
+@@ -4,6 +4,8 @@
+  *
+  * Copyright (C) secunet Security Networks AG
+  *
++ * Modified by PQC Today, LLC, 2026: ML-KEM key exchange and ML-DSA/SLH-DSA/EdDSA registration; MODP not advertised.
++ *
+  * This program is free software; you can redistribute it and/or modify it
+  * under the terms of the GNU General Public License as published by the
+  * Free Software Foundation; either version 2 of the License, or (at your
+@@ -30,6 +32,7 @@
  #include "pkcs11_hasher.h"
  #include "pkcs11_rng.h"
  #include "pkcs11_dh.h"
@@ -1030,7 +1065,7 @@ index aa27f1e..d4aca45 100644
  
  typedef struct private_pkcs11_plugin_t private_pkcs11_plugin_t;
  
-@@ -195,21 +196,39 @@ METHOD(plugin_t, get_features, int,
+@@ -195,21 +198,39 @@ METHOD(plugin_t, get_features, int,
  			PLUGIN_PROVIDE(HASHER, HASH_SHA384),
  			PLUGIN_PROVIDE(HASHER, HASH_SHA512),
  	};
@@ -1085,7 +1120,7 @@ index aa27f1e..d4aca45 100644
  	static plugin_feature_t f_ecdh[] = {
  		PLUGIN_REGISTER(KE, pkcs11_dh_create),
  			PLUGIN_PROVIDE(KE, ECP_192_BIT),
-@@ -218,6 +237,46 @@ METHOD(plugin_t, get_features, int,
+@@ -218,6 +239,46 @@ METHOD(plugin_t, get_features, int,
  			PLUGIN_PROVIDE(KE, ECP_384_BIT),
  			PLUGIN_PROVIDE(KE, ECP_521_BIT),
  	};
@@ -1132,7 +1167,7 @@ index aa27f1e..d4aca45 100644
  	static plugin_feature_t f_rng[] = {
  		PLUGIN_REGISTER(RNG, pkcs11_rng_create),
  			PLUGIN_PROVIDE(RNG, RNG_STRONG),
-@@ -237,9 +296,9 @@ METHOD(plugin_t, get_features, int,
+@@ -237,9 +298,9 @@ METHOD(plugin_t, get_features, int,
  			PLUGIN_PROVIDE(CUSTOM, "pkcs11-certs"),
  				PLUGIN_DEPENDS(CERT_DECODE, CERT_X509),
  	};
@@ -1144,7 +1179,7 @@ index aa27f1e..d4aca45 100644
  	static int count = 0;
  
  	if (!count)
-@@ -268,11 +327,14 @@ METHOD(plugin_t, get_features, int,
+@@ -268,11 +329,14 @@ METHOD(plugin_t, get_features, int,
  		if (lib->settings->get_bool(lib->settings,
  								"%s.plugins.pkcs11.use_dh", FALSE, lib->ns))
  		{
@@ -1161,10 +1196,19 @@ index aa27f1e..d4aca45 100644
  	}
  	*features = f;
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c b/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
-index 6a54b3f..f424bf9 100644
+index 6a54b3f..e37382b 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
-@@ -194,11 +194,29 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
+@@ -5,6 +5,8 @@
+  *
+  * Copyright (C) secunet Security Networks AG
+  *
++ * Modified by PQC Today, LLC, 2026: ML-DSA, SLH-DSA, Ed448 and Ed25519 signing through the token.
++ *
+  * This program is free software; you can redistribute it and/or modify it
+  * under the terms of the GNU General Public License as published by the
+  * Free Software Foundation; either version 2 of the License, or (at your
+@@ -194,11 +196,29 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
  		 KEY_ECDSA, 384,									HASH_SHA384},
  		{SIGN_ECDSA_521,				{CKM_ECDSA,				NULL, 0},
  		 KEY_ECDSA, 521,									HASH_SHA512},
@@ -1194,7 +1238,7 @@ index 6a54b3f..f424bf9 100644
  	hash_algorithm_t hash_alg = HASH_UNKNOWN;
  	int i;
  
-@@ -343,6 +361,41 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
+@@ -343,6 +363,41 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
  				mechanism->pParameter = rsa_pkcs_pss_params;
  				mechanism->ulParameterLen = sizeof(CK_RSA_PKCS_PSS_PARAMS);
  			}
@@ -1236,7 +1280,7 @@ index 6a54b3f..f424bf9 100644
  			else
  			{
  				hash_alg = mappings[i].hash;
-@@ -459,7 +512,7 @@ METHOD(private_key_t, sign, bool,
+@@ -459,7 +514,7 @@ METHOD(private_key_t, sign, bool,
  		DBG1(DBG_LIB, "C_SignInit() failed: %N", ck_rv_names, rv);
  		goto end;
  	}
@@ -1245,7 +1289,7 @@ index 6a54b3f..f424bf9 100644
  	{
  		hasher_t *hasher;
  
-@@ -488,10 +541,38 @@ METHOD(private_key_t, sign, bool,
+@@ -488,10 +543,38 @@ METHOD(private_key_t, sign, bool,
  		}
  		data = hash;
  	}
@@ -1288,7 +1332,7 @@ index 6a54b3f..f424bf9 100644
  	}
  	buf = malloc(len);
  	rv = this->lib->f->C_Sign(session, data.ptr, data.len, buf, &len);
-@@ -832,6 +913,60 @@ static pkcs11_library_t* find_lib_and_keyid_by_skid(chunk_t keyid_chunk,
+@@ -832,6 +915,60 @@ static pkcs11_library_t* find_lib_and_keyid_by_skid(chunk_t keyid_chunk,
  	return found;
  }
  
@@ -1349,7 +1393,7 @@ index 6a54b3f..f424bf9 100644
  /**
   * Find the key on the token
   */
-@@ -877,6 +1012,125 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
+@@ -877,6 +1014,125 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
  				this->object = object;
  				found = TRUE;
  				break;
@@ -1476,10 +1520,19 @@ index 6a54b3f..f424bf9 100644
  				DBG1(DBG_CFG, "PKCS#11 key type %d not supported", type);
  				break;
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c b/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
-index 70dbbf5..dfbe729 100644
+index 70dbbf5..12f2097 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
-@@ -249,6 +249,16 @@ METHOD(public_key_t, verify, bool,
+@@ -5,6 +5,8 @@
+  *
+  * Copyright (C) secunet Security Networks AG
+  *
++ * Modified by PQC Today, LLC, 2026: ML-DSA, SLH-DSA, Ed448 and Ed25519 public keys and verification.
++ *
+  * This program is free software; you can redistribute it and/or modify it
+  * under the terms of the GNU General Public License as published by the
+  * Free Software Foundation; either version 2 of the License, or (at your
+@@ -249,6 +251,16 @@ METHOD(public_key_t, verify, bool,
  			memcpy(sig.ptr + (len - r.len), r.ptr, r.len);
  			memcpy(sig.ptr + len + (len - s.len), s.ptr, s.len);
  			break;
@@ -1496,7 +1549,7 @@ index 70dbbf5..dfbe729 100644
  		default:
  			sig = chunk_skip_zero(sig);
  			break;
-@@ -267,7 +277,7 @@ METHOD(public_key_t, verify, bool,
+@@ -267,7 +279,7 @@ METHOD(public_key_t, verify, bool,
  		DBG1(DBG_LIB, "C_VerifyInit() failed: %N", ck_rv_names, rv);
  		goto end;
  	}
@@ -1505,7 +1558,7 @@ index 70dbbf5..dfbe729 100644
  	{
  		hasher_t *hasher;
  
-@@ -482,6 +492,183 @@ static bool encode_rsa(private_pkcs11_public_key_t *this,
+@@ -482,6 +494,183 @@ static bool encode_rsa(private_pkcs11_public_key_t *this,
  	return success;
  }
  
@@ -1689,7 +1742,7 @@ index 70dbbf5..dfbe729 100644
  METHOD(public_key_t, get_encoding, bool,
  	private_pkcs11_public_key_t *this, cred_encoding_type_t type,
  	chunk_t *encoding)
-@@ -492,6 +679,16 @@ METHOD(public_key_t, get_encoding, bool,
+@@ -492,6 +681,16 @@ METHOD(public_key_t, get_encoding, bool,
  			return encode_rsa(this, type, NULL, encoding);
  		case KEY_ECDSA:
  			return encode_ecdsa(this, type, encoding);
@@ -1706,7 +1759,7 @@ index 70dbbf5..dfbe729 100644
  		default:
  			return FALSE;
  	}
-@@ -510,6 +707,16 @@ METHOD(public_key_t, get_fingerprint, bool,
+@@ -510,6 +709,16 @@ METHOD(public_key_t, get_fingerprint, bool,
  			return encode_rsa(this, type, this, fp);
  		case KEY_ECDSA:
  			return fingerprint_ecdsa(this, type, fp);
@@ -1723,7 +1776,7 @@ index 70dbbf5..dfbe729 100644
  		default:
  			return FALSE;
  	}
-@@ -783,16 +990,305 @@ static private_pkcs11_public_key_t* create_ecdsa_key(chunk_t ecparams,
+@@ -783,16 +992,305 @@ static private_pkcs11_public_key_t* create_ecdsa_key(chunk_t ecparams,
  					  countof(mechs), tmpl, countof(tmpl));
  }
  
@@ -2031,7 +2084,7 @@ index 70dbbf5..dfbe729 100644
  	while (TRUE)
  	{
  		switch (va_arg(args, builder_part_t))
-@@ -800,6 +1296,12 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+@@ -800,6 +1298,12 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
  			case BUILD_BLOB_ASN1_DER:
  				blob = va_arg(args, chunk_t);
  				continue;
@@ -2044,7 +2097,7 @@ index 70dbbf5..dfbe729 100644
  			case BUILD_RSA_MODULUS:
  				n = va_arg(args, chunk_t);
  				continue;
-@@ -849,6 +1351,149 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+@@ -849,6 +1353,149 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
  			}
  		}
  	}
@@ -2194,7 +2247,7 @@ index 70dbbf5..dfbe729 100644
  	return NULL;
  }
  
-@@ -882,6 +1527,20 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
+@@ -882,6 +1529,20 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
  		case KEY_ECDSA:
  			type = CKK_ECDSA;
  			break;
@@ -2215,7 +2268,7 @@ index 70dbbf5..dfbe729 100644
  		default:
  			/* don't specify key type on KEY_ANY */
  			count--;
-@@ -929,6 +1588,107 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
+@@ -929,6 +1590,107 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
  				}
  				break;
  			}

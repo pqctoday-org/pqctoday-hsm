@@ -3,6 +3,8 @@
  *
  * Copyright (C) secunet Security Networks AG
  *
+ * Modified by PQC Today, LLC, 2026: keep the ECDH peer value alive until derive; derived secret readable.
+ *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation; either version 2 of the License, or (at your

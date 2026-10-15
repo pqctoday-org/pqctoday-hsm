@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: inlined from openpgp-x509-sequoia 0.2.0 and ported to sequoia 2.x.
 //! Inlined `openpgp-x509-sequoia` (0.2.0) helpers, ported to sequoia 2.x.
 //!
 //! Upstream `openpgp-x509-sequoia` 0.2.0 (LGPL-2.0-or-later) is abandoned and
