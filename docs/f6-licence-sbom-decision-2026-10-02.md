@@ -10,10 +10,10 @@ in the WASM bundle:
 
 | File | In shipped Rust engine? | Commit authors | Derived from GPL code? |
 |---|---|---|---|
-| `src/lib/vendor_mechanisms.h` | No — Rust has no `build.rs`/bindgen; `rust/src/constants.rs` mirrors values by hand | Eric Amador, pqctoday | No derivation stated |
-| `rust/src/crypto/keccak.rs` | Yes | pqctoday | No derivation stated |
-| `rust/src/crypto/lms.rs` | Yes | Eric Amador, eramusa, pqctoday | No — "Supports all SP 800-208 parameter sets" |
-| `rust/src/crypto/split_key.rs` | Yes | Eric Amador | No — "implemented directly from KMIP 3.0" |
+| `src/lib/vendor_mechanisms.h` | No — Rust has no `build.rs`/bindgen; `rust/src/constants.rs` mirrors values by hand | PQC Today | No derivation stated |
+| `rust/src/crypto/keccak.rs` | Yes | PQC Today | No derivation stated |
+| `rust/src/crypto/lms.rs` | Yes | PQC Today | No — "Supports all SP 800-208 parameter sets" |
+| `rust/src/crypto/split_key.rs` | Yes | PQC Today | No — "implemented directly from KMIP 3.0" |
 
 ## 2. Decision
 
