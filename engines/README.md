@@ -39,8 +39,15 @@ pinned toolchain. Independent reproducibility is a separate improvement.
 
 The output is deterministic: the same input gives the same bytes.
 
-## Not declared yet
+## The OpenSSL Studio bundle
 
-The consumer's sixth bundle (`openssl.*`) is linked outside this repository, so
-it is not in `bundles.json`. Its builder has to move here, or be published from
-where it is built, before a consumer can pin it the same way.
+`openssl-pkcs11` (`public/wasm/openssl.js` + `openssl.wasm`) is linked by
+`scripts/build-openssl-studio-wasm.sh` from OpenSSL 3.6.3, this repository's
+pkcs11-provider and Rust engine, and the C shims in `wasm/openssl-studio/`.
+It writes to a staging folder, `build-wasm/engines-staging/`, laid out like
+the consumer, so it can be packaged on its own:
+
+```bash
+python3 scripts/publish_engines.py package --from build-wasm/engines-staging \
+    --only openssl-pkcs11 --out /tmp/engines-2 --tag engines-2 --commit-head
+```
