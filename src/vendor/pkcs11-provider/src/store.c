@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: store loading of SLH-DSA, HSS/LMS, XMSS and X25519/X448 keys. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

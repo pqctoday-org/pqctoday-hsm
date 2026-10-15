@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: AES Key Wrap, AES-XTS, ChaCha20 and GCM/CCM fixes through PKCS#11. */
 /* Copyright (C) 2024 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

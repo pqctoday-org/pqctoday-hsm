@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: declarations for SLH-DSA, HSS/LMS, XMSS and ML-DSA variants. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

@@ -1,3 +1,4 @@
+# Modified by PQC Today, LLC, 2026: openssl_modulesdir option.
 option('openssl_modulesdir',
        type: 'string',
        value: '',

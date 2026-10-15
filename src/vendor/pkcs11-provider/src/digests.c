@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: digest context copy falls back to a software shadow when the token cannot copy state. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

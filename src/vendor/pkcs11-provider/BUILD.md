@@ -1,3 +1,4 @@
+<!-- Modified by PQC Today, LLC, 2026: fork note and build instructions for this repository. -->
 ## Build & Installation
 
 > **SoftHSMv3 fork note:** this file documents the upstream Latchset

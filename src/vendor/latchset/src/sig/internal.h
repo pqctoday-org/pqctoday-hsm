@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: SLH-DSA, HSS and XMSS signature declarations. */
 /* Copyright (C) 2022-2025 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

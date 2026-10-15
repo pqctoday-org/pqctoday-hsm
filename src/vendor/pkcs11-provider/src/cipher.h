@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: declarations for the added ciphers. */
 /* Copyright (C) 2024 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 
