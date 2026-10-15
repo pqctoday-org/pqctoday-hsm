@@ -66,9 +66,9 @@ PR; a release needs the full evidence set behind it.
    (`CMakeLists.txt` carries no version to bump — `project(softhsmv3 C CXX)`
    declares none).
 
-## Why this is a separate document from CONTRIBUTING.md
+## Why this is a separate document from docs/DEVELOPMENT.md
 
-CONTRIBUTING.md's local-gate step is what every PR needs. This checklist is
+docs/DEVELOPMENT.md's local-gate step is what every change needs. This checklist is
 stricter and slower by design — it exists because two prior releases
 (0.23.0, 0.24.0) shipped compliance claims (a differential-harness figure,
 a hub-side cross-check, the Rust PKCS#11 matrix) without a fresh, in-repo,
