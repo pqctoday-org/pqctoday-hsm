@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: more HashML-DSA pre-hash functions; optional hardware Keccak/ExpandA hook and profiling.
 // This file implements functionality from FIPS 204 section 7.3 Pseudorandom Sampling
 
 use crate::conversion::{bit_unpack, coeff_from_half_byte, coeff_from_three_bytes};

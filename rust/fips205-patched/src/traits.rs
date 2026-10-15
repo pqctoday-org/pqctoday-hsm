@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: more pre-hash variants; signing an already-hashed PHM.
 use rand_core::CryptoRngCore;
 use rand_core::RngCore;
 use rand_core::CryptoRng;

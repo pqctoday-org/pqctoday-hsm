@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: bounds-checked parsing; HSS level from the wire is bounded.
 use crate::{
     constants::{
         lms_public_key_length, lms_signature_length, MAX_ALLOWED_HSS_LEVELS,

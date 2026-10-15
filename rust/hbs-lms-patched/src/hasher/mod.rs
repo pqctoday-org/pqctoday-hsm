@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs (SHA-256, SHAKE-256).
 use core::{
     convert::TryFrom,
     fmt::Debug,

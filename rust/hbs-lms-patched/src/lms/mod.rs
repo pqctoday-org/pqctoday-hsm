@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: helper module made crate-visible for the node cache and hardware hook.
 use crate::hasher::HashChain;
 use crate::hss::aux::MutableExpandedAuxData;
 use crate::hss::parameter::HssParameter;

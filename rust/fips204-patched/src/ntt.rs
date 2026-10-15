@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling.
 // This file implements functionality from FIPS 204 section 7.5 `NTT` and `invNTT`
 
 use crate::helpers::{full_reduce32, mont_reduce, ZETA_TABLE_MONT};

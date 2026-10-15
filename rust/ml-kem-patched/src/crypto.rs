@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling.
 #![allow(dead_code)]
 
 use hybrid_array::{Array, ArraySize};

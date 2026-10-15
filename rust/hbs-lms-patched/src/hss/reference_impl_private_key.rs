@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: private-key format stays compatible with per-family type IDs.
 use crate::{
     constants::{
         LmsTreeIdentifier, D_TOPSEED, ILEN, LMS_LEAF_IDENTIFIERS_SIZE, MAX_ALLOWED_HSS_LEVELS,

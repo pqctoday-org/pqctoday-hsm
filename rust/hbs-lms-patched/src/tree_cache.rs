@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: optional in-memory node cache per LMS tree.
 //! In-memory, per-tree LMS node cache (pqctoday-hsm addition, feature `tree-cache`).
 //!
 //! Upstream signs without auxiliary data, and then `get_tree_element` recomputes every

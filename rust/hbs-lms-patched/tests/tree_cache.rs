@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: node cache tests.
 //! pqctoday-hsm: the in-memory tree cache (feature `tree-cache`) must not change a single
 //! signature byte or state update. Own test binary: nothing else toggles the cache here.
 #![cfg(feature = "tree-cache")]

@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: more pre-hash variants; signing an already-hashed PHM.
 use crate::types::Ph;
 use rand_core::{CryptoRng, CryptoRngCore, RngCore};
 #[cfg(feature = "default-rng")]

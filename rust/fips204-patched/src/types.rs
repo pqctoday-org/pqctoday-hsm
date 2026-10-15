@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: more pre-hash variants; expanded signing context, zeroised on drop.
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 
