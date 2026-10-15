@@ -826,8 +826,9 @@ pub const CKM_PQCTODAY_FHE_ENCRYPT: u32 = 0x8000_001B;
 // draft's own name and codepoint — no longer a vendor-range stopgap. See
 // docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
 // the original design rationale. NOTE: v3.3 itself is still only a
-// working draft; per docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/
-// working/identifier_db/raw_ids.db this codepoint's OASIS status is
+// working draft; per the OASIS PKCS 11 TC tree at commit 2b25dd8,
+// https://github.com/oasis-tcs/pkcs11/blob/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/identifier_db/raw_ids.db,
+// this codepoint's OASIS status is
 // "proposed" (not yet through final ballot) — double-check against the
 // final ratified v3.3 header once published.
 pub const CKM_ML_DSA_EXTERNAL_MU: u32 = 0x0000_403c;

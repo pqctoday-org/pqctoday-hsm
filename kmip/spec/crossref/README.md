@@ -48,7 +48,10 @@ next to every fact so it can be independently re-checked.
 
 - One file per topic (e.g. `kem-encapsulate-decapsulate.yaml`), not one giant
   file — keeps diffs small and each file independently re-verifiable.
-- Every file's `sources:` block records the exact local PDF path, a human
+- Every file's `sources:` block records the publisher `url`, the local path
+  the document is restored to (`file:`, gitignored — this public repository
+  carries no third-party documents; restore and verify with
+  `python3 docs/refs/fetch_refs.py`), a human
   label, the retrieval/edition date, and the file's own `sha256` — if the
   PDF is replaced, the checksum mismatch is the trigger to re-verify every
   fact in that file, the same discipline `../README.md`'s refresh policy

@@ -13,6 +13,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `mlxpqc/`, the standalone Apple Metal ML-DSA-65 acceleration benchmark, moved with its history to the
   hardware-acceleration repository `pqctoday-org/pqctoday-hwpqc` (`ml-dsa/mlx`). It was never part of the HSM
   build, tests or releases, so nothing in the engine changes.
+- The copies of third-party documents: the OASIS PKCS #11 v3.2 and KMIP 2.1/3.0 specification PDFs,
+  HTML, DOCX and ZIP files, the FrodoKEM and Classic McEliece specifications, RFC 9180, and the snapshot of the
+  OASIS PKCS 11 TC's v3.3 working tree. The repository keeps only what was extracted from them (the KMIP
+  tag/enum and §6.1 JSON, the cross-reference fact sheets, the `.sha256` sidecars) and the two canonical
+  OASIS v3.2 headers. `docs/refs/README.md` lists every document with its publisher link and SHA-256;
+  `python3 docs/refs/fetch_refs.py` restores verified local copies, which git ignores. The v3.3 draft is
+  now cited by its upstream commit (`oasis-tcs/pkcs11@2b25dd8`). No build, test or gate needs the documents.
 
 ### Security
 

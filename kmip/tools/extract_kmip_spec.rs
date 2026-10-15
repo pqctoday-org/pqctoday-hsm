@@ -110,6 +110,13 @@ fn main() -> ExitCode {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: cannot read {SPEC_HTML}: {e}");
+            eprintln!(
+                "  The OASIS spec HTML is not committed (this public repository carries only \
+                 extractions). Restore it with (run from the repository root):\n    \
+                 python3 docs/refs/fetch_refs.py --only kmip-spec-v3.0-csd02.html --allow-html-drift\n  \
+                 (publisher HTML is re-written per request, so its sha256 will not match the \
+                 recorded one; see docs/refs/README.md)"
+            );
             return ExitCode::from(2);
         }
     };

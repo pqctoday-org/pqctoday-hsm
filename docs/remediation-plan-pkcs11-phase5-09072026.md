@@ -309,7 +309,7 @@ That is a different target and a different threat model — the host already hol
 - Assert against an **independent** oracle, never the engine against itself.
 - Every `exceptions.json` edit quotes the sentence it relies on, with `file:line` — and, since phase 3, the same applies to claims about *code*.
 - **When in doubt, read BOTH specs.** v3.2 alone would have had us signing HSS/XMSS over a pre-computed hash; v3.3 alone would have had us dropping the FIPS 186-4 constraints on the authority of an unpublished draft.
-- Section and table numbers come from `docs/refs/pkcs11-spec-v3.2-os.pdf`. Quote v3.3 by `file:line` plus the snapshot commit.
+- Section and table numbers come from `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf`. Quote v3.3 by `file:line` plus the snapshot commit.
 - Sabotage-test any new gate check on a **copy** of the tree.
 - **Read the engines before reasoning from the spec alone.**
 - **When a grep defines the finding, show the whole range.** A truncated window is indistinguishable from an absence — added after §0.1's phantom ML-DSA divergence.

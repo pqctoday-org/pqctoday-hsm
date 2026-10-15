@@ -55,10 +55,14 @@ MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 #     ERROR. It does not otherwise supersede v3.2: the reported Cryptoki
 #     version stays 3.2, and citations continue to reference the v3.2 OS,
 #     because v3.3 is an unpublished working draft that still moves
-#     (docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/PROVENANCE.md).
+#     (provenance of the pinned commit: docs/refs/README.md).
 #
-# Every entry needs a reason and a citation naming the v3.3 file:line and the
-# snapshot commit, so a reader can check the correction rather than trust it.
+# Every entry needs a reason and a citation naming the v3.3 file:line in the
+# OASIS PKCS 11 TC repository (github.com/oasis-tcs/pkcs11) at the pinned
+# commit 2b25dd8ed4a85d22937d8509bb296555cd329f43, so a reader can check the correction rather than trust it.
+# The citation is a permalink to that commit; this public repository no
+# longer carries a copy of the TC tree (`python3 docs/refs/fetch_refs.py --v33`
+# restores one locally, gitignored).
 # An entry here is NOT a licence to drift — the value must match v3.3 exactly,
 # and anything not listed still fails against canonical v3.2.
 V33_CORRECTIONS = {
@@ -72,8 +76,9 @@ V33_CORRECTIONS = {
             "in v3.2 (pkcs11t.h:574-576). A plain omission, not a design choice."
         ),
         "citation": (
-            "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/headers/"
-            "pkcs11t.h:658 (OASIS PKCS 11 TC working tree, commit 2b25dd8)"
+            "https://github.com/oasis-tcs/pkcs11/blob/2b25dd8ed4a85d22937d8509bb296555cd329f43/"
+            "working/headers/pkcs11t.h#L658 (working/headers/pkcs11t.h:658, "
+            "OASIS PKCS 11 TC working tree, commit 2b25dd8)"
         ),
     },
     "CKA_DECAPSULATE_TEMPLATE": {
@@ -81,8 +86,9 @@ V33_CORRECTIONS = {
         "v33": 0x4000062B,
         "reason": "Same omission as CKA_ENCAPSULATE_TEMPLATE, same correction.",
         "citation": (
-            "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/headers/"
-            "pkcs11t.h:659 (OASIS PKCS 11 TC working tree, commit 2b25dd8)"
+            "https://github.com/oasis-tcs/pkcs11/blob/2b25dd8ed4a85d22937d8509bb296555cd329f43/"
+            "working/headers/pkcs11t.h#L659 (working/headers/pkcs11t.h:659, "
+            "OASIS PKCS 11 TC working tree, commit 2b25dd8)"
         ),
     },
 }
