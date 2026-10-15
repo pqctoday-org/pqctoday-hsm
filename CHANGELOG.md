@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- `mlxpqc/`, the standalone Apple Metal ML-DSA-65 acceleration benchmark, moved with its history to the
+  hardware-acceleration repository `pqctoday-org/pqctoday-hwpqc` (`ml-dsa/mlx`). It was never part of the HSM
+  build, tests or releases, so nothing in the engine changes.
+
 ### Security
 
 - **Rust engine: RSA private-key operations run only in AWS-LC on the boards
