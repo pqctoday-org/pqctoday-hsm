@@ -15,8 +15,8 @@
 # Run it in the Emscripten image the bundle is built with (pinned by digest,
 # emsdk 6.0.4 arm64), from the repository root:
 #
-#   docker run --rm -v "$PWD:/src" -w /src --entrypoint bash \
-#     emscripten/emsdk@sha256:3a0d11e50f072dc2c4bc92e3b05ab1340fb7d4dd152f80b8af35fc1c6f15e644 \
+#   docker run --rm -v "$PWD:/src" -w /src -e HSM_COMMIT="$(git rev-parse HEAD)" \
+#     --entrypoint bash emscripten/emsdk@sha256:3a0d11e50f072dc2c4bc92e3b05ab1340fb7d4dd152f80b8af35fc1c6f15e644 \
 #     scripts/build-openssl-studio-wasm.sh
 #
 # Inputs:
@@ -46,6 +46,9 @@
 #   PKCS11_PROVIDER_AR=.. path to libpkcs11-provider.a
 #   STAGING_DIR=...       output folder (default build-wasm/engines-staging)
 #   JOBS=N                make parallelism (default: CPU count)
+#   HSM_COMMIT=<sha>      commit recorded in openssl-link-inputs.json; pass it
+#                         in, because a git worktree's metadata is usually not
+#                         visible inside the container
 
 set -euo pipefail
 
@@ -194,7 +197,7 @@ cp apps/openssl.js   "$STAGING_DIR/public/wasm/openssl.js"
 digest() { (shasum -a 256 "$1" 2>/dev/null || sha256sum "$1") | awk '{print $1}'; }
 mtime()  { date -u -d "@$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1")" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
            || date -u -r "$(stat -f %m "$1")" +%Y-%m-%dT%H:%M:%SZ; }
-HSM_COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+HSM_COMMIT="${HSM_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 cat > "$STAGING_DIR/openssl-link-inputs.json" <<JSON
 {
   "_comment": "SHA-256 of every archive linked into openssl.wasm, recorded at link time by scripts/build-openssl-studio-wasm.sh.",
@@ -221,7 +224,7 @@ JSON
 # Warn loudly when an input archive predates the commit it will be recorded
 # against: not fatal (an untouched archive can be legitimately reused), but
 # never silent.
-src_epoch=$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)
+src_epoch=$(git -C "$ROOT" log -1 --format=%ct "$HSM_COMMIT" 2>/dev/null || echo 0)
 for ar in "$PKCS11_PROVIDER_AR" "$SOFTHSM_AR"; do
     ar_epoch=$(stat -c %Y "$ar" 2>/dev/null || stat -f %m "$ar" 2>/dev/null || echo 0)
     if (( ar_epoch > 0 && src_epoch > ar_epoch )); then
