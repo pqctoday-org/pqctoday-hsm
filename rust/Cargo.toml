@@ -170,6 +170,11 @@ required-features = ["educational-replication", "test-support"]
 name = "replication_admin"
 required-features = ["educational-replication", "test-support"]
 
+# Signed admin operations for FHE custody (plan D02387 WP-A2); runs on default native builds.
+[[test]]
+name = "replication_admin_fhe"
+required-features = ["fhe-custody", "test-support"]
+
 [[test]]
 name = "replication_fhe_p1"
 required-features = ["educational-replication", "test-support"]
