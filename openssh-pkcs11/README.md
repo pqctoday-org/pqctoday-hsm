@@ -85,5 +85,7 @@ the other PKCS#11 consumers (`strongswan-pkcs11/`, `JavaJCE/`, `openpgp/`,
 
 ## License
 
-BSD 2-Clause — see [`LICENSE`](LICENSE). Files derived from `openssh-portable`
-retain their upstream BSD/ISC terms.
+OpenSSH and the OpenSSH files this folder changes are under the OpenSSH
+licence in [`LICENSE`](LICENSE). The files PQC Today, LLC wrote for this
+folder are under the BSD 2-Clause terms in [`NOTICE`](NOTICE), which also
+lists what was changed.

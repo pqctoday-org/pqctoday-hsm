@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: X25519/X448 key exchange. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

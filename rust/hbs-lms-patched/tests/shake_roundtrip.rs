@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: SHAKE-256 LMS/HSS round-trip tests.
 //! SP 800-208 SHAKE-256 round-trip + type-ID serialization checks for the
 //! patched type-ID handling (see repo gap-analysis: hbs-lms finding).
 

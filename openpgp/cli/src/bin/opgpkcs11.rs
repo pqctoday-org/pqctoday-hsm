@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: in-token generation of composite PQC keys.
 use std::path::PathBuf;
 use std::str::FromStr;
 

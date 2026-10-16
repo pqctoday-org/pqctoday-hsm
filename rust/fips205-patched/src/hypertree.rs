@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: top-layer root checked during signing; PK.seed block reuse; profiling.
 use crate::hashers::{Hashers, PkSeed};
 use crate::types::{Adrs, HtSig, WotsSig, XmssSig};
 use crate::xmss;

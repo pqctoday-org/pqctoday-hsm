@@ -113,6 +113,16 @@ jobs:
       # Packages nothing and uploads nothing: tests the release tooling only.
       - name: Unit tests for scripts/publish_engines.py
         run: python3 -m unittest tests/test_publish_engines.py
+      # Every bundle declares its third-party notices, every licence file
+      # exists, every crate has a licence, and the crate lists match Cargo.lock.
+      - name: Third-party notices are complete
+        run: python3 scripts/engine_notices.py check
+      # The committed crate lists are what cargo resolves for wasm32 today
+      # (catches a feature or dependency change that leaves Cargo.lock alone).
+      - name: Crate lists are current
+        run: |
+          python3 scripts/engine_notices.py crates --online
+          git diff --exit-code -- engines/notices/crates
 
   rust-test:
     name: Rust Tests (engine + KMIP)

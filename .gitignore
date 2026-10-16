@@ -130,6 +130,9 @@ strongswan-pkcs11/tests/test_pkcs11_kem
 # Release wasm the local gate builds for the ACVP harness (plan 2.B)
 rust/pkg-acvp/
 
+# Token store of the root softhsm2.conf (directories.tokendir = tokens)
+/tokens/
+
 # Third-party documents (owner rule 2026-10-15): this public repository carries
 # only their extractions. Local copies may sit at the cited paths; restore and
 # verify them with `python3 docs/refs/fetch_refs.py` (list:

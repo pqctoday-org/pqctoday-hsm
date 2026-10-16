@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: optional multi-core subtree computation under one core budget.
 //! Optional multi-threaded tree computation (pqctoday-hsm addition, feature `parallel`).
 //!
 //! Signing and key generation are dominated by building Merkle subtrees, and most of those

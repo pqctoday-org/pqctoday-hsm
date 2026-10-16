@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs.
 use core::convert::TryFrom;
 use tinyvec::ArrayVec;
 

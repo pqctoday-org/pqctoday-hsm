@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: uses the inlined x509 module.
 use std::time::SystemTime;
 
 use anyhow::Result;

@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: pre-hash and already-hashed entry points, from_bytes_unchecked, parallel and hw-accel features.
 #![no_std]
 #![deny(clippy::pedantic, warnings, missing_docs, unsafe_code)]
 // Most of the 'allow' category...

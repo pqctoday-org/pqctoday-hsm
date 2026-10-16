@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: PKCS#11 v3.2/v3.3 template attributes and PQC Today vendor mechanism values. */
 /* This file is in the Public Domain */
 
 #ifndef _PD_PKCS11_

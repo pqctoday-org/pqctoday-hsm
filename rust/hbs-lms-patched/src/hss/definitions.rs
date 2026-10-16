@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: bounds-checked parsing of untrusted key and signature bytes.
 use core::convert::TryInto;
 
 use tinyvec::ArrayVec;

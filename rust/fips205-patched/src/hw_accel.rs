@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: hardware hook for SLH_SIGN and SLH_KEYGEN.
 //! pqctoday-hsm: optional, process-wide hooks for the `hashsig` FPGA engine.
 //!
 //! The engine (pqctoday-cacp `fpga/hashsig/ABI.md` §6.1–§6.2) computes the

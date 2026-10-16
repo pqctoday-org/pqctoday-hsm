@@ -2,6 +2,9 @@
    Copyright 2006, 2007 g10 Code GmbH
    Copyright 2006 Andreas Jellinghaus
 
+   Modified by PQC Today, LLC, 2026: PKCS#11 v3.2 ML-KEM, ML-DSA and
+   SLH-DSA constants.
+
    This file is free software; as a special exception the author gives
    unlimited permission to copy and/or distribute it, with or without
    modifications, as long as this notice is preserved.

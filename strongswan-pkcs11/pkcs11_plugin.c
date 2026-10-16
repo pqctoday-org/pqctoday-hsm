@@ -4,6 +4,8 @@
  *
  * Copyright (C) secunet Security Networks AG
  *
+ * Modified by PQC Today, LLC, 2026: ML-KEM key exchange and ML-DSA/SLH-DSA/EdDSA registration; MODP not advertised.
+ *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation; either version 2 of the License, or (at your

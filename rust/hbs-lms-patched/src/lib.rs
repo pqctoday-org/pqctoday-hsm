@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: SHAKE-256 type IDs; tree-cache feature and hardware hook.
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
 

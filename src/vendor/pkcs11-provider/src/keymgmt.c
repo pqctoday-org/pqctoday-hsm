@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: key management for ML-KEM, ML-DSA, SLH-DSA, HSS/LMS, XMSS, X25519/X448. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

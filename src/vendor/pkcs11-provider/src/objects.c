@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: PQC key objects, AES-CTR/GCM fixes, MAC and HSS attribute handling. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

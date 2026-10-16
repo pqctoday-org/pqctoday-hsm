@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: PK.seed block reuse; optional parallel subtrees and profiling.
 use crate::hashers::{Hashers, PkSeed};
 use crate::types::{Adrs, WotsSig, XmssSig, TREE, WOTS_HASH};
 use crate::wots;

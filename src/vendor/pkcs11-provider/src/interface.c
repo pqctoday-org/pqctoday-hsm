@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: C_WrapKey/C_UnwrapKey and C_EncapsulateKey/C_DecapsulateKey bindings. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

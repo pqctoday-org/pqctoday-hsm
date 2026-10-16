@@ -8,8 +8,34 @@ The Hub ships WebAssembly engines that are built from this repository. An
   as the consumer lays them out (the explicit file paths in `bundles.json`; folder
   entries are rejected because a folder can hold consumer-authored code);
 - `engines-manifest.json`: for every bundle the build commit, the tarball
-  SHA-256 and the SHA-256 and size of every file;
+  SHA-256, the SHA-256 and size of every file, and the bundle's notice files;
 - `SHA256SUMS`.
+
+## Third-party notices
+
+Every tarball also holds `public/licenses/engines/<bundle>/THIRD-PARTY-NOTICES.txt`
+and a `LICENSES/` folder next to it with the full licence texts of everything
+compiled into that bundle: the components named in the bundle's `notices`
+list (`notices/components.json`, texts in `notices/texts/` or elsewhere in this
+repository) and, for the Rust bundles, every crate compiled for wasm32
+(`notices/crates/<bundle>.json`, generated from `Cargo.lock`). Changed
+third-party code is marked as changed and points to its record (`PATCHES.md`,
+`NOTICE`). The strongSwan bundle also carries the GPL-2.0 source pointer: the
+strongSwan 6.0.5 tarball plus this repository at the build commit. The
+manifest lists every notice file with its SHA-256, and `verify` checks them in
+the tarballs and in the consumer tree.
+
+The notices are generated from this checkout. Packaging refuses a bundle whose
+notices are incomplete, and CI runs the same check:
+
+```bash
+python3 scripts/engine_notices.py check     # no cargo needed
+# after a dependency change, in the Rust container (cargo + crate sources):
+python3 scripts/engine_notices.py crates
+```
+
+When a build starts linking new third-party code, add it to
+`notices/components.json` and to the bundle's `notices` list.
 
 A consumer pins **one exact release and checksum per bundle** and verifies it
 without any sibling checkout.
