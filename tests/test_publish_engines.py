@@ -208,16 +208,30 @@ class Notices(Base):
             self.assertIn("rust/fips204-patched/PATCHES.md", text)
             self.assertIn("wasm-bindgen", text)
 
-    def test_openssl_studio_carries_gpl3_shims_patched_openssl_and_emscripten_crates(self):
+    def test_openssl_studio_carries_agpl3_shims_patched_openssl_and_emscripten_crates(self):
         text = self.notices_text("openssl-pkcs11")
         commit = self.manifest["bundles"]["openssl-pkcs11"]["hsmCommit"]
-        for needle in ("GPL-3.0-only", "Copyright (c) 2026 PQC Today, LLC", f"/tree/{commit}",
+        for needle in ("AGPL-3.0-only", "Copyright (c) 2026 PQC Today, LLC", f"/tree/{commit}",
                        "openssl-3.6.3.tar.gz", "0001-apps_startup-register-pkcs11-provider.patch",
                        "pkcs11-provider", "src/vendor/pkcs11-provider/PATCHES.md", "OASIS", "Emscripten",
                        "target wasm32-unknown-emscripten", "rust/fips204-patched/PATCHES.md"):
             self.assertIn(needle, text)
-        gpl = self.members("openssl-pkcs11")["public/licenses/engines/openssl-pkcs11/LICENSES/openssl-studio-shims/GPL-3.0-only.txt"].decode()
-        self.assertIn("Version 3, 29 June 2007", gpl)
+        # The shims and the Rust engine share one AGPL text; the tarball stores it once.
+        agpl = [v.decode() for k, v in self.members("openssl-pkcs11").items()
+                if k.startswith("public/licenses/engines/openssl-pkcs11/LICENSES/") and k.endswith("/AGPL-3.0-only.txt")]
+        self.assertEqual(len(agpl), 1)
+        self.assertIn("GNU AFFERO GENERAL PUBLIC LICENSE", agpl[0])
+
+    def test_rust_bundles_carry_the_agpl_text_and_source_offer_for_own_code(self):
+        for name in ("cacp-kmip", "softhsmrustv3-engine", "openssl-pkcs11"):
+            text = self.notices_text(name)
+            commit = self.manifest["bundles"][name]["hsmCommit"]
+            self.assertIn("Code written by PQC Today, LLC", text, name)
+            self.assertIn(f"/tree/{commit}", text, name)
+            agpl = [v.decode() for k, v in self.members(name).items()
+                    if k.startswith(f"public/licenses/engines/{name}/LICENSES/") and k.endswith("/AGPL-3.0-only.txt")]
+            self.assertEqual(len(agpl), 1, name)
+            self.assertIn("GNU AFFERO GENERAL PUBLIC LICENSE", agpl[0], name)
 
     def test_crate_target_is_per_bundle(self):
         by_name = {b["name"]: b for b in BUNDLES}

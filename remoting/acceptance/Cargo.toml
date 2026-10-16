@@ -2,7 +2,7 @@
 name = "pqctoday-pkcs11-remote-acceptance"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "WP5a — v3.2-derived acceptance suite for the PKCS#11 gRPC/REST remoting services: a shared case table run three ways (in-process core control, real gRPC, real REST), asserting exact CKR_* parity across transports."
 
 [lib]

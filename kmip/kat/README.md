@@ -176,4 +176,4 @@ The `-30` suffix marks KMIP 3.0; `-M-` denotes mandatory; `-O-` optional.
 
 ## License
 
-OASIS KMIP test cases are published under the OASIS IPR Policy with royalty-free terms (RF on Limited Terms Mode). NIST ACVP vectors are public-domain (US Government work, 17 USC §105). All files in this corpus are redistributable as part of `pqctoday-hsm/kmip/` (MIT license).
+OASIS KMIP test cases are published under the OASIS IPR Policy with royalty-free terms (RF on Limited Terms Mode). NIST ACVP vectors are public-domain (US Government work, 17 USC §105). All files in this corpus are redistributable as part of `pqctoday-hsm/kmip/`; the code around them is AGPL-3.0-only (see COPYRIGHT.md at the repository root), while the test cases and vectors keep the terms above.

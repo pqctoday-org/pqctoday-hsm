@@ -2,7 +2,7 @@
 name        = "pqctoday-kmip"
 version     = "0.17.0"
 edition     = "2024"
-license     = "MIT"
+license     = "AGPL-3.0-only"
 description = "KMIP 3.0 PQC + classical key management wrapper over pqctoday-hsm PKCS#11"
 repository  = "https://github.com/pqctoday-org/pqctoday-hsm"
 

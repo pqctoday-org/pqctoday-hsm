@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 // vendor_mechanisms.h — Vendor-defined PKCS#11 mechanism and attribute constants
 //

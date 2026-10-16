@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 //! KAT suite for `OpenMlsRustCrypto` — drives `hash`, `hmac`,
 //! `hkdf_extract`, and `hkdf_expand` against the published vectors from
 //! FIPS 180-4 (SHA-2), RFC 4231 (HMAC-SHA-2), and RFC 5869 (HKDF).

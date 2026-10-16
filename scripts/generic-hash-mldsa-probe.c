@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* generic-hash-mldsa-probe: remediation R37 (phase 8) permanent regression
  * fixture (started as a step-1 live-confirm diagnostic; promoted once the

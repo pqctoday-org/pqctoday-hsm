@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* lms-xdr-verify: phase-4 R9 cross-implementation proof. Verifies an
  * HSS-token-produced signature using OpenSSL 3.6.3's OWN, independent,

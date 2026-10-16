@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* aes-wrap-probe: OpenSSL-provider remediation item (2026-08-30) test
  * helper for CKM_AES_KEY_WRAP / CKM_AES_KEY_WRAP_KWP -- neither had ANY

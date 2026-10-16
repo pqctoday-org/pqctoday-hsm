@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* hash-pqc-provider-probe: remediation item 5 (2026-08-30) verification
  * helper. Exercises this provider's NEW "HASH-ML-DSA"/"HASH-SLH-DSA"

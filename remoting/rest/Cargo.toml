@@ -2,7 +2,7 @@
 name = "pqc-rest-pkcs11"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "REST (JSON+base64 over HTTP/1.1 keep-alive) PKCS#11 remoting service over softhsmrustv3 — sandbox-bench-transport-arms-plan-08242026.md WP3."
 
 [[bin]]

@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* hss-pubkey-dump: phase-4 R9 test helper. Writes the raw CKA_VALUE
  * (RFC 8554 HSS wire-format public key bytes) of the sole CKK_HSS public
