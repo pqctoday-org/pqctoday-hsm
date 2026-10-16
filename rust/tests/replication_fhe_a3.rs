@@ -204,8 +204,17 @@ fn kat_ckks_registry_ids_through_the_token() {
 }
 
 /// TFHE registry ID 1 through the token (educational-fhe builds). Three independent paths:
-/// - the parameter hash: SHA-384 of `FheParamSetV1` with the spec §4 values, DER-encoded by hand in this test (not
-///   through the engine's `der` types), equals the seed's CKA_PQCTODAY_FHE_PARAM_HASH;
+/// - the parameter hash: SHA-384 of `FheParamSetV1`, DER-encoded by hand in this test (not through the engine's `der`
+///   types), equals the seed's CKA_PQCTODAY_FHE_PARAM_HASH and the value pinned in the published pqctoday-fhe evidence
+///   (`reference-runs/kv260-fhe-server/results/2026-10-03-*`, `paramHash=2ce45553…`).
+///
+///   KNOWN DISCREPANCY (WP-A3 finding, owner decision pending): the `commit` field the engine encodes
+///   (`fhe::TFHE_COMMIT`, 187fc0b95ab35352422deb6c027d0bd8743b6db6) is not the TFHE-rs 1.8.1 commit that spec §4, the
+///   constant's own comment and the pqctoday-fhe provenance name (187fc0b95ab35352422deec6c027d0bd8743b6db): one hex
+///   digit was dropped after `422de` and the last byte padded. The spec's encoding hashes to e3219e9e…, not to the
+///   engine's 2ce45553…. Correcting the constant changes registry ID 1's parameter hash, which published evidence
+///   pins and TFHE seeds already made carry, so it is left for the owner; this test pins today's value and fails when
+///   either side changes.
 /// - the client key: `client_key_for(00..1f)` reproduces the committed §5.5 vector (derived seed `0xf6eb…12dc`,
 ///   SHA-256 `9f5d847e…b77b`, 24,087 bytes);
 /// - the token: a seed installed with the KAT value decrypts a ciphertext made outside the token with that KAT client
@@ -230,18 +239,24 @@ fn kat_tfhe_registry_1_through_the_token() {
         o.extend_from_slice(v);
         o
     }
-    let commit: Vec<u8> = (0..40).step_by(2).map(|i| u8::from_str_radix(&"187fc0b95ab35352422deec6c027d0bd8743b6db"[i..i + 2], 16).unwrap()).collect();
-    let body = [
+    let unhex = |h: &str| -> Vec<u8> { (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect() };
+    let spec_commit = unhex("187fc0b95ab35352422deec6c027d0bd8743b6db");
+    let engine_commit = unhex("187fc0b95ab35352422deb6c027d0bd8743b6db6");
+    assert_eq!(fhe::TFHE_COMMIT.to_vec(), engine_commit, "the engine's commit field (see the KNOWN DISCREPANCY above)");
+    assert_ne!(engine_commit, spec_commit);
+    let param_der = |commit: &[u8]| tlv(0x30, &[
         tlv(0x02, &[1]),
         tlv(0x0c, b"tfhe-rs"),
         tlv(0x0c, b"1.8.1"),
-        tlv(0x04, &commit),
+        tlv(0x04, commit),
         tlv(0x0c, b"PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128"),
         tlv(0x0c, b"ConfigBuilder::default().use_dedicated_oprf_key(false)"),
         tlv(0x0c, b"sp800-108-ctr-hmac-sha384/v1"),
     ]
-    .concat();
-    let want_hash: Vec<u8> = sha2::Sha384::digest(tlv(0x30, &body)).to_vec();
+    .concat());
+    let want_hash: Vec<u8> = sha2::Sha384::digest(param_der(&engine_commit)).to_vec();
+    assert_eq!(hexs(&want_hash), "2ce455537b3c792053ca3c7a0cf98a4e3bfb5569054f69eedd32a3607da06ed0f6a469d6e891fd9c8c19d55fa6c778b5", "the value pinned in the published evidence");
+    assert!(hexs(&sha2::Sha384::digest(param_der(&spec_commit))).starts_with("e3219e9e"), "spec §4's encoding");
 
     // The §5.5 vector.
     assert_eq!(tf::derive_tfhe_seed(&KAT_SEED), 0xf6eb1c9a88a4442c8a7449536c3d12dc);
@@ -262,7 +277,7 @@ fn kat_tfhe_registry_1_through_the_token() {
     let s = w.tokens[0].user;
     let h = fhe::generate_fhe_seed_with_value_for_test(s, 1, &rpid, &dpid, &KAT_SEED, b"tfhe-kat").expect("KEY_GEN");
     let got = native::get_attribute(s, h, CKA_PQCTODAY_FHE_PARAM_HASH).unwrap();
-    assert_eq!(got, want_hash, "CKA_PQCTODAY_FHE_PARAM_HASH = SHA-384 of the hand-encoded FheParamSetV1");
+    assert_eq!(got, want_hash, "CKA_PQCTODAY_FHE_PARAM_HASH = SHA-384 of the hand-encoded FheParamSetV1 (engine commit field)");
     assert_eq!(fhe::param_hash(1).unwrap().to_vec(), want_hash);
 
     // Outside → token.

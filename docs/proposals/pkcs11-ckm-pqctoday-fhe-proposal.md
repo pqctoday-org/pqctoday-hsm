@@ -83,6 +83,8 @@ Measured for ID 1: n = 918, N = 2048, k = 1, KS level 4, `encryption_key_choice:
 
 **Canonical parameter encoding (P2).** This is the DER of `FheParamSetV1 ::= SEQUENCE { id INTEGER, library UTF8String, version UTF8String, commit OCTET STRING (SIZE(20)), paramName UTF8String, config UTF8String, kdf UTF8String }`, with the ID 1 values above and `kdf = "sp800-108-ctr-hmac-sha384/v1"`. `CKA_PQCTODAY_FHE_PARAM_HASH` is SHA-384 of that DER.
 
+**Known discrepancy (WP-A3, owner decision pending).** The engine encodes `commit` as `187fc0b95ab35352422deb6c027d0bd8743b6db6` (`fhe::TFHE_COMMIT`), not the commit above: one hex digit was dropped and the last byte padded. Registry ID 1's `CKA_PQCTODAY_FHE_PARAM_HASH` is therefore `2ce45553…` (the value published evidence pins), where the encoding written here gives `e3219e9e…`. Correcting the constant changes the hash of every TFHE seed; `kat_tfhe_registry_1_through_the_token` pins today's value until the owner decides.
+
 P1's placeholder hash (SHA-384 of the display name, `f48a040d` `param_hash`) is replaced in P2. Objects created under the placeholder are P1 test fixtures, so they are not migrated; P2 rejects them on import with `CKR_ENCRYPTED_DATA_INVALID`, the descriptor-mismatch code.
 
 ## 5. Mechanisms
