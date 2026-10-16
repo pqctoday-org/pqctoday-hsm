@@ -1,7 +1,7 @@
 //! K4 acceptance — protected replication (plan R3.7; spec §10/§12; review
 //! K0B dispositions). Every positive case runs for AES-128/192/256,
 //! ML-KEM-768 and ML-DSA-65.
-#![cfg(feature = "educational-replication")]
+#![cfg(pqc_replication)]
 
 mod replication_common;
 use replication_common::*;

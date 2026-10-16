@@ -2,7 +2,7 @@
 //! operation, the §3.2 verification order and its refusals, exact retry,
 //! sizing, the B2 root-CRL renewal path, authority replacement and ledger
 //! pruning. Receipts are checked with the host verifier (public bytes only).
-#![cfg(all(feature = "educational-replication", feature = "test-support"))]
+#![cfg(all(pqc_replication, feature = "test-support"))]
 
 mod replication_common;
 use replication_common::*;

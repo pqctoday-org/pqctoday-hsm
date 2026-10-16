@@ -10,7 +10,7 @@
 //! and are destroyed while another context commits a replication package.
 //! After the last logout, and again after a restart from the SQLite store
 //! alone, there is still exactly one source object and the budget stays spent.
-#![cfg(feature = "educational-replication")]
+#![cfg(pqc_replication)]
 
 mod replication_common;
 use replication_common::*;

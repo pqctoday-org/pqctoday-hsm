@@ -1,7 +1,7 @@
 //! Admin addendum A-03 (stage + common commit) and the BeginReceive length
 //! function (§2.2): staging changes nothing, `resultDigest`/output follow
 //! §3.6, and sizing is exact and side-effect free.
-#![cfg(all(feature = "educational-replication", feature = "test-support"))]
+#![cfg(all(pqc_replication, feature = "test-support"))]
 
 mod replication_common;
 use replication_common::*;
