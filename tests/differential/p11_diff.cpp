@@ -465,6 +465,22 @@ static std::string classify(const CK_BYTE* p, size_t n) {
     return "RAW";
 }
 
+// CKA_EC_POINT of an Edwards or Montgomery key (Ed25519/Ed448, X25519/X448) is the raw 32/57/56-byte point, or
+// that point wrapped in a DER OCTET STRING. Decided by LENGTH, never by the leading byte: a raw point is uniformly
+// random, so about one key in 256 starts 0x30 and classify() calls it a malformed ASN.1 SEQUENCE. Found 2026-10-15:
+// a full gate failed with ONE uncovered divergence,
+//   scenario create.generate_key_pair.ed25519
+//   path     gen.pub.CKA_EC_POINT.enc
+//   cpp      RAW_32      rust  DER_SEQUENCE_MALFORMED_LEN
+// and an immediate re-run of the identical commit reported 0 uncovered. A wrapped point (0x04, length, point) is
+// still classified as before, so an engine that wraps while the other does not still diverges.
+static std::string classify_mont_edwards_point(const CK_BYTE* p, size_t n) {
+    if (n == 32) return "RAW_32";
+    if (n == 56) return "RAW_56";
+    if (n == 57) return "RAW_57";
+    return classify(p, n);
+}
+
 // Attributes whose byte value is engine-random by construction (key material,
 // engine-minted identifiers). For these the harness records return code,
 // length and encoding class — never the bytes, which would guarantee a
@@ -722,6 +738,9 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
                            (attr_ulong(e, s, o, CKA_CLASS, &objClass) &&
                             (objClass == CKO_SECRET_KEY ||
                              objClass == CKO_PRIVATE_KEY));
+    CK_ULONG ecKeyType = 0;
+    const bool montEdwards = attr_ulong(e, s, o, CKA_KEY_TYPE, &ecKeyType) &&
+                             (ecKeyType == CKK_EC_EDWARDS || ecKeyType == CKK_EC_MONTGOMERY);
     std::vector<std::string> present;
     for (CK_ATTRIBUTE_TYPE t : kProbe) {
         std::string an = attr_name(t);
@@ -754,7 +773,9 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         // trap again for CKA_VALUE on a raw fixed-length PQC key or a secret
         // key (see rawValue's own comment) — unlike a wrapped-key blob, there
         // is no ASN.1 framing to verify here at all.
-        if (!is_unstructured_attr(t) && !is_bignum_attr(t) &&
+        if (t == CKA_EC_POINT && montEdwards)
+            r.put(prefix + "." + an + ".enc", classify_mont_edwards_point(buf.data(), a.ulValueLen));
+        else if (!is_unstructured_attr(t) && !is_bignum_attr(t) &&
             !(t == CKA_VALUE && rawValue))
             r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
         if (is_opaque_attr(t)) {

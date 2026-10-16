@@ -917,7 +917,11 @@ mod tests {
             flood(&mut m, sigma_log2).unwrap();
             let var = m.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n as f64;
             let ratio = var.sqrt() / sigma_log2.exp2();
-            assert!((0.98..1.02).contains(&ratio), "σ = 2^{sigma_log2}: std/σ = {ratio}");
+            // n = 2^14 draws: the relative standard error of the sample standard deviation is about 1/√(2n) ≈ 0.55 %.
+            // ±3 % is about 5.4 standard errors, a false failure about once in 10^7 runs over the three widths
+            // (±2 % was 3.6 standard errors, about once per thousand runs, and failed once in a gate on 2026-10-15
+            // with std/σ = 0.97998). A real width error (a wrong exponent, a missing factor) is far outside ±3 %.
+            assert!((0.97..1.03).contains(&ratio), "σ = 2^{sigma_log2}: std/σ = {ratio}");
             for bit in [0, 8, 20] {
                 let set = m.iter().filter(|&&v| (v >> bit) & 1 == 1).count() as f64 / n as f64;
                 assert!((0.45..0.55).contains(&set), "σ = 2^{sigma_log2}: bit {bit} set in {set}");

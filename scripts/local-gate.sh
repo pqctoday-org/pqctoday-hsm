@@ -443,6 +443,12 @@ run_step_host "gate container-root derivation test" \
 run_step_host "pre-push hook test (delete-only pushes allowed)" \
   "cd '$ROOT' && bash tests/test-pre-push-hook.sh"
 
+# Third-party notices of every engine bundle are complete and were generated from the committed Cargo.lock
+# files. CI runs this check (and regenerates the crate lists); the gate missed it on 2026-10-15, when a lockfile
+# change reached a PR with stale notices and only CI caught it.
+run_step_host "engine third-party notices complete and current (engine_notices.py check)" \
+  "cd '$ROOT' && python3 scripts/engine_notices.py check"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
