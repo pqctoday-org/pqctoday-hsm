@@ -4577,8 +4577,8 @@ pub fn C_GenerateKey(
     // inspection (the _impl below repeats these checks; they are idempotent).
     require_init!();
     require_session!(_h_session);
-    // FHE P2 (P0B §5.1): CKM_PQCTODAY_FHE_KEY_GEN, educational-ckks (CKKS) /
-    // educational-fhe (adds TFHE) only.
+    // FHE P2 (P0B §5.1): CKM_PQCTODAY_FHE_KEY_GEN, cfg pqc_ckks_custody (CKKS: the
+    // default native `fhe-custody` or `educational-ckks`; TFHE needs `educational-fhe`).
     #[cfg(pqc_ckks_custody)]
     if !p_mechanism.is_null() && !ph_key.is_null() {
         let m = unsafe { ck_param::mech(p_mechanism) };
@@ -10369,7 +10369,8 @@ pub fn C_Encrypt(
 pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
-    // FHE P2 (P0B §5.3): single-part CKM_PQCTODAY_FHE_DECRYPT, educational-ckks only.
+    // FHE P2 (P0B §5.3): single-part CKM_PQCTODAY_FHE_DECRYPT, cfg pqc_ckks_custody
+    // (default native `fhe-custody`, or `educational-ckks`).
     #[cfg(pqc_ckks_custody)]
     {
         if p_mechanism.is_null() && crate::replication::fhe_custody::cancel(h_session) {
@@ -12244,8 +12245,8 @@ pub fn C_DeriveKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
-    // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, educational-ckks only
-    // (TFHE kinds additionally need educational-fhe).
+    // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, cfg pqc_ckks_custody (default
+    // native `fhe-custody`, or `educational-ckks`; TFHE kinds also need educational-fhe).
     #[cfg(pqc_ckks_custody)]
     if !p_mechanism.is_null() && !ph_key.is_null() {
         let m = unsafe { ck_param::mech(p_mechanism) };

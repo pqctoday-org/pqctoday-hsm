@@ -814,9 +814,16 @@ pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
 // function key is never a general signing oracle.
 pub const CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE: u32 = 0x8000_0016;
 pub const CKM_PQCTODAY_SIGN_KEY_ATTESTATION: u32 = 0x8000_0017;
-// FHE custody mechanisms (authority §1.4.5, priv PR #148 merged b80c856b).
-// Reserved here for the P1 policy model; NOT dispatched by any C_* entry point
-// until FHE P2 implements them.
+// FHE custody mechanisms (authority §1.4.5, priv PR #148 merged b80c856b;
+// spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md). Dispatched by
+// C_GenerateKey / C_DeriveKey / C_DecryptInit + C_Decrypt in builds with cfg
+// `pqc_ckks_custody`: the default native build (`fhe-custody`, CKKS; nothing
+// for wasm32) and the opt-in `educational-ckks` / `educational-fhe` (adds
+// TFHE, non-commercial) features. ENCRYPT exists only with `educational-fhe`
+// plus `test-support` (TFHE known-answer vectors). None of
+// the four is listed by C_GetMechanismList yet: KEY_GEN, DERIVE_PUBLIC and
+// DECRYPT will be once the plan D02387 WP-A3 hardening tests pass (owner
+// decision F19, spec §10).
 pub const CKM_PQCTODAY_FHE_KEY_GEN: u32 = 0x8000_0018;
 pub const CKM_PQCTODAY_FHE_DERIVE_PUBLIC: u32 = 0x8000_0019;
 pub const CKM_PQCTODAY_FHE_DECRYPT: u32 = 0x8000_001A;
