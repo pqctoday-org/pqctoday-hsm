@@ -882,3 +882,23 @@ class KmipClient:
         if offset is not None:
             payload.append(_leaf("Offset", "Interval", offset))
         return self.request("ReKeyKeyPair", *payload)
+
+    def pkcs11(self, interface: str, function: int, input_parameters: bytes = b"") -> tuple[int, bytes]:
+        """KMIP PKCS#11 (§6.1.44, Operation 0x33) on a named interface.
+
+        ``function`` is the KMIP PKCS#11 Function value, the 1-based offset in the interface's function list.
+        Returns ``(CK_RV, output parameters)``; the server omits empty output, which comes back as ``b""``. A
+        KMIP-level failure (the request never reached the interface) raises ``RuntimeError``.
+        """
+        payload = [
+            _leaf("PKCS11Interface", "TextString", interface),
+            _leaf("PKCS11Function", "Enumeration", int(function)),
+        ]
+        if input_parameters:
+            payload.append(_leaf("PKCS11InputParameters", "ByteString", bytes(input_parameters).hex()))
+        r = self.request("PKCS11", *payload)
+        if not r.ok:
+            raise RuntimeError(f"PKCS_11 on {interface} function {function}: {r}")
+        rv = r.get("PKCS11ReturnCode")
+        out = r.get("PKCS11OutputParameters")
+        return (int(rv) & 0xFFFF_FFFF if rv is not None else -1, bytes.fromhex(out) if out else b"")

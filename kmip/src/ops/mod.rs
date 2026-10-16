@@ -77,6 +77,10 @@ pub mod revoke;
 pub mod rng_and_pkcs11;
 #[cfg(feature = "educational-replication")]
 pub mod replication_bridge;
+#[cfg(any(feature = "educational-replication", feature = "fhe-custody"))]
+pub mod engine_bridge;
+#[cfg(feature = "fhe-custody")]
+pub mod fhe_bridge;
 pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;

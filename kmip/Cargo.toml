@@ -65,7 +65,12 @@ default = ["native"]
 educational-replication = ["softhsmrustv3/educational-replication"]
 # Adds the FHE seed profile (TFHE-rs custody) to the educational courier (`bootstrap --fhe`).
 educational-fhe = ["educational-replication", "softhsmrustv3/educational-fhe"]
+# FHE key custody over KMIP (plan D02387 WP-B): the `PQCTODAY_FHE_1_0` interface on Operation PKCS_11, CKKS
+# custody only (no TFHE-rs; owner decision F10). Part of `native`, so every server build has it; served only when
+# the server is started with `--fhe-custody`. TFHE seeds need `educational-fhe` as well (non-commercial lab images).
+fhe-custody = ["softhsmrustv3/fhe-custody"]
 native = [
+    "fhe-custody",
     "dep:tokio",
     "dep:tokio-rustls",
     "dep:rustls",
@@ -120,7 +125,7 @@ rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "
 # already resolved in Cargo.lock via `rsa` / `x509-parser` / `ecdsa`
 # (der 0.7, spki 0.7, const-oid 0.9) so no second copy is pulled in.
 x509-cert = { version = "0.2", default-features = false, features = ["builder"] }
-der       = { version = "0.7", features = ["oid", "alloc"] }
+der       = { version = "0.7", features = ["oid", "alloc", "derive"] }
 spki      = { version = "0.7", features = ["alloc"] }
 const-oid = { version = "0.9", features = ["db"] }
 
