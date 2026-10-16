@@ -17,11 +17,15 @@ Every tarball also holds `public/licenses/engines/<bundle>/THIRD-PARTY-NOTICES.t
 and a `LICENSES/` folder next to it with the full licence texts of everything
 compiled into that bundle: the components named in the bundle's `notices`
 list (`notices/components.json`, texts in `notices/texts/` or elsewhere in this
-repository) and, for the Rust bundles, every crate compiled for wasm32
-(`notices/crates/<bundle>.json`, generated from `Cargo.lock`). Changed
+repository) and, for the Rust bundles, every crate compiled for the bundle's
+wasm32 target (`cargoTarget` in `bundles.json`, default
+`wasm32-unknown-unknown`; `openssl-pkcs11` links the Rust engine as a
+`wasm32-unknown-emscripten` staticlib) (`notices/crates/<bundle>.json`,
+generated from `Cargo.lock`). Changed
 third-party code is marked as changed and points to its record (`PATCHES.md`,
 `NOTICE`). The strongSwan bundle also carries the GPL-2.0 source pointer: the
-strongSwan 6.0.5 tarball plus this repository at the build commit. The
+strongSwan 6.0.5 tarball plus this repository at the build commit, and the
+OpenSSL Studio bundle carries the GPL-3.0 source pointer for its shims. The
 manifest lists every notice file with its SHA-256, and `verify` checks them in
 the tarballs and in the consumer tree.
 
@@ -65,8 +69,15 @@ pinned toolchain. Independent reproducibility is a separate improvement.
 
 The output is deterministic: the same input gives the same bytes.
 
-## Not declared yet
+## The OpenSSL Studio bundle
 
-The consumer's sixth bundle (`openssl.*`) is linked outside this repository, so
-it is not in `bundles.json`. Its builder has to move here, or be published from
-where it is built, before a consumer can pin it the same way.
+`openssl-pkcs11` (`public/wasm/openssl.js` + `openssl.wasm`) is linked by
+`scripts/build-openssl-studio-wasm.sh` from OpenSSL 3.6.3, this repository's
+pkcs11-provider and Rust engine, and the C shims in `wasm/openssl-studio/`.
+It writes to a staging folder, `build-wasm/engines-staging/`, laid out like
+the consumer, so it can be packaged on its own:
+
+```bash
+python3 scripts/publish_engines.py package --from build-wasm/engines-staging \
+    --only openssl-pkcs11 --out /tmp/engines-2 --tag engines-2 --commit-head
+```

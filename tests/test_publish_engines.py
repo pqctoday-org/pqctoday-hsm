@@ -208,6 +208,24 @@ class Notices(Base):
             self.assertIn("rust/fips204-patched/PATCHES.md", text)
             self.assertIn("wasm-bindgen", text)
 
+    def test_openssl_studio_carries_gpl3_shims_patched_openssl_and_emscripten_crates(self):
+        text = self.notices_text("openssl-pkcs11")
+        commit = self.manifest["bundles"]["openssl-pkcs11"]["hsmCommit"]
+        for needle in ("GPL-3.0-only", "Copyright (c) 2026 PQC Today, LLC", f"/tree/{commit}",
+                       "openssl-3.6.3.tar.gz", "0001-apps_startup-register-pkcs11-provider.patch",
+                       "pkcs11-provider", "src/vendor/pkcs11-provider/PATCHES.md", "OASIS", "Emscripten",
+                       "target wasm32-unknown-emscripten", "rust/fips204-patched/PATCHES.md"):
+            self.assertIn(needle, text)
+        gpl = self.members("openssl-pkcs11")["public/licenses/engines/openssl-pkcs11/LICENSES/openssl-studio-shims/GPL-3.0-only.txt"].decode()
+        self.assertIn("Version 3, 29 June 2007", gpl)
+
+    def test_crate_target_is_per_bundle(self):
+        by_name = {b["name"]: b for b in BUNDLES}
+        self.assertEqual(en.bundle_target(by_name["softhsmrustv3-engine"]), "wasm32-unknown-unknown")
+        self.assertEqual(en.bundle_target(by_name["openssl-pkcs11"]), "wasm32-unknown-emscripten")
+        wrong = dict(by_name["openssl-pkcs11"], cargoTarget="wasm32-unknown-unknown")
+        self.assertTrue(any("generated for" in p for p in en.check_bundle(wrong, en.load_components())))
+
     def test_incomplete_notices_refuse_to_package(self):
         bundle = {"name": "x", "files": ["a"], "notices": ["no-such-component"]}
         self.assertTrue(en.check_bundle(bundle, en.load_components()))
