@@ -282,7 +282,9 @@ fn fhe_custody_over_kmip_end_to_end() {
         let (rv, len) = call(&lab, Some("tenant-a"), 6, &decrypt_der(&ct, 0));
         assert_eq!(rv, CKR_OK, "C_Decrypt size query {i}");
         let len: u64 = repl::asn1::decode_strict(&len, 16).unwrap();
-        assert_eq!(call(&lab, Some("tenant-a"), 6, &decrypt_der(&ct, 1)).0, CKR_BUFFER_TOO_SMALL, "the operation stays active");
+        let (rv, need) = call(&lab, Some("tenant-a"), 6, &decrypt_der(&ct, 1));
+        assert_eq!(rv, CKR_BUFFER_TOO_SMALL, "the operation stays active");
+        assert_eq!(repl::asn1::decode_strict::<u64>(&need, 16).unwrap(), len, "the needed length comes back");
         let (rv, out) = call(&lab, Some("tenant-a"), 6, &decrypt_der(&ct, len));
         assert_eq!(rv, CKR_OK, "C_Decrypt {i}");
         assert!(release_precision(&out, &want) >= 19.0, "owner release at the policy's 2^-20 rounding");

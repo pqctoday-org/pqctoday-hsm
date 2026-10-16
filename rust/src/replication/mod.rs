@@ -100,8 +100,9 @@ pub(crate) fn require_profile() -> Result<(), u32> {
 static CLOCK_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 
 /// Pin the host clock (seconds since the Unix epoch) for tests of expiry and
-/// freshness; `None` returns to the real clock. Part of the non-shipping
-/// educational feature only.
+/// freshness; `None` returns to the real clock. Test builds only (`test-support`): the replication layer is in
+/// the default native build, and a shipped token must not let a caller move its clock.
+#[cfg(feature = "test-support")]
 pub fn set_clock_override(unix_secs: Option<u64>) {
     CLOCK_OVERRIDE.store(unix_secs.unwrap_or(0), Ordering::SeqCst);
 }
