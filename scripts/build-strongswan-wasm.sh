@@ -39,9 +39,13 @@
 #                         C_GetFunctionList; defaults to
 #                         $HSM_ROOT/build-wasm/src/lib/libsofthsmv3.a
 #
+#   HUB=...               the Hub checkout to install into; defaults to the
+#                         sibling checkout <parent of this repo>/pqctoday-hub
+#   HUB_WASM_OUT=...      override the install folder ($HUB/public/wasm)
+#
 # Output (unless SKIP_INSTALL_TO_HUB=1):
-#   /Users/ericamador/antigravity/pqctoday-hub/public/wasm/strongswan.js
-#   /Users/ericamador/antigravity/pqctoday-hub/public/wasm/strongswan.wasm
+#   $HUB_WASM_OUT/strongswan.js
+#   $HUB_WASM_OUT/strongswan.wasm
 
 set -euo pipefail
 
@@ -49,7 +53,8 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 
 HSM_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HUB_WASM_OUT="/Users/ericamador/antigravity/pqctoday-hub/public/wasm"
+HUB="${HUB:-$(cd "$HSM_ROOT/.." && pwd)/pqctoday-hub}"  # sibling checkout (override: HUB=...)
+HUB_WASM_OUT="${HUB_WASM_OUT:-$HUB/public/wasm}"
 BUILD_ROOT="${BUILD_ROOT:-/tmp/strongswan-build}"
 TARBALL="strongswan-6.0.5.tar.bz2"
 TARBALL_URL="https://download.strongswan.org/${TARBALL}"

@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: decoders for PQC keys and URI-PEM load-back. */
 /* Copyright (C) 2023 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0
 */

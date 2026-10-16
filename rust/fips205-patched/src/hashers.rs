@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: more HashSLH-DSA pre-hash functions; PK.seed block reuse; hardware hook.
 use crate::types::Adrs;
 use crate::Ph;
 

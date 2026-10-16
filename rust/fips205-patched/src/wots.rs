@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: PK.seed block hashed once per operation; optional phase profiling.
 use crate::hashers::{Hashers, PkSeed};
 use crate::helpers::{base_2b, to_byte};
 use crate::types::{Adrs, WotsPk, WotsSig, WOTS_PK, WOTS_PRF};

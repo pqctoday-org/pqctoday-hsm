@@ -12,6 +12,6 @@ This software is provided "AS IS", without warranty of any kind, express or impl
 Please be advised that certain environments (such as the WASM memory model) are strictly ephemeral. Loss of stateful keys (e.g., XMSS or LMS variants) can result in catastrophic security failures if those keys are exported or reused across different sessions. SoftHSMv3 does not inherently provide durability guarantees in its default browser-based engine.
 
 ## 4. Certification Limitations
-Unlike hardware security modules, SoftHSMv3 is a software abstraction layer. It **does not provide physical security guarantees**, side-channel resistance, or tamper-evident features. Do not use this software as a replacement for FIPS 140-2/3 Level 3+ HSMs in enterprise deployments.
+Unlike hardware security modules, SoftHSMv3 is a software abstraction layer. It **does not provide physical security guarantees**, side-channel resistance, or tamper-evident features. It is not a replacement for FIPS 140-2/3 Level 3+ HSMs in enterprise deployments.
 
-By using this software, you acknowledge and agree to these limitations and assume all risks associated with its operation.
+These are notices and disclaimers; they add no conditions to the software licence in LICENSE. Users assume the risks of operating the software.

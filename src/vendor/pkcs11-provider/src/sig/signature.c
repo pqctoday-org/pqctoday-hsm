@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: HashML-DSA/HashSLH-DSA and external-mu state in context duplication. */
 /* Copyright (C) 2022-2025 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

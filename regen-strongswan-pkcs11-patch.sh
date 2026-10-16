@@ -42,6 +42,8 @@ MODIFIED=() NEW=() UNCHANGED=()
 for f in "$FORK_DIR"/*; do
   name="$(basename "$f")"
   [ -f "$f" ] || continue
+  # Licence files for this folder, not plugin sources: keep them out of the patch.
+  case "$name" in COPYING|NOTICE) continue ;; esac
   if [ -f "$PRISTINE/$name" ]; then
     if cmp -s "$f" "$PRISTINE/$name"; then
       UNCHANGED+=("$name")

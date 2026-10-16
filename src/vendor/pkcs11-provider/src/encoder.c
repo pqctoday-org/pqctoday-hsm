@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: encoders for ML-KEM, ML-DSA, SLH-DSA, HSS/LMS, XMSS and composite keys. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

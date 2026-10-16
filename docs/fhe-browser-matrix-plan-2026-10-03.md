@@ -250,7 +250,7 @@ only. The KDF itself already matched in both browsers.
   names its type (`i32::try_from(tau)`). With wasm-bindgen's comparison impls
   in the dependency graph, the untyped `try_into()` became ambiguous. No
   behaviour change.
-  Recorded in `rust/fips204-patched/PQCTODAY-PATCHES.md`.
+  Recorded in `rust/fips204-patched/PATCHES.md`.
 - **No leak into native builds**, checked with
   `cargo tree -e features -i tfhe --features educational-fhe`: on the host
   target, `tfhe` carries no `integer-client-js-wasm-api` or `__wasm_api`

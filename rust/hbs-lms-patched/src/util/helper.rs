@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: bounds-checked read helpers (no panic on short input).
 pub fn is_odd(x: usize) -> bool {
     x % 2 == 1
 }

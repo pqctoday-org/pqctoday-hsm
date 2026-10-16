@@ -1,3 +1,4 @@
+# Modified by PQC Today, LLC, 2026: adds the SLH-DSA, HSS and XMSS sources.
 pkcs11_provider_sources = [
   'asymmetric_cipher.c',
   'cipher.c',

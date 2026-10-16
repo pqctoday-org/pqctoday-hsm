@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: more pre-hash variants.
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 

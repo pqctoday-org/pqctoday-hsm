@@ -6,12 +6,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import engine_notices as en  # noqa: E402
 import publish_engines as pe  # noqa: E402
 
 BUNDLES = pe.load_bundles()
@@ -117,8 +119,21 @@ class Verifying(Base):
         self.assertEqual(self.package(self.out)[0], 0)
         self.manifest = os.path.join(self.out, "engines-manifest.json")
 
+    def install(self):
+        """Unpack every tarball into the consumer tree, as the consumer does."""
+        manifest = json.load(open(self.manifest))
+        for b in manifest["bundles"].values():
+            with tarfile.open(os.path.join(self.out, b["tarball"]), "r:gz") as tar:
+                tar.extractall(self.src, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+
     def test_untouched_release_and_tree_pass(self):
+        self.install()
         self.assertEqual(run("verify", "--manifest", self.manifest, "--tarballs", self.out, "--tree", self.src)[0], 0)
+
+    def test_a_tree_without_the_notices_fails(self):
+        code, stdout, _ = run("verify", "--manifest", self.manifest, "--tree", self.src)
+        self.assertEqual(code, 1)
+        self.assertIn("public/licenses/engines/strongswan/THIRD-PARTY-NOTICES.txt missing", stdout)
 
     def test_a_changed_engine_file_is_named(self):
         victim = "public/wasm/strongswan.wasm"
@@ -138,6 +153,74 @@ class Verifying(Base):
         code, stdout, _ = run("verify", "--manifest", self.manifest, "--tarballs", self.out)
         self.assertEqual(code, 1)
         self.assertIn("strongswan: tarball", stdout)
+
+
+class Notices(Base):
+    """Every tarball carries the licence texts its contents require."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = os.path.join(self.tmp, "out")
+        self.assertEqual(self.package(self.out)[0], 0)
+        self.manifest = json.load(open(os.path.join(self.out, "engines-manifest.json")))
+
+    def members(self, bundle):
+        b = self.manifest["bundles"][bundle]
+        with tarfile.open(os.path.join(self.out, b["tarball"]), "r:gz") as tar:
+            return {m.name: tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+
+    def notices_text(self, bundle):
+        return self.members(bundle)[f"public/licenses/engines/{bundle}/THIRD-PARTY-NOTICES.txt"].decode()
+
+    def test_every_tarball_has_notices_listed_in_the_manifest(self):
+        for name, b in self.manifest["bundles"].items():
+            members = self.members(name)
+            self.assertIn(b["thirdPartyNotices"], members, name)
+            self.assertTrue(any("/LICENSES/" in rel for rel in b["notices"]), name)
+            for rel in b["notices"]:
+                self.assertIn(rel, members, f"{name}: {rel}")
+            self.assertIn(b["hsmCommit"], self.notices_text(name))
+
+    def test_cpp_engine_carries_openssl_softhsm2_and_runtime_texts(self):
+        text = self.notices_text("softhsm-cpp-engine")
+        for needle in ("openssl-3.6.3.tar.gz", "Apache-2.0", "SURFnet bv", "Cisco Systems", "CC0-1.0", "Emscripten"):
+            self.assertIn(needle, text)
+        members = self.members("softhsm-cpp-engine")
+        apache = members["public/licenses/engines/softhsm-cpp-engine/LICENSES/openssl/LICENSE.txt"].decode()
+        self.assertIn("Apache License", apache)
+        self.assertIn("Version 2.0", apache)
+
+    def test_strongswan_carries_gpl_text_and_source_pointer(self):
+        text = self.notices_text("strongswan")
+        commit = self.manifest["bundles"]["strongswan"]["hsmCommit"]
+        self.assertIn("GPL-2.0-or-later", text)
+        self.assertIn("strongswan-6.0.5.tar.bz2", text)
+        self.assertIn(f"/tree/{commit}", text)
+        gpl = self.members("strongswan")["public/licenses/engines/strongswan/LICENSES/strongswan/COPYING"].decode()
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", gpl)
+        self.assertIn("Version 2, June 1991", gpl)
+
+    def test_rust_bundles_list_their_crates_and_mark_patched_ones(self):
+        for name in ("softhsmrustv3-engine", "cacp-kmip"):
+            text = self.notices_text(name)
+            self.assertIn("Rust crates (", text)
+            self.assertIn("fips204", text)
+            self.assertIn("rust/fips204-patched/PATCHES.md", text)
+            self.assertIn("wasm-bindgen", text)
+
+    def test_incomplete_notices_refuse_to_package(self):
+        bundle = {"name": "x", "files": ["a"], "notices": ["no-such-component"]}
+        self.assertTrue(en.check_bundle(bundle, en.load_components()))
+        self.assertTrue(en.check_bundle({"name": "y", "files": ["a"]}, en.load_components()))
+        with self.assertRaises(en.NoticeError):
+            en.render_bundle(bundle, "0" * 40)
+
+
+class NoticeSources(unittest.TestCase):
+    def test_committed_notice_sources_are_complete_and_current(self):
+        # Fails when a crate list is stale against its Cargo.lock: regenerate with
+        # `python3 scripts/engine_notices.py crates` in the Rust container.
+        self.assertEqual(en.check_all(), [])
 
 
 if __name__ == "__main__":

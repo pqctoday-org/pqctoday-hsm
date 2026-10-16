@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: PQC composite signing/decryption, in-token key generation, sequoia 2.x and cryptoki 0.12.
 //! Library for PKCS #11 HSM usage with Sequoia PGP.
 //!
 //! Example use, uploading an OpenPGP key to a PKCS #11 device:

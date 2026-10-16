@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: tests for the process-wide core budget.
 //! pqctoday-hsm: the `parallel` feature's process-wide core budget (src/par.rs).
 //! Own test binary, so no other test shares the process-global budget counters.
 

@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs; LM-OTS checksum shift from RFC 8554 4.1.
 use core::mem::size_of;
 use tinyvec::ArrayVec;
 

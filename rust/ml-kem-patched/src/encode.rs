@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling.
 use hybrid_array::{
     typenum::{Unsigned, U256},
     Array,

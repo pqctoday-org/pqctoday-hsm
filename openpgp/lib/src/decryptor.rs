@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: ML-KEM composite decryption (MLKEM768_X25519, MLKEM1024_X448).
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass};
 use sequoia_openpgp::crypto::SessionKey;

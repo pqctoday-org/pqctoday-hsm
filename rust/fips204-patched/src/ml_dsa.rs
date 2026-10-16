@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: external mu, per-key expanded signing context, optional hardware signing path.
 // This file implements functionality from FIPS 204 sections 6/7: Key Generation, Signing, Verification
 
 use crate::encodings::{pk_decode, pk_encode, sig_decode, sig_encode, sk_decode, w1_encode};

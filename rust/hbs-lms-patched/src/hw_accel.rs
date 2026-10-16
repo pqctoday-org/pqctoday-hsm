@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: hardware hook for MERKLE_SUBTREE.
 //! pqctoday-hsm: optional, process-wide hooks for the `hashsig` FPGA engine's
 //! `MERKLE_SUBTREE` command (pqctoday-cacp `fpga/hashsig/ABI.md` §6.3).
 //!

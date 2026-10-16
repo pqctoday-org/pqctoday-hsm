@@ -5,6 +5,8 @@
  *
  * Copyright (C) secunet Security Networks AG
  *
+ * Modified by PQC Today, LLC, 2026: ML-DSA, SLH-DSA, Ed448 and Ed25519 public keys and verification.
+ *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation; either version 2 of the License, or (at your

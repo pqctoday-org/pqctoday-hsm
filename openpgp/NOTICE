@@ -1,0 +1,38 @@
+openpgp: PKCS#11 bridge for OpenPGP (Sequoia), PQC Today, LLC fork
+=================================================================
+
+Upstream: openpgp-pkcs11 by Heiko Schaefer,
+https://codeberg.org/heiko/openpgp-pkcs11
+  lib/  openpgp-pkcs11-sequoia 0.2.0 (tag openpgp-pkcs11-sequoia/v0.2.0)
+  cli/  openpgp-pkcs11-tools 0.0.2 (tag openpgp-pkcs11-tools/v0.0.2)
+  imported at upstream commit da3f13772730f2f08efa8e149154a5faa434f550
+lib/src/x509.rs, lib/src/x509/types.rs and lib/src/x509/experimental.rs are
+inlined from openpgp-x509-sequoia 0.2.0 by the same author.
+
+Licence: GNU Library General Public License, version 2 or (at your option)
+any later version (LGPL-2.0-or-later), as declared in lib/Cargo.toml and
+cli/Cargo.toml. Upstream does not ship the licence text; the full text of
+version 2 is in COPYING in this folder. Upstream build and configuration
+files carry their own CC0 SPDX tags, which are kept.
+
+Changes by PQC Today, LLC (June to September 2026)
+--------------------------------------------------
+Post-quantum OpenPGP (draft-ietf-openpgp-pqc) through a PKCS#11 v3.2 token:
+ML-DSA composite signing (MLDSA65_Ed25519, MLDSA87_Ed448), ML-KEM composite
+decryption (MLKEM768_X25519, MLKEM1024_X448), standalone Ed448 signing,
+in-token key generation; ported to sequoia-openpgp 2.x and cryptoki 0.12;
+openpgp-x509-sequoia inlined; rsa 0.9 and x509-certificate 0.25.
+
+Modified upstream files (each carries a "Modified by" line):
+  lib/Cargo.toml, cli/Cargo.toml, lib/src/lib.rs, lib/src/decryptor.rs,
+  lib/src/signer.rs, lib/src/upload.rs, lib/src/util.rs, lib/src/x509.rs,
+  cli/src/bin/opgpkcs11.rs, README.md, lib/README.md, cli/README.md,
+  .gitignore
+New files written by PQC Today, LLC: Cargo.lock, docs/, smoke-import/,
+smoke-mldsa/, smoke-mlkem/, spike-pqc/ (their sources carry their own SPDX tags).
+The git history of this folder records every change and its date.
+
+Linking: a binary that statically links this library must also give its
+recipients what they need to relink it with a modified version of the
+library (LGPL-2.0 section 6). This library is excluded from any commercial
+licence offered by PQC Today, LLC.

@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: Ed25519ph/Ed448ph instance override only for the pre-hash names; external-mu naming. */
 /* Copyright (C) 2022-2025 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

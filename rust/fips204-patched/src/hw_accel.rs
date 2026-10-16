@@ -1,3 +1,4 @@
+// Added by PQC Today, LLC, 2026: optional hardware hook for ExpandA and ML-DSA signing.
 //! Optional, process-wide hardware hook for the public-seed `ExpandA` operation.
 
 use crate::types::T;

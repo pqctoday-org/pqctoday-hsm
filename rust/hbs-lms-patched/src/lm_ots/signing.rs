@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs; bounds-checked parsing.
 use crate::{
     constants::{D_MESG, MAX_HASH_CHAIN_COUNT, MAX_HASH_SIZE, MAX_LMOTS_SIGNATURE_LENGTH},
     hasher::HashChain,

@@ -1,3 +1,4 @@
+# Modified by PQC Today, LLC, 2026: openssl_modulesdir option and extra sources.
 project(
   'pkcs11-provider', 'c',
   version: '1.1',

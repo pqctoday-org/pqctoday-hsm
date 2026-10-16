@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2022-2023 Heiko Schaefer <heiko@schaefer.name>
 # SPDX-License-Identifier: CC0
+# Modified by PQC Today, LLC, 2026: dependency updates (sequoia 2.x, cryptoki 0.12), openpgp-x509-sequoia inlined.
 
 [package]
 name = "openpgp-pkcs11-sequoia"

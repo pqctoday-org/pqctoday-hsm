@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: HashML-DSA and external-mu signing. */
 /* Copyright (C) 2025 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/pqctoday-org/pqctoday-hsm/blob/main/SECURITY.md
+    about: Please report security issues privately, as SECURITY.md explains.

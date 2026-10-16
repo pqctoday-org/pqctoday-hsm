@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: node cache and hardware hook in tree element computation.
 use tinyvec::ArrayVec;
 
 use crate::constants::{D_INTR, D_LEAF, MAX_HASH_SIZE};
