@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* skey-flow-probe: phase-5 R24 (F36-3) test helper. Answers the
  * question OpenSSL 3.6's new EVP_SKEY opaque-key API raised and phases

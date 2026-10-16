@@ -132,3 +132,17 @@ rust/pkg-acvp/
 
 # Token store of the root softhsm2.conf (directories.tokendir = tokens)
 /tokens/
+
+# Third-party documents (owner rule 2026-10-15): this public repository carries
+# only their extractions. Local copies may sit at the cited paths; restore and
+# verify them with `python3 docs/refs/fetch_refs.py` (list:
+# docs/refs/third-party-documents.json). The canonical OASIS headers
+# docs/refs/pkcs11{t,f}-canonical-v3.2.h stay tracked.
+/docs/refs/*.pdf
+/docs/refs/rfc9180-hpke.txt
+/docs/refs/draft-ietf-hpke-pq-05.txt
+/docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/
+/kmip/spec/oasis-kmip-*/**/*.pdf
+/kmip/spec/oasis-kmip-*/**/*.docx
+/kmip/spec/oasis-kmip-*/**/*.html
+/kmip/spec/oasis-kmip-*/**/*.zip

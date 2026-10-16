@@ -18,10 +18,12 @@ topic: kem-encapsulate-decapsulate
 sources:
   kmip_3_0_csd02:
     file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.html
+    url: https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.html  # file: is a local, gitignored copy; restore with docs/refs/fetch_refs.py
     label: "KMIP 3.0 Committee Specification Draft 02, 7 May 2026"
     sha256: c6277cc83a2505bdac75ab154355211085feeadad07c7de9ae20a19d6d4c7b74
     pdf_companion:
       file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.pdf
+      url: https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.pdf  # file: is a local, gitignored copy; restore with docs/refs/fetch_refs.py
       sha256: 9043830d9ea39e6cb963faf9cdd0c74c6fb4b2ea29131e8c5b65f63a3ed271cb
     note: >
       CURRENT BASELINE. CSD02 folded the PQC surface into the published
@@ -32,6 +34,7 @@ sources:
       public review closed 13 Aug 2026.
   kmip_3_0_wd19_superseded:
     file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf
+    url: https://groups.oasis-open.org/higherlogic/ws/public/download/72645/kmip-spec-v3.0-wd19-clean.pdf  # file: is a local, gitignored copy; restore with docs/refs/fetch_refs.py
     label: "KMIP 3.0 Working Draft 19, 14 February 2025 — SUPERSEDED by CSD02"
     sha256: e2dc1991e0a5697637aab00cb31b4bbebc51a664f2c1f27f8225713a42ba4f4d
     note: >
@@ -40,6 +43,7 @@ sources:
       new facts from this file.
   pkcs11_3_2_csd01:
     file: docs/refs/pkcs11-spec-v3.2-csd01.pdf
+    url: https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf  # file: is a local, gitignored copy; restore with docs/refs/fetch_refs.py
     label: "PKCS#11 v3.2 Committee Specification Draft 01, 16 April 2025"
     sha256: f30334792922cea2d0016585144985f3a298dcadeb156fc52aee5da835ca81c6
     note: >
@@ -52,6 +56,7 @@ sources:
     superseded_by: pkcs11_3_2_os
   pkcs11_3_2_os:
     file: docs/refs/pkcs11-spec-v3.2-os.pdf
+    url: https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf  # file: is a local, gitignored copy; restore with docs/refs/fetch_refs.py
     label: "PKCS#11 v3.2 OASIS Standard, 3 June 2026"
     note: >
       PKCS#11 v3.2 IS RATIFIED — unlike KMIP 3.0, this is a full OASIS

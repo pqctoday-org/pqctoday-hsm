@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 // vendor_mechanisms.h — Vendor-defined PKCS#11 mechanism and attribute constants
 //
@@ -110,8 +110,8 @@
 // the mechanism parameter.
 //
 // NOTE: v3.3 itself is still only a working draft. Per
-// docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/identifier_db/
-// raw_ids.db, this codepoint's OASIS status is "proposed" (auto-allocated,
+// the OASIS PKCS 11 TC tree at commit 2b25dd8,
+// https://github.com/oasis-tcs/pkcs11/blob/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/identifier_db/raw_ids.db, this codepoint's OASIS status is "proposed" (auto-allocated,
 // not yet through final ballot) — a future ballot could in principle
 // renumber it before v3.3 formally ratifies. Double-check this value
 // against the final ratified v3.3 header once it is published.

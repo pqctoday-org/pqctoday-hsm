@@ -493,7 +493,7 @@ predicates = "3"
 - [x] OASIS KMIP 3.0 spec PDF + HTML + sha256 present at `spec/oasis-kmip-3.0/`. **Spec-refresh audit:** pulled the 2024-08-23 republished HTML via `tools/download_kmip_spec.py`; HTML sha256 differs (`e593dad8…` → `4197ff90…`) but byte length and re-extracted content are equivalent (Word metadata churn, no spec changes). PDF is byte-identical. See [KMIP_3_0_DELTA.md](KMIP_3_0_DELTA.md) §8.
 - [x] Rust HTML parser at [`tools/extract_kmip_spec.rs`](../tools/extract_kmip_spec.rs) walks the OASIS HTML and emits `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`. No LLM in the loop — pure `scraper`-based DOM walk. Run via `cargo run --bin extract-kmip-spec`. Extraction: 395 tags + 62 enums + 730 enum values. Cross-checked against all 102 KMIP 3.0 KAT XML cases: 100% tag-name coverage, 100% Operation enum coverage, all symbolic CryptographicAlgorithm names accounted for modulo trivial notation (`DES3` vs `3DES`, `HMAC_SHA256` vs `HMAC-SHA256`).
 - [x] [`docs/KMIP_3_0_DELTA.md`](KMIP_3_0_DELTA.md) written documenting the pre-extraction draft codepoint correction (PQC algos were off by 7–20, with three direct collisions against SLH-DSA). The §6.3 placeholder JSON in this plan is now an obsolete historical artifact; Phase 3 codegen uses the extracted JSON as authority. (`src/kmip30/spec_source.json` is therefore NOT separately created; the extracted JSON IS the source-of-truth.)
-- [x] OASIS KMIP 2.1 PDF present at `spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for fallback reference (provided by earlier scaffolding).
+- [x] OASIS KMIP 2.1 PDF present at `https://docs.oasis-open.org/kmip/kmip-spec/v2.1/os/kmip-spec-v2.1-os.pdf` for fallback reference (provided by earlier scaffolding).
 - [x] NIST ACVP vectors present at `kat/{ml-kem,ml-dsa,slh-dsa}/*-acvp.json` (provided by earlier scaffolding).
 - [x] Classical KAT present at `kat/{rsa,ecdsa,aes,hmac,sha}/*-acvp.json` (provided by earlier scaffolding).
 - [x] Hand-crafted TTLV wire vectors landed at `kat/ttlv-wire/` via [`tools/gen_ttlv_kats.py`](../tools/gen_ttlv_kats.py). Six byte-exact golden vectors derived directly from OASIS KMIP 3.0 §9 (TTLV encoding rules) + the extracted §10 codepoints: Integer (BatchCount=1), Enumeration (Operation=Create), **PQC Enumeration (CryptographicAlgorithm=ML-KEM-768, codepoint 0x3a — first authoritative PQC KMIP TTLV vector for the platform; OASIS has not yet published PQC KAT, see [KMIP_3_0_DELTA.md §8](KMIP_3_0_DELTA.md))**, Boolean(true), padded TextString, nested Structure (ProtocolVersion=3.0). Indexed in `kat/ttlv-wire/manifest.json` with sha256 + hex-preview per vector. The generator's `--check` mode acts as a drift detector for CI.
@@ -856,7 +856,7 @@ Shipped on `feat/kmip-phase-7-tls-dispatcher`:
       types per KMIP 3.0 §8.1.x and §8.2.x. **Spec-verified shape:** KMIP 3.0
       removed `Batch Count` (was 0x42000d in 2.x) and `Unique Batch Item ID`
       (was 0x420093) — batch items are correlated by position only. Confirmed
-      against `spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf` §8.1.2 / §8.1.3 / §8.2.3.
+      against `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.pdf` §8.1.2 / §8.1.3 / §8.2.3.
 - [x] `src/kmip30/wire.rs` — TTLV ↔ typed-struct codec for the message
       envelope + all 12 op request/response payloads. Every KMIP tag
       codepoint cited from `kmip-spec-3.0-tags-enums.json`. Protocol

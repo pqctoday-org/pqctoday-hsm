@@ -22,8 +22,8 @@ numbers to trust. Generated 2026-06-07 as part of Phase 1 of the
 
 | Authority | Path |
 | --- | --- |
-| OASIS KMIP 3.0 specification PDF | [`../spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf`](../spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf) |
-| OASIS KMIP 3.0 specification HTML (extracted) | [`../spec/oasis-kmip-3.0/kmip-spec-v3.0.html`](../spec/oasis-kmip-3.0/kmip-spec-v3.0.html) |
+| OASIS KMIP 3.0 specification PDF | [`kmip-spec-v3.0-csd01.pdf`](https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.pdf) (not carried in this repository; see [`docs/refs/README.md`](../../docs/refs/README.md)) |
+| OASIS KMIP 3.0 specification HTML (extracted) | [`kmip-spec-v3.0-csd01.html`](https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.html) (not carried in this repository; see [`docs/refs/README.md`](../../docs/refs/README.md)) |
 | Extractor binary | [`../tools/extract_kmip_spec.rs`](../tools/extract_kmip_spec.rs) (`cargo run --bin extract-kmip-spec`) |
 | Extracted authoritative JSON | [`../spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`](../spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json) |
 
@@ -132,7 +132,7 @@ for the authoritative, hand-verified current picture.
 ## 6. Maintenance
 
 Re-run `cargo run --bin extract-kmip-spec` whenever
-`spec/oasis-kmip-3.0/kmip-spec-v3.0.html` is replaced (OASIS errata, future
+`https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.html` is replaced (OASIS errata, future
 3.x release). The `source_sha256` field in the output JSON is the gate — CI
 should fail the build if the input file's sha256 changes without a
 corresponding re-extraction.

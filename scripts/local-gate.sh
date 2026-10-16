@@ -443,6 +443,11 @@ run_step_host "gate container-root derivation test" \
 run_step_host "pre-push hook test (delete-only pushes allowed)" \
   "cd '$ROOT' && bash tests/test-pre-push-hook.sh"
 
+# Licence labels match COPYRIGHT.md (AGPL plan step 9): own files and crates
+# say AGPL-3.0-only, third-party files keep theirs, new code files carry a header.
+run_step_host "licence labels (own files AGPL-3.0-only)" \
+  "cd '$ROOT' && python3 -m unittest tests/test_check_licences.py && python3 scripts/check_licences.py"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
@@ -606,7 +611,7 @@ run_step_bg "kmip educational bridge (educational-replication): tests + courier 
 # ~seconds to 5+ minutes for every contributor.
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
-run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+run_step "OASIS corpus provenance (102 transcripts; vs the CSD02 zip when restored)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
 
 # Immediately after the corpus check, and for the same reason. That step asks
@@ -711,7 +716,7 @@ run_step_bg "cross-engine PKCS#11 differential harness" \
 # before it: if the corpus is not the corpus we think it is, the replay
 # figure is measuring something else — kept in reading order even though
 # nothing here enforces it at run time.
-run_step_bg "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+run_step_bg "OASIS corpus provenance (102 transcripts; vs the CSD02 zip when restored)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py" \
   oasis-checks
 

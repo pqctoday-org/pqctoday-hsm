@@ -4,7 +4,7 @@
 **Baseline:** branch `fix/pkcs11-v32-gaps-0906` @ `9fd47d5f` (4 commits over `origin/main@1e8db083`)
 **Predecessor:** [remediation-plan-pkcs11-v32-gaps-09062026.md](remediation-plan-pkcs11-v32-gaps-09062026.md) — its §0 records two adversarial review passes and §9 the Phase 1 execution log. Phase 1 (C1, C3, R3, D-4, D-1, R1′, R2′a) is done, verified and committed.
 **Status:** PLAN ONLY. Nothing here is implemented. Push/merge stays gated on explicit go-ahead.
-**Spec text:** `file:line` citations point into the vendored OASIS markdown under `docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/doc/spec/` (`spec/` below). Section numbers follow the v3.2 CSD01 PDF — the predecessor plan had several wrong, so confirm against the PDF before a number goes into a commit message or the ledger.
+**Spec text:** `file:line` citations point into the OASIS PKCS 11 TC markdown at commit `2b25dd8`, `https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/doc/spec` (`spec/` below). Section numbers follow the v3.2 CSD01 PDF — the predecessor plan had several wrong, so confirm against the PDF before a number goes into a commit message or the ledger.
 
 ## 0. Decisions already taken (binding)
 
@@ -186,7 +186,7 @@ It is worth recording why X2′ was the right item to build. The wrong `CK_MECHA
 
 ### §6 H1 — done (2026-09-07)
 
-**H1.1/H1.2 — citations re-verified.** All 31 `citation` fields checked against `docs/refs/pkcs11-spec-v3.2-csd01.pdf`. **16 were wrong.** No verdict changed — every divergence is still legal — but the errors were not cosmetic:
+**H1.1/H1.2 — citations re-verified.** All 31 `citation` fields checked against `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf`. **16 were wrong.** No verdict changed — every divergence is still legal — but the errors were not cosmetic:
 
 - **One quoted a sentence that does not exist** in any edition: `CKA_ALLOWED_MECHANISMS` "if not present, the key may be used with any mechanism". The specification defines no absence semantics for it at all. Re-justified on materialisation grounds.
 - **Ten shared one wrong section**: "§4.9 common key attribute table footnote". §4.9 is *Public key objects*; the common key attribute table is Table 26 in §4.8; the footnote is 9 of Table 13 in §4.2.

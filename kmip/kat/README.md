@@ -95,7 +95,7 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 | `composite-sigs/external-composite-vectors.json` | Produced by **other** implementations, not this engine — deliberately, to catch cross-implementation interop bugs a self-generated vector structurally cannot (this file exists because a real one shipped 2026-08-17: the engine signed a composite certificate's classical half with SHA-512 instead of the draft-composite-sigs §6 "Traditional Signature Algorithm", and every self-round-trip test still passed because signer and verifier shared the same wrong table). 5 certificate vectors. **Never regenerate locally** — refresh only by pulling a newer upstream round | 1 | Cross-implementation composite-signature verification vectors |
 | `pqc-interop/pqc_interop_engine_vectors.json` | Extracted by `scripts/extract_pqc_interop_vectors.py` from the OASIS KMIP 3.0 PQC interop test set (`kmip-3-0-pqc-tests-03.zip`, 2025-02-26, the same 1452-transcript set `../conformance/pqc_corpus/` vendors a subset of) — engine-level (input → expected-output) vectors for keygen/encapsulate/decapsulate (vendored in full: 270/30/75) and a representative siggen/sigver subset, for `tests/pqc_interop_engine.rs`'s byte-exact I0 checks at the `native`/`crypto` level (no KMIP, no dispatcher) | 1 | OASIS PQC interop engine-level vectors |
 
-**Note on `oasis-kmip-2.1/`:** Not present by intent (the directory is created only when needed). The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `../spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for the reference.
+**Note on `oasis-kmip-2.1/`:** Not present by intent (the directory is created only when needed). The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `https://docs.oasis-open.org/kmip/kmip-spec/v2.1/os/kmip-spec-v2.1-os.pdf` for the reference.
 
 ### Classic McEliece — permanent gap, not an oversight (P-2, formalized 2026-08-24)
 
@@ -124,9 +124,9 @@ or "cross-validated" — self-consistency is the entire evidence base.
 
 | Type | Available? | Where |
 |---|---|---|
-| OASIS specification PDF | ✅ yes | `../spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf` |
-| OASIS specification HTML | ✅ yes | `../spec/oasis-kmip-3.0/kmip-spec-v3.0.html` |
-| OASIS profiles document | ✅ yes | `../spec/oasis-kmip-3.0/kmip-profiles-v3.0.pdf` |
+| OASIS specification PDF | ✅ yes | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.pdf` |
+| OASIS specification HTML | ✅ yes | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.html` |
+| OASIS profiles document | ✅ yes | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd01/kmip-profiles-v3.0-csd01.pdf` |
 | OASIS conformance test cases (classical) | ✅ yes (bundled inside the profiles ZIP, not the testcases directory) | `../conformance/oasis_corpus/mandatory/` + `optional/` |
 | OASIS PQC test cases | ❌ **not published** | gap — KMIP 3.0 spec adds PQC algorithm IDs but OASIS hasn't shipped corresponding test vectors |
 | Conformance suite size | 102 tests | (1,452 in the 2025 OASIS interop event uses additional vendor-contributed vectors not in the public ZIP) |
@@ -176,4 +176,4 @@ The `-30` suffix marks KMIP 3.0; `-M-` denotes mandatory; `-O-` optional.
 
 ## License
 
-OASIS KMIP test cases are published under the OASIS IPR Policy with royalty-free terms (RF on Limited Terms Mode). NIST ACVP vectors are public-domain (US Government work, 17 USC §105). All files in this corpus are redistributable as part of `pqctoday-hsm/kmip/` (MIT license).
+OASIS KMIP test cases are published under the OASIS IPR Policy with royalty-free terms (RF on Limited Terms Mode). NIST ACVP vectors are public-domain (US Government work, 17 USC §105). All files in this corpus are redistributable as part of `pqctoday-hsm/kmip/`; the code around them is AGPL-3.0-only (see COPYRIGHT.md at the repository root), while the test cases and vectors keep the terms above.

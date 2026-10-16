@@ -323,7 +323,7 @@
   ],
   "_citation_verification": [
     "2026-09-07 (plan item H1.1/H1.2): every citation in this file was re-verified against",
-    "docs/refs/pkcs11-spec-v3.2-csd01.pdf (authoritative for section and table numbers) and the",
+    "https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf (authoritative for section and table numbers) and the",
     "vendored v3.3-draft prose. 16 entries were corrected. Findings worth remembering:",
     "  - One citation quoted a sentence that DOES NOT EXIST in any edition of the specification",
     "    (CKA_ALLOWED_MECHANISMS 'if not present, the key may be used with any mechanism').",

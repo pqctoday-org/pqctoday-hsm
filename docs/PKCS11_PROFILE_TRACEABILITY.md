@@ -111,7 +111,7 @@ absence — is exactly what a traceability table catches at a glance, without
 re-deriving the whole chain from scratch on every audit.
 
 **Source of truth.** The condition lists quoted below are transcribed
-verbatim from `docs/refs/pkcs11-profiles-v3.2-os.pdf` (PKCS #11 Profiles
+verbatim from `https://docs.oasis-open.org/pkcs11/pkcs11-profiles/v3.2/os/pkcs11-profiles-v3.2-os.pdf` (PKCS #11 Profiles
 Version 3.2, OASIS Standard, 03 June 2026 — the authoritative document per
 `docs/refs/README.md`), Section 5 ("Base Profiles"). **These are the PKCS#11
 Profiles v3.2 §5.1/§5.2/§5.3 Baseline/Complete/Extended *Provider*

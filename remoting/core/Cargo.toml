@@ -2,7 +2,7 @@
 name = "pqctoday-pkcs11-remote-core"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "Transport-agnostic verb layer for the PKCS#11 gRPC/REST remoting services — engine bootstrap, the eight verbs mapped onto softhsmrustv3::native, and the CKR_* error-mapping contract both wire formats share (sandbox-bench-transport-arms-plan-08242026.md WP1/WP5a; the 8th verb, self-signed certificate export, added 2026-08-25 per pqctoday-hsm's own JCA-provider remaining-gaps plan §7/WS-E)."
 
 [dependencies]

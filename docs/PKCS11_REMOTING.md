@@ -455,7 +455,7 @@ a UI. These remain Step 2 (`sandbox-bench-transport-arms-plan-08242026.md`
 - PKCS#11 v3.2 OS (ratified 2026-06-03):
   <https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/pkcs11-spec-v3.2.html>
 - KMIP 3.0 Profiles v3.0 CSD02 §3.3 (Quantum Safe Authentication Suite) —
-  vendored at `kmip/spec/oasis-kmip-3.0/`
+  <https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.pdf>
 - draft-ietf-tls-ecdhe-mlkem (hybrid group wire format)
 - `sandbox-bench-transport-arms-plan-08242026.md` (workspace root of the
   Antigravity working directory) — the program plan this implements

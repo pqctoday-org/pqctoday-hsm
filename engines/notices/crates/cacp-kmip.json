@@ -2529,7 +2529,7 @@
   },
   {
    "files": [],
-   "license": "MIT",
+   "license": "AGPL-3.0-only",
    "modifiedRecord": null,
    "name": "pqctoday-kmip",
    "path": "kmip",
@@ -2540,7 +2540,7 @@
   },
   {
    "files": [],
-   "license": "MIT",
+   "license": "AGPL-3.0-only",
    "modifiedRecord": null,
    "name": "pqctoday-kmip-wasm",
    "path": "wasm",
@@ -3187,7 +3187,7 @@
   },
   {
    "files": [],
-   "license": "BSD-2-Clause",
+   "license": "AGPL-3.0-only",
    "modifiedRecord": null,
    "name": "softhsmrustv3",
    "path": "rust",

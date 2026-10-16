@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* aes-xts-probe: OpenSSL-provider remediation item (2026-08-30) test
  * helper for CKM_AES_XTS's own OSSL_OP_CIPHER registration ("AES-128-XTS"

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-only */
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /*
  * pkcs11_static_shim.c — Static softhsmv3 linker shim for OpenSSL TLS WASM build.
  *

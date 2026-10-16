@@ -13,8 +13,10 @@ This script makes it a second. It checks two things:
 1. **Integrity** — every transcript still hashes to what ``corpus_provenance.json``
    recorded. Catches a corpus edited in place, which would silently move the
    replay figure.
-2. **Provenance** — when the source zip is present (it is, under
-   ``spec/oasis-kmip-3.0/``), extract it and confirm the corpus is byte-identical
+2. **Provenance** — when the source zip is present (it is not committed: this
+   public repository carries no third-party documents; restore it to
+   ``spec/oasis-kmip-3.0/`` with ``python3 docs/refs/fetch_refs.py --only
+   kmip-profiles-v3.0-csd02.zip``), extract it and confirm the corpus is byte-identical
    to what that zip contains. This is the part that actually ties our files to an
    OASIS artefact rather than to our own past self.
 
@@ -171,7 +173,7 @@ def revisit_signal(record: dict) -> str | None:
     return (
         f"the pinned revision is a committee draft whose public review closed "
         f"{closed}; check whether OASIS has published a newer one (CS01 / CSD03) "
-        f"and re-vendor if so"
+        f"and re-baseline if so"
     )
 
 
@@ -180,7 +182,8 @@ def update() -> int:
     zip_name = record.get("source_zip", "kmip-profiles-v3.0-csd02.zip")
     zip_path = SPEC_DIR / zip_name
     if not zip_path.exists():
-        print(f"cannot update: source zip missing at {zip_path}", file=sys.stderr)
+        print(f"cannot update: source zip missing at {zip_path} "
+              f"(restore it: python3 docs/refs/fetch_refs.py --only {zip_name})", file=sys.stderr)
         return 1
 
     record["source_zip"] = zip_name
@@ -238,7 +241,8 @@ def main(argv: list[str]) -> int:
         print(
             f"CORPUS PROVENANCE PARTIAL: {n} transcripts unmodified, but "
             f"{record['source_zip']} is absent — provenance against the OASIS "
-            f"download was NOT verified"
+            f"download was NOT verified (restore it: python3 docs/refs/fetch_refs.py "
+            f"--only {record['source_zip']})"
         )
     if revisit:
         print(f"CORPUS PROVENANCE REVISIT: {revisit}")

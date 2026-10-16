@@ -8,7 +8,7 @@ version = "0.8.2"
 description = "Python client for the pqctoday KMIP 3.0 PQC key management server"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "AGPL-3.0-only"
 authors = [{ name = "PQCToday" }]
 keywords = ["kmip", "pqc", "post-quantum", "cryptography", "key-management"]
 classifiers = [

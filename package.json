@@ -13,7 +13,7 @@
     "cryptography"
   ],
   "author": "PQC Today",
-  "license": "BSD-2-Clause",
+  "license": "AGPL-3.0-only AND BSD-2-Clause",
   "homepage": "https://github.com/pqctoday-org/pqctoday-hsm",
   "repository": {
     "type": "git",

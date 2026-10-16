@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* aead-edge-probe: phase-6 R30 test helper. Purpose-built for the two
  * AEAD decrypt edge cases R26 left honestly undone rather than folding

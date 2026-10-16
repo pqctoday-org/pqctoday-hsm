@@ -16,6 +16,14 @@ OASIS docs.oasis-open.org is not WAF-fronted; the lighter pattern is
 sufficient. If a 403/Cloudflare layer ever appears, escalate to the
 playwright-stealth pattern referenced in pqctoday-hub PR #305.
 
+Downloaded files are gitignored: this public repository carries no
+third-party documents, only their extractions (owner rule 2026-10-15).
+This script fetches the LATEST stage behind the un-revisioned v3.0/ URLs
+(CSD02 as of 2026-10-15), which overwrites the local CSD01 copies of the
+same names and their .sha256 sidecars — use it only for a deliberate
+re-baseline. To restore the exact copies the code was audited against,
+verified by SHA-256, use `python3 docs/refs/fetch_refs.py` instead.
+
 Usage:
   python3 download_kmip_spec.py                      # refresh all primary files
   python3 download_kmip_spec.py --include-csd01      # also pull csd01/

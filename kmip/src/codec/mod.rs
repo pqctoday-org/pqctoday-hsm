@@ -2,7 +2,7 @@
 //!
 //! KMIP TTLV (Tag-Type-Length-Value) is the wire format used by every KMIP
 //! message. See OASIS KMIP 3.0 §9 (file:
-//! `spec/oasis-kmip-3.0/kmip-spec-v3.0.html`, section 9.x).
+//! `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.html`, section 9.x).
 //!
 //! Layout (KMIP 3.0 §9.6):
 //!

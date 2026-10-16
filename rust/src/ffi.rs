@@ -15126,7 +15126,7 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
 /// single-part-only.
 ///
 /// Return code for the single-part-only case, pinned from the spec
-/// (docs/refs/pkcs11-spec-v3.2-csd01.pdf): the §5.13.3 C_SignUpdate and
+/// (https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf): the §5.13.3 C_SignUpdate and
 /// §5.15.3 C_VerifyUpdate return-value lists contain NEITHER
 /// CKR_MECHANISM_INVALID NOR CKR_FUNCTION_NOT_SUPPORTED; the listed code
 /// that fits is CKR_OPERATION_NOT_INITIALIZED, defined in §5.1 as "there is

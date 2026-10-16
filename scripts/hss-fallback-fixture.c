@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* hss-fallback-fixture: phase-6 R29 test helper. Creates a PUBLIC HSS
  * key object via direct C_CreateObject with a real, valid CKA_VALUE but

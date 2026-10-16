@@ -420,7 +420,7 @@ def find_child(node: TtlvNode, tag: str) -> TtlvNode | None:
 # nothing invented.
 #
 # Format: tag-name → spec citation. Codec citations point to PDF page
-# numbers in `spec/oasis-kmip-3.0/kmip-profiles-v3.0.pdf`.
+# numbers in `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd01/kmip-profiles-v3.0-csd01.pdf`.
 _VARIABLE_ITEM_TAGS: dict[str, str] = {
     # Envelope fields the main spec §8.2.3 marks as transient.
     _norm("TimeStamp"): "§4.1.1 item 6 — Time Stamp",

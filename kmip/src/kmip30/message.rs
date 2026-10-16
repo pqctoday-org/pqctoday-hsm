@@ -2,7 +2,7 @@
 //! Batch Item per OASIS KMIP 3.0 §8.1 and §8.2.
 //!
 //! ## Spec-verified shape (verified 2026-06-07 against
-//! `spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf`)
+//! `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.pdf`)
 //!
 //! - **§8.1.1 Request Message** = Request Header + one or more Batch Item
 //! - **§8.1.2 Request Header** = Protocol Version + (optional fields:
