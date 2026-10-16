@@ -56,6 +56,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rust engine: the TFHE parameter fingerprint named the wrong library commit.** The TFHE-rs 1.8.1 commit encoded in
+  `CKA_PQCTODAY_FHE_PARAM_HASH` for registry ID 1 had a typo (one hex digit dropped). The engine now encodes the real
+  commit (`187fc0b9…43b6db`), so the hash changes from `2ce45553…` to `e3219e9e…`. TFHE keys made before this change
+  carry the old hash and must be generated again. Results recorded with the old hash are superseded by re-runs. CKKS
+  keys are unaffected.
+- **Rust engine: the FHE "released" audit entry is written only once the result exists.** Before, it was logged
+  before the sealed result was built, so a sealing or signing failure left a "released" entry for a result that never
+  left the token.
 - **Rust engine: an FHE decrypt counter unit could be spent twice.** Decryptions on the same key at the same time
   could pass the budget check with the same count, so a key could release more results than its policy allows: in a
   test with 16 threads, a key with a budget of 12 released between 21 and 25. The counter is now reserved under a lock.

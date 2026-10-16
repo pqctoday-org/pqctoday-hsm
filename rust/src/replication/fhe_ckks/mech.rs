@@ -862,6 +862,15 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
         plain.extend_from_slice(&((im * unit).round() as i64).to_le_bytes());
     }
     slots.iter_mut().for_each(|v| *v = (0.0, 0.0));
+    // The event is written only once the output exists: a sealing or signing
+    // failure must not leave a "released" record for a result that never left.
+    let out = if owner {
+        DecryptOutput::Owner(plain)
+    } else {
+        let sealed = tf::seal_release(slot, &so.attrs, &policy.id, recipient, counter, &plain);
+        plain.zeroize();
+        DecryptOutput::Sealed(sealed?)
+    };
     crate::replication::oplog_event(
         "fhe_decrypt_released",
         slot,
@@ -873,13 +882,10 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
             ("recipient", if owner { "owner".into() } else { crate::replication::hex(recipient) }),
         ],
     );
-    if owner {
-        return Ok((plain.len(), Some(DecryptOutput::Owner(plain))));
-    }
-    let sealed = tf::seal_release(slot, &so.attrs, &policy.id, recipient, counter, &plain);
-    plain.zeroize();
-    let sealed = sealed?;
-    Ok((sealed.len(), Some(DecryptOutput::Sealed(sealed))))
+    let len = match &out {
+        DecryptOutput::Owner(b) | DecryptOutput::Sealed(b) => b.len(),
+    };
+    Ok((len, Some(out)))
 }
 
 #[cfg(test)]
