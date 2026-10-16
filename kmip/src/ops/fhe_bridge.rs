@@ -564,6 +564,125 @@ mod tests {
         assert_eq!(hex(&generate_der(48)), generate);
     }
 
+    /// The mutants of `valid` (plan D02387 WP-A3, spec §10 gate 5): every proper prefix, 1..=8 appended bytes, every
+    /// position XORed with 0x01, 0x80 and 0xff, and 2,000 seeded random rewrites (fixed-seed xorshift64*).
+    fn mutants(valid: &[u8], seed: u64) -> Vec<Vec<u8>> {
+        let mut x = seed | 1;
+        let mut next = move || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let mut out: Vec<Vec<u8>> = (0..valid.len()).map(|n| valid[..n].to_vec()).collect();
+        for n in 1..=8 {
+            let mut v = valid.to_vec();
+            v.extend((0..n).map(|_| next() as u8));
+            out.push(v);
+        }
+        for i in 0..valid.len() {
+            for mask in [0x01u8, 0x80, 0xff] {
+                let mut v = valid.to_vec();
+                v[i] ^= mask;
+                out.push(v);
+            }
+        }
+        for _ in 0..2000 {
+            let mut v = valid.to_vec();
+            for _ in 0..1 + next() % 8 {
+                let i = (next() % v.len() as u64) as usize;
+                v[i] = next() as u8;
+            }
+            out.push(v);
+        }
+        out.retain(|m| m != valid);
+        out
+    }
+
+    /// Parser robustness of every V1 input of the interface and of the admin request function 8 accepts (plan D02387
+    /// WP-A3): for each mutant the strict decoder the bridge uses does not panic, and either refuses it or returns a
+    /// value whose DER is the mutant itself; the bridge's own field checks (lengths, versions, function 8's operation
+    /// filter) do not panic either. Decoder level only: these unit tests have no engine, and a mutant that decoded
+    /// would otherwise reach whatever engine state another test left (the real-engine pass is
+    /// `tests/fhe_custody_e2e.rs`).
+    #[test]
+    fn v1_inputs_survive_mutation() {
+        macro_rules! strict {
+            ($t:ty, $m:expr, $max:expr) => {
+                repl::asn1::decode_strict::<$t>($m, $max).ok().map(|v| (v.to_der().unwrap(), v))
+            };
+        }
+        let u = uid36();
+        let get = GetAttributeValueV1 { object: s36(&u), types: vec![CKA_VALUE, 0x8000_0110] }.to_der().unwrap();
+        let dec = DecryptV1 { ciphertext: OctetString::new(vec![7u8; 40]).unwrap(), output_len: 9 }.to_der().unwrap();
+        let attrs = vec![AttributeV1 { attr_type: CKA_VALUE, value: Some(OctetString::new(vec![1, 2]).unwrap()) }, AttributeV1 { attr_type: 0x8000_0110, value: None }].to_der().unwrap();
+        let cases: [(&str, Vec<u8>); 6] = [
+            ("GenerateKeyV1", generate_der(48)),
+            ("DeriveKeyV1", derive_der(2, 3)),
+            ("GetAttributeValueV1", get),
+            ("DecryptInitV1", decrypt_init_der(48)),
+            ("DecryptV1", dec),
+            ("AttributesV1", attrs),
+        ];
+        for (k, (name, valid)) in cases.iter().enumerate() {
+            let mut accepted = 0;
+            for m in mutants(valid, 0xa3_b000 + k as u64) {
+                let r = std::panic::catch_unwind(|| -> Option<Vec<u8>> {
+                    match k {
+                        0 => strict!(GenerateKeyV1, &m, 4096).map(|(der, g)| {
+                            let _ = g.replication_policy_id.as_bytes().len() == 48 && g.label.as_bytes().len() <= MAX_ATTR;
+                            der
+                        }),
+                        1 => strict!(DeriveKeyV1, &m, 256).map(|(der, d)| {
+                            let _ = (usize::try_from(d.from_limb), usize::try_from(d.to_limb), d.base_key.as_bytes().len());
+                            der
+                        }),
+                        2 => strict!(GetAttributeValueV1, &m, 1024).map(|(der, _)| der),
+                        3 => strict!(DecryptInitV1, &m, 256).map(|(der, _)| der),
+                        4 => strict!(DecryptV1, &m, MAX_INPUT).map(|(der, d)| {
+                            let _ = usize::try_from(d.output_len);
+                            der
+                        }),
+                        _ => strict!(Vec<AttributeV1>, &m, 1024).map(|(der, _)| der),
+                    }
+                });
+                match r {
+                    Err(_) => panic!("{name}: a mutant of {} bytes panicked", m.len()),
+                    Ok(Some(der)) => {
+                        assert_eq!(der, m, "{name}: accepted mutant re-encodes differently");
+                        accepted += 1;
+                    }
+                    Ok(None) => {}
+                }
+            }
+            eprintln!("{name}: {accepted} mutants decoded as other valid values");
+        }
+
+        // Function 8's input: an AdminSignedRequest with each FHE operation, through the bridge's decoder and its
+        // operation filter.
+        let ops = [
+            repl::admin::AdminOperation::EnrollFheDecryptPolicy { policy: vec![0x30, 0x03, 0x02, 0x01, 0x01] },
+            repl::admin::AdminOperation::EnrollFheRecipient { chain: vec![vec![0x30, 0x00], vec![0x30, 0x01, 0x00]] },
+            repl::admin::AdminOperation::DestroyFheSeed { lineage: [8u8; 32] },
+        ];
+        for (i, op) in ops.iter().enumerate() {
+            let tbs = repl::admin_host::tbs_request(&[1u8; 32], &[2u8; 32], &[3u8; 32], 1, 1_790_000_000, op).unwrap();
+            let req = repl::admin_host::signed_request(&tbs, &[0u8; 3309]).unwrap();
+            for m in mutants(&req, 0xa3_b100 + i as u64) {
+                let r = std::panic::catch_unwind(|| {
+                    let d = repl::asn1::decode_strict::<repl::admin::AdminSignedRequest>(&m, repl::admin::MAX_ADMIN_REQUEST_DER).ok()?;
+                    let _ = d.tbs.operation();
+                    Some(d.to_der().unwrap())
+                });
+                match r {
+                    Err(_) => panic!("AdminSignedRequest [{}]: a mutant of {} bytes panicked", 5 + i, m.len()),
+                    Ok(Some(der)) => assert_eq!(der, m, "AdminSignedRequest [{}]: accepted mutant re-encodes differently", 5 + i),
+                    Ok(None) => {}
+                }
+            }
+        }
+    }
+
     #[test]
     fn layouts_round_trip() {
         let g = generate_der(48);

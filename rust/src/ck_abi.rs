@@ -2713,7 +2713,9 @@ mod tests {
                 C_GetMechanismList(0, std::ptr::null_mut(), &mut count),
                 rv(CKR_OK)
             );
-            assert_eq!(count as usize, SUPPORTED_MECHS.len());
+            // The advertised list: SUPPORTED_MECHS, plus the FHE custody mechanisms when they are listed.
+            let advertised = crate::constants::advertised_mechanisms();
+            assert_eq!(count as usize, advertised.len());
 
             // Too-small buffer → CKR_BUFFER_TOO_SMALL, count corrected.
             let mut small = vec![0 as CK_MECHANISM_TYPE; 1];
@@ -2722,7 +2724,7 @@ mod tests {
                 C_GetMechanismList(0, small.as_mut_ptr(), &mut small_count),
                 rv(CKR_BUFFER_TOO_SMALL)
             );
-            assert_eq!(small_count as usize, SUPPORTED_MECHS.len());
+            assert_eq!(small_count as usize, advertised.len());
 
             // Full fetch: every entry widened from the engine's u32 table.
             let mut list = vec![0 as CK_MECHANISM_TYPE; count as usize];
@@ -2732,7 +2734,7 @@ mod tests {
                 rv(CKR_OK)
             );
             assert_eq!(full_count, count);
-            for (got, want) in list.iter().zip(SUPPORTED_MECHS.iter()) {
+            for (got, want) in list.iter().zip(advertised.iter()) {
                 assert_eq!(*got, *want as CK_MECHANISM_TYPE);
             }
 

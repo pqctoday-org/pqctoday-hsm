@@ -313,13 +313,8 @@ pub(crate) fn decrypt_tfhe(session: u32, h_seed: u32, recipient: &[u8; 48], inpu
         // Exact for the owner; an upper bound for a sealed release (Codex #2).
         return Ok((if owner { output_len(&m.ty) } else { sealed_len_bound(slot, &so.attrs, recipient, output_len(&m.ty))? }, None));
     }
-    // Step 4: reserve one unit of the counter durably, before any work.
-    let used = so.attrs.get(&CKA_PRIV_FHE_DECRYPT_COUNT).and_then(|v| v.as_slice().try_into().ok()).map(u64::from_le_bytes).unwrap_or(0);
-    if used >= p.max_decrypts as u64 {
-        return Err(refuse(slot, "decrypt budget exhausted"));
-    }
-    let counter = used + 1;
-    crate::state::commit_objects_atomically(session, Vec::new(), vec![(so.handle, vec![(CKA_PRIV_FHE_DECRYPT_COUNT, counter.to_le_bytes().to_vec())])])?;
+    // Step 4: reserve one unit of the counter durably, before any work (read and written under the counter lock).
+    let counter = reserve_decrypt_unit(session, slot, so.handle, p.max_decrypts)?;
     // Step 5: rule 5 (recipient), independent of the plaintext.
     if (owner && p.recipient_only) || (!owner && !p.recipients.iter().any(|r| r.as_bytes() == recipient)) {
         return Err(refuse(slot, "recipient not allowed"));

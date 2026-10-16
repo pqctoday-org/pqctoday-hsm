@@ -314,4 +314,73 @@ fn fhe_custody_over_kmip_end_to_end() {
     // ── Refusals ──
     assert_eq!(get_attrs(&lab, &[b'z'; 36], &[CKA_VALUE]).0, 0x60, "unknown unique ID: CKR_KEY_HANDLE_INVALID");
     assert_eq!(call(&lab, None, 2, b"junk").0, 0x20, "not DER: CKR_DATA_INVALID");
+
+    // ── Oversized input at every function (plan D02387 WP-A3) ──
+    // A buffer over the 48 MiB reply cap is refused by the bridge; a ciphertext over the engine's 4 MiB cap inside a
+    // well-formed DecryptV1 by the engine (CKR_DATA_LEN_RANGE), which ends the operation; a frame over the bridge's
+    // input cap, a label over 256 bytes, more than 16 attribute types and admin payloads over their bounds are
+    // CKR_DATA_INVALID.
+    assert_eq!(call(&lab, Some("tenant-a"), 5, &decrypt_init_der(&kat_uid)).0, CKR_OK);
+    assert_eq!(call(&lab, Some("tenant-a"), 6, &decrypt_der(&ct, fhe_bridge::MAX_OUTPUT as u64 + 1)).0, CKR_DATA_LEN_RANGE);
+    let big = vec![0u8; softhsmrustv3::replication::fhe_custody::MAX_DECRYPT_INPUT + 1];
+    assert_eq!(call(&lab, Some("tenant-a"), 6, &decrypt_der(&big, 0)).0, CKR_DATA_LEN_RANGE, "over the engine's 4 MiB");
+    assert_eq!(call(&lab, Some("tenant-a"), 6, &decrypt_der(&ct, 0)).0, CKR_OPERATION_NOT_INITIALIZED, "the refusal ended the operation");
+    assert_eq!(call(&lab, Some("tenant-a"), 6, &vec![0x30; 8 * 1024 * 1024]).0, 0x20, "a frame over the bridge's cap");
+    let long_label = GenerateKeyV1 { param_set: PS, replication_policy_id: octets(&lab.replication_policy), decrypt_policy_id: octets(&dpid), label: octets(&[b'l'; 257]), id: octets(b"") }.to_der().unwrap();
+    assert_eq!(call(&lab, None, 1, &long_label).0, 0x20, "a 257-byte label");
+    let many = GetAttributeValueV1 { object: utf8(&kat_uid), types: vec![softhsmrustv3::native::CKA_LABEL; 17] }.to_der().unwrap();
+    assert_eq!(call(&lab, None, 3, &many).0, 0x20, "17 attribute types");
+    let unsigned = |op: &AdminOperation| {
+        let tbs = admin_host::tbs_request(&lab.device_id, &lab.admin_key.key_id(), &[0u8; 32], 9, NOW, op).unwrap();
+        admin_host::signed_request(&tbs, &[0u8; 3309]).unwrap()
+    };
+    assert_eq!(call(&lab, Some(ROLE_ADMIN_CN), 8, &unsigned(&AdminOperation::EnrollFheDecryptPolicy { policy: vec![0x30; 8193] })).0, 0x20, "[5] policy over 8 KiB");
+    assert_eq!(call(&lab, Some(ROLE_ADMIN_CN), 8, &unsigned(&AdminOperation::EnrollFheRecipient { chain: vec![vec![0x30, 0]; 5] })).0, 0x20, "[6] chain of five");
+    assert_eq!(call(&lab, Some(ROLE_ADMIN_CN), 8, &vec![0x30; admin::MAX_ADMIN_REQUEST_DER + 1]).0, 0x20, "a request over 96 KiB");
+
+    // ── Mutated inputs through the real handler and engine (plan D02387 WP-A3): no panic ──
+    // The decoder-level property (refused, or canonical) is `fhe_bridge::tests::v1_inputs_survive_mutation`; here a
+    // seeded sample of mutants of each user function's valid input goes through `pkcs11()` and the engine.
+    let derive_valid = DeriveKeyV1 { base_key: utf8(&kat_uid), version: 2, kind: mech::PUBLIC_KIND_CKKS_DESCRIPTOR, key: 0, digit: 0, from_limb: 0, to_limb: 0 }.to_der().unwrap();
+    let get_valid = GetAttributeValueV1 { object: utf8(&kat_uid), types: vec![softhsmrustv3::native::CKA_LABEL, CKA_PQCTODAY_FHE_PARAM_SET] }.to_der().unwrap();
+    for (f, valid) in [(1u32, gen_der.clone()), (2, derive_valid), (3, get_valid), (5, decrypt_init_der(&kat_uid)), (6, decrypt_der(&ct, 0))] {
+        for (i, m) in sampled_mutants(&valid, 0xa3_e000 + f as u64, 150).iter().enumerate() {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(&lab, Some("tenant-m"), f, m)));
+            assert!(r.is_ok(), "function {f}: mutant {i} panicked");
+        }
+    }
+}
+
+/// A seeded sample of `n` mutants of `valid` (fixed-seed xorshift64*): prefixes, extensions, single-byte changes
+/// and short random rewrites.
+fn sampled_mutants(valid: &[u8], seed: u64, n: usize) -> Vec<Vec<u8>> {
+    let mut x = seed | 1;
+    let mut next = move || {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    };
+    let mut out = Vec::new();
+    while out.len() < n {
+        let mut v = valid.to_vec();
+        match next() % 4 {
+            0 => v.truncate((next() % valid.len() as u64) as usize),
+            1 => v.extend((0..1 + next() % 8).map(|_| next() as u8)),
+            2 => {
+                let i = (next() % v.len() as u64) as usize;
+                v[i] ^= [0x01u8, 0x80, 0xff][(next() % 3) as usize];
+            }
+            _ => {
+                for _ in 0..1 + next() % 8 {
+                    let i = (next() % v.len() as u64) as usize;
+                    v[i] = next() as u8;
+                }
+            }
+        }
+        if v != valid {
+            out.push(v);
+        }
+    }
+    out
 }

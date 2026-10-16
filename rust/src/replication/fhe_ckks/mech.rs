@@ -250,6 +250,8 @@ pub(super) fn ledgers() -> std::sync::MutexGuard<'static, BTreeMap<u32, Ledger>>
 /// Drop the ledger of `session` (C_CloseSession).
 pub fn clear_ledger_for_session(session: u32) {
     ledgers().remove(&session);
+    // PKCS#11 v3.2 §5.6: closing a session ends its active operations, the pending FHE decryption included (WP-A3).
+    tf::cancel(session);
     #[cfg(feature = "educational-fhe")]
     crate::replication::fhe_tfhe::clear_manifest_ledger_for_session(session);
 }
@@ -265,6 +267,7 @@ pub fn clear_ledgers_for_slot(slot: u32) {
 /// Drop every ledger (C_Finalize).
 pub fn clear_ledgers() {
     ledgers().clear();
+    tf::cancel_all();
     #[cfg(feature = "educational-fhe")]
     crate::replication::fhe_tfhe::clear_manifest_ledgers();
 }
@@ -799,12 +802,8 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
         // Exact for the owner; an upper bound for a sealed release (Codex #2).
         return Ok((if owner { output_len(c) } else { tf::sealed_len_bound(slot, &so.attrs, recipient, output_len(c))? }, None));
     }
-    let used = so.attrs.get(&tf::CKA_PRIV_FHE_DECRYPT_COUNT).and_then(|v| v.as_slice().try_into().ok()).map(u64::from_le_bytes).unwrap_or(0);
-    if used >= p.max_decrypts as u64 {
-        return Err(tf::refuse(slot, "decrypt budget exhausted"));
-    }
-    let counter = used + 1;
-    crate::state::commit_objects_atomically(session, Vec::new(), vec![(so.handle, vec![(tf::CKA_PRIV_FHE_DECRYPT_COUNT, counter.to_le_bytes().to_vec())])])?;
+    // Step 4: reserve one unit durably, read and written under the counter lock.
+    let counter = tf::reserve_decrypt_unit(session, slot, so.handle, p.max_decrypts)?;
     if (owner && p.recipient_only) || (!owner && !p.recipients.iter().any(|r| r.as_bytes() == recipient)) {
         return Err(tf::refuse(slot, "recipient not allowed"));
     }

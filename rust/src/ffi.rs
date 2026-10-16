@@ -1870,6 +1870,17 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // CKF_DECAPSULATE — the only two calls that dispatch it.
         CKM_HPKE_KEM_KEY_PAIR_GEN => (0, 0, 0x00010000),
         CKM_HPKE => (0, 0, 0x10000000 | 0x20000000),
+        // FHE custody (spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §8; owner decision F19, plan D02387
+        // WP-A3). Answered exactly when C_GetMechanismList lists them (`fhe_custody_mechs_listed`: custody compiled
+        // and the replication profile selected). Key size is the 32-byte seed, in bytes, for all three. KEY_GEN:
+        // CKF_GENERATE (C_GenerateKey). DERIVE_PUBLIC: CKF_DERIVE (C_DeriveKey). DECRYPT: CKF_DECRYPT, single-part
+        // C_Decrypt only, so no CKF_MESSAGE_* flag. CKM_PQCTODAY_FHE_ENCRYPT (test builds only, §5.4) has no arm.
+        #[cfg(pqc_ckks_custody)]
+        CKM_PQCTODAY_FHE_KEY_GEN if crate::constants::fhe_custody_mechs_listed() => (32, 32, 0x00008000),
+        #[cfg(pqc_ckks_custody)]
+        CKM_PQCTODAY_FHE_DERIVE_PUBLIC if crate::constants::fhe_custody_mechs_listed() => (32, 32, 0x00080000),
+        #[cfg(pqc_ckks_custody)]
+        CKM_PQCTODAY_FHE_DECRYPT if crate::constants::fhe_custody_mechs_listed() => (32, 32, 0x00000200),
         _ => return None,
     };
     // Native (owner decision 2026-10-03, RUSTSEC-2023-0071): RSA private-key
