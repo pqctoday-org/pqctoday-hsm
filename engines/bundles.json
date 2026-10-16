@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. List files explicitly: a folder entry would sweep in consumer-authored code, so the tool rejects folders. 'notices' names the non-Rust third-party components compiled into each bundle (engines/notices/components.json); bundles with a cargoManifest also get their Rust crates from engines/notices/crates/<name>.json. scripts/publish_engines.py puts THIRD-PARTY-NOTICES.txt and LICENSES/ for each bundle into its tarball under public/licenses/engines/<name>/.",
+  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. List files explicitly: a folder entry would sweep in consumer-authored code, so the tool rejects folders. 'notices' names the non-Rust third-party components compiled into each bundle (engines/notices/components.json); bundles with a cargoManifest also get their Rust crates from engines/notices/crates/<name>.json, resolved for 'cargoTarget' (default wasm32-unknown-unknown). scripts/publish_engines.py puts THIRD-PARTY-NOTICES.txt and LICENSES/ for each bundle into its tarball under public/licenses/engines/<name>/.",
   "bundles": [
     {
       "name": "cacp-kmip",
@@ -85,7 +85,15 @@
         "public/wasm/openssl.wasm"
       ],
       "buildScript": "scripts/build-openssl-studio-wasm.sh",
-      "cargoManifest": "rust/Cargo.toml"
+      "cargoManifest": "rust/Cargo.toml",
+      "cargoTarget": "wasm32-unknown-emscripten",
+      "notices": [
+        "openssl-studio-shims",
+        "openssl-cli",
+        "pkcs11-provider",
+        "oasis-pkcs11-headers",
+        "emscripten-runtime"
+      ]
     }
   ]
 }

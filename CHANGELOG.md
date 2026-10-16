@@ -14,7 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with pkcs11-provider and the Rust engine linked in) is now built here: `scripts/build-openssl-studio-wasm.sh` links it
   into `build-wasm/engines-staging/`, and its C shims and OpenSSL patch moved to `wasm/openssl-studio/` (GPL-3.0-only;
   the patch is Apache-2.0). The bundle is declared in `engines/bundles.json`, so it can be published with the other
-  engines.
+  engines. Its tarball carries third-party notices like the others: OpenSSL (marked as changed), pkcs11-provider, the
+  OASIS PKCS#11 headers, the Emscripten runtime, the Rust crates compiled for `wasm32-unknown-emscripten`, and the
+  GPL-3.0 text and source pointer for the shims.
 
 ### Removed
 

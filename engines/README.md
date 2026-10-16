@@ -17,11 +17,15 @@ Every tarball also holds `public/licenses/engines/<bundle>/THIRD-PARTY-NOTICES.t
 and a `LICENSES/` folder next to it with the full licence texts of everything
 compiled into that bundle: the components named in the bundle's `notices`
 list (`notices/components.json`, texts in `notices/texts/` or elsewhere in this
-repository) and, for the Rust bundles, every crate compiled for wasm32
-(`notices/crates/<bundle>.json`, generated from `Cargo.lock`). Changed
+repository) and, for the Rust bundles, every crate compiled for the bundle's
+wasm32 target (`cargoTarget` in `bundles.json`, default
+`wasm32-unknown-unknown`; `openssl-pkcs11` links the Rust engine as a
+`wasm32-unknown-emscripten` staticlib) (`notices/crates/<bundle>.json`,
+generated from `Cargo.lock`). Changed
 third-party code is marked as changed and points to its record (`PATCHES.md`,
 `NOTICE`). The strongSwan bundle also carries the GPL-2.0 source pointer: the
-strongSwan 6.0.5 tarball plus this repository at the build commit. The
+strongSwan 6.0.5 tarball plus this repository at the build commit, and the
+OpenSSL Studio bundle carries the GPL-3.0 source pointer for its shims. The
 manifest lists every notice file with its SHA-256, and `verify` checks them in
 the tarballs and in the consumer tree.
 
