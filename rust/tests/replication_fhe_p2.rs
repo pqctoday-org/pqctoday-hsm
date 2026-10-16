@@ -154,7 +154,10 @@ fn p2_restore_preserves_client_key_and_old_ciphertexts_decrypt() {
     // Data encrypted before the backup.
     let old = tf::encrypt_for_test(s0, seed, "FheUint8", 123).unwrap();
     let backup = repl::create_replication_package(s0, seed, &request(&w, 0, 1, Operation::OfflineBackup, &pd)).unwrap();
-    assert_eq!(softhsmrustv3::ffi::C_DestroyObject(s0, seed), CKR_OK, "source test instance destroyed");
+    // FHE seeds are not destroyable by the normal user (CKA_DESTROYABLE = FALSE, owner decision 2026-10-15); the
+    // source test instance is lost here as a device would be.
+    assert_eq!(softhsmrustv3::ffi::C_DestroyObject(s0, seed), CKR_ACTION_PROHIBITED);
+    repl::discard_object(seed);
     repl::set_clock_override(Some(w.now + 3600));
     let (bk, _) = repl::import_replication_package(w.tokens[1].user, &backup, &[]).unwrap();
     let (rest, _) = repl::import_replication_package(

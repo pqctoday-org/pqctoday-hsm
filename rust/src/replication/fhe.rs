@@ -572,6 +572,7 @@ fn generate_fhe_seed_inner(
         (CKA_EXTRACTABLE, false),
         (CKA_COPYABLE, false),
         (CKA_MODIFIABLE, false),
+        (CKA_DESTROYABLE, false),
         (CKA_TRUSTED, false),
         (CKA_DERIVE, true),
         (CKA_DECRYPT, true),

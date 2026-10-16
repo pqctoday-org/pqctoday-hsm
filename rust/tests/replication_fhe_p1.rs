@@ -77,7 +77,10 @@ fn p1_fhe_seed_live_clone_and_offline_restore_with_source_destroyed() {
     assert!(!receipt.is_empty());
     // Offline backup 0 → 2, destroy the source, a day later import, then restore 2 → 1.
     let backup = repl::create_replication_package(w.tokens[0].user, src, &request(&w, 0, 2, Operation::OfflineBackup, &pd)).unwrap();
-    assert_eq!(softhsmrustv3::ffi::C_DestroyObject(w.tokens[0].user, src), CKR_OK);
+    // FHE seeds are not destroyable by the normal user (CKA_DESTROYABLE = FALSE, owner decision 2026-10-15); the
+    // source is lost here as a device would be.
+    assert_eq!(softhsmrustv3::ffi::C_DestroyObject(w.tokens[0].user, src), CKR_ACTION_PROHIBITED);
+    repl::discard_object(src);
     repl::set_clock_override(Some(w.now + 86_400));
     let (bk, _) = repl::import_replication_package(w.tokens[2].user, &backup, &[]).expect("offline import");
     let restored_pkg = repl::create_replication_package(w.tokens[2].user, bk, &request(&w, 2, 1, Operation::Restore, &pd)).unwrap();
