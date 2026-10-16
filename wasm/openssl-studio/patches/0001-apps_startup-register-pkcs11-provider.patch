@@ -1,0 +1,44 @@
+Subject: [PATCH] apps: register the statically-linked pkcs11-provider at CLI startup
+
+openssl.wasm links pkcs11-provider and a PKCS#11 engine statically, and
+registers the provider with OSSL_PROVIDER_add_builtin() from
+pqctoday_cms_init() (wasm/openssl-studio/shims/cms_provider_init.c). That registration
+is per-runtime, and openssl.wasm is built with -sEXIT_RUNTIME=1, so EVERY
+callMain() starts a fresh runtime with nothing registered.
+
+Without this hook, a CLI command touching a `pkcs11:` URI only works if
+the embedding JS called _pqctoday_cms_init() on that exact module instance
+first. Calling it from apps_startup() makes the provider available to
+every command in every instance -- which the CMS/S-MIME workshop, the TLS
+simulator's HSM mode, and OpenSSL Studio all depend on. Known in the JS as
+"Fix A" (see the comment block in cms.worker.ts).
+
+Recovered 2026-07-24: this patch previously existed only inside a
+gitignored openssl-3.6.2-src tree on one machine. When that tree went
+missing, a rebuild from pristine source silently produced a binary where
+pkcs11: URIs no longer resolved in any CLI command.
+
+--- a/apps/openssl.c
++++ b/apps/openssl.c
+@@ -74,6 +74,21 @@
+     (void)setup_engine_loader();
+ 
+     /*
++     * pqctoday "Fix A": register the statically-linked pkcs11-provider in
++     * this runtime's global lib ctx. openssl.wasm is built -sEXIT_RUNTIME=1,
++     * so every callMain() starts a fresh runtime and the registration made by
++     * a previous command is gone; without this, `pkcs11:` URIs only work if
++     * the embedding JS called _pqctoday_cms_init() on that exact module
++     * instance first. Idempotent (returns 1 when already loaded). The return
++     * code is ignored on purpose: a build or run with no usable PKCS#11
++     * module must still run every non-pkcs11 command normally.
++     */
++    {
++        extern int pqctoday_cms_init(void);
++        (void)pqctoday_cms_init();
++    }
++
++    /*
+      * NOTE: This is an undocumented feature required for testing only.
+      * There are no guarantees that it will exist in future builds.
+      */
