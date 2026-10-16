@@ -21,7 +21,10 @@ Inputs (all in this repository, so packaging needs no network and no cargo):
 
 The crate lists are generated where cargo and the crate sources are (the
 project's Rust container), because the list must be the crates that are
-really compiled for wasm32, not everything in Cargo.lock:
+really compiled for the bundle's wasm32 target, not everything in Cargo.lock.
+The target is the bundle's "cargoTarget" in engines/bundles.json, default
+wasm32-unknown-unknown (openssl-pkcs11 links the Rust engine as a
+wasm32-unknown-emscripten staticlib):
 
   python3 scripts/engine_notices.py crates          # in the Rust container (see local-gate.sh)
   python3 scripts/engine_notices.py check          # no cargo needed; CI runs this
@@ -45,7 +48,7 @@ BUNDLES_FILE = os.path.join(ROOT, "engines", "bundles.json")
 NOTICES_DIR = os.path.join(ROOT, "engines", "notices")
 COMPONENTS_FILE = os.path.join(NOTICES_DIR, "components.json")
 CRATES_DIR = os.path.join(NOTICES_DIR, "crates")
-TARGET = "wasm32-unknown-unknown"
+DEFAULT_TARGET = "wasm32-unknown-unknown"
 REPO_URL = "https://github.com/pqctoday-org/pqctoday-hsm"
 LICENCE_FILE_RE = re.compile(r"^(LICEN[CS]E|COPYING|COPYRIGHT|NOTICE|UNLICENSE)([-_.].*)?$", re.IGNORECASE)
 
@@ -114,9 +117,14 @@ def file_sha256(path: str) -> str:
 # Generating the crate lists (needs cargo and the crate sources)
 
 
-def cargo_metadata(manifest: str, online: bool = False) -> dict:
+def bundle_target(bundle: dict) -> str:
+    """The Rust target a bundle's crates are compiled for."""
+    return bundle.get("cargoTarget") or DEFAULT_TARGET
+
+
+def cargo_metadata(manifest: str, online: bool = False, target: str = DEFAULT_TARGET) -> dict:
     cmd = ["cargo", "metadata", "--format-version", "1", "--locked",
-           "--filter-platform", TARGET, "--manifest-path", manifest]
+           "--filter-platform", target, "--manifest-path", manifest]
     if not online:
         cmd.insert(4, "--offline")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -157,7 +165,8 @@ def licence_files(package: dict) -> list[str]:
 
 def build_crate_list(bundle: dict, online: bool = False) -> dict:
     manifest = os.path.join(ROOT, bundle["cargoManifest"])
-    meta = cargo_metadata(manifest, online)
+    target = bundle_target(bundle)
+    meta = cargo_metadata(manifest, online, target)
     root_real = os.path.realpath(ROOT)
     crates, texts = [], {}
     for pkg in compiled_packages(meta, manifest):
@@ -197,7 +206,7 @@ def build_crate_list(bundle: dict, online: bool = False) -> dict:
         "schema": 1,
         "bundle": bundle["name"],
         "cargoManifest": bundle["cargoManifest"],
-        "target": TARGET,
+        "target": target,
         "cargoLock": os.path.relpath(lock_path(bundle), ROOT),
         "cargoLockSha256": file_sha256(lock_path(bundle)),
         "crates": crates,
@@ -262,6 +271,8 @@ def check_bundle(bundle: dict, components: dict[str, dict], fallbacks: dict[str,
             current = None
         if current and doc.get("cargoLockSha256") != current:
             problems.append(f"{name}: crate list was generated from a different {doc.get('cargoLock')}; regenerate it")
+        if doc.get("target") != bundle_target(bundle):
+            problems.append(f"{name}: crate list was generated for {doc.get('target')}, not {bundle_target(bundle)}; regenerate it")
         for crate in doc.get("crates", []):
             label = f"{name}: crate {crate['name']} {crate['version']}"
             if not crate.get("thirdParty"):

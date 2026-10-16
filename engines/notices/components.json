@@ -90,6 +90,24 @@
       "source": "https://github.com/latchset/pkcs11-provider",
       "modified": "modified by PQC Today, LLC; see src/vendor/pkcs11-provider/PATCHES.md",
       "licenseFiles": ["src/vendor/pkcs11-provider/COPYING"]
+    },
+    "openssl-cli": {
+      "name": "OpenSSL, library and openssl command-line tool",
+      "version": "3.6.3",
+      "license": "Apache-2.0",
+      "copyright": ["Copyright (c) 1998-2026 The OpenSSL Project Authors"],
+      "source": "https://www.openssl.org/source/openssl-3.6.3.tar.gz (SHA-256 243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1); built with its apps by scripts/build-openssl-studio-wasm.sh",
+      "modified": "apps/openssl.c changed by PQC Today, LLC to register pkcs11-provider at start-up; see wasm/openssl-studio/patches/0001-apps_startup-register-pkcs11-provider.patch",
+      "licenseFiles": ["engines/notices/texts/openssl-3.6.3/LICENSE.txt"]
+    },
+    "openssl-studio-shims": {
+      "name": "OpenSSL Studio shims (TLS, CMP and CMS simulators, static PKCS#11 binding)",
+      "version": "this repository, wasm/openssl-studio/shims",
+      "license": "GPL-3.0-only",
+      "copyright": ["Copyright (c) 2026 PQC Today, LLC"],
+      "source": "wasm/openssl-studio/ in this repository (see its README.md)",
+      "sourceOffer": "Complete corresponding source: {repo}/tree/{commit} (shims, OpenSSL patch and build script) plus the OpenSSL 3.6.3 tarball and the pkcs11-provider source named in this file. It stays available there, and on request from PQC Today, LLC, for at least three years after this bundle is published.",
+      "licenseFiles": ["wasm/openssl-studio/LICENSES/GPL-3.0-only.txt"]
     }
   },
   "crateTextFallbacks": {

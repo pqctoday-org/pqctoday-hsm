@@ -117,8 +117,10 @@ jobs:
       # exists, every crate has a licence, and the crate lists match Cargo.lock.
       - name: Third-party notices are complete
         run: python3 scripts/engine_notices.py check
-      # The committed crate lists are what cargo resolves for wasm32 today
-      # (catches a feature or dependency change that leaves Cargo.lock alone).
+      # The committed crate lists are what cargo resolves today for each
+      # bundle's wasm32 target (bundles.json cargoTarget: openssl-pkcs11 is
+      # wasm32-unknown-emscripten, the others wasm32-unknown-unknown); catches
+      # a feature or dependency change that leaves Cargo.lock alone.
       - name: Crate lists are current
         run: |
           python3 scripts/engine_notices.py crates --online
