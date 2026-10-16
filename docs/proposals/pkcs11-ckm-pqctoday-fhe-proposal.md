@@ -1,7 +1,7 @@
 # PQCToday FHE custody mechanisms (CKM_PQCTODAY_FHE_*): normative specification
 
-Status: **P0B working specification, revision 3: review amendments A1–A5, the §11 answers and implementation amendment I-1 from the FHE P1/P2 implementer (session 7f) are applied. Educational, not a production interface**
-Date: 2026-10-03
+Status: **P0B working specification, revision 7.** Revisions 1–6 are listed in §15. Revision 7 records the build status (§12), the signed security-officer operations (§13) and the KMIP binding (§14) of plan D02387. CKKS custody is part of the default native build; it is not certified, and its outputs keep the educational label until a separate owner decision (plan D02387 §7, §8 item 2).
+Date: 2026-10-15
 Engine scope: `softhsmrustv3` only
 
 **Sources.**
@@ -10,19 +10,24 @@ Engine scope: `softhsmrustv3` only
 - Allocation authority `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md` §1.4.5 (priv PR #148, merged `b80c856b`).
 - The FHE P1 implementation on `feat/fhe-p1-1003` at `f48a040d`.
 - Reference evidence in the private repo `pqctoday-org/pqctoday-fhe` at `ebda5c3d` (`reference-runs/tfhe-custody`).
+- Plan D02387, FHE key management over KMIP, revision 3 (pqctoday-plan `pqctoday-hsm/fhe/2026-10/fhe-key-management-kmip-plan-20261015.md`), owner decisions F1–F19 (2026-10-15).
+- The D02387 implementation on branch `feat/fhe-kmip-ttlv-1015` at `dff56a1f`: the default build (`478e57d2`), admin operations [5] and [6] (`ef0f2414`), non-destroyable seeds, [7] and the short-buffer rule (`da44cccc`), the KMIP interface (`2c08bcdd`, described in `kmip/docs/FHE_CUSTODY_INTERFACE.md`).
 
 **Owner approvals (2026-10-03, relayed by the coordinator session).** FHE plan P1–P2 approved ("Approve P1-P2 (Recommended)"). The §6.3 typed-decrypt text approved ("Yes to all three (Recommended)").
+
+**Owner decisions 2026-10-15 (plan D02387 §2) used in revision 7.** F7 native build only; F8 SO updates reuse the replication admin signed-update format; F10 CKKS by default, TFHE opt-in; F11 the documentation-OID profile may ship; F13 one KMIP function is one PKCS#11 call; F14 single-part decryption; F15 the PKCS#11 v3.2 user model, no FHE-specific role; F16 only the SO deletes a seed (`CKA_DESTROYABLE = FALSE`); F17 one SO identity; F18 timeouts for state held across KMIP requests; F19 advertise once the hardening tests pass.
 
 Where this document and the P1 code at `f48a040d` agree, the code is the reference. Where this document adds behaviour P1 does not yet have (the four mechanisms, the KDF, the output encoding), P2 implements it as written here, or a review amendment changes this text first.
 
 ## 1. Design invariants
 
-1. The FHE seed (`CKK_PQCTODAY_FHE`) is `CKA_SENSITIVE=true`, `CKA_EXTRACTABLE=false`, `CKA_COPYABLE=false` and `CKA_MODIFIABLE=false` for its whole life. `C_WrapKey`, `C_WrapKeyAuthenticated`, `C_CopyObject` and `C_GetAttributeValue(CKA_VALUE)` refuse it. It leaves the token only through the Key Replication Interface 1.0, carrying the recovery descriptor of §7 as its type-specific extension.
+1. The FHE seed (`CKK_PQCTODAY_FHE`) is `CKA_SENSITIVE=true`, `CKA_EXTRACTABLE=false`, `CKA_COPYABLE=false` and `CKA_MODIFIABLE=false` for its whole life. `C_WrapKey`, `C_WrapKeyAuthenticated`, `C_CopyObject` and `C_GetAttributeValue(CKA_VALUE)` refuse it. It leaves the token only through the Key Replication Interface 1.0, carrying the recovery descriptor of §7 as its type-specific extension. A seed created by `KEY_GEN` is also `CKA_DESTROYABLE=false`: `C_DestroyObject` refuses it for every caller, and only the security officer removes it (§3, §13).
 2. The four mechanisms below are the only operations that use the seed. The caller-visible KDFs (`CKM_SP800_108_*`, `CKM_HKDF_*`, `CKM_*_KEY_DERIVATION`) are never in its `CKA_ALLOWED_MECHANISMS`. The seed's allowlist is a subset of {`CKM_PQCTODAY_FHE_DERIVE_PUBLIC`, `CKM_PQCTODAY_FHE_DECRYPT`}.
 3. Only the client key is ever regenerated from the seed. Server keys and public keys are generated fresh on each derivation and are not reproducible (FHE plan D9; measured in `reference-runs/tfhe-custody` check C3).
 4. No caller supplies cryptographic parameters. Parameter sets come from the allowlisted registry of §4.
 5. Every decryption passes the typed policy of §6, which is SO-enrolled, immutable, and bound to the seed at creation. The HSM cannot verify which computation produced a submitted ciphertext; the policy limits what is released, not what was computed.
-6. This is an educational emulator, and its claims are scoped as in FHE plan §1.2. The browser emulator and native software token give no hardware custody and no rollback resistance against the host. Evidence uses the label "software token on <board>" until HSM plan K6.
+6. This is a software token, and its claims are scoped as in FHE plan §1.2. CKKS custody is in the default native build (§12), but that means shipped and gated, not certified. The native software token gives no hardware custody and no rollback resistance against the host. Evidence uses the label "software token on <board>" until HSM plan K6.
+7. Roles follow the PKCS#11 v3.2 user model, as for every other key (F15). Generation, export of public material and decryption are normal-user operations. Policy enrolment, recipient enrolment, CKKS key rotation, seed retirement and seed destruction are security-officer operations. There is no FHE-specific role. What one seed allows is fixed by its attributes and by the policies the SO enrolled.
 
 ## 2. Definitions (authority §1.4.5)
 
@@ -39,12 +44,12 @@ Attributes. Every one is engine-computed or creation-only and immutable: `attr_m
 
 | Codepoint | Symbol | Type | Value |
 |---|---|---|---|
-| `0x8000010C` | `CKA_PQCTODAY_FHE_SCHEME` | UTF-8 bytes | `tfhe-rs` (the only scheme in version 1) |
+| `0x8000010C` | `CKA_PQCTODAY_FHE_SCHEME` | UTF-8 bytes | `tfhe-rs` (registry ID 1) or `ckks-stream` (streamed CKKS, §6.5–§6.8) |
 | `0x8000010D` | `CKA_PQCTODAY_FHE_PARAM_SET` | `CK_ULONG` | Registry ID (§4) |
 | `0x8000010E` | `CKA_PQCTODAY_FHE_PARAM_HASH` | 48 bytes | SHA-384 of the canonical parameter encoding (§4) |
 | `0x8000010F` | `CKA_PQCTODAY_FHE_LIBRARY` | UTF-8 bytes | Backend identifier, e.g. `tfhe-rs 1.8.1 187fc0b9` |
 | `0x80000110` | `CKA_PQCTODAY_FHE_LINEAGE_ID` | 32 bytes | Random recovery identity, generated with the original seed and preserved across replication |
-| `0x80000111` | `CKA_PQCTODAY_FHE_PUBLIC_KIND` | `CK_ULONG` | On `CKK_PQCTODAY_FHE_PUBLIC` objects only: `1` compressed server key, `2` compact public key |
+| `0x80000111` | `CKA_PQCTODAY_FHE_PUBLIC_KIND` | `CK_ULONG` | On `CKK_PQCTODAY_FHE_PUBLIC` objects only: `1` compressed server key, `2` compact public key, `3` token-signed TFHE manifest (parameter version 1); CKKS kinds under parameter version 2 |
 | `0x80000112` | `CKA_PQCTODAY_FHE_DECRYPT_POLICY` | 48 bytes | SHA-384 of the enrolled policy DER (§6) |
 
 The decrypt counter of §6.4 lives in the engine-private range (`>= 0xFFFF0000`), so it is never client-writable. It is not a vendor attribute and needs no allocation.
@@ -57,15 +62,18 @@ The decrypt counter of §6.4 lives in the engine-private range (`>= 0xFFFF0000`)
 | `CKA_VALUE_LEN` | 32 (the seed; `CKA_VALUE` is never readable) |
 | `CKA_TOKEN`, `CKA_PRIVATE`, `CKA_SENSITIVE` | true |
 | `CKA_EXTRACTABLE`, `CKA_COPYABLE`, `CKA_MODIFIABLE`, `CKA_TRUSTED` | false |
+| `CKA_DESTROYABLE` | false, set by `KEY_GEN` (F16). `C_DestroyObject` returns `CKR_ACTION_PROHIBITED` for every caller. A seed leaves the token's store only through a security-officer operation: the signed `[7] destroyFheSeed` (§13.4), or `retire_old_seed` after a signed CKKS rotation (§6.7). Neither is a `C_DestroyObject` call |
 | `CKA_DERIVE`, `CKA_DECRYPT` | true |
 | `CKA_ALLOWED_MECHANISMS` | Exactly the replication policy's allowed mechanisms, which must be a subset of {`DERIVE_PUBLIC`, `DECRYPT`} |
 | `CKA_DERIVE_TEMPLATE` | `{CKA_CLASS=CKO_PUBLIC_KEY, CKA_KEY_TYPE=CKK_PQCTODAY_FHE_PUBLIC, CKA_TOKEN=false, CKA_PRIVATE=false}` (F3 enforces it). It is a fixed profile constant, never caller-supplied. The engine sets it at `KEY_GEN` **and re-sets it when installing a replication package**, because packages do not carry restriction templates (A1). The descriptor's generator version (§7) implies it, so a replica can never lose it |
 | Replication binding | The Key Replication Interface policy whose `typeConstraintHash` equals the FHE profile hash (P1 `profile_constraint_hash`) |
 | History | Created by `KEY_GEN`: `CKA_LOCAL=true`, `CKA_KEY_GEN_MECHANISM=CKM_PQCTODAY_FHE_KEY_GEN`, `CKA_ALWAYS_SENSITIVE`/`CKA_NEVER_EXTRACTABLE=true`. Installed from a package: imported plus provenance (HSM plan decision 1) |
 
+A seed installed from a replication package carries `CKA_DESTROYABLE=false` too (`rust/src/replication/package.rs`, `installed_objects`): F16 applies to every FHE seed, generated or replicated.
+
 ## 4. Parameter registry and canonical encoding
 
-Version 1 has exactly one entry.
+This section defines the TFHE entry, registry ID 1. TFHE custody is compiled only with the opt-in `educational-fhe` feature (§12). The streamed-CKKS entries (IDs 2, 3, 4 and the test set 0x8002) are defined in `rust/src/replication/fhe_ckks/params.rs` and described in §6.5–§6.8.
 
 | ID | Name | Library | Config |
 |---|---|---|---|
@@ -80,6 +88,8 @@ P1's placeholder hash (SHA-384 of the display name, `f48a040d` `param_hash`) is 
 ## 5. Mechanisms
 
 All parameter structures use fixed-width fields, carry no pointers inside nested data, and start with `ulVersion` = 1. An unknown version, a wrong length or a non-null reserved field returns `CKR_MECHANISM_PARAM_INVALID`.
+
+**Roles (F15).** `KEY_GEN`, `DERIVE_PUBLIC` (parameter versions 1 and 2) and `DECRYPT` are normal-user operations in an R/W user session, like any other key. The security officer gets `CKR_USER_TYPE_INVALID`. The SO-only exceptions are `DERIVE_PUBLIC` parameter version 3 (CKKS rotation, §6.7) and the operations of §13.
 
 ### 5.1 `CKM_PQCTODAY_FHE_KEY_GEN` (`C_GenerateKey`)
 
@@ -103,7 +113,7 @@ typedef struct CK_PQCTODAY_FHE_KEY_GEN_PARAMS {
 ```c
 typedef struct CK_PQCTODAY_FHE_DERIVE_PUBLIC_PARAMS {
     CK_ULONG    ulVersion;            /* 1 */
-    CK_ULONG    ulPublicKind;         /* 1 compressed server key, 2 compact public key */
+    CK_ULONG    ulPublicKind;         /* 1 compressed server key, 2 compact public key, 3 token-signed manifest */
 } CK_PQCTODAY_FHE_DERIVE_PUBLIC_PARAMS;
 ```
 
@@ -135,6 +145,19 @@ The per-object cap is 64 MiB. The output size is computed before allocation, and
 
 **Authenticity.** The token does not sign the blob itself. The application signs a manifest with a standard `C_Sign(CKM_ML_DSA)` call using an ML-DSA-65 key. That key **must be token-resident and non-extractable**, and the compute server verifies it through K3 `attest_key` evidence (device chain plus lineage) before trusting the manifest. So no new vendor operation is needed. The manifest is the DER of `FhePublicManifestV1 ::= SEQUENCE { lineage OCTET STRING (SIZE(32)), paramHash OCTET STRING (SIZE(48)), kind INTEGER, valueSha384 OCTET STRING (SIZE(48)) }`. It never buffers the blob as signature input (F4). The KV260 compute server verifies the manifest before decompressing.
 
+**Token-signed manifest, kind 3 (revision 7; plan D02387, owner decision 2026-10-15).** Over KMIP there is no
+`C_Sign` with a token-resident signer key and no K3 evidence, so the token signs itself, as for CKKS kind 6. After a
+session has derived kind 1 and kind 2 for a seed, `ulPublicKind = 3` returns `TfheSignedManifestV1 ::= SEQUENCE { tbs
+TfheManifestTbsV1, signature OCTET STRING, signerChain SEQUENCE OF Certificate }` with `TfheManifestTbsV1 ::= SEQUENCE
+{ version INTEGER (1), paramHash OCTET STRING, lineage OCTET STRING, entries SEQUENCE OF SEQUENCE { kind INTEGER,
+sha256 OCTET STRING (SIZE(32)) } }`. The entries are the SHA-256 of the exact kind 1 and kind 2 bytes this session
+derived (TFHE public material differs at every derivation). The signature is ML-DSA-65 by the device's receipt-signing
+function key over `"PQCToday TFHE Manifest 1.0" || 0x00 || DER(tbs)`; `signerChain` is `[receipt-signing
+certificate, device certificate]`. A receiver validates the chain for the receipt-signing purpose against the
+manufacturing root and CRLs, verifies the signature, and compares the hashes with the files it holds
+(`replication::fhe_tfhe::verify_tfhe_manifest`). Kind 3 is refused with `CKR_OPERATION_NOT_INITIALIZED` until both
+kinds were derived in the session; it is signed once per export; the record is dropped when the session closes.
+
 ### 5.3 `CKM_PQCTODAY_FHE_DECRYPT` (`C_Decrypt`)
 
 ```c
@@ -145,12 +168,13 @@ typedef struct CK_PQCTODAY_FHE_DECRYPT_PARAMS {
 } CK_PQCTODAY_FHE_DECRYPT_PARAMS;
 ```
 
-- **Single-part only.** `C_DecryptUpdate`/`C_DecryptFinal` return `CKR_FUNCTION_NOT_SUPPORTED` for this mechanism.
+- **Single-part only (F14).** The sequence is `C_DecryptInit`, `C_Decrypt` with `pData == NULL` (size query), then `C_Decrypt` with a buffer. `C_DecryptUpdate`/`C_DecryptFinal` return `CKR_FUNCTION_NOT_SUPPORTED` for this mechanism and end the operation. A whole ciphertext (16 KB for a TFHE boolean, about 2 MB for CKKS registry ID 3) fits one call, and the token needs all of it anyway.
+- **Operation state (PKCS#11 v3.2 §5.2).** A size query keeps the operation active. A buffer below the length the size query reports returns `CKR_BUFFER_TOO_SMALL` with that length in `*pulDataLen`. The check runs before any decryption: no decryption runs, no counter unit is spent, and the operation stays active, so the caller can retry with a larger buffer. Every other outcome, success or error, ends the operation.
 - **Input.** One TFHE-rs `safe_serialize` blob of a high-level `FheBool` or `FheUint*`, at most 4 MiB. **Version 1 refuses compressed ciphertext lists.** `FheType.compressed_allowed` must be false, and the policy parser refuses `true` (P2 change to the P1 parser).
 - **Order of checks.** These run in a fixed order, so that errors cannot be used as an oracle. They extend §9 of the replication interface:
   1. **Rule 4, requester binding.** Session, login and role must be the owning user. The SO and public sessions get the standard role errors.
   2. **Mechanism allowed.** It must be in the base key's allowlist, else `CKR_KEY_FUNCTION_NOT_PERMITTED`.
-  3. **Size query.** If `pData == NULL`, run only the rule 1 type gate and return the output length of the matched type, **without decrypting and without consuming the counter**. The type gate looks only at the ciphertext's shape (type, width, block count, parameters), which the submitter already knows, so the size query leaks nothing that depends on the plaintext (A5). A size query of a non-conforming input returns the same `CKR_ACTION_PROHIBITED` as a real call.
+  3. **Size query.** If `pData == NULL`, run only the rule 1 type gate and return the output length of the matched type, **without decrypting and without consuming the counter**. The type gate looks only at the ciphertext's shape (type, width, block count, parameters), which the submitter already knows, so the size query leaks nothing that depends on the plaintext (A5). A size query of a non-conforming input returns the same `CKR_ACTION_PROHIBITED` as a real call. A call with a buffer runs the same size computation first; if the buffer is smaller, it returns `CKR_BUFFER_TOO_SMALL` here, before step 4 (F14).
   4. **Counter.** Reserve one unit of the decrypt counter durably (§6.4). If exhausted, return `CKR_ACTION_PROHIBITED`. From here on, every refusal still consumes the unit.
   5. **Rule 5, recipient.** An all-zero recipient is allowed only if `recipient_only` is false. A non-zero recipient must be in the policy `recipients`. Otherwise return `CKR_ACTION_PROHIBITED`. This check does not depend on the plaintext, so it runs before any decryption work, and the refusal still consumes the counter unit (A3).
   6. **Rule 1, conformance-checked type gate.** For each policy `allowed_output_types` entry in order, call `safe_deserialize_conformant` with that type's conformance parameters (block count, moduli, LWE dimension, atomic pattern) and the 4 MiB cap. The first conforming type is the matched type. If none conforms, return `CKR_ACTION_PROHIBITED`.
@@ -171,7 +195,7 @@ typedef struct CK_PQCTODAY_FHE_DECRYPT_PARAMS {
 
 ### 5.4 `CKM_PQCTODAY_FHE_ENCRYPT` (`C_Encrypt`)
 
-This mechanism exists only in builds with the `test-support` feature, for known-answer vectors. It is not advertised by `C_GetMechanismList` in shipped artefacts, and `C_GetMechanismInfo` returns `CKR_MECHANISM_INVALID` there. Its input is the owner-output format of §5.3. It encrypts under the regenerated client key and returns the `safe_serialize` blob.
+This mechanism exists only in builds with both the `educational-fhe` and `test-support` features, for TFHE known-answer vectors. It is not advertised by `C_GetMechanismList` in shipped artefacts, and `C_GetMechanismInfo` returns `CKR_MECHANISM_INVALID` there. Its input is the owner-output format of §5.3. It encrypts under the regenerated client key and returns the `safe_serialize` blob.
 
 ### 5.5 Seed derivation (normative; generator version 1)
 
@@ -219,9 +243,15 @@ The policy ID is SHA-384 of the DER. The parser rejects anything else with `CKR_
 
 ### 6.2 Enrollment
 
-The SO enrolls a policy in a record with role 13, as P1 does. Enrolling identical DER again is idempotent, and there are at most 64 policies per slot.
+The SO enrolls a policy in a record with role 13, as P1 does. Enrolling identical DER again is idempotent, and there are at most 64 policies per slot. Release recipients (§5.3, policy `recipients`) are enrolled the same way, as certificate records with role 14.
 
-Over KMIP (programme stage 2), policy enrollment is a signed SO update. Root and trust-anchor enrollment stays board-local (owner decision, 2026-10-03).
+There are two paths, with the same checks:
+- **Signed update (F3, F8).** Admin operation `[5] enrollFheDecryptPolicy` for a policy and `[6] enrollFheRecipient` for a recipient, carried by `C_PQCTODAY_AdminExecute` in a security-officer session (§13). This is the path for a remote SO, over the C ABI or over KMIP (§14).
+- **Board-local Rust API.** `fhe::enroll_fhe_decrypt_policy` and `fhe_custody::enroll_fhe_recipient`, in an SO session. They have no C entry point.
+
+The replication policy that `KEY_GEN` also names is not an FHE operation: it is enrolled with the replication interface's own path (§6.5).
+
+Root and trust-anchor enrollment stays board-local (owner decision, 2026-10-03).
 
 ### 6.3 Replication
 
@@ -270,8 +300,10 @@ later): those tokens' CKKS replication policies need the same re-enrolment, with
 1. The Security Officer of each token that must replicate CKKS seeds, on the source and on every destination (a
    destination accepts only an equal or stricter policy, which requires an equal `typeConstraintHash`), enrols the
    policy again with every field unchanged except `typeConstraintHash`, set to the current
-   `fhe::ckks_profile_constraint_hash()`. Locally this is `enroll_policy`; over KMIP it is the signed SO policy update
-   (§6.2).
+   `fhe::ckks_profile_constraint_hash()`. Locally this is `enroll_policy`. As a signed update it is admin operation
+   `[1] enrollPolicy` of the replication admin interface 1.0, not one of the FHE operations of §13. Over KMIP, `[1]`
+   travels only on the replication admin interface, which the KMIP server has only in `educational-replication`
+   builds; the FHE interface (§14) refuses it.
 2. The policy ID is the SHA-384 of the policy DER, so the re-enrolled policy has a new ID. Users name the new ID when
    they generate CKKS seeds.
 3. A seed bound to the old policy cannot be rebound. To make its data replicable, generate a new seed under the
@@ -465,7 +497,7 @@ A future TFHE-rs version that changes `generate_with_seed` output needs a new ge
 | `DECRYPT` | 32 / 32 | `CKF_DECRYPT` |
 | `ENCRYPT` (test builds only) | 32 / 32 | `CKF_ENCRYPT` |
 
-None of the four is advertised by a normal release build until the gates of §10 close.
+As of revision 7, none of the four is listed by `C_GetMechanismList`, and `C_GetMechanismInfo` returns `CKR_MECHANISM_INVALID` for them; the mechanisms work when called directly. `KEY_GEN`, `DERIVE_PUBLIC` and `DECRYPT` will be listed, with the values above, once the gates of §10 pass (F19). `ENCRYPT` stays test-only and is never listed in a shipped build (§5.4).
 
 ## 9. Return codes
 
@@ -477,10 +509,12 @@ None of the four is advertised by a normal release build until the gates of §10
 | Unknown parameter set or policy at `KEY_GEN` | `CKR_TEMPLATE_INCONSISTENT` |
 | Malformed policy DER at enrollment | `CKR_DATA_INVALID` |
 | Any decrypt policy refusal: type gate, never-release, predicate, recipient, counter exhausted | `CKR_ACTION_PROHIBITED` (one code; the reason goes to the audit log only) |
-| Output buffer too small | `CKR_BUFFER_TOO_SMALL`, with the length |
+| Output buffer too small | `CKR_BUFFER_TOO_SMALL`, with the length; checked before decrypting, no counter unit spent, the operation stays active (§5.3) |
 | Over a size cap or quota | `CKR_DEVICE_MEMORY` |
 | Descriptor or package inconsistency on import | `CKR_ENCRYPTED_DATA_INVALID` |
-| Multi-part decrypt | `CKR_FUNCTION_NOT_SUPPORTED` |
+| Multi-part decrypt | `CKR_FUNCTION_NOT_SUPPORTED` (the operation ends) |
+| `C_DestroyObject` on a seed (`CKA_DESTROYABLE=false`) | `CKR_ACTION_PROHIBITED` |
+| Signed SO operations [5]–[7] | the replication admin codes (§13.3) |
 
 Every error path zeroizes transient secrets and leaves no partial object.
 
@@ -496,7 +530,9 @@ Every error path zeroizes transient secrets and leaves no partial object.
    - SO, public and foreign-token sessions are refused;
    - recipient-only never returns plaintext to the owner.
 4. The repository gates of FHE plan §10.1: the vendor-constant manifest, the mechanism ledger with `excluded-by-scope:` on C++ rows, conformance-report freshness, vector reachability, and the full local gate.
-5. The owner's separate approval to advertise.
+5. The hardening tests of plan D02387 WP-A3 pass in the HSM local gate: native KATs (TFHE ID 1; CKKS IDs 2–4 and 0x8002); negative tests (wrong role, policy exhausted, wrong lineage, oversized inputs, counters across restarts); fuzzing of the policy and parameter parsers; a review of the decrypt-release path.
+
+Owner decision F19 (2026-10-15) replaces the earlier separate approval: once these tests pass in the HSM gate, `KEY_GEN`, `DERIVE_PUBLIC` and `DECRYPT` are listed in `C_GetMechanismList` and answered by `C_GetMechanismInfo` (§8). `ENCRYPT` stays hidden. As of revision 7, WP-A3 has not started and nothing is listed.
 
 ## 11. Review decisions (rev 2)
 
@@ -505,7 +541,94 @@ Every error path zeroizes transient secrets and leaves no partial object.
 3. **Server-key manifest signer:** an application ML-DSA-65 key that is token-resident, non-extractable and attested through K3 (§5.2).
 4. **P1 placeholder parameter hash:** retired in P2. P1 fixtures are test-only and are not migrated (§4).
 
-## 12. Revision history
+## 12. Builds (revision 7)
+
+| Build | FHE custody | How |
+|---|---|---|
+| Default native build (`rust/`, and the KMIP server built with its default `native` feature) | **CKKS custody** and the replication layer it needs. No TFHE-rs | `fhe-custody` is in `default` (F1, F10). `rust/build.rs` sets the cfgs `pqc_ckks_custody` and `pqc_replication` when the feature is on and the target is not wasm32 |
+| `educational-fhe` (opt-in) | adds **TFHE custody** (TFHE-rs 1.8.1, `integer` feature; registry ID 1) | **Non-commercial use only** (D4, F10). TFHE-rs is BSD-3-Clause-Clear, which grants no patent rights, and Zama requires a commercial patent licence for any commercial use. Never in a default or commercial artefact. A move of TFHE to OpenFHE is a future evolution (plan D02387 §9, F12) |
+| `educational-ckks` (opt-in) | CKKS custody | The earlier name for the same code, kept for existing builds |
+| WebAssembly (wasm32) | **none** in the default build (F7) | `fhe-custody` compiles nothing for wasm32, so the Hub bundles are unchanged. Only an explicit opt-in feature would compile custody for wasm32, and no shipped bundle enables one. The separate `educational-fhe` browser KAT bundle (`scripts/build-fhe-browser-kat.sh`) exports the TFHE seed derivation to JavaScript for KAT and timing runs on fixed public test seeds; no token object or token secret is reachable from those exports, and no shipped bundle enables it |
+| `test-support` (tests only) | KAT hooks; with `educational-fhe`, also `ENCRYPT` (§5.4) | Never in a shipped build |
+
+**Replication profile (F11).** Custody depends on the Key Replication Interface, whose identifiers are the RFC 5612 documentation OIDs (`1.3.6.1.4.1.32473`). There will be no private IANA enterprise number, and this profile may ship. Nothing is discoverable until a caller selects the profile at run time (`replication::select_educational_profile`); the KMIP server selects it when started with `--fhe-custody` (§14).
+
+## 13. Security-officer operations (signed updates)
+
+### 13.1 Format
+
+The FHE SO operations use the signed-update format of the [replication admin interface 1.0](pqctoday-key-replication-admin-interface-1.0.md) (F8): the same request, signature, nonce, sequence, replay ledger and receipt, and the same admin-authority key. Revision 7 adds three arms to its `AdminOperation` CHOICE, with explicit tags like arms [0]–[4] (`rust/src/replication/admin.rs`, `AdminTbsRequest`):
+
+```asn1
+AdminOperation ::= CHOICE {
+  -- [0] enrollCrl … [4] issueDeviceCrl: as in the admin interface 1.0
+  enrollFheDecryptPolicy [5] SEQUENCE { policy OCTET STRING (SIZE(1..8192)) },  -- FheDecryptPolicy DER, §6.1
+  enrollFheRecipient     [6] SEQUENCE { chain SEQUENCE SIZE(1..4) OF OCTET STRING (SIZE(1..8192)) },
+                                                                               -- recipient chain, leaf first
+  destroyFheSeed         [7] SEQUENCE { lineage OCTET STRING (SIZE(32)) } }    -- CKA_PQCTODAY_FHE_LINEAGE_ID
+```
+
+The C entry points are `C_PQCTODAY_AdminIssueNonce` and `C_PQCTODAY_AdminExecute` in the interface `PQCTODAY_KEY_REPLICATION_ADMIN_1_0` (`C_GetInterface`, once the profile is selected). Over KMIP they are functions 7 and 8 of §14. Host tools build and sign requests with `replication::admin_host` and check receipts with `replication::host_verify::verify_admin_receipt`.
+
+### 13.2 Authorisation, commit and receipt
+
+A request is accepted only with all of the following, as for every admin operation:
+- a real security-officer login (`CKU_SO`) on an R/W session. This is the token's one SO identity (F17); over KMIP it is the client certificate CN `replication-admin` (§14);
+- an ML-DSA-65 signature by the enrolled admin authority over `"PQCToday Replication Admin 1.0" ‖ 0x00 ‖ DER(AdminTbsRequest)`;
+- the engine's current nonce (one per slot, 60 s);
+- `sequence` equal to the stored sequence + 1.
+
+The staged effect, the new sequence, the replay-ledger entry (also the audit record) and the receipt are committed in one store transaction. The nonce is consumed after that commit. The receipt is signed by the token's receipt-signing key. An exact retry of a committed request (the same DER) returns the stored receipt byte for byte, without a nonce or sequence check.
+
+| Operation | Stage checks | Receipt `output` | Receipt `resultDigest` |
+|---|---|---|---|
+| `[5] enrollFheDecryptPolicy` | the §6.1 parser; at most 64 policies per slot; identical DER is idempotent | the policy ID (48 bytes) | the policy ID |
+| `[6] enrollFheRecipient` | the chain validates as a recovery-recipient chain to an enrolled root; an enrolled recipient is idempotent | SHA-384 of the leaf SPKI (48 bytes), the ID a policy's `recipients` names | the same 48 bytes |
+| `[7] destroyFheSeed` | exactly one token FHE seed on the slot carries the lineage | the lineage (32 bytes) | SHA-384 of the lineage |
+
+### 13.3 Return codes
+
+The admin interface's codes apply. Malformed input, including a policy or certificate that does not parse and a lineage that is not 32 bytes, returns `CKR_DATA_INVALID` before any trust check. Every syntactically valid refusal returns `CKR_ACTION_PROHIBITED`, with the reason in the audit log only. This includes a recipient chain that does not validate and a lineage that names no seed or more than one. A full ledger or a full policy table returns `CKR_DEVICE_MEMORY`; a ledger integrity or commit failure returns `CKR_DEVICE_ERROR`. In a build with the replication layer but without CKKS custody (`educational-replication` alone), [6] and [7] are refused.
+
+### 13.4 `destroyFheSeed`
+
+Seeds are not destroyable (§3), so this is the SO's way to remove one (F16). The request names the seed by its lineage, because an SO session cannot find private objects. The order is fixed:
+1. The stage checks that exactly one token seed on the slot carries the lineage. It writes nothing.
+2. The receipt and the ledger entry are committed.
+3. The engine then destroys the seed, clears the caches that hold material derived from it, and logs `fhe_seed_destroyed`.
+
+A destroyed seed therefore always has a signed receipt. If the engine stops between steps 2 and 3, the exact retry of the same signed request returns the stored receipt and completes step 3. If the seed is already gone, the retry only returns the receipt.
+
+`retire_old_seed`, the SO's removal of a CKKS seed after a signed rotation (§6.7), is the other removal path. It is a board-local Rust API, not a signed update.
+
+## 14. KMIP binding: interface `PQCTODAY_FHE_1_0`
+
+The full wire description is `kmip/docs/FHE_CUSTODY_INTERFACE.md`, and the code is `kmip/src/ops/fhe_bridge.rs`. This section summarises it.
+
+**Carrier (F2, F13).** KMIP 3.0 Operation PKCS_11 (0x33) with the interface name `PQCTODAY_FHE_1_0`, following the replication bridge. One KMIP function is one PKCS#11 call; there are no combined calls. A KMIP-level abstraction is a later step. The interface is compiled into every native server build (`fhe-custody` is part of the server's `native` feature) and served only when the server is started with `--fhe-custody`. Without `--fhe-so-pin-file`, functions 7 and 8 are refused.
+
+**Functions.** `Function` is the 1-based KMIP PKCS#11 Function value (KMIP 3.0 §11.39). Inputs are strict DER (canonical, nothing trailing). Objects are named by `CKA_UNIQUE_ID` (36 bytes).
+
+| Function | PKCS#11 call | Role | Input | Output |
+|---|---|---|---|---|
+| 1 | `C_GenerateKey(CKM_PQCTODAY_FHE_KEY_GEN)` | user | `GenerateKeyV1`: parameter set, replication and decryption policy IDs (48 bytes each), optional `CKA_LABEL`/`CKA_ID` | the seed's unique ID |
+| 2 | `C_DeriveKey(CKM_PQCTODAY_FHE_DERIVE_PUBLIC)` | user | `DeriveKeyV1`: base seed, parameter version 1 (TFHE kind) or 2 (CKKS piece: kind, key, digit, limb range) | the public session object's unique ID |
+| 3 | `C_GetAttributeValue` | user | `GetAttributeValueV1`: object, 1 to 16 attribute types | `AttributesV1`, with the engine's return code |
+| 4 | `C_DestroyObject` | user | unique ID | empty |
+| 5 | `C_DecryptInit(CKM_PQCTODAY_FHE_DECRYPT)` | user | `DecryptInitV1`: seed, recipient ID (48 zero bytes = owner) | empty |
+| 6 | `C_Decrypt`, single part | user | `DecryptV1`: ciphertext (at most 4 MiB), buffer size (0 = size query) | the data, or for a size query its length as a DER INTEGER |
+| 7 | `C_PQCTODAY_AdminIssueNonce` | SO | empty | 32-byte nonce |
+| 8 | `C_PQCTODAY_AdminExecute` | SO | `AdminSignedRequest` carrying [5], [6] or [7] (§13); any other admin operation gets `CKR_FUNCTION_NOT_SUPPORTED` | `AdminReceipt` |
+
+DERIVE_PUBLIC parameter version 3 (CKKS rotation, SO only) is not offered over this interface.
+
+**Roles (F15, F17).** Functions 1–6 run in the PKCS#11 normal-user session the server holds for the client, exactly like KMIP Create or Decrypt on other keys. Functions 7 and 8 accept only the client certificate CN `replication-admin`, the token's one SO identity, shared with the replication admin interface; the server runs them with a real SO login. Functions 1–6 refuse that identity, and functions 7–8 refuse every other one (`CKR_USER_TYPE_INVALID`). There is no FHE-specific role. A seed's limits come from its attributes and the SO-enrolled policies, which the engine enforces.
+
+**State held across KMIP requests (F18).** KMIP closes the connection after each request, and in the default tenancy mode clients share one engine session. The bridge therefore binds a pending decryption to the client that started it (TLS client-certificate hash, else its authenticated name), cancels a decryption not finished within 2 minutes, destroys a public object from function 2 that is not destroyed within 10 minutes, and serialises all calls on the interface.
+
+**Bounds.** An incoming KMIP request frame is at most 16 MiB. Functions 3 and 6 refuse an output above 48 MiB with `CKR_DATA_LEN_RANGE`; the ~29 MiB TFHE compressed server key is read in one call. A CKKS key set is exported piece by piece (functions 2, 3, 4 per piece), with limb ranges small enough for one message.
+
+## 15. Revision history
 
 | Rev | Date | Change |
 |---|---|---|
@@ -515,3 +638,4 @@ Every error path zeroizes transient secrets and leaves no partial object.
 | 4 | 2026-10-11 | §6.5: the streamed-CKKS profile hash lists every registered CKKS set; re-enrolment after registry ID 3 changed it, and its test |
 | 5 | 2026-10-11 | §6.6: the CKKS flood sampler as built (rounded continuous Gaussian, per-value timing measured, owner decision not to build a constant-time discrete sampler). §6.7: signed rotation retirement record in the token's retirement ledger, replicas refused as the new rotation seed (D3), and the open question on old-secret holders |
 | 6 | 2026-10-11 | §6.6: flood width corrected to LMSS22 Corollary 2 (√(24·q·n), q = lineage total), two-prime cap 2^80; §6.3: a CKKS replica keeps the source's `maxReplicas`; §6.4: lineage bound used as q |
+| 7 | 2026-10-15 | Plan D02387, owner decisions F1–F19. §12: CKKS custody in the default native build; TFHE opt-in and non-commercial; no custody in WebAssembly; the documentation-OID profile may ship. §13: SO operations `[5] enrollFheDecryptPolicy`, `[6] enrollFheRecipient`, `[7] destroyFheSeed` in the replication admin signed-update format. §14: KMIP interface `PQCTODAY_FHE_1_0`. §1, §3, §9: seeds, generated and replicated, are `CKA_DESTROYABLE=false`. §5.2: token-signed TFHE manifest, kind 3. §14: replies up to 48 MiB. §1, §5: PKCS#11 v3.2 roles, no FHE-specific role. §5.3, §9: a short `C_Decrypt` buffer gets `CKR_BUFFER_TOO_SMALL` before decrypting, keeps the operation and spends no counter unit. §6.2: signed enrolment paths. §8, §10: advertising once the WP-A3 tests pass (F19), not yet listed. §2, §4: the `ckks-stream` scheme and the CKKS registry entries are referenced. Status line corrected (it still said revision 3) |

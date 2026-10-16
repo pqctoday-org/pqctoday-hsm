@@ -1,9 +1,12 @@
 //! K2–K4 PQCToday key hierarchy, key attestation and protected replication.
 //!
-//! **EDUCATIONAL SOFTWARE TOKEN ONLY.** Compiled only with the non-default
-//! `educational-replication` feature and inert until a caller explicitly
-//! selects the educational profile at runtime ([`select_educational_profile`]).
-//! It uses the RFC 5612 documentation OID arc, a host-side test
+//! **SOFTWARE TOKEN, NOT CERTIFIED.** Compiled with cfg `pqc_replication`:
+//! the opt-in `educational-replication` feature, or the default `fhe-custody`
+//! feature on native targets (FHE custody depends on it; see build.rs and plan
+//! D02387, owner decision F1). Inert until a caller explicitly selects the
+//! educational profile at runtime ([`select_educational_profile`]).
+//! It uses the RFC 5612 documentation OID arc (owner decision F11, 2026-10-15:
+//! no private IANA enterprise number; this profile may ship), a host-side test
 //! manufacturing CA and the host clock; nothing here is hardware-backed,
 //! production-identified or rollback-resistant. Every exported artefact must
 //! be labelled `PQCTODAY EDUCATIONAL TEST ONLY` by its consumer.
