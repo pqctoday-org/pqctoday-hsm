@@ -96,7 +96,11 @@ security officer builds and signs requests with `replication::admin_host` and ch
 ## The usual sequences
 
 - **Export one piece of public material:** 2 `C_DeriveKey` → 3 `C_GetAttributeValue(CKA_VALUE)` → 4
-  `C_DestroyObject`. A CKKS key set is exported piece by piece (limb ranges small enough for one KMIP message).
+  `C_DestroyObject`. A CKKS key set is exported piece by piece and closed by the token-signed manifest (version 2,
+  kind 6). A TFHE export is kind 1 (compressed server key) and kind 2 (compact public key), then kind 3 (version 1):
+  the token-signed manifest over the SHA-256 of the two objects this session exported, signed by the device's
+  receipt-signing key with its chain (`replication::fhe_tfhe::verify_tfhe_manifest` checks it against the
+  manufacturing root).
 - **Decrypt one ciphertext** (PKCS#11 single-part; owner decision 2026-10-15): 5 `C_DecryptInit` → 6 `C_Decrypt` with
   `outputLen` 0 (size query; nothing is decrypted or counted) → 6 `C_Decrypt` with that size. A buffer that is too
   small gets `CKR_BUFFER_TOO_SMALL` and the operation stays active; any other outcome ends it. Ciphertexts are
@@ -118,8 +122,9 @@ session. So the bridge:
 
 ## Bounds
 
-- A KMIP frame is at most 16 MiB (listener cap). `C_GetAttributeValue` and `C_Decrypt` refuse an output above
-  15 MiB with `CKR_DATA_LEN_RANGE`.
+- An incoming request frame is at most 16 MiB (listener cap). Replies may be larger: `C_GetAttributeValue` and
+  `C_Decrypt` refuse an output above 48 MiB with `CKR_DATA_LEN_RANGE` (the TFHE compressed server key is about
+  29 MiB and is read in one call; owner decision 2026-10-15).
 - At most 16 attribute types per `C_GetAttributeValue`.
 
 ## Return codes added by the bridge
@@ -132,6 +137,6 @@ session. So the bridge:
 | `CKR_USER_TYPE_INVALID` | an SO function from another identity, or a user function from the SO identity |
 | `CKR_USER_NOT_LOGGED_IN` | no engine session for the client; or no SO PIN file configured (functions 7 and 8) |
 | `CKR_OPERATION_ACTIVE` / `CKR_OPERATION_NOT_INITIALIZED` | a decryption pending for another client (see above) |
-| `CKR_DATA_LEN_RANGE` | an output above 15 MiB |
+| `CKR_DATA_LEN_RANGE` | an output above 48 MiB |
 
 Every other code comes from the engine.
