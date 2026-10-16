@@ -105,6 +105,20 @@ jobs:
       - name: Scan tracked files against the baseline
         run: python3 scripts/check_public_boundary.py --tree . --tracked --baseline scripts/public_boundary_baseline.json --mode enforce
 
+  licences:
+    name: Licence labels match COPYRIGHT.md
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # AGPL plan step 9 (2026-10-16): own files and crates say AGPL-3.0-only,
+      # third-party and SoftHSM2 files keep their own licence, and a new own
+      # code file needs an SPDX header (scripts/licence_header_baseline.txt
+      # freezes the files that had none; it only shrinks).
+      - name: Unit tests for the checker
+        run: python3 -m unittest tests/test_check_licences.py
+      - name: Check licence labels
+        run: python3 scripts/check_licences.py
+
   engines-tool:
     name: Engine release tool (unit tests)
     runs-on: ubuntu-24.04
