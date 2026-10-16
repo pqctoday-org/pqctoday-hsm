@@ -313,13 +313,8 @@ pub(crate) fn decrypt_tfhe(session: u32, h_seed: u32, recipient: &[u8; 48], inpu
         // Exact for the owner; an upper bound for a sealed release (Codex #2).
         return Ok((if owner { output_len(&m.ty) } else { sealed_len_bound(slot, &so.attrs, recipient, output_len(&m.ty))? }, None));
     }
-    // Step 4: reserve one unit of the counter durably, before any work.
-    let used = so.attrs.get(&CKA_PRIV_FHE_DECRYPT_COUNT).and_then(|v| v.as_slice().try_into().ok()).map(u64::from_le_bytes).unwrap_or(0);
-    if used >= p.max_decrypts as u64 {
-        return Err(refuse(slot, "decrypt budget exhausted"));
-    }
-    let counter = used + 1;
-    crate::state::commit_objects_atomically(session, Vec::new(), vec![(so.handle, vec![(CKA_PRIV_FHE_DECRYPT_COUNT, counter.to_le_bytes().to_vec())])])?;
+    // Step 4: reserve one unit of the counter durably, before any work (read and written under the counter lock).
+    let counter = reserve_decrypt_unit(session, slot, so.handle, p.max_decrypts)?;
     // Step 5: rule 5 (recipient), independent of the plaintext.
     if (owner && p.recipient_only) || (!owner && !p.recipients.iter().any(|r| r.as_bytes() == recipient)) {
         return Err(refuse(slot, "recipient not allowed"));
@@ -349,18 +344,24 @@ pub(crate) fn decrypt_tfhe(session: u32, h_seed: u32, recipient: &[u8; 48], inpu
     let nbytes = (m.ty.width_bits as usize).div_ceil(8);
     plain.extend_from_slice(&value.to_le_bytes()[..nbytes.min(8)]);
     plain.resize(3 + nbytes, 0);
+    // The event is written only once the output exists: a sealing or signing
+    // failure must not leave a "released" record for a result that never left.
+    let out = if owner {
+        DecryptOutput::Owner(plain)
+    } else {
+        let sealed = seal_release(slot, &so.attrs, &policy.id, recipient, counter, &plain);
+        plain.zeroize();
+        DecryptOutput::Sealed(sealed?)
+    };
     super::oplog_event(
         "fhe_decrypt_released",
         slot,
         &[("policy", super::hex(&policy.id)), ("type", m.ty.type_name.clone()), ("counter", counter.to_string()), ("recipient", if owner { "owner".into() } else { super::hex(recipient) })],
     );
-    if owner {
-        return Ok((plain.len(), Some(DecryptOutput::Owner(plain))));
-    }
-    let sealed = seal_release(slot, &so.attrs, &policy.id, recipient, counter, &plain);
-    plain.zeroize();
-    let sealed = sealed?;
-    Ok((sealed.len(), Some(DecryptOutput::Sealed(sealed))))
+    let len = match &out {
+        DecryptOutput::Owner(b) | DecryptOutput::Sealed(b) => b.len(),
+    };
+    Ok((len, Some(out)))
 }
 
 // ── §5.4 ENCRYPT (test builds only) ────────────────────────────────────────

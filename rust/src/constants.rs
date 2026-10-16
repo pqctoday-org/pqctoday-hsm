@@ -820,10 +820,10 @@ pub const CKM_PQCTODAY_SIGN_KEY_ATTESTATION: u32 = 0x8000_0017;
 // `pqc_ckks_custody`: the default native build (`fhe-custody`, CKKS; nothing
 // for wasm32) and the opt-in `educational-ckks` / `educational-fhe` (adds
 // TFHE, non-commercial) features. ENCRYPT exists only with `educational-fhe`
-// plus `test-support` (TFHE known-answer vectors). None of
-// the four is listed by C_GetMechanismList yet: KEY_GEN, DERIVE_PUBLIC and
-// DECRYPT will be once the plan D02387 WP-A3 hardening tests pass (owner
-// decision F19, spec §10).
+// plus `test-support` (TFHE known-answer vectors) and is never listed.
+// KEY_GEN, DERIVE_PUBLIC and DECRYPT are listed by C_GetMechanismList and
+// answered by C_GetMechanismInfo (spec §8) since the plan D02387 WP-A3
+// hardening tests pass (owner decision F19, spec §10): see FHE_CUSTODY_MECHS.
 pub const CKM_PQCTODAY_FHE_KEY_GEN: u32 = 0x8000_0018;
 pub const CKM_PQCTODAY_FHE_DERIVE_PUBLIC: u32 = 0x8000_0019;
 pub const CKM_PQCTODAY_FHE_DECRYPT: u32 = 0x8000_001A;
@@ -1240,6 +1240,46 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_PQCTODAY_ECDSA_EXPLICIT_K,
 ];
 
+/// FHE custody mechanisms (spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md
+/// §8; owner decision F19, plan D02387 WP-A3: listed once the hardening tests
+/// pass). C_GetMechanismList appends them to `SUPPORTED_MECHS`, and
+/// C_GetMechanismInfo answers them, only when `fhe_custody_mechs_listed()`:
+/// custody is compiled (cfg `pqc_ckks_custody`, the default native build) AND
+/// the replication profile is selected at run time. Without the profile every
+/// one of them returns CKR_FUNCTION_NOT_SUPPORTED, and spec §12 says nothing of
+/// custody is discoverable before the profile is selected. The mechanism is
+/// listed in builds with and without `educational-fhe`: TFHE only adds
+/// parameter set 1. CKM_PQCTODAY_FHE_ENCRYPT (test builds only, §5.4) is never
+/// listed. The mechanism ledger (scripts/check_pkcs11_mechanism_ledger.py)
+/// reads this list as well as `SUPPORTED_MECHS`.
+pub const FHE_CUSTODY_MECHS: &[u32] = &[
+    CKM_PQCTODAY_FHE_KEY_GEN,
+    CKM_PQCTODAY_FHE_DERIVE_PUBLIC,
+    CKM_PQCTODAY_FHE_DECRYPT,
+];
+
+/// Whether this build and process list `FHE_CUSTODY_MECHS` (see there).
+pub fn fhe_custody_mechs_listed() -> bool {
+    #[cfg(pqc_ckks_custody)]
+    {
+        crate::replication::educational_profile_selected()
+    }
+    #[cfg(not(pqc_ckks_custody))]
+    {
+        false
+    }
+}
+
+/// What C_GetMechanismList returns: `SUPPORTED_MECHS`, then
+/// `FHE_CUSTODY_MECHS` when they are listed.
+pub fn advertised_mechanisms() -> Vec<u32> {
+    let mut v = SUPPORTED_MECHS.to_vec();
+    if fhe_custody_mechs_listed() {
+        v.extend_from_slice(FHE_CUSTODY_MECHS);
+    }
+    v
+}
+
 /// PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization
 /// (§5.4), validates the slot (CKR_SLOT_ID_INVALID, mirroring
 /// C_GetTokenInfo) and the required `pulCount` out-param
@@ -1259,19 +1299,20 @@ pub fn C_GetMechanismList(slot_id: u32, p_mechanism_list: *mut u32, pul_count: *
     if !valid_slot {
         return CKR_SLOT_ID_INVALID;
     }
+    let mechs = advertised_mechanisms();
     unsafe {
         if p_mechanism_list.is_null() {
-            *pul_count = SUPPORTED_MECHS.len() as u32;
+            *pul_count = mechs.len() as u32;
         } else {
             let avail = *pul_count as usize;
-            if avail < SUPPORTED_MECHS.len() {
-                *pul_count = SUPPORTED_MECHS.len() as u32;
+            if avail < mechs.len() {
+                *pul_count = mechs.len() as u32;
                 return CKR_BUFFER_TOO_SMALL;
             }
-            for (i, m) in SUPPORTED_MECHS.iter().enumerate() {
+            for (i, m) in mechs.iter().enumerate() {
                 *p_mechanism_list.add(i) = *m;
             }
-            *pul_count = SUPPORTED_MECHS.len() as u32;
+            *pul_count = mechs.len() as u32;
         }
     }
     CKR_OK

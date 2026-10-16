@@ -5,14 +5,14 @@
   "sources_of_truth": {
     "values": "docs/refs/pkcs11t-canonical-v3.2.h",
     "cpp_advertised": "src/lib/SoftHSM_slots.cpp :: SoftHSM::prepareSupportedMechanisms",
-    "rust_advertised": "rust/src/constants.rs :: SUPPORTED_MECHS"
+    "rust_advertised": "rust/src/constants.rs :: SUPPORTED_MECHS + FHE_CUSTODY_MECHS"
   },
   "counts": {
     "canonical_header_mechanisms": 473,
     "cpp_advertised": 169,
-    "rust_advertised": 175,
+    "rust_advertised": 178,
     "cpp_only": [],
-    "rust_only_count": 6
+    "rust_only_count": 9
   },
   "scope_reasons": {
     "legacy-block-ciphers": "Pre-AES or regional block ciphers (DES/3DES, RC2/RC4/RC5, CAST, IDEA, Blowfish/Twofish, SKIPJACK/BATON/JUNIPER/FORTEZZA, SEED, ARIA, Camellia, GOST 28147). This is a PQC engine with a deliberately narrow symmetric surface: AES and ChaCha20. Adding any of these would widen the attack surface to primitives no current caller should select.",
@@ -39,7 +39,8 @@
     "ecmqv": "CKM_ECMQV_DERIVE. Deliberately declined, and recorded here because THREE separate audits have each re-discovered it as an apparent gap. MQV's security depends on implicit key confirmation the PKCS#11 API cannot express, it is not in FIPS SP 800-56A rev3's approved schemes, and one-pass ECDH covers the deployed use. This row exists so the fourth audit reads a decision instead of filing it again.",
     "misc-unadopted": "Individually unadopted mechanisms: CKM_NULL (no-op wrap), CKM_XOR_BASE_AND_DATA (superseded by CKM_CONCATENATE_* plus a real KDF), CKM_EXTRACT_KEY_FROM_KEY (bit-slicing a key), CKM_CMS_SIG (embeds CMS structure knowledge in the token), CKM_KEY_WRAP_LYNKS and CKM_KEY_WRAP_SET_OAEP (obsolete wrap formats), and CKM_PUB_KEY_FROM_PRIV_KEY (recovering a public key from a private one, which the engine does internally but does not expose as a mechanism).",
     "ripemd160-rsa-composite": "CKM_RIPEMD160_RSA_PKCS, the fused RIPEMD-160-then-RSA-PKCS#1-v1.5 signature. Unlike the other exclusions here the underlying primitive IS in scope: both engines implement CKM_RIPEMD160 and its HMACs, for the same reason MD5 and SHA-1 are kept (decision D2) — callers have to verify existing artefacts. A caller who needs this signature can build it with CKM_RIPEMD160 plus CKM_RSA_PKCS, which takes a caller-supplied DigestInfo. The fused mechanism is simply not implemented, and no standard this repo tracks requires it.",
-    "vendor-base": "CKM_VENDOR_DEFINED is the base of the vendor range, not a mechanism. Both engines define vendor mechanisms above it; those appear in this ledger as engine-extension rows."
+    "vendor-base": "CKM_VENDOR_DEFINED is the base of the vendor range, not a mechanism. Both engines define vendor mechanisms above it; those appear in this ledger as engine-extension rows.",
+    "fhe-custody-rust-engine": "FHE key custody (CKM_PQCTODAY_FHE_*, priv allocation authority §1.4.5) is specified for the Rust engine only (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md, \"Engine scope: softhsmrustv3 only\"). It depends on the Rust engine's Key Replication Interface, its CKKS generator and, for TFHE, TFHE-rs; the C++ engine implements none of these, and a second implementation would double the custody surface that FHE plan D02387 hardens. The C++ engine therefore never advertises these vendor mechanisms."
   },
   "rows": {
     "CKM_ACTI": {
@@ -3166,6 +3167,30 @@
       "cpp_max": 521,
       "rust_min": 256,
       "rust_max": 521
+    },
+    "CKM_PQCTODAY_FHE_DECRYPT": {
+      "value": "engine-extension",
+      "cpp": "excluded-by-scope:fhe-custody-rust-engine",
+      "rust": "implemented",
+      "note": "Vendor mechanism 0x8000001A (CKM_VENDOR_DEFINED range; priv allocation authority §1.4.5). FHE custody, Rust engine only (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md, 'Engine scope: softhsmrustv3 only'). Listed by C_GetMechanismList and answered by C_GetMechanismInfo (owner decision F19, plan D02387 WP-A3) from rust/src/constants.rs FHE_CUSTODY_MECHS, appended to SUPPORTED_MECHS when custody is compiled (cfg pqc_ckks_custody, the default native build; never wasm32) and the replication profile is selected at run time. Mechanism info: 32/32 bytes (the seed), CKF_DECRYPT, single-part C_Decrypt only."
+    },
+    "CKM_PQCTODAY_FHE_DERIVE_PUBLIC": {
+      "value": "engine-extension",
+      "cpp": "excluded-by-scope:fhe-custody-rust-engine",
+      "rust": "implemented",
+      "note": "Vendor mechanism 0x80000019 (CKM_VENDOR_DEFINED range; priv allocation authority §1.4.5). FHE custody, Rust engine only (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md, 'Engine scope: softhsmrustv3 only'). Listed by C_GetMechanismList and answered by C_GetMechanismInfo (owner decision F19, plan D02387 WP-A3) from rust/src/constants.rs FHE_CUSTODY_MECHS, appended to SUPPORTED_MECHS when custody is compiled (cfg pqc_ckks_custody, the default native build; never wasm32) and the replication profile is selected at run time. Mechanism info: 32/32 bytes (the seed), CKF_DERIVE."
+    },
+    "CKM_PQCTODAY_FHE_ENCRYPT": {
+      "value": "engine-extension",
+      "cpp": "excluded-by-scope:fhe-custody-rust-engine",
+      "rust": "not-advertised",
+      "note": "Vendor mechanism 0x8000001B (priv allocation authority §1.4.5). Test-vector encryption, compiled only with educational-fhe plus test-support (spec §5.4); never listed by C_GetMechanismList and C_GetMechanismInfo returns CKR_MECHANISM_INVALID in every build. Recorded so the decision is visible; the C++ engine has no FHE custody."
+    },
+    "CKM_PQCTODAY_FHE_KEY_GEN": {
+      "value": "engine-extension",
+      "cpp": "excluded-by-scope:fhe-custody-rust-engine",
+      "rust": "implemented",
+      "note": "Vendor mechanism 0x80000018 (CKM_VENDOR_DEFINED range; priv allocation authority §1.4.5). FHE custody, Rust engine only (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md, 'Engine scope: softhsmrustv3 only'). Listed by C_GetMechanismList and answered by C_GetMechanismInfo (owner decision F19, plan D02387 WP-A3) from rust/src/constants.rs FHE_CUSTODY_MECHS, appended to SUPPORTED_MECHS when custody is compiled (cfg pqc_ckks_custody, the default native build; never wasm32) and the replication profile is selected at run time. Mechanism info: 32/32 bytes (the seed), CKF_GENERATE."
     },
     "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": {
       "value": "engine-extension",

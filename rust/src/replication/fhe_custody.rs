@@ -172,9 +172,41 @@ pub(crate) fn refuse(slot: u32, why: &'static str) -> u32 {
     CKR_ACTION_PROHIBITED
 }
 
+/// Serialises every decrypt-counter reservation in the process (§6.4).
+static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Reserve one unit of the seed's decrypt counter durably (§5.3 step 4, §6.4) and return its number.
+///
+/// The count is read again from the object table under `COUNTER_LOCK`, not from the attribute snapshot the caller
+/// took when it resolved the seed. Before WP-A3 both decrypt paths checked the snapshot and then committed
+/// `snapshot + 1`, so two concurrent `C_Decrypt` calls on the same seed (two sessions, two threads) could both pass
+/// the budget check with the same count and both commit the same value: two decryptions for one unit, and at the
+/// boundary releases beyond `maxDecrypts` (21 to 25 for a budget of 12 under 16 threads). Test:
+/// `concurrent_decrypts_never_exceed_the_budget`
+/// (`rust/tests/replication_fhe_a3.rs`).
+pub(crate) fn reserve_decrypt_unit(session: u32, slot: u32, handle: u32, max_decrypts: u32) -> Result<u64, u32> {
+    let _g = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let used = crate::state::OBJECTS
+        .with(|o| o.borrow().get(&handle).map(|a| a.get(&CKA_PRIV_FHE_DECRYPT_COUNT).and_then(|v| v.as_slice().try_into().ok()).map(u64::from_le_bytes).unwrap_or(0)))
+        .ok_or(CKR_KEY_HANDLE_INVALID)?;
+    if used >= max_decrypts as u64 {
+        return Err(refuse(slot, "decrypt budget exhausted"));
+    }
+    let counter = used + 1;
+    crate::state::commit_objects_atomically(session, Vec::new(), vec![(handle, vec![(CKA_PRIV_FHE_DECRYPT_COUNT, counter.to_le_bytes().to_vec())])])?;
+    Ok(counter)
+}
+
 /// `C_Decrypt(CKM_PQCTODAY_FHE_DECRYPT)`. `size_only` is the `pData == NULL`
 /// call: shape-level type gate only, no decryption, no counter (§5.3 step 3).
 pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], size_only: bool) -> Result<(usize, Option<DecryptOutput>), u32> {
+    // §5.3 step 1 comes first: the session's role, before anything looks at the object. Found by WP-A3: routing by
+    // object type ran first, so in a build without TFHE-rs a handle that is not a CKKS seed (or no object at all)
+    // got CKR_KEY_TYPE_INCONSISTENT in any session, the SO's and a public session's included, instead of the role
+    // error; and a session that may not use the object learned whether a handle names a CKKS seed. Test:
+    // `wrong_roles_and_foreign_tokens_are_refused_before_the_counter` (`rust/tests/replication_fhe_a3.rs`).
+    super::require_profile()?;
+    super::require_user_rw(session)?;
     if super::fhe_ckks::mech::is_ckks_seed(h_seed) {
         return super::fhe_ckks::mech::decrypt(session, h_seed, recipient, input, size_only);
     }
@@ -184,6 +216,9 @@ pub fn decrypt(session: u32, h_seed: u32, recipient: &[u8; 48], input: &[u8], si
     }
     #[cfg(not(feature = "educational-fhe"))]
     {
+        // The object checks of every other path (access, slot, key type, allowlist), then: a TFHE seed (replicated
+        // from a TFHE build) cannot be decrypted without TFHE-rs.
+        seed_object(session, h_seed, CKM_PQCTODAY_FHE_DECRYPT)?;
         Err(CKR_KEY_TYPE_INCONSISTENT)
     }
 }
@@ -563,6 +598,11 @@ pub fn cancel(session: u32) -> bool {
     ops(|m| m.remove(&session).is_some())
 }
 
+/// Drop every pending FHE operation (C_Finalize). `C_CloseSession` drops the session's own through `cancel`.
+pub fn cancel_all() {
+    ops(|m| m.clear());
+}
+
 /// `C_DecryptInit(CKM_PQCTODAY_FHE_DECRYPT)`: validates the key and records
 /// the operation. Policy work happens in `C_Decrypt` (§5.3).
 ///
@@ -622,10 +662,12 @@ pub unsafe fn ffi_decrypt(session: u32, input: *const u8, in_len: u32, out: *mut
     let r = decrypt(session, key, &recipient, data, false);
     cancel(session);
     match r {
-        Ok((n, Some(DecryptOutput::Owner(b) | DecryptOutput::Sealed(b)))) => {
-            if (*out_len as usize) < n {
-                // Not reached when the size query's length is exact or an upper bound (checked above).
-                *out_len = n as u32;
+        Ok((_, Some(DecryptOutput::Owner(b) | DecryptOutput::Sealed(b)))) => {
+            // Compared with the bytes actually copied, not with the length the decrypt path reported (WP-A3
+            // review): the two are equal on every path today, and this keeps the copy in bounds if they ever differ.
+            // Not reached when the size query's length is exact or an upper bound (checked above).
+            if (*out_len as usize) < b.len() {
+                *out_len = b.len() as u32;
                 return CKR_BUFFER_TOO_SMALL;
             }
             std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len());

@@ -271,9 +271,11 @@ the engines converged and the entry is stale. Two entries here were removed for
 exactly that reason once the Rust engine was rebuilt. The six that permanently
 match nothing use the scenario `__never_matches__` and are deliberate: they
 record divergences that were considered and consciously left untested
-(on-disk storage, XMSS state representation, PIN lockout, message-based signing
-flags, build-flag-varying mechanism sets, KDF coverage), so a future engineer
-knows they were thought about rather than forgotten.
+(on-disk storage, XMSS state representation, PIN lockout, build-flag-varying
+mechanism sets, the FHE custody mechanisms the Rust engine lists only once its
+replication profile is selected, KDF coverage), so a future engineer knows they
+were thought about rather than forgotten. (The message-based signing flags entry
+once listed here was removed when the harness began recording those flags.)
 
 ## Proving the harness still detects
 

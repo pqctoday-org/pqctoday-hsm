@@ -95,7 +95,20 @@ def rust_advertised() -> set:
         return set()
     body = src[start:]
     body = body[: body.index("\n];")]
-    return set(re.findall(r"^\s*(CKM_[A-Z0-9_]+),", body, re.M))
+    names = set(re.findall(r"^\s*(CKM_[A-Z0-9_]+),", body, re.M))
+    # FHE custody (plan D02387 WP-A3, owner decision F19): C_GetMechanismList
+    # appends FHE_CUSTODY_MECHS when custody is compiled (the default native
+    # build) and the replication profile is selected, so these are advertised
+    # too. See advertised_mechanisms() in the same file.
+    try:
+        start = src.index("pub const FHE_CUSTODY_MECHS")
+    except ValueError:
+        fail(f"{RUST_CONSTS.name}: FHE_CUSTODY_MECHS not found — the parse "
+             f"must be repaired, not skipped")
+        return names
+    body = src[start:]
+    body = body[: body.index("\n];")]
+    return names | set(re.findall(r"^\s*(CKM_[A-Z0-9_]+),", body, re.M))
 
 
 def main() -> int:

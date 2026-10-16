@@ -189,12 +189,16 @@ required-features = ["educational-fhe", "test-support"]
 [[test]]
 # Streamed-CKKS ledger and token-signed manifest (E3, S5).
 name = "replication_fhe_ckks"
-required-features = ["educational-ckks", "test-support"]
+# `fhe-custody` (default on native) compiles CKKS custody, as `educational-ckks` does; plan D02387 WP-A3 runs
+# these suites in the default build.
+required-features = ["fhe-custody", "test-support"]
 
 [[test]]
 # CKKS rotation key old -> new (E10): SO-only DERIVE_PUBLIC v3, manifest, retirement.
 name = "replication_fhe_ckks_rotation"
-required-features = ["educational-ckks", "test-support"]
+# `fhe-custody` (default on native) compiles CKKS custody, as `educational-ckks` does; plan D02387 WP-A3 runs
+# these suites in the default build.
+required-features = ["fhe-custody", "test-support"]
 
 [[test]]
 # Uses the established downstream-test reset hook because both spikes exercise

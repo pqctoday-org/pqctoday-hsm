@@ -193,6 +193,15 @@ SCOPE_REASONS = {
         "CKM_VENDOR_DEFINED is the base of the vendor range, not a mechanism. "
         "Both engines define vendor mechanisms above it; those appear in this "
         "ledger as engine-extension rows.",
+    "fhe-custody-rust-engine":
+        "FHE key custody (CKM_PQCTODAY_FHE_*, priv allocation authority §1.4.5) "
+        "is specified for the Rust engine only "
+        "(docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md, \"Engine scope: "
+        "softhsmrustv3 only\"). It depends on the Rust engine's Key Replication "
+        "Interface, its CKKS generator and, for TFHE, TFHE-rs; the C++ engine "
+        "implements none of these, and a second implementation would double the "
+        "custody surface that FHE plan D02387 hardens. The C++ engine therefore "
+        "never advertises these vendor mechanisms.",
 }
 
 
@@ -219,12 +228,17 @@ def cpp_advertised() -> set:
 
 
 def rust_advertised() -> set:
-    """Names listed in SUPPORTED_MECHS, which C_GetMechanismList returns."""
+    """Names listed in SUPPORTED_MECHS and FHE_CUSTODY_MECHS, which
+    C_GetMechanismList returns (the second when custody is compiled and the
+    replication profile is selected; plan D02387 WP-A3)."""
     src = read(RUST_CONSTS)
-    start = src.index("pub const SUPPORTED_MECHS")
-    body = src[start:]
-    body = body[: body.index("\n];")]
-    return set(re.findall(r"^\s*(CKM_[A-Z0-9_]+),", body, re.M))
+    names = set()
+    for const in ("pub const SUPPORTED_MECHS", "pub const FHE_CUSTODY_MECHS"):
+        start = src.index(const)
+        body = src[start:]
+        body = body[: body.index("\n];")]
+        names |= set(re.findall(r"^\s*(CKM_[A-Z0-9_]+),", body, re.M))
+    return names
 
 
 def classify(name: str):
@@ -269,12 +283,25 @@ def main() -> int:
     # header. These are real, reachable mechanisms — a caller sees them in
     # C_GetMechanismList — so they get rows too, or the ledger would
     # under-report what the engines expose.
+    # A hand-set disposition for an engine that does not advertise the
+    # extension (e.g. `excluded-by-scope:fhe-custody-rust-engine`) is kept;
+    # so is a hand-written row for an extension neither engine advertises
+    # (CKM_PQCTODAY_FHE_ENCRYPT, test builds only).
+    def kept(prev: dict, engine: str, advertised: bool) -> str:
+        if advertised:
+            return "implemented"
+        old = prev.get(engine, "not-advertised")
+        return "not-advertised" if old == "implemented" else old
+
+    for name, prev in previous.items():
+        if prev.get("value") == "engine-extension" and name not in cpp | rust:
+            rows[name] = prev
     for name in sorted((cpp | rust) - set(canon)):
         prev = previous.get(name, {})
         rows[name] = {
             "value": prev.get("value", "engine-extension"),
-            "cpp": "implemented" if name in cpp else "not-advertised",
-            "rust": "implemented" if name in rust else "not-advertised",
+            "cpp": kept(prev, "cpp", name in cpp),
+            "rust": kept(prev, "rust", name in rust),
             "note": prev.get(
                 "note",
                 "Engine extension: advertised by at least one engine but not "
@@ -299,7 +326,7 @@ def main() -> int:
         "sources_of_truth": {
             "values": "docs/refs/pkcs11t-canonical-v3.2.h",
             "cpp_advertised": "src/lib/SoftHSM_slots.cpp :: SoftHSM::prepareSupportedMechanisms",
-            "rust_advertised": "rust/src/constants.rs :: SUPPORTED_MECHS",
+            "rust_advertised": "rust/src/constants.rs :: SUPPORTED_MECHS + FHE_CUSTODY_MECHS",
         },
         "counts": {
             "canonical_header_mechanisms": len(canon),
