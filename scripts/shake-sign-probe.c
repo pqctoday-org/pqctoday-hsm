@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* shake-sign-probe: remediation R38 (phase 8) test helper.
  *

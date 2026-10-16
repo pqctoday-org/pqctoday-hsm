@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* mu-gen-probe: remediation R39 (phase 8) regression fixture. Drives the
  * raw PKCS#11 C_Digest* API directly (this mechanism is engines-only by

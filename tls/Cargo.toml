@@ -2,7 +2,7 @@
 name = "pqctoday-tls"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-only"
+license = "AGPL-3.0-only"
 description = "Shared rustls TLS-posture crate: KMIP 3.0 Profiles §3.3 Quantum Safe Authentication Suite (extracted from pqctoday-kmip's server::secp384r1mlkem1024 + TlsProfile so the gRPC/REST PKCS#11 remoting services can reuse the identical posture without depending on the kmip crate)."
 repository = "https://github.com/pqctoday-org/pqctoday-hsm"
 

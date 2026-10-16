@@ -2,7 +2,7 @@
 name = "pqctoday-pkcs11-remote-proto"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "Generated tonic/prost types for the PKCS#11 gRPC remoting service (pkcs11_remote.proto) — shared by the server (remoting/grpc) and the bench-harness client (rust/bench-harness) so the wire schema is single-sourced."
 
 [dependencies]

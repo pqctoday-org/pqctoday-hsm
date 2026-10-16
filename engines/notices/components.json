@@ -5,17 +5,27 @@
     "softhsmv3": {
       "name": "SoftHSMv3, the PQC Today fork of SoftHSM2",
       "version": "SoftHSM2 2.7.0 base",
-      "license": "BSD-2-Clause",
+      "license": "AGPL-3.0-only AND BSD-2-Clause",
       "copyright": [
         "Copyright (c) 2008-2013 .SE (The Internet Infrastructure Foundation)",
         "Copyright (c) 2010-2018 SURFnet bv",
         "Copyright (c) 2022 NLnet Labs",
         "Copyright (c) 2014, 2020 Red Hat, Inc.",
-        "Copyright (c) 2024-2026 PQC Today"
+        "Copyright (c) 2024-2026 PQC Today, LLC"
       ],
       "source": "https://github.com/softhsm/SoftHSMv2 (upstream); this repository (fork)",
-      "modified": "OpenSSL 3 EVP-only backend, PKCS#11 v3.2, ML-KEM, ML-DSA, SLH-DSA, HSS/LMS, XMSS; see LICENSE and CHANGELOG.md",
-      "licenseFiles": ["LICENSE"]
+      "modified": "OpenSSL 3 EVP-only backend, PKCS#11 v3.2, ML-KEM, ML-DSA, SLH-DSA, HSS/LMS, XMSS; the SoftHSM2 files keep BSD-2-Clause, the files written by PQC Today, LLC are AGPL-3.0-only; see COPYRIGHT.md and CHANGELOG.md",
+      "sourceOffer": "Complete corresponding source: {repo}/tree/{commit}. It stays available there, and on request from PQC Today, LLC (pqctoday@proton.me), for at least three years after this bundle is published.",
+      "licenseFiles": ["LICENSES/AGPL-3.0-only.txt", "LICENSES/BSD-2-Clause.txt"]
+    },
+    "pqctoday-rust": {
+      "name": "Code written by PQC Today, LLC (Rust PKCS#11 engine, KMIP server and policy engine)",
+      "version": "this repository, rust/, kmip/ and wasm/",
+      "license": "AGPL-3.0-only",
+      "copyright": ["Copyright (c) 2024-2026 PQC Today, LLC"],
+      "source": "this repository (see COPYRIGHT.md)",
+      "sourceOffer": "Complete corresponding source: {repo}/tree/{commit}. It stays available there, and on request from PQC Today, LLC (pqctoday@proton.me), for at least three years after this bundle is published.",
+      "licenseFiles": ["LICENSES/AGPL-3.0-only.txt"]
     },
     "oasis-pkcs11-headers": {
       "name": "OASIS PKCS#11 v3.2 headers",
@@ -103,11 +113,11 @@
     "openssl-studio-shims": {
       "name": "OpenSSL Studio shims (TLS, CMP and CMS simulators, static PKCS#11 binding)",
       "version": "this repository, wasm/openssl-studio/shims",
-      "license": "GPL-3.0-only",
+      "license": "AGPL-3.0-only",
       "copyright": ["Copyright (c) 2026 PQC Today, LLC"],
       "source": "wasm/openssl-studio/ in this repository (see its README.md)",
       "sourceOffer": "Complete corresponding source: {repo}/tree/{commit} (shims, OpenSSL patch and build script) plus the OpenSSL 3.6.3 tarball and the pkcs11-provider source named in this file. It stays available there, and on request from PQC Today, LLC, for at least three years after this bundle is published.",
-      "licenseFiles": ["wasm/openssl-studio/LICENSES/GPL-3.0-only.txt"]
+      "licenseFiles": ["wasm/openssl-studio/LICENSES/AGPL-3.0-only.txt"]
     }
   },
   "crateTextFallbacks": {

@@ -198,7 +198,7 @@ def gen_cpp(t) -> str:
     w = o.append
     w("/*")
     w(" * Copyright (c) 2026 pqctoday")
-    w(" * SPDX-License-Identifier: BSD-2-Clause")
+    w(" * SPDX-License-Identifier: AGPL-3.0-only")
     w(" */")
     w("")
     w(f"/* {BANNER} */")
