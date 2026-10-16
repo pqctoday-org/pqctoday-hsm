@@ -505,9 +505,6 @@ pub fn retire_old_seed(so_session: u32, old_lineage: &[u8; 32]) -> Result<u32, u
         Some((_, ROTATION_SIGNED, None)) => return Err(refuse("retire needs the rotation manifest signed again")),
         _ => return Err(refuse("retire before a signed rotation manifest")),
     };
-    if old.attrs.get(&CKA_DESTROYABLE).is_some_and(|v| v.first() == Some(&0)) {
-        return Err(CKR_ACTION_PROHIBITED);
-    }
     // The ledger entry first: a retired seed always has its record. An entry
     // left by an interrupted earlier call for this pair is reused.
     let ledger = retirement_records(slot);

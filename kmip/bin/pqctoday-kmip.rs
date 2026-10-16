@@ -135,6 +135,18 @@ struct Cli {
     #[arg(long)]
     replication_so_pin_file: Option<PathBuf>,
 
+    /// Serve FHE key custody over the KMIP PKCS#11 operation (interface `PQCTODAY_FHE_1_0`, plan D02387). Selects
+    /// the engine's replication profile (documentation-OID identifiers, owner decision F11).
+    #[cfg(feature = "fhe-custody")]
+    #[arg(long)]
+    fhe_custody: bool,
+
+    /// Board-local root-only file with the SO PIN for the security-officer functions of the FHE interface (the
+    /// token's one SO identity, `replication-admin` client certificate). Without it, those functions are refused.
+    #[cfg(feature = "fhe-custody")]
+    #[arg(long)]
+    fhe_so_pin_file: Option<PathBuf>,
+
     /// Append-only JSONL audit log. Combined with the in-memory ring via CompositeSink.
     #[arg(long)]
     audit_log: Option<PathBuf>,
@@ -442,7 +454,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Same exclusive store lock as repl_edu_board: two processes on one engine store corrupt it.
     #[cfg(feature = "educational-replication")]
-    let _store_lock = match (&cli.engine_store, cli.educational_replication) {
+    let replication_served = cli.educational_replication;
+    #[cfg(not(feature = "educational-replication"))]
+    let replication_served = false;
+    #[cfg(feature = "fhe-custody")]
+    let replication_served = replication_served || cli.fhe_custody;
+    let _store_lock = match (&cli.engine_store, replication_served) {
         (Some(dir), true) => {
             let p = dir.join(".repl-edu.lock");
             let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&p)
@@ -462,6 +479,16 @@ async fn main() -> anyhow::Result<()> {
             "PQCTODAY EDUCATIONAL TEST ONLY: replication interfaces served over KMIP on {} (pre-ceremony-ABI)",
             cli.listen
         );
+    }
+
+    #[cfg(feature = "fhe-custody")]
+    if cli.fhe_custody {
+        softhsmrustv3::replication::select_educational_profile();
+        if let Some(p) = &cli.fhe_so_pin_file {
+            pqctoday_kmip::ops::engine_bridge::configure_admin(p.clone(), cli.slot);
+        }
+        pqctoday_kmip::ops::fhe_bridge::enable();
+        tracing::info!("FHE key custody served over KMIP on {} (interface PQCTODAY_FHE_1_0)", cli.listen);
     }
 
     // ── Engine session (Phase 7b — real bridge to softhsmrustv3) ────────

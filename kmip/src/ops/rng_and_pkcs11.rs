@@ -140,6 +140,24 @@ pub fn pkcs11(
             return_code: rv as i32,
         });
     }
+    // FHE key custody (plan D02387 WP-B): served when the server runs with `--fhe-custody`.
+    #[cfg(feature = "fhe-custody")]
+    if super::fhe_bridge::handles(req.interface.as_deref()) {
+        let session = deps.resolve_tenant_session(auth.identity.as_ref()).map_err(|_| ());
+        let input = req.input_parameters.as_deref().unwrap_or(&[]);
+        let peer = auth.identity.as_ref().map(|i| i.username.as_str());
+        let (rv, out) = super::fhe_bridge::dispatch_as(session, peer, req.function, input);
+        emit_pkcs11(deps, correlation_id, "fhe", None, rv, &ckr_display_name(rv));
+        emit_success(deps, correlation_id, "PKCS_11");
+        let cv = req.correlation_value.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
+        return Ok(Pkcs11Response {
+            interface: req.interface,
+            function: req.function,
+            correlation_value: Some(cv),
+            output_parameters: out,
+            return_code: rv as i32,
+        });
+    }
     let (return_code, output_parameters): (i32, Option<Vec<u8>>) = match req.function {
         C_INITIALIZE => {
             // PKCS#11 v3.2 §5.6: a second C_Initialize without an

@@ -3,7 +3,7 @@
 //! host holds the admin-authority key; this module never touches a token.
 
 use super::admin::{
-    gtime, signed_bytes, AdminOperation, AdminSignedRequest, AdminTbsRequest, EnrollCrlOp, EnrollFheRecipientOp, EnrollPolicyOp, IssueDeviceCrlOp, REQUEST_DOMAIN,
+    gtime, signed_bytes, AdminOperation, AdminSignedRequest, AdminTbsRequest, DestroyFheSeedOp, EnrollCrlOp, EnrollFheRecipientOp, EnrollPolicyOp, IssueDeviceCrlOp, REQUEST_DOMAIN,
 };
 use super::asn1;
 use crate::constants::*;
@@ -31,6 +31,7 @@ pub fn tbs_request(
         issue_device_crl: None,
         enroll_fhe_decrypt_policy: None,
         enroll_fhe_recipient: None,
+        destroy_fhe_seed: None,
     };
     match op {
         AdminOperation::EnrollCrl { crl, issuer_device_cert } => {
@@ -43,6 +44,7 @@ pub fn tbs_request(
         AdminOperation::EnrollFheRecipient { chain } => {
             tbs.enroll_fhe_recipient = Some(EnrollFheRecipientOp { chain: chain.iter().map(|c| asn1::octets(c)).collect() })
         }
+        AdminOperation::DestroyFheSeed { lineage } => tbs.destroy_fhe_seed = Some(DestroyFheSeedOp { lineage: asn1::octets(lineage) }),
         AdminOperation::RotateRecoveryKey => tbs.rotate_recovery_key = Some(der::asn1::Null),
         AdminOperation::IssueFunctionCerts => tbs.issue_function_certs = Some(der::asn1::Null),
         AdminOperation::IssueDeviceCrl { revoke, retired_to_revoke, validity_seconds } => {
