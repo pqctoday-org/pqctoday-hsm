@@ -24,7 +24,8 @@ pub const ROLE_FHE_DECRYPT_POLICY: u8 = 13;
 
 /// The only scheme and generator version P1 accepts.
 pub const FHE_SCHEME_TFHE: &str = "tfhe-rs";
-/// Streamed CKKS (Lattigo-compatible evaluation keys), educational-ckks only.
+/// Streamed CKKS (Lattigo-compatible evaluation keys): cfg `pqc_ckks_custody` (the default native `fhe-custody`, or
+/// `educational-ckks`).
 pub const FHE_SCHEME_CKKS: &str = "ckks-stream";
 pub const FHE_GENERATOR_VERSIONS: &[u32] = &[1];
 /// Opaque P1 seed length (a TFHE-rs client-key seed is 128 bits; 32 bytes

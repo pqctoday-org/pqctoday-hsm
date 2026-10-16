@@ -22,7 +22,9 @@ path = "bin/pqctoday-kmip-client.rs"
 # PQCTODAY EDUCATIONAL TEST ONLY: operator courier for the two-board replication test.
 name = "repl_edu_courier"
 path = "bin/repl_edu_courier.rs"
-required-features = ["educational-replication", "native"]
+# Host-side tool: the replication lab (bootstrap/ceremony) and FHE custody provisioning + SO requests over KMIP
+# (fhe-provision, fhe-so). Needs only the engine's replication layer, which `native` brings via `fhe-custody`.
+required-features = ["native"]
 
 [[bin]]
 name = "pqctoday-kmip-compliance"

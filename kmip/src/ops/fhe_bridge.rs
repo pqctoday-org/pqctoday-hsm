@@ -55,8 +55,10 @@ pub const IFACE: &str = "PQCTODAY_FHE_1_0";
 /// mTLS client-certificate CN of the security officer: the one SO identity of the token, shared with the replication
 /// admin interface (owner decision 2026-10-15).
 pub const ROLE_ADMIN_CN: &str = super::engine_bridge::ROLE_SO_CN;
-/// Largest attribute value one call returns (the KMIP listener caps a frame at 16 MiB).
-pub const MAX_OUTPUT: usize = 15 * 1024 * 1024;
+/// Largest output one call returns: the TFHE compressed server key is about 29 MiB and is read in one
+/// `C_GetAttributeValue` (owner decision 2026-10-15). Only replies are this large; the listener still caps an incoming
+/// request frame at 16 MiB.
+pub const MAX_OUTPUT: usize = 48 * 1024 * 1024;
 /// A decryption started with `C_DecryptInit` and not finished within this time is cancelled.
 pub const OP_TTL: Duration = Duration::from_secs(120);
 /// A public object created by `C_DeriveKey` and not destroyed within this time is destroyed.
@@ -200,7 +202,7 @@ fn call(engine_session: Result<u32, ()>, peer: Option<&str>, function: u32, inpu
         3 => get_attribute_value(s, input),
         4 => destroy_object(st, s, input).map(|()| (CKR_OK, Vec::new())),
         5 => decrypt_init(st, s, &me, input).map(|()| (CKR_OK, Vec::new())),
-        6 => decrypt(st, s, &me, input).map(|o| (CKR_OK, o)),
+        6 => decrypt(st, s, &me, input),
         _ => Err(CKR_ARGUMENTS_BAD),
     }
 }
@@ -384,9 +386,10 @@ fn decrypt_init(st: &mut State, s: u32, me: &Client, input: &[u8]) -> Result<(),
 }
 
 /// 6: `C_Decrypt`, single part. `output_len` 0 is the size query (`pData == NULL`): the length comes back as a DER
-/// INTEGER and the operation stays active. A buffer that is too small gets `CKR_BUFFER_TOO_SMALL` and the operation
-/// stays active; every other outcome ends it (PKCS#11 §5.2).
-fn decrypt(st: &mut State, s: u32, me: &Client, input: &[u8]) -> Result<Vec<u8>, u32> {
+/// INTEGER and the operation stays active. A buffer that is too small gets `CKR_BUFFER_TOO_SMALL` with the needed
+/// length (DER INTEGER, as PKCS#11 sets `*pulDataLen`) and the operation stays active; every other outcome ends it
+/// (PKCS#11 §5.2).
+fn decrypt(st: &mut State, s: u32, me: &Client, input: &[u8]) -> Result<(u32, Vec<u8>), u32> {
     match st.ops.get(&s) {
         Some((owner, _)) if owner == me => {}
         _ => return Err(CKR_OPERATION_NOT_INITIALIZED),
@@ -400,15 +403,19 @@ fn decrypt(st: &mut State, s: u32, me: &Client, input: &[u8]) -> Result<Vec<u8>,
     let mut n = 0u32;
     let r = if out_len == 0 {
         let rv = softhsmrustv3::ffi::C_Decrypt(s, ct.as_ptr() as *mut u8, ct.len() as u32, std::ptr::null_mut(), &mut n);
-        ck(rv).and_then(|()| repl::asn1::to_der(&(n as u64)))
+        ck(rv).and_then(|()| repl::asn1::to_der(&(n as u64))).map(|o| (CKR_OK, o))
     } else {
         let mut out = vec![0u8; out_len];
         n = out_len as u32;
         let rv = softhsmrustv3::ffi::C_Decrypt(s, ct.as_ptr() as *mut u8, ct.len() as u32, out.as_mut_ptr(), &mut n);
-        ck(rv).map(|()| {
-            out.truncate(n as usize);
-            out
-        })
+        match rv {
+            CKR_OK => {
+                out.truncate(n as usize);
+                Ok((CKR_OK, out))
+            }
+            CKR_BUFFER_TOO_SMALL => repl::asn1::to_der(&(n as u64)).map(|o| (CKR_BUFFER_TOO_SMALL, o)),
+            e => Err(e),
+        }
     };
     if softhsmrustv3::replication::fhe_custody::active(s).is_none() {
         st.ops.remove(&s);

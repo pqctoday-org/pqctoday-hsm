@@ -1,8 +1,10 @@
 //! FHE custody inside the token, scheme-neutral half (P0B spec
-//! `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`, revision 2).
+//! `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`, revision 7).
 //!
-//! Compiled with `educational-ckks` (streamed CKKS, no TFHE-rs) and with
-//! `educational-fhe` (which implies it and adds TFHE in `fhe_tfhe`). Holds
+//! Compiled with cfg `pqc_ckks_custody`: the default `fhe-custody` feature on
+//! native targets (streamed CKKS, no TFHE-rs; plan D02387, F1/F10),
+//! `educational-ckks`, and `educational-fhe` (which implies it and adds TFHE in
+//! `fhe_tfhe`; non-commercial use only). Holds
 //! the seed-object access, the decrypt counter, the signed HPKE-sealed
 //! release, recipient enrollment and the C ABI dispatch helpers both schemes
 //! share. The seed never leaves the engine; only public material,

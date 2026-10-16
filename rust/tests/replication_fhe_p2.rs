@@ -241,3 +241,39 @@ fn p2_c_abi_dispatch_of_all_four_mechanisms() {
     let mut badm = [CKM_PQCTODAY_FHE_DECRYPT as usize, dpar.as_ptr() as usize, 3];
     assert_eq!(C_DecryptInit(s, badm.as_mut_ptr() as *mut u8, seed), CKR_MECHANISM_PARAM_INVALID);
 }
+
+/// Plan D02387 (owner decision 2026-10-15): kind 3 is the token-signed TFHE manifest over the kinds 1 and 2 this
+/// session exported. It is refused until both were exported, verifies against the manufacturing root, names the exact
+/// bytes read, and is used once.
+#[test]
+fn p2_token_signed_tfhe_manifest() {
+    use sha2::Digest;
+    let _g = lock();
+    let w = world(1);
+    let (ps, _, dpid) = enroll_all(&w, &[0], &dp(vec![], false, 1000));
+    let s = w.tokens[0].user;
+    let seed = fhe::generate_fhe_seed(s, 1, &ps, &dpid, Some(b"manifest-seed"), None).expect("KEY_GEN");
+    assert_eq!(tf::derive_public(s, seed, tf::PUBLIC_KIND_TFHE_MANIFEST), Err(CKR_OPERATION_NOT_INITIALIZED), "nothing exported yet");
+    let value = |h: u32| native::get_attribute(s, h, CKA_VALUE).unwrap();
+    let pk = value(tf::derive_public(s, seed, tf::PUBLIC_KIND_COMPACT_PUBLIC_KEY).unwrap());
+    assert_eq!(tf::derive_public(s, seed, tf::PUBLIC_KIND_TFHE_MANIFEST), Err(CKR_OPERATION_NOT_INITIALIZED), "server key not exported yet");
+    let sk = value(tf::derive_public(s, seed, tf::PUBLIC_KIND_COMPRESSED_SERVER_KEY).unwrap());
+    let m = value(tf::derive_public(s, seed, tf::PUBLIC_KIND_TFHE_MANIFEST).expect("manifest"));
+    let (tbs, device) = tf::verify_tfhe_manifest(&m, &repl::trust_inputs(w.tokens[0].slot), w.now).expect("verifies against the root");
+    assert_eq!(device, repl::device_id(s).unwrap());
+    let got: Vec<(u32, Vec<u8>)> = tbs.entries.iter().map(|e| (e.kind, e.sha256.as_bytes().to_vec())).collect();
+    assert_eq!(
+        got,
+        vec![
+            (tf::PUBLIC_KIND_COMPRESSED_SERVER_KEY, sha2::Sha256::digest(&sk).to_vec()),
+            (tf::PUBLIC_KIND_COMPACT_PUBLIC_KEY, sha2::Sha256::digest(&pk).to_vec()),
+        ]
+    );
+    assert_eq!(tbs.lineage.as_bytes(), &native::get_attribute(s, seed, CKA_PQCTODAY_FHE_LINEAGE_ID).unwrap()[..]);
+    // A tampered manifest does not verify; the record is used once.
+    let mut bad = m.clone();
+    let i = bad.len() - 200;
+    bad[i] ^= 1;
+    assert!(tf::verify_tfhe_manifest(&bad, &repl::trust_inputs(w.tokens[0].slot), w.now).is_err());
+    assert_eq!(tf::derive_public(s, seed, tf::PUBLIC_KIND_TFHE_MANIFEST), Err(CKR_OPERATION_NOT_INITIALIZED), "signed once");
+}
