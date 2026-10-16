@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: top-layer root check during signing; parallel and hardware paths.
 use crate::hashers::{Hashers, PkSeed};
 use crate::types::{Adrs, SlhDsaSig, SlhPrivateKey, SlhPublicKey};
 use crate::types::{Auth, ForsSig, HtSig, WotsSig, XmssSig, FORS_TREE};

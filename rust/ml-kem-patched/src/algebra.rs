@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling.
 use core::ops::{Add, Mul, Sub};
 use hybrid_array::{typenum::U256, Array};
 use sha3::digest::XofReader;

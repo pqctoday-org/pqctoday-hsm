@@ -4,13 +4,15 @@
 
 set -e
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 # Validate formatting
 echo "Validating Rust format..."
-cd /Users/ericamador/antigravity/pqctoday-hsm/rust
+cd "$ROOT/rust"
 cargo fmt || { echo "Run cargo fmt!"; exit 1; }
 
 echo "Running E2E tests..."
-cd /Users/ericamador/antigravity/pqctoday-hsm/build
+mkdir -p "$ROOT/build" && cd "$ROOT/build"
 brew install cppunit || true
 export CPATH="$(brew --prefix)/include"
 export LIBRARY_PATH="$(brew --prefix)/lib"
@@ -18,7 +20,7 @@ cmake ..
 make
 ctest --output-on-failure || { echo "Tests failed!"; exit 1; }
 
-cd /Users/ericamador/antigravity/pqctoday-hsm
+cd "$ROOT"
 
 # Check for uncommitted changes
 git status

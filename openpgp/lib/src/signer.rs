@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: ML-DSA composite and Ed448 signing, sequoia 2.x and cryptoki 0.12.
 use cryptoki::mechanism::dsa::{HedgeType, SignAdditionalContext};
 use cryptoki::mechanism::eddsa::{EddsaParams, EddsaSignatureScheme};
 use cryptoki::mechanism::Mechanism;

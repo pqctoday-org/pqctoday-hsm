@@ -1,8 +1,5 @@
 {
   "files": {
-    "CHANGELOG.md": {
-      "agent-config-path": 1
-    },
     "docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md": {
       "private-repo": 3
     },
@@ -58,17 +55,8 @@
     "rust/src/native/hpke.rs": {
       "private-repo": 1
     },
-    "scripts/build-strongswan-wasm.sh": {
-      "home-path": 3
-    },
     "scripts/check_pkcs11_constants.py": {
       "private-repo": 3
-    },
-    "scripts/commit_changes.sh": {
-      "home-path": 3
-    },
-    "softhsm2.conf": {
-      "home-path": 1
     },
     "src/lib/vendor_mechanisms.h": {
       "private-repo": 1

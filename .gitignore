@@ -129,3 +129,6 @@ strongswan-pkcs11/tests/test_pkcs11_kem
 
 # Release wasm the local gate builds for the ACVP harness (plan 2.B)
 rust/pkg-acvp/
+
+# Token store of the root softhsm2.conf (directories.tokendir = tokens)
+/tokens/

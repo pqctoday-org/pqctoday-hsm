@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling of keygen, encaps and decaps.
 use core::marker::PhantomData;
 use hybrid_array::typenum::U32;
 use rand_core::CryptoRngCore;

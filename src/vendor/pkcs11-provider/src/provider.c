@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: registers the PQC, composite, MAC, KDF and cipher algorithms. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

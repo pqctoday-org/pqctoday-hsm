@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. List files explicitly: a folder entry would sweep in consumer-authored code, so the tool rejects folders.",
+  "comment": "Declaration of what each published engine bundle contains. Paths are relative to the consumer (the Hub) because that is the layout the consumer expects; scripts/publish_engines.py reads the files from any directory laid out the same way. List files explicitly: a folder entry would sweep in consumer-authored code, so the tool rejects folders. 'notices' names the non-Rust third-party components compiled into each bundle (engines/notices/components.json); bundles with a cargoManifest also get their Rust crates from engines/notices/crates/<name>.json. scripts/publish_engines.py puts THIRD-PARTY-NOTICES.txt and LICENSES/ for each bundle into its tarball under public/licenses/engines/<name>/.",
   "bundles": [
     {
       "name": "cacp-kmip",
@@ -14,7 +14,8 @@
         "src/wasm/kmip/pqctoday_kmip_wasm_bg.wasm.d.ts"
       ],
       "buildScript": "scripts/build-kmip-wasm.sh",
-      "cargoManifest": "wasm/Cargo.toml"
+      "cargoManifest": "wasm/Cargo.toml",
+      "notices": []
     },
     {
       "name": "softhsmrustv3-engine",
@@ -24,7 +25,8 @@
         "src/vendor/softhsm-wasm/wasm/softhsmrustv3_bg.wasm"
       ],
       "buildScript": "rust/build-wasm-bundle.sh",
-      "cargoManifest": "rust/Cargo.toml"
+      "cargoManifest": "rust/Cargo.toml",
+      "notices": []
     },
     {
       "name": "softhsm-cpp-engine",
@@ -33,7 +35,15 @@
         "public/wasm/libsofthsmv3.wasm",
         "src/vendor/softhsm-wasm/wasm/softhsm.wasm"
       ],
-      "buildScript": "scripts/build-wasm.sh"
+      "buildScript": "scripts/build-wasm.sh",
+      "notices": [
+        "softhsmv3",
+        "oasis-pkcs11-headers",
+        "openssl",
+        "hash-sigs",
+        "xmss-reference",
+        "emscripten-runtime"
+      ]
     },
     {
       "name": "openssh-pkcs11",
@@ -41,14 +51,32 @@
         "public/wasm/openssh-server.js",
         "public/wasm/openssh-server.wasm"
       ],
-      "buildScript": "openssh-pkcs11/scripts/build-wasm.sh"
+      "buildScript": "openssh-pkcs11/scripts/build-wasm.sh",
+      "notices": [
+        "openssh",
+        "softhsmv3",
+        "oasis-pkcs11-headers",
+        "openssl",
+        "hash-sigs",
+        "xmss-reference",
+        "emscripten-runtime"
+      ]
     },
     {
       "name": "strongswan",
       "files": [
         "public/wasm/strongswan.wasm"
       ],
-      "buildScript": "scripts/build-strongswan-wasm.sh"
+      "buildScript": "scripts/build-strongswan-wasm.sh",
+      "notices": [
+        "strongswan",
+        "softhsmv3",
+        "oasis-pkcs11-headers",
+        "openssl",
+        "hash-sigs",
+        "xmss-reference",
+        "emscripten-runtime"
+      ]
     },
     {
       "name": "openssl-pkcs11",

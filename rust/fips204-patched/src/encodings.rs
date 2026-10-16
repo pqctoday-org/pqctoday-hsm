@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: s1/s2 range check in sk_decode (FIPS 204 Alg. 25); optional phase profiling.
 // This file implements functionality from FIPS 204 section 7.2 Encodings of ML-DSA Keys and Signatures
 
 use crate::conversion::{

@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling.
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = include_str!("../README.md")]

@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs.
 use core::marker::PhantomData;
 
 use crate::hasher::{sha256::Sha256_256, HashChain};

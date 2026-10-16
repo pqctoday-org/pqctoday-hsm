@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "comment": "Third-party components compiled into the engine release bundles, other than Rust crates (those are generated into crates/). Each licenseFiles entry is a repository-relative file holding a full licence text; scripts/engine_notices.py copies them into each bundle's LICENSES/ folder. Add a component here, and its id to the bundle's 'notices' list in engines/bundles.json, whenever a build starts linking new third-party code.",
+  "components": {
+    "softhsmv3": {
+      "name": "SoftHSMv3, the PQC Today fork of SoftHSM2",
+      "version": "SoftHSM2 2.7.0 base",
+      "license": "BSD-2-Clause",
+      "copyright": [
+        "Copyright (c) 2008-2013 .SE (The Internet Infrastructure Foundation)",
+        "Copyright (c) 2010-2018 SURFnet bv",
+        "Copyright (c) 2022 NLnet Labs",
+        "Copyright (c) 2014, 2020 Red Hat, Inc.",
+        "Copyright (c) 2024-2026 PQC Today"
+      ],
+      "source": "https://github.com/softhsm/SoftHSMv2 (upstream); this repository (fork)",
+      "modified": "OpenSSL 3 EVP-only backend, PKCS#11 v3.2, ML-KEM, ML-DSA, SLH-DSA, HSS/LMS, XMSS; see LICENSE and CHANGELOG.md",
+      "licenseFiles": ["LICENSE"]
+    },
+    "oasis-pkcs11-headers": {
+      "name": "OASIS PKCS#11 v3.2 headers",
+      "version": "3.2",
+      "license": "LicenseRef-OASIS-IPR",
+      "copyright": ["Copyright (c) OASIS Open 2016, 2019, 2024"],
+      "source": "https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/",
+      "licenseFiles": ["engines/notices/texts/oasis-pkcs11/NOTICE.txt"]
+    },
+    "openssl": {
+      "name": "OpenSSL",
+      "version": "3.6.3",
+      "license": "Apache-2.0",
+      "copyright": ["Copyright (c) 1998-2026 The OpenSSL Project Authors"],
+      "source": "https://www.openssl.org/source/openssl-3.6.3.tar.gz (SHA-256 243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1), unmodified; built by scripts/build-openssl-wasm.sh",
+      "licenseFiles": ["engines/notices/texts/openssl-3.6.3/LICENSE.txt"]
+    },
+    "hash-sigs": {
+      "name": "hash-sigs (HSS/LMS), PQC Today fork of cisco/hash-sigs",
+      "version": "commit 21294a0f2e4cfcc66b6bc58b7717fd4cb6757931",
+      "license": "BSD-3-Clause",
+      "copyright": ["Copyright (c) 2017 Cisco Systems, Inc."],
+      "source": "https://github.com/pqctoday-org/hash-sigs (fork of https://github.com/cisco/hash-sigs); submodule src/lib/crypto/stateful/hash-sigs",
+      "modified": "SP 800-208 SHAKE-256 parameter sets and OpenSSL hashing, by PQC Today",
+      "licenseFiles": ["engines/notices/texts/hash-sigs/license.txt"]
+    },
+    "xmss-reference": {
+      "name": "XMSS reference implementation",
+      "version": "commit 171ccbd26f098542a67eb5d2b128281c80bd71a6",
+      "license": "CC0-1.0",
+      "source": "https://github.com/XMSS/xmss-reference; submodule src/lib/crypto/stateful/xmss-reference",
+      "licenseFiles": ["engines/notices/texts/xmss-reference/LICENSE"]
+    },
+    "emscripten-runtime": {
+      "name": "Emscripten runtime (emscripten library code, musl libc, libc++, libc++abi, compiler-rt)",
+      "version": "Emscripten SDK used for the build (texts from emsdk 6.0.4)",
+      "license": "(MIT OR NCSA) AND MIT AND (Apache-2.0 WITH LLVM-exception OR NCSA OR MIT)",
+      "copyright": ["Copyright (c) 2010-2014 Emscripten authors", "Copyright (c) 2005-2020 Rich Felker, et al. (musl)", "LLVM Project contributors (libc++, libc++abi, compiler-rt)"],
+      "source": "https://github.com/emscripten-core/emscripten",
+      "licenseFiles": [
+        "engines/notices/texts/emscripten/LICENSE",
+        "engines/notices/texts/emscripten/musl-COPYRIGHT",
+        "engines/notices/texts/emscripten/libcxx-LICENSE.TXT",
+        "engines/notices/texts/emscripten/libcxxabi-LICENSE.TXT",
+        "engines/notices/texts/emscripten/compiler-rt-LICENSE.TXT"
+      ]
+    },
+    "openssh": {
+      "name": "OpenSSH portable",
+      "version": "10.3p1 (tag V_10_3_P1, commit 2d98db98331803cbb820211b2fb0d31a6e71e58e)",
+      "license": "LicenseRef-OpenSSH (BSD-style and ISC terms, see the text)",
+      "copyright": ["Tatu Ylonen, the OpenBSD project and the other authors named in the licence text"],
+      "source": "https://github.com/openssh/openssh-portable",
+      "modified": "ML-DSA and SLH-DSA key types and PKCS#11 signing, by PQC Today, LLC; see openssh-pkcs11/NOTICE",
+      "licenseFiles": ["openssh-pkcs11/LICENSE", "openssh-pkcs11/NOTICE"]
+    },
+    "strongswan": {
+      "name": "strongSwan",
+      "version": "6.0.5",
+      "license": "GPL-2.0-or-later (with strongSwan's OpenSSL linking exception)",
+      "copyright": ["The strongSwan authors and secunet Security Networks AG, see the headers of the source files"],
+      "source": "https://download.strongswan.org/strongswan-6.0.5.tar.bz2 (SHA-256 437460893655d6cfbc2def79d2da548cb5175b865520c507201ab2ec2e7895d9)",
+      "modified": "PQC Today, LLC patches: strongswan-6.0.5-pqc.patch, strongswan-6.0.5-wasm.patch, the strongswan-pkcs11/ plugin and strongswan-wasm-shims/, applied by scripts/build-strongswan-wasm.sh",
+      "sourceOffer": "Complete corresponding source: the strongSwan 6.0.5 tarball above plus {repo}/tree/{commit} (patches, plugin, shims and build script). It stays available there, and on request from PQC Today, LLC, for at least three years after this bundle is published.",
+      "licenseFiles": ["strongswan-pkcs11/COPYING", "engines/notices/texts/strongswan-6.0.5/LICENSE", "strongswan-pkcs11/NOTICE"]
+    },
+    "pkcs11-provider": {
+      "name": "pkcs11-provider (OpenSSL 3 provider), PQC Today fork",
+      "version": "upstream commit 663dea335c80bec7fd96d544ff875af08d6461a9 (v1.1.0-17)",
+      "license": "Apache-2.0",
+      "copyright": ["Copyright (C) 2022 Simo Sorce and the pkcs11-provider contributors"],
+      "source": "https://github.com/latchset/pkcs11-provider",
+      "modified": "modified by PQC Today, LLC; see src/vendor/pkcs11-provider/PATCHES.md",
+      "licenseFiles": ["src/vendor/pkcs11-provider/COPYING"]
+    }
+  },
+  "crateTextFallbacks": {
+    "asn1-rs-impl": {
+      "useTextsOf": "asn1-rs",
+      "reason": "this proc-macro crate (compile time only) ships no licence file; it is part of the asn1-rs repository, whose licence texts follow"
+    }
+  }
+}

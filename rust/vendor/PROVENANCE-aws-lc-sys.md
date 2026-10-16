@@ -24,3 +24,10 @@
   crates.io package plus the patch and diffs it.
 - **Exit plan:** upstream the patch to aws/aws-lc (draft in the pqctoday-cacp docs);
   when a release carries it, delete this directory and the three patch entries.
+
+## Licence options taken
+
+AWS-LC's `third_party/jitterentropy` is dual-licensed under a BSD-style licence
+or GPL-2.0 (`aws-lc/LICENSE`, "Jitter Entropy RNG"). As AWS-LC itself elects,
+this repository takes it under **BSD-3-Clause**, not GPL-2.0. AWS-LC is linked
+only into native builds; no engine release bundle (wasm32) contains it.

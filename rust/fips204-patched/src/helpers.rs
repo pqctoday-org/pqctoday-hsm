@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: optional phase profiling.
 use crate::types::{R, T, T0};
 use crate::{Q, ZETA};
 

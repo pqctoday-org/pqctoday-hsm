@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: upload of ML-DSA/ML-KEM composite key parts, cryptoki 0.12.
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{
     Attribute, AttributeType, CertificateType, KeyType, MlDsaParameterSetType,

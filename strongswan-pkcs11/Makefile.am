@@ -1,3 +1,4 @@
+# Modified by PQC Today, LLC, 2026: adds pkcs11_kem.c/.h (ML-KEM key exchange).
 AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/libstrongswan
 

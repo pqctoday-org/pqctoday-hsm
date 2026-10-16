@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs; bounds-checked parsing.
 use crate::constants::{
     LmsLeafIdentifier, MAX_HASH_SIZE, MAX_LMS_SIGNATURE_LENGTH, MAX_TREE_HEIGHT,
 };

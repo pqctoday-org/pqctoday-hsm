@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: per-hash-family type IDs; bounds-checked parsing.
 use crate::constants::*;
 use crate::hasher::HashChain;
 use crate::lm_ots::definitions::LmotsPrivateKey;

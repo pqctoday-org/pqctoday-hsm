@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: PK.seed block hashed once per operation; optional parallel trees and profiling.
 use crate::hashers::{Hashers, PkSeed};
 use crate::helpers::base_2b;
 use crate::types::{Adrs, Auth, ForsPk, ForsSig, FORS_PRF, FORS_ROOTS};

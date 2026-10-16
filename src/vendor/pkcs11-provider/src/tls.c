@@ -1,3 +1,4 @@
+/* Modified by PQC Today, LLC, 2026: ML-KEM TLS groups and composite signature algorithms. */
 /* Copyright (C) 2022 Simo Sorce <simo@redhat.com>
    SPDX-License-Identifier: Apache-2.0 */
 

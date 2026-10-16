@@ -1,11 +1,11 @@
 # Terms of Service
 
 **Effective Date:** March 22, 2026
-**Last Updated:** March 22, 2026
+**Last Updated:** October 15, 2026
 
-## 1. Acceptance of Terms
+## 1. About these Terms
 
-By accessing, downloading, or using SoftHSMv3 (the "Software"), available at [https://github.com/pqctoday/softhsmv3](https://github.com/pqctoday/softhsmv3) and its associated npm package (`@pqctoday/softhsm-wasm`), you agree to be bound by these Terms of Service ("Terms"). If you do not agree to these Terms, do not access or use the Software.
+These Terms of Service ("Terms") accompany SoftHSMv3 (the "Software"), available at [https://github.com/pqctoday/softhsmv3](https://github.com/pqctoday/softhsmv3) and its associated npm package (`@pqctoday/softhsm-wasm`). They are notices and disclaimers. Your rights to use, copy, modify and distribute the Software come from its licence (section 2), and these Terms add no conditions to it.
 
 ## 2. License
 
@@ -15,11 +15,11 @@ The Software is licensed under the **BSD 2-Clause License** (same as the upstrea
 
 SoftHSMv3 is a **PQC-enabled HSM emulation library** forked from SoftHSM2 v2.7.0. It implements PKCS#11 v3.2 with ML-KEM (FIPS 203), ML-DSA (FIPS 204), and SLH-DSA (FIPS 205) support. It is intended for **development, testing, education, and prototyping purposes**.
 
-**You must not:**
+**Disclaimer:**
 
-- Use the Software as a substitute for a certified hardware security module (HSM) in production environments.
-- Rely on the Software for protecting real cryptographic keys, production credentials, or financial transactions.
-- Treat the Software as FIPS 140-3 validated — it is not. The Software emulates PKCS#11 v3.2 operations in software (and WebAssembly) without the tamper-resistance guarantees of a hardware HSM.
+- The Software is not certified. It is not FIPS 140-3 validated and has no Common Criteria or equivalent certification.
+- The Software is not a substitute for a certified hardware security module (HSM) and is not intended for production keys, production credentials, or financial transactions.
+- The Software emulates PKCS#11 v3.2 operations in software (and WebAssembly) without the tamper resistance of a hardware HSM.
 
 ## 4. Export Compliance and Sanctions
 
@@ -31,32 +31,16 @@ The Software contains cryptographic functionality classified under **Export Cont
 
 Distribution is authorized under **License Exception TSU (§740.13 EAR)** for publicly available encryption source code and **License Exception ENC (§740.17 EAR)** for mass-market encryption software.
 
-### 4.3 Prohibited Destinations
+### 4.3 Your responsibility for export and sanctions law
 
-You may not access, download, or use the Software if you are located in, or a national or resident of, any country or territory subject to comprehensive U.S. sanctions, including but not limited to:
+Users are responsible for complying with the export control and sanctions laws that apply to them. U.S. law, for example, restricts exports to countries and territories under comprehensive U.S. sanctions (such as Cuba, Iran, North Korea, Syria, and the Crimea, Donetsk and Luhansk regions of Ukraine) and to parties on the BIS Entity List, the Treasury Department's Specially Designated Nationals (SDN) List, or other restricted party lists. This section is a notice about the law, not a condition of the licence.
 
-- Cuba
-- Iran
-- North Korea (DPRK)
-- Syria
-- The Crimea, Donetsk, and Luhansk regions of Ukraine
+## 5. Notices on use
 
-### 4.4 Denied Parties
-
-You may not access or use the Software if you are listed on, or acting on behalf of any party listed on, the U.S. Bureau of Industry and Security (BIS) Entity List, the U.S. Treasury Department's Specially Designated Nationals (SDN) List, or any other applicable restricted party list.
-
-### 4.5 User Responsibility
-
-You are solely responsible for complying with all applicable export control and sanctions laws in your jurisdiction. By using the Software, you represent and warrant that you are not located in a prohibited destination and are not a denied party.
-
-## 5. Acceptable Use
-
-You agree not to:
-
-- Use the Software for any unlawful purpose or in violation of any applicable laws or regulations.
-- Misrepresent the Software as your own creation or remove attribution and license notices.
-- Use the Software to develop weapons, conduct surveillance, or engage in any activity that violates human rights.
-- Represent the Software as a certified or validated cryptographic module (FIPS 140-3, Common Criteria, or equivalent) unless you have independently obtained such certification.
+- Users are responsible for using the Software lawfully.
+- The licence requires redistributions to keep the copyright and licence notices.
+- The Software is not a certified or validated cryptographic module (FIPS 140-3, Common Criteria, or equivalent); a product built on it is certified only if it obtains its own certification.
+- PQC Today, LLC does not endorse use of the Software to develop weapons, conduct surveillance, or violate human rights.
 
 ## 6. No Warranty
 
@@ -84,7 +68,7 @@ Each component is subject to its own license terms.
 
 ## 10. Modifications
 
-We reserve the right to modify these Terms at any time. Changes will be indicated by updating the "Last Updated" date. Continued use of the Software after changes constitutes acceptance of the modified Terms.
+These Terms may be updated at any time. Changes are indicated by updating the "Last Updated" date.
 
 ## 11. Governing Law
 

@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: pre-hash, already-hashed and external-mu entry points; hw-accel and profiling features.
 #![no_std]
 #![deny(clippy::pedantic, warnings, missing_docs, unsafe_code)]
 // Almost all of the 'allow' category...

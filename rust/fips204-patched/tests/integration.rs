@@ -1,3 +1,4 @@
+// Modified by PQC Today, LLC, 2026: test that the expanded signing context signs identically.
 mod nist_vectors;
 
 use fips204::traits::{KeyGen, Signer, Verifier};
