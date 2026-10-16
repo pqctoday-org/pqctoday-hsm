@@ -405,6 +405,28 @@ pub fn find_decrypt_policy(slot: u32, id: &[u8]) -> Option<DecryptPolicyView> {
 
 /// SO enrollment of an immutable FHE decryption policy (§6.3 "Policy
 /// provisioning"). Returns its SHA-384 identifier; identical DER is idempotent.
+/// The signed-admin form of `enroll_fhe_decrypt_policy` (admin operation [5], plan D02387 WP-A2): same checks,
+/// returned as a staged change that `admin::execute` commits together with its ledger entry and receipt.
+pub(crate) fn stage_enroll_fhe_decrypt_policy(slot: u32, policy_der: &[u8]) -> Result<super::enroll::Staged, u32> {
+    let view = parse_decrypt_policy(policy_der)?;
+    let id = view.id;
+    let unchanged = super::enroll::Staged { new_objects: Vec::new(), updates: Vec::new(), output: Some(id.to_vec()), result_digest: id, event: None };
+    if find_decrypt_policy(slot, &id).is_some() {
+        return Ok(unchanged);
+    }
+    if records::list(slot, ROLE_FHE_DECRYPT_POLICY).len() >= records::MAX_POLICIES_PER_SLOT {
+        return Err(CKR_DEVICE_MEMORY);
+    }
+    let rec = records::new_record(ROLE_FHE_DECRYPT_POLICY, CKO_DATA, "FHE decryption policy", policy_der.to_vec(), Vec::new(), false);
+    Ok(super::enroll::Staged {
+        new_objects: vec![rec],
+        updates: Vec::new(),
+        output: Some(id.to_vec()),
+        result_digest: id,
+        event: Some(("fhe_policy_enrolled", vec![("policy", super::hex(&id))])),
+    })
+}
+
 pub fn enroll_fhe_decrypt_policy(so_session: u32, policy_der: &[u8]) -> Result<[u8; 48], u32> {
     super::require_profile()?;
     let slot = super::require_so(so_session)?;
