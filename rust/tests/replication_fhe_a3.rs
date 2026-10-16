@@ -73,13 +73,13 @@ fn setup(max_decrypts: u32, seed: &[u8; 32], id: &[u8]) -> (World, u32, u32) {
 }
 
 /// Slot values small against the scale: coefficient i is ((i mod 7) − 3)·2^(scale − 20).
-fn small_plaintext(ps: &params::CkksParamSet) -> Vec<i128> {
+fn small_plaintext(ps: &'static params::CkksParamSet) -> Vec<i128> {
     let shift = ps.log_default_scale as u32 - 20;
     (0..ps.n() as i128).map(|i| ((i % 7) - 3) << shift).collect()
 }
 
 /// A release-level ciphertext of `m` under the secret of `seed`, in the token's input format.
-fn ciphertext(ps: &params::CkksParamSet, seed: &[u8; 32], m: &[i128], rand: u8) -> Vec<u8> {
+fn ciphertext(ps: &'static params::CkksParamSet, seed: &[u8; 32], m: &[i128], rand: u8) -> Vec<u8> {
     let level = params::release_level(ps);
     let (c0, c1) = Generator::new(ps, seed).encrypt_for_test(level, m, &[rand; 32]).unwrap();
     let mut b = if level == 0 { mech::CT_MAGIC.to_vec() } else { mech::CT_MAGIC_V3.to_vec() };
@@ -284,6 +284,10 @@ fn kat_tfhe_registry_1_through_the_token() {
 /// CKR_USER_NOT_LOGGED_IN; the normal user gets CKR_USER_TYPE_INVALID for every SO operation (policy and recipient
 /// enrolment, the admin nonce and execute). A user of another token cannot reach the seed by handle
 /// (CKR_KEY_HANDLE_INVALID). No refusal spends a counter unit.
+///
+/// Found by this test in the default build (no TFHE-rs): `fhe_custody::decrypt` routed by object type before the role
+/// check, so the SO, or a public session, holding a handle that was not a CKKS seed got CKR_KEY_TYPE_INCONSISTENT
+/// instead of its role error, and could tell CKKS seeds from other handles. The role is now checked first.
 #[test]
 fn wrong_roles_and_foreign_tokens_are_refused_before_the_counter() {
     let _g = lock();
@@ -329,6 +333,8 @@ fn wrong_roles_and_foreign_tokens_are_refused_before_the_counter() {
             mech::derive_public_v2(so, h, mech::PUBLIC_KIND_CKKS_DESCRIPTOR, 0, 0, 0, 0).err(),
             fc::decrypt(so, h, &OWNER, &ct, false).err(),
             fc::decrypt(so, h, &OWNER, &ct, true).err(),
+            // A handle that names nothing: still the role error, not an object error (§5.3 step 1 first).
+            fc::decrypt(so, 0x00de_adbe, &OWNER, &ct, false).err(),
         ];
         let mut kp = Vec::new();
         kp.extend_from_slice(&1usize.to_ne_bytes());
@@ -337,13 +343,13 @@ fn wrong_roles_and_foreign_tokens_are_refused_before_the_counter() {
         kp.extend_from_slice(&dpid);
         let mut km = [CKM_PQCTODAY_FHE_KEY_GEN as usize, kp.as_ptr() as usize, kp.len()];
         let mut nh = 0u32;
-        let gen = ffi::C_GenerateKey(so, km.as_mut_ptr() as *mut u8, std::ptr::null_mut(), 0, &mut nh);
+        let keygen_rv = ffi::C_GenerateKey(so, km.as_mut_ptr() as *mut u8, std::ptr::null_mut(), 0, &mut nh);
         let dprm = decrypt_params(&OWNER);
         let mut dm = [CKM_PQCTODAY_FHE_DECRYPT as usize, dprm.as_ptr() as usize, dprm.len()];
         let init = ffi::C_DecryptInit(so, dm.as_mut_ptr() as *mut u8, h);
-        (rust, [gen, init])
+        (rust, [keygen_rv, init])
     });
-    assert_eq!(so_rust, [Some(CKR_USER_TYPE_INVALID); 4], "SO through the Rust API");
+    assert_eq!(so_rust, [Some(CKR_USER_TYPE_INVALID); 5], "SO through the Rust API");
     assert_eq!(so_abi, [CKR_USER_TYPE_INVALID; 2], "SO through the C ABI");
 
     // A public session: the user logged out.
@@ -351,6 +357,7 @@ fn wrong_roles_and_foreign_tokens_are_refused_before_the_counter() {
     let public = open_rw_session(0);
     let h_pub = h;
     assert_eq!(fc::decrypt(public, h_pub, &OWNER, &ct, false).map(|_| ()), Err(CKR_USER_NOT_LOGGED_IN));
+    assert_eq!(fc::decrypt(public, 0x00de_adbe, &OWNER, &ct, true).map(|_| ()), Err(CKR_USER_NOT_LOGGED_IN), "no object probe before the role check");
     assert_eq!(fhe::generate_fhe_seed(public, TEST_RING, &rpid, &dpid, None, None), Err(CKR_USER_NOT_LOGGED_IN));
     assert_eq!(ffi::C_CloseSession(public), CKR_OK);
     let mut pin = USER.as_bytes().to_vec();
@@ -617,7 +624,8 @@ fn generated_and_replicated_seeds_cannot_be_destroyed() {
     for (s, h, what) in [(u0, src, "generated"), (u1, replica, "replicated")] {
         assert_eq!(native::get_attribute_bool(s, h, CKA_DESTROYABLE), Some(false), "{what}");
         assert_eq!(ffi::C_DestroyObject(s, h), CKR_ACTION_PROHIBITED, "{what}: C_DestroyObject");
-        let t = raw_template(&[(CKA_DESTROYABLE, bb(true))]);
+        let attrs = vec![(CKA_DESTROYABLE, bb(true))];
+        let t = raw_template(&attrs);
         assert_ne!(ffi::C_SetAttributeValue(s, h, t.as_ptr() as *mut u8, 1), CKR_OK, "{what}: made destroyable");
         let mut copy = 0u32;
         assert_ne!(ffi::C_CopyObject(s, h, t.as_ptr() as *mut u8, 1, &mut copy), CKR_OK, "{what}: copied");
@@ -635,7 +643,8 @@ fn generated_and_replicated_seeds_cannot_be_destroyed() {
 /// budget check with the same count and commit the same value (two decryptions for one unit, and one release more
 /// than maxDecrypts at the boundary). The reservation now re-reads and writes under one lock
 /// (`fhe_custody::reserve_decrypt_unit`). Sixteen threads, each with its own session, race 64 owner decryptions
-/// against a budget of 12: exactly 12 are released and the counter ends at 12.
+/// against a budget of 12: exactly 12 are released and the counter ends at 12. Against the decrypt paths as they were
+/// (1b7bc9af) this test failed in three of three runs on the M4 Pro, with 22, 21 and 25 releases for the budget of 12.
 #[test]
 fn concurrent_decrypts_never_exceed_the_budget() {
     let _g = lock();

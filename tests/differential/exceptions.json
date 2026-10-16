@@ -217,6 +217,15 @@
       "unobservable": "the observation depends on the C++ BUILD, not on either engine's behaviour"
     },
     {
+      "id": "LEGAL-VENDOR-MECHANISMS-FHE-CUSTODY",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness: the Rust engine lists the FHE custody vendor mechanisms CKM_PQCTODAY_FHE_KEY_GEN (0x80000018), CKM_PQCTODAY_FHE_DERIVE_PUBLIC (0x80000019) and CKM_PQCTODAY_FHE_DECRYPT (0x8000001A) in C_GetMechanismList and answers them in C_GetMechanismInfo (owner decision F19, plan D02387 WP-A3, 2026-10-15); the C++ engine does not implement FHE custody and never lists them. The test-only CKM_PQCTODAY_FHE_ENCRYPT (0x8000001B) is listed by neither. The FHE specification is Rust-engine-only by design (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md: 'Engine scope: softhsmrustv3 only'), and docs/pkcs11-mechanism-ledger.json records the C++ rows as excluded-by-scope:fhe-custody-rust-engine. Its own entry rather than a reason to widen LEGAL-VENDOR-MECHANISMS: should the harness ever select the replication profile, the observation would be mech.CKM_VENDOR|0x00000018..1a (rust_only, cpp '<absent>'), which that entry's existing glob already covers without change.",
+      "citation": "PKCS#11 v3.2 §3.5 Data types for mechanisms: \"Mechanism types CKM_VENDOR_DEFINED and above are permanently reserved for token vendors.\" PKCS #11 Profiles v3.2 OS §5.1 (Baseline, the profile this engine claims): \"Supports the following mechanisms: a. None specified\", so a vendor mechanism one engine lists and the other does not cannot be a conformance gap.",
+      "unobservable": "the Rust engine lists these mechanisms only after the replication profile is selected at run time (rust/src/constants.rs fhe_custody_mechs_listed, spec §12), which is a Rust API call the harness, loading the engine through the C ABI, never makes"
+    },
+    {
       "id": "LEGAL-KDF-COVERAGE",
       "status": "legal",
       "scenario": "__never_matches__",

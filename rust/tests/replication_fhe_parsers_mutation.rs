@@ -40,53 +40,63 @@ impl Rng {
     }
 }
 
-/// The mutants of `valid`. Exhaustive classes: every proper prefix; 1..=8 appended bytes; every position XORed with
-/// 0x01, 0x80 and 0xff. Seeded classes: `random` rewrites of 1..=8 random positions, `random / 4` insertions and
-/// deletions of a short run, and `random / 4` wholly random buffers of up to twice the length.
-fn mutants(valid: &[u8], seed: u64, random: usize) -> Vec<Vec<u8>> {
+/// Call `f` on every mutant of `valid` (never on `valid` itself), one reused buffer at a time. Exhaustive classes:
+/// every proper prefix; 1..=8 appended bytes; every position XORed with 0x01, 0x80 and 0xff. Seeded classes: `random`
+/// rewrites of 1..=8 random positions, `random / 4` insertions or deletions of a short run, and `random / 4` wholly
+/// random buffers of up to twice the length.
+fn for_each_mutant(valid: &[u8], seed: u64, random: usize, mut f: impl FnMut(usize, &[u8])) {
     let mut rng = Rng(seed | 1);
-    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut emit = |v: &[u8], f: &mut dyn FnMut(usize, &[u8])| {
+        if v != valid {
+            f(i, v);
+            i += 1;
+        }
+    };
     for n in 0..valid.len() {
-        out.push(valid[..n].to_vec());
+        emit(&valid[..n], &mut f);
     }
+    let mut v = valid.to_vec();
     for n in 1..=8 {
-        let mut v = valid.to_vec();
-        v.extend(rng.bytes(n));
-        out.push(v);
+        v.truncate(valid.len());
+        let tail = rng.bytes(n);
+        v.extend(tail);
+        emit(&v, &mut f);
     }
-    for i in 0..valid.len() {
+    v.truncate(valid.len());
+    for p in 0..valid.len() {
         for mask in [0x01u8, 0x80, 0xff] {
-            let mut v = valid.to_vec();
-            v[i] ^= mask;
-            out.push(v);
+            v[p] ^= mask;
+            emit(&v, &mut f);
+            v[p] ^= mask;
         }
     }
     for _ in 0..random {
-        let mut v = valid.to_vec();
+        let mut w = valid.to_vec();
         for _ in 0..1 + rng.below(8) {
-            let i = rng.below(v.len());
-            v[i] = rng.next() as u8;
+            let p = rng.below(w.len());
+            w[p] = rng.next() as u8;
         }
-        out.push(v);
+        emit(&w, &mut f);
     }
     for _ in 0..random / 4 {
-        let mut v = valid.to_vec();
-        let at = rng.below(v.len());
+        let mut w = valid.to_vec();
+        let at = rng.below(w.len());
         if rng.next() & 1 == 0 {
-            let run = rng.bytes(1 + rng.below(16));
-            v.splice(at..at, run);
+            let len = 1 + rng.below(16);
+            let run = rng.bytes(len);
+            let _ = w.splice(at..at, run);
         } else {
-            let end = (at + 1 + rng.below(16)).min(v.len());
-            v.drain(at..end);
+            let end = (at + 1 + rng.below(16)).min(w.len());
+            w.drain(at..end);
         }
-        out.push(v);
+        emit(&w, &mut f);
     }
     for _ in 0..random / 4 {
         let n = rng.below(2 * valid.len() + 1);
-        out.push(rng.bytes(n));
+        let w = rng.bytes(n);
+        emit(&w, &mut f);
     }
-    out.retain(|m| m != valid);
-    out
 }
 
 /// Run `parse` on every mutant: no panic; `Some(der)` (accepted) only when `der` is the mutant itself. Returns the
@@ -94,25 +104,50 @@ fn mutants(valid: &[u8], seed: u64, random: usize) -> Vec<Vec<u8>> {
 fn check(name: &str, valid: &[u8], seed: u64, random: usize, parse: impl Fn(&[u8]) -> Option<Vec<u8>>) -> usize {
     assert_eq!(parse(valid).as_deref(), Some(valid), "{name}: the valid input parses and re-encodes to itself");
     let mut accepted = 0;
-    for (i, m) in mutants(valid, seed, random).iter().enumerate() {
+    for_each_mutant(valid, seed, random, |i, m| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(m)));
         match r {
             Err(_) => panic!("{name}: mutant {i} ({} bytes) panicked: {}", m.len(), hex(m)),
             Ok(Some(der)) => {
-                assert_eq!(der, *m, "{name}: mutant {i} accepted but re-encodes differently");
+                assert_eq!(der, m, "{name}: mutant {i} accepted but re-encodes differently");
                 accepted += 1;
             }
             Ok(None) => {}
         }
-    }
+    });
     accepted
 }
 
-/// A deterministic sample of `n` mutants, for the slower verifiers.
+/// A deterministic sample of `n` mutants, for the slower verifiers: one prefix, extension, single-byte change or
+/// short random rewrite each.
 fn sample(valid: &[u8], seed: u64, n: usize) -> Vec<Vec<u8>> {
-    let all = mutants(valid, seed, 64);
     let mut rng = Rng(seed ^ 0x5eed);
-    (0..n).map(|_| all[rng.below(all.len())].clone()).collect()
+    let mut out = Vec::new();
+    while out.len() < n {
+        let mut v = valid.to_vec();
+        match rng.below(4) {
+            0 => v.truncate(rng.below(valid.len())),
+            1 => {
+                let k = 1 + rng.below(8);
+                let tail = rng.bytes(k);
+                v.extend(tail);
+            }
+            2 => {
+                let p = rng.below(v.len());
+                v[p] ^= [0x01u8, 0x80, 0xff][rng.below(3)];
+            }
+            _ => {
+                for _ in 0..1 + rng.below(8) {
+                    let p = rng.below(v.len());
+                    v[p] = rng.next() as u8;
+                }
+            }
+        }
+        if v != valid {
+            out.push(v);
+        }
+    }
+    out
 }
 
 fn hex(b: &[u8]) -> String {
@@ -341,20 +376,25 @@ fn ckks_decrypt_input_survives_mutation() {
     let header = 24;
     assert!(fc::decrypt(s, h, &[0u8; 48], &ct, false).is_ok());
     // Size query: exhaustive over the header, prefixes and extensions; seeded over the coefficient words.
-    let mut all = mutants(&ct[..header + 64], 0xa3_0050, 2000);
-    for v in all.iter_mut() {
-        if v.len() >= header + 64 {
-            v.extend_from_slice(&ct[header + 64..]);
-        }
-    }
-    all.extend(sample(&ct, 0xa3_0051, 500));
-    for (i, x) in all.iter().enumerate() {
+    let size_query = |i: usize, x: &[u8]| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fc::decrypt(s, h, &[0u8; 48], x, true)));
         match r {
             Err(_) => panic!("decrypt size query panicked on mutant {i}"),
             Ok(Ok(_)) => assert!(x.len() == ct.len() && x[..header] == ct[..header], "mutant {i} passed the type gate with another shape"),
             Ok(Err(e)) => assert!(matches!(e, CKR_ACTION_PROHIBITED | CKR_DATA_LEN_RANGE), "mutant {i}: {e:#x}"),
         }
+    };
+    let mut full = Vec::with_capacity(ct.len() + 64);
+    for_each_mutant(&ct[..header + 64], 0xa3_0050, 2000, |i, x| {
+        full.clear();
+        full.extend_from_slice(x);
+        if x.len() >= header + 64 {
+            full.extend_from_slice(&ct[header + 64..]);
+        }
+        size_query(i, &full);
+    });
+    for (i, x) in sample(&ct, 0xa3_0051, 500).iter().enumerate() {
+        size_query(i, x);
     }
     let before = records::object_attrs(h).unwrap().get(&fc::CKA_PRIV_FHE_DECRYPT_COUNT).cloned();
     assert_eq!(before, Some(1u64.to_le_bytes().to_vec()), "size queries spent nothing");

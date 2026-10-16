@@ -10,6 +10,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine: the FHE custody mechanisms are listed.** `CKM_PQCTODAY_FHE_KEY_GEN`, `CKM_PQCTODAY_FHE_DERIVE_PUBLIC`
+  and `CKM_PQCTODAY_FHE_DECRYPT` now appear in `C_GetMechanismList` and are answered by `C_GetMechanismInfo` (key size
+  32 bytes, the seed; `CKF_GENERATE`, `CKF_DERIVE`, `CKF_DECRYPT`) in native builds once the replication profile is
+  selected, which the KMIP server does with `--fhe-custody`. Before that they worked only for callers who already knew
+  them. The test-only `CKM_PQCTODAY_FHE_ENCRYPT` stays unlisted. The C++ engine has no FHE custody. This follows the
+  hardening tests below (spec `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md` revision 8, §8 and §10).
+- **FHE custody hardening tests.** Known answers through the token for every registered parameter set (CKKS IDs 2, 3,
+  4 and the test ring against the reference oracle files; TFHE ID 1 in the opt-in TFHE build), the refusal cases
+  (wrong role, exhausted budget, another seed's ciphertext or lineage, oversized input at every entry point, keys that
+  cannot be destroyed, generated or copied), decrypt counters across an engine restart, and mutation tests of every
+  FHE parser, including the KMIP interface's inputs.
+
 - The OpenSSL Studio engine bundle (`openssl-pkcs11`: `openssl.js` + `openssl.wasm`, the OpenSSL 3.6.3 command line
   with pkcs11-provider and the Rust engine linked in) is now built here: `scripts/build-openssl-studio-wasm.sh` links it
   into `build-wasm/engines-staging/`, and its C shims and OpenSSL patch moved to `wasm/openssl-studio/` (GPL-3.0-only;
@@ -43,6 +55,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   browser): it now is. Signatures are byte-for-byte unchanged.
 
 ### Fixed
+
+- **Rust engine: an FHE decrypt counter unit could be spent twice.** Decryptions on the same key at the same time
+  could pass the budget check with the same count, so a key could release more results than its policy allows: in a
+  test with 16 threads, a key with a budget of 12 released between 21 and 25. The counter is now reserved under a lock.
+  Closing a session also ends its pending FHE decryption.
+- **Rust engine: FHE decryption checks the caller's role first.** In native builds without the opt-in TFHE feature, a
+  decryption call with a handle that was not a CKKS key returned a key-type error before the role check, so the
+  security officer or a session that was not logged in got the wrong error and could tell CKKS keys from other
+  handles. The role is now checked first, as the specification orders.
 
 - **CKKS decryption flooding now follows the published analysis (educational
   feature only).** The flood width now follows Corollary 2 of Li, Micciancio,

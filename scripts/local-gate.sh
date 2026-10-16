@@ -557,9 +557,21 @@ run_step_bg "rust engine cargo test" \
 # 1.8.1; it reproduces the client-key KAT). Streamed CKKS (2026-10-11): the
 # ledger/manifest, rotation and registry ID 3 suites, plus the --lib unit
 # tests with the generator v1 freeze check (gate V) and the oracle KATs.
+# FHE custody hardening (plan D02387 WP-A3, 2026-10-15): the signed FHE admin
+# operations, the A3 suites (known answers through the token incl. TFHE ID 1,
+# negative cases, the counter race, counters across restarts, parser mutation)
+# and the mechanism-list check.
 run_step_bg "rust replication K2-K4 acceptance (educational-replication)" \
-  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-fhe,test-support --lib --test replication_k2 --test replication_k3 --test replication_k4 --test replication_store --test replication_store_contexts --test replication_admin_stage --test replication_admin --test replication_fhe_p1 --test replication_fhe_p2 --test replication_fhe_ckks --test replication_fhe_ckks_rotation --test replication_fhe_ckks_flood" \
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features educational-fhe,test-support --lib --test replication_k2 --test replication_k3 --test replication_k4 --test replication_store --test replication_store_contexts --test replication_admin_stage --test replication_admin --test replication_fhe_p1 --test replication_fhe_p2 --test replication_fhe_ckks --test replication_fhe_ckks_rotation --test replication_fhe_ckks_flood --test replication_admin_fhe --test replication_fhe_a3 --test replication_fhe_a3_store --test replication_fhe_parsers_mutation --test fhe_mechanism_list" \
   rust-replication
+
+# The same FHE custody suites in the DEFAULT native build plus test-support:
+# CKKS custody without TFHE-rs, which is what ships (plan D02387 F1/F10). WP-A3
+# gates listing the FHE mechanisms (owner decision F19) on these passing here,
+# not only in the educational-fhe lane above, where TFHE code paths are present.
+run_step_bg "rust FHE custody hardening, default build + test-support (WP-A3)" \
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --features test-support --test replication_admin_fhe --test replication_fhe_ckks --test replication_fhe_ckks_rotation --test replication_fhe_ckks_flood --test replication_fhe_a3 --test replication_fhe_a3_store --test replication_fhe_parsers_mutation --test fhe_mechanism_list" \
+  rust-fhe-default
 
 # KMIP bridge for the educational replication interfaces (2026-10-04). The
 # kmip crate's own `educational-replication` feature (the PKCS#11-operation
