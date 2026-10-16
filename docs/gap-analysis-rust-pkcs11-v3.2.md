@@ -116,7 +116,7 @@
 **Scope:** `rust/src/` (`softhsmrustv3` v0.5.0) — constants, FFI surface (`ffi.rs`), crypto
 mechanisms (`crypto/`, `native/`), session/object/attribute model (`state.rs`, `native/`).
 **Source of truth:** OASIS PKCS#11 v3.2 specification (CSD01,
-`docs/refs/pkcs11-spec-v3.2-csd01.pdf`) and its normative header
+`https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf`) and its normative header
 `src/lib/pkcs11/pkcs11t.h` / `pkcs11f.h`. Where any other artifact (vendor manifest,
 constants.js, C++ code) disagrees, the OASIS spec wins.
 **Out of scope (by request):** multipart *encryption* paths — `C_EncryptUpdate` /

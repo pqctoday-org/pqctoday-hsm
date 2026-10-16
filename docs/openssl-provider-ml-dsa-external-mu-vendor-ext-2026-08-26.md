@@ -13,7 +13,7 @@ F36-6 (coverage audit) originally called ML-DSA external-µ support "not
 fixable... regardless of provider-side code." That was wrong. Verified
 directly against sources, not memory:
 
-- **PKCS#11 v3.2** (ratified OASIS Standard, `docs/refs/pkcs11-spec-v3.2-os.pdf`,
+- **PKCS#11 v3.2** (ratified OASIS Standard, `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf`,
   03 June 2026 — the current, non-draft text): `CKM_ML_DSA` carries only
   `CK_SIGN_ADDITIONAL_CONTEXT` (hedge/context). No field anywhere in the
   spec carries a caller-supplied µ. Confirmed by full-text search, not a

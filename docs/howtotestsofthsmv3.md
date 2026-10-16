@@ -713,7 +713,7 @@ prints the manual command. Pruning never fails the gate.
 
 ## 11. Key Template Requirements
 
-> **Spec reference**: PKCS#11 v3.2, ratified OASIS Standard (03 June 2026) — `docs/refs/pkcs11-spec-v3.2-os.pdf`
+> **Spec reference**: PKCS#11 v3.2, ratified OASIS Standard (03 June 2026) — `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf`
 > (page/section/table numbers below are unchanged from the earlier CSD01 draft, verified against the ratified text)
 > §6.67 ML-DSA (p. 447) — Tables 280, 281; §6.67.4 key pair generation |
 > §6.68 ML-KEM (p. 453) — Tables 287, 288; §6.68.4 key pair generation; §6.68.5 Key Agreement |

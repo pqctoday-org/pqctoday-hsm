@@ -1,25 +1,45 @@
 # OASIS Specification Library — `pqctoday-hsm/kmip/spec/`
 
-Local copies of the OASIS KMIP + PKCS#11 specification documents that the wrapper validates against. Stored offline so validation runs do not depend on `docs.oasis-open.org` availability.
+The OASIS KMIP + PKCS#11 specification documents the wrapper validates against.
+**This public repository carries no third-party documents, only their
+extractions** (owner rule, 2026-10-15): the documents themselves are listed,
+with publisher URL and the SHA-256 of the audited copy, in
+[`../../docs/refs/README.md`](../../docs/refs/README.md) and
+[`../../docs/refs/third-party-documents.json`](../../docs/refs/third-party-documents.json).
+What stays committed here: the `.sha256` sidecars, the JSON extractions
+(`oasis-kmip-3.0/kmip-spec-3.0-tags-enums*.json`,
+`oasis-kmip-3.0/kmip-spec-3.0-section61-headings.json`), the hand-verified
+[`crossref/`](crossref/) fact sheets, and this file. No build, test or gate step
+needs the documents. To restore local copies (gitignored) at the paths below:
 
-**Current baseline: CSD02.** The `-csd02` files below are what the code implements and cites;
-the CSD01 / WD19 files are retained only so a superseded citation can be traced.
+```bash
+python3 docs/refs/fetch_refs.py --only kmip/spec/    # downloads and verifies SHA-256
+```
 
-| File | Bytes | Source | Date | Role |
+**Current baseline: CSD02.** The `-csd02` documents below are what the code implements and cites;
+the CSD01 / WD19 documents are listed only so a superseded citation can be traced.
+
+| Local path | Bytes | Source | Date | Role |
 |---|---|---|---|---|
 | `oasis-kmip-3.0/kmip-spec-v3.0-csd02.pdf` | 2 962 732 | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.pdf` | 2026-05-07 | **BASELINE** |
 | `oasis-kmip-3.0/kmip-spec-v3.0-csd02.html` | 19 266 598 | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.html` | 2026-05-07 | **BASELINE** — extractor input |
 | `oasis-kmip-3.0/kmip-profiles-v3.0-csd02.pdf` | 1 278 197 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.pdf` | 2026-05-21 | **BASELINE** — profiles (§3.3 Quantum Safe suite, §5.1.2 Baseline Server) |
 | `oasis-kmip-3.0/kmip-profiles-v3.0-csd02.zip` | 1 429 398 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.zip` | 2026-05-21 | **BASELINE** — conformance test cases |
-| `oasis-kmip-3.0/kmip-ug-v3.0/` | — | KMIP Usage Guide v3.0 (`.pdf`/`.html`/`.docx`) | 2026-06-18 | companion |
-| `oasis-kmip-3.0/kmip-spec-v3.0.pdf` / `.html` | 3 141 715 / 19 055 347 | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/kmip-spec-v3.0.{pdf,html}` | 2024-08-23 | superseded (CSD01) — retained for citation archaeology |
-| `oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf` | 3 142 670 | Working Draft 19 (pre-CSD, PQC ops added WD17+) | 2025-02-14 | superseded by CSD02 — retained for citation archaeology |
-| `oasis-kmip-3.0/kmip-profiles-v3.0.pdf` / `.zip` | 1 142 181 / 8 389 246 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/kmip-profiles-v3.0.{pdf,zip}` | 2023-11-30 | superseded (CSD01 profiles) |
+| `oasis-kmip-3.0/kmip-ug-v3.0/` | — | KMIP Usage Guide v3.0 CND01, `https://docs.oasis-open.org/kmip/kmip-ug/v3.0/cnd01/` (`.pdf`/`.html`/`.docx`) | 2026-06-18 | companion |
+| `oasis-kmip-3.0/kmip-spec-v3.0.pdf` / `.html` | 3 141 715 / 19 055 347 | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.{pdf,html}` | 2024-08-23 | superseded (CSD01) — for citation archaeology |
+| `oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf` | 3 142 670 | Working Draft 19 (pre-CSD, PQC ops added WD17+), `https://groups.oasis-open.org/higherlogic/ws/public/download/72645/kmip-spec-v3.0-wd19-clean.pdf` | 2025-02-14 | superseded by CSD02 — for citation archaeology |
+| `oasis-kmip-3.0/kmip-profiles-v3.0.pdf` / `.zip` | 1 142 181 / 8 389 246 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd01/kmip-profiles-v3.0-csd01.{pdf,zip}` | 2023-11-30 | superseded (CSD01 profiles) |
 | `oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` | 6 796 775 | `https://docs.oasis-open.org/kmip/kmip-spec/v2.1/os/kmip-spec-v2.1-os.pdf` | 2020-12-14 | fallback reference for legacy-mode clients |
-| `../../docs/refs/pkcs11-spec-v3.2-os.pdf` | — | PKCS#11 v3.2 **OASIS Standard** | 2026-06-03 | ratified; content-identical to the CSD01 draft the engine implemented |
-| `../../docs/refs/pkcs11-spec-v3.2-csd01.pdf` | 5 142 051 | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf` | 2025-04-16 | superseded by the OS above |
+| PKCS#11 v3.2 OS | — | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf` | 2026-06-03 | ratified; content-identical to the CSD01 draft the engine implemented |
+| PKCS#11 v3.2 CSD01 | 5 142 051 | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf` | 2025-04-16 | superseded by the OS above |
 
-All files have `.sha256` companions next to them; regenerate after any refresh. The PKCS#11 v3.2 PDFs live under `pqctoday-hsm/docs/refs/` (next to the canonical `pkcs11t.h`), not under a `oasis-pkcs11-3.2/` subdirectory here.
+The `.docx` and `.zip` companions of each spec revision are listed in `docs/refs/README.md`.
+Every document has a committed `.sha256` sidecar at its local path. The un-revisioned
+`v3.0/` URLs (`.../kmip-spec/v3.0/kmip-spec-v3.0.pdf`) now serve **CSD02**, not CSD01 —
+the local `kmip-spec-v3.0.*` names hold CSD01, so restore them from the `csd01/` URLs
+above (`fetch_refs.py` does). Publisher HTML is re-written per request (e-mail
+obfuscation), so a fresh `.html` download does not reproduce its sidecar; see
+`docs/refs/README.md`.
 
 **Standardization status (checked 2026-08-12).** KMIP 3.0 CSD02 is a **committee draft, not a ratified OASIS Standard**. It completed a 30-day OASIS public review on **13 Aug 2026** (opened 14 Jul 2026) — the step preceding Committee Specification. PKCS#11 v3.2, by contrast, **is** ratified (OASIS Standard, 3 Jun 2026).
 
@@ -30,7 +50,8 @@ All files have `.sha256` companions next to them; regenerate after any refresh. 
 CSD02's public review closed 2026-08-13, so a **CS01** (or a further CSD) is the expected next
 artifact. There is no automation for this; it is a manual trigger. When it appears:
 
-1. Download spec + profiles (+ UG if revised) into `oasis-kmip-3.0/`, regenerate `.sha256` sidecars.
+1. Download spec + profiles (+ UG if revised) into `oasis-kmip-3.0/` (gitignored — never commit them),
+   regenerate `.sha256` sidecars, and add each new document to `docs/refs/third-party-documents.json`.
 2. Re-run the tag/enum extractor against the new `.html`; diff `kmip-spec-3.0-tags-enums.json`.
 3. Add the new baseline's `§6.1.x` operation table to `kmip-spec-3.0-section61-headings.json`
    and re-run `kmip/tests/section61_citation_drift.rs` — it catches citations that never migrated.
@@ -69,14 +90,19 @@ done
 ```
 
 Substitute the new revision's directory (`cs01/`, `csd03/`, …) when one is published — the
-`v3.0/` path without a revision segment still serves CSD01. Diff the `.sha256` sidecars against
+`v3.0/` path without a revision segment serves the latest stage (CSD02 as of 2026-10-15).
+The downloaded documents are gitignored; commit only the `.sha256` sidecars and any
+regenerated extraction, and record each new document in `docs/refs/third-party-documents.json`.
+To restore the exact copies this baseline was audited against, use
+`python3 docs/refs/fetch_refs.py --only kmip/spec/` instead. Diff the `.sha256` sidecars against
 what is committed; if any changed, regenerate `src/kmip30/spec_source.json`, re-run the extractor,
 and work through the "Spec watch" checklist — a changed checksum invalidates every hand-verified
 fact in `crossref/`.
 
 ## License (attribution)
 
-OASIS documents are republished under the OASIS IPR Policy:
+The documents are not republished here. The extractions above derive from these OASIS documents
+(© OASIS Open, OASIS IPR Policy):
 
 - KMIP Specification Version 3.0 — Committee Specification Draft 02, 2026-05-07.
 - KMIP Profiles Version 3.0 — Committee Specification Draft 02, 2026-05-21.

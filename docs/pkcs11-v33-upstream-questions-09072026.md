@@ -2,10 +2,10 @@
 
 **Date:** 2026-09-07
 **Source:** OASIS PKCS 11 TC working tree, `https://github.com/oasis-tcs/pkcs11`, branch `master`
-**Snapshot commit:** `2b25dd8ed4a85d22937d8509bb296555cd329f43` (2026-08-26), vendored at `docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/`
+**Snapshot commit:** `2b25dd8ed4a85d22937d8509bb296555cd329f43` (2026-08-26), pinned at `https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43` (a local copy was vendored until 2026-10-15; see `docs/refs/README.md`)
 **Status:** Recorded per phase-5 decision D-4. **Not sent.** Whether and when to raise these with the TC is a separate decision; this document exists so the defects are on file rather than re-discovered.
 
-Every item below was re-verified against the vendored snapshot before being written down (`docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/doc/spec/`), not carried forward from an earlier draft of this list.
+Every item below was re-verified against the vendored snapshot before being written down (`https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/doc/spec`), not carried forward from an earlier draft of this list.
 
 ---
 

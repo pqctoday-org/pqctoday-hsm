@@ -24,7 +24,7 @@ standalone plan's `b8402936` code baseline before that commit; historical code r
 FHE plan intentionally remain anchored at `ceddd554` until its own P-1 re-pin.
 
 **PKCS#11 baseline (D13).** The reference is the PKCS#11 v3.2 OASIS Standard
-(`docs/refs/pkcs11-spec-v3.2-os.pdf`), augmented only with pqctoday vendor mechanisms, key types and
+(`https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf`), augmented only with pqctoday vendor mechanisms, key types and
 attributes. Existing v3.2 functions remain the ABI for FHE mechanisms. The prerequisite HSM plan's
 replication functions live only in the separately discoverable `PQCTODAY_KEY_REPLICATION_1_0`
 vendor interface returned by standard `C_GetInterface*`; they do not modify
@@ -798,7 +798,7 @@ P1/P2 and optional lane tests supply implementation evidence.
 
 ## 12. References
 
-- PKCS#11 v3.2 OS (`docs/refs/pkcs11-spec-v3.2-os.pdf`) + pqctoday vendor extensions (D13); the v3.3 draft snapshot has no HPKE mechanism
+- PKCS#11 v3.2 OS (`https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf`) + pqctoday vendor extensions (D13); the v3.3 draft snapshot has no HPKE mechanism
 - RFC 9180 (§5.2 single-shot APIs, §6.1); draft-ietf-hpke-pq-05 (2026-07-06); FIPS 202/203/204; SP 800-38D; SP 800-38F; SP 800-108; RFC 5869
 - Attestation and PQ certificate sources: version-pinned primary links and publication status in §6.8 (RATS key attestation -07; LAMPS CSR attestation -29 and freshness -08; RFC 9881 and RFC 9935). Drafts are not published standards; the selected pure-PQC composition remains our reviewed profile
 - ISO/IEC DIS 28033-2, FDIS 28033-3, FDIS 28033-4; NIST IR 8214C (call for submissions)

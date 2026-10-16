@@ -594,7 +594,7 @@ run_step_bg "kmip educational bridge (educational-replication): tests + courier 
 # ~seconds to 5+ minutes for every contributor.
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
-run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+run_step "OASIS corpus provenance (102 transcripts; vs the CSD02 zip when restored)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
 
 # Immediately after the corpus check, and for the same reason. That step asks
@@ -699,7 +699,7 @@ run_step_bg "cross-engine PKCS#11 differential harness" \
 # before it: if the corpus is not the corpus we think it is, the replay
 # figure is measuring something else — kept in reading order even though
 # nothing here enforces it at run time.
-run_step_bg "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+run_step_bg "OASIS corpus provenance (102 transcripts; vs the CSD02 zip when restored)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py" \
   oasis-checks
 

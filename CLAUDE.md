@@ -118,7 +118,7 @@ CKA_SEED                = 0x00000637  // deterministic seed: ξ for ML-DSA, d||z
 ```
 
 Values verified from `src/lib/pkcs11/pkcs11t.h` and PKCS#11 v3.2 CSD01 spec
-(`docs/refs/pkcs11-spec-v3.2-csd01.pdf`).
+(`https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf`).
 
 New functions in pkcs11f.h:
 - `C_EncapsulateKey` — ML-KEM encapsulation
@@ -131,17 +131,17 @@ New functions in pkcs11f.h:
 ### v3.2 baseline, v3.3 fills the gaps (standing rule, 2026-09-07)
 
 - **v3.2 is the baseline.** It is the published OASIS Standard
-  (`docs/refs/pkcs11-spec-v3.2-os.pdf`). The engines report Cryptoki **3.2.0**,
+  (`https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf`). The engines report Cryptoki **3.2.0**,
   and every citation in `tests/differential/exceptions.json` references v3.2
   section and table numbers.
 - **v3.3 governs where v3.2 has a gap or a plain error.** The OASIS PKCS 11
-  TC's working tree is vendored at
-  `docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/`. Where v3.2 is silent,
+  TC's working tree is pinned at commit `2b25dd8ed4a85d22937d8509bb296555cd329f43`
+  (https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43; provenance in `docs/refs/README.md`). Where v3.2 is silent,
   ambiguous, or demonstrably wrong, v3.3 is the authority.
 - **v3.3 does NOT otherwise supersede v3.2.** It is an *unpublished* working
   draft — no v3.3 CSD/CS/OS exists on `docs.oasis-open.org`, its own header
   still declares `CRYPTOKI_VERSION_MINOR 2`, and it moves with every TC commit
-  (see that directory's `PROVENANCE.md`). Do not bump the reported Cryptoki
+  (see `docs/refs/README.md`). Do not bump the reported Cryptoki
   version to 3.3, and do not re-anchor citations to it: its markdown carries no
   section numbers at all.
 - **Every v3.3-derived constant correction is registered**, with a reason and a

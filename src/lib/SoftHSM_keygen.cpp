@@ -9811,7 +9811,7 @@ CK_RV SoftHSM::MechParamCheckRSAPKCSOAEP(CK_MECHANISM_PTR pMechanism)
 	// the spec does not restrict this to any particular hash family, and
 	// CKG_MGF1_SHA3_224/256/384/512 are defined in the same normative
 	// table as the SHA-2 MGF1 variants (confirmed directly against
-	// docs/refs/pkcs11-spec-v3.2-os.pdf before this was reported as a
+	// https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf before this was reported as a
 	// genuine gap rather than a spec-mandated restriction). SHA-3 support
 	// added here to close that gap — previously this allow-list silently
 	// rejected SHA-3 with CKR_ARGUMENTS_BAD even though the engine

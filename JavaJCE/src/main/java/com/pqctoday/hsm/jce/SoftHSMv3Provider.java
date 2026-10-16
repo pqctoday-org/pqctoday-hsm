@@ -773,7 +773,7 @@ public final class SoftHSMv3Provider extends AuthProvider {
         // was briefly dropped after discovering the C++ engine's
         // MechParamCheckRSAPKCSOAEP hardcoded a SHA-1/SHA-2-only
         // allow-list — confirmed against the actual PKCS#11 v3.2 OASIS
-        // Standard text (docs/refs/pkcs11-spec-v3.2-os.pdf §6.1.8) that
+        // Standard text (https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf §6.1.8) that
         // this was a genuine engine completeness gap, not a spec-mandated
         // restriction (hashAlg is spec-defined as an open "mechanism ID
         // of the message digest algorithm", and CKG_MGF1_SHA3_* is
