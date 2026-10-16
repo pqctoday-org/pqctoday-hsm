@@ -155,7 +155,10 @@ required-features = ["educational-replication", "test-support"]
 # PQCTODAY EDUCATIONAL TEST ONLY; never built without the non-default feature.
 name = "repl_edu_board"
 path = "src/bin/repl_edu_board.rs"
-required-features = ["educational-replication"]
+# Board-local token provisioning (device enrolment, admin authority, policies). Built with the default
+# `fhe-custody` feature so the appliance image can provision FHE custody (plan D02387, owner decision 2026-10-15:
+# one-time board-local provisioning over SSH, then key work over KMIP only).
+required-features = ["fhe-custody"]
 
 [[test]]
 # C1 — two-context variant of replication_store (per-connection contexts).
