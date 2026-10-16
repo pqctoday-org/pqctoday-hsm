@@ -1,7 +1,7 @@
 //! FHE P1 acceptance (FHE plan §9 P1 exit gate): both K4 replication flows
 //! for an opaque FHE-seed fixture, decryption-policy and profile refusals,
 //! descriptor binding, and custody. No TFHE backend; no decryption claim.
-#![cfg(feature = "educational-replication")]
+#![cfg(pqc_replication)]
 
 mod replication_common;
 use replication_common::*;

@@ -1,5 +1,5 @@
 //! K2 acceptance — hierarchy and enrollment (plan R1.4; spec §4.2).
-#![cfg(feature = "educational-replication")]
+#![cfg(pqc_replication)]
 
 mod replication_common;
 use replication_common::*;

@@ -6,7 +6,7 @@
 //! record in the retirement ledger, no replica as the target. INSECURE test
 //! ring 0x8002 only; the generator's bytes are pinned by the unit KAT
 //! (`spec.rs`, `kat/fhe-ckks-rotation-kat-32770.json`).
-#![cfg(all(feature = "educational-ckks", feature = "test-support"))]
+#![cfg(all(pqc_ckks_custody, feature = "test-support"))]
 
 mod replication_common;
 use replication_common::*;

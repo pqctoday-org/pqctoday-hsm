@@ -1538,7 +1538,7 @@ mod tests {
 // registered and nothing here is reachable from the FFI. Encapsulation
 // randomness is always fresh OS randomness — there is no seed parameter.
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 fn replication_v1_key_nonce(shared_secret: &[u8], info: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     let sid = hpke_suite_id(CKP_HPKE_KEM_ML_KEM_768, CKD_HPKE_HKDF_SHA384, CKZ_HPKE_AEAD_256_GCM);
     let sched = key_schedule(CKM_SHA384, &sid, CKZ_HPKE_MODE_BASE, shared_secret, info, &[], &[], Some((32, 12)), 48)?;
@@ -1548,7 +1548,7 @@ fn replication_v1_key_nonce(shared_secret: &[u8], info: &[u8]) -> Result<(Vec<u8
 /// Seal `pt` to the ML-KEM-768 encapsulation key `pk_r`. Returns
 /// `(enc, ciphertext)`; `enc` is exactly 1,088 bytes and the ciphertext is
 /// `pt.len() + 16`.
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 pub(crate) fn seal_replication_v1(pk_r: &[u8], info: &[u8], aad: &[u8], pt: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     use aes_gcm::aead::{Aead, KeyInit, Payload};
     use zeroize::Zeroize;
@@ -1570,7 +1570,7 @@ pub(crate) fn seal_replication_v1(pk_r: &[u8], info: &[u8], aad: &[u8], pt: &[u8
 /// Open a replication ciphertext with the expanded ML-KEM-768 decapsulation
 /// key `dk`. Every failure after the length checks is
 /// `CKR_ENCRYPTED_DATA_INVALID` (spec §9 item 11).
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 pub(crate) fn open_replication_v1(dk: &[u8], enc: &[u8], info: &[u8], aad: &[u8], ct: &[u8]) -> Result<Vec<u8>, CkRv> {
     use aes_gcm::aead::{Aead, KeyInit, Payload};
     use zeroize::Zeroize;

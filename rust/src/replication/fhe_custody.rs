@@ -330,6 +330,27 @@ pub const ROLE_FHE_RECIPIENT: u8 = 14;
 /// SO enrollment of a third-party release recipient: an ML-KEM-768
 /// recovery-recipient certificate of a device that chains to an enrolled
 /// root. Returns the SPKI hash a decryption policy names.
+/// The signed-admin form of `enroll_fhe_recipient` (admin operation [6], plan D02387 WP-A2): same chain validation,
+/// returned as a staged change that `admin::execute` commits together with its ledger entry and receipt.
+pub(crate) fn stage_enroll_fhe_recipient(slot: u32, recipient_chain: &[Vec<u8>]) -> Result<super::enroll::Staged, u32> {
+    let chain = super::pki::chain_from_ders(recipient_chain).map_err(|_| CKR_DATA_INVALID)?;
+    let trust = super::enroll::trust_inputs(slot);
+    let v = super::pki::validate_chain(&chain, Purpose::RecoveryRecipient, &trust, super::now_unix(), super::Profile::Educational)
+        .map_err(|_| CKR_SIGNATURE_INVALID)?;
+    let h = super::pki::spki_hash(&v.leaf);
+    if recipient_key(slot, &h).is_some() {
+        return Ok(super::enroll::Staged { new_objects: Vec::new(), updates: Vec::new(), output: Some(h.to_vec()), result_digest: h, event: None });
+    }
+    let rec = records::new_record(ROLE_FHE_RECIPIENT, CKO_CERTIFICATE, "FHE release recipient certificate", recipient_chain[0].clone(), Vec::new(), false);
+    Ok(super::enroll::Staged {
+        new_objects: vec![rec],
+        updates: Vec::new(),
+        output: Some(h.to_vec()),
+        result_digest: h,
+        event: Some(("fhe_recipient_enrolled", vec![("recipient", super::hex(&h))])),
+    })
+}
+
 pub fn enroll_fhe_recipient(so_session: u32, recipient_chain: &[Vec<u8>]) -> Result<[u8; 48], u32> {
     super::require_profile()?;
     let slot = super::require_so(so_session)?;

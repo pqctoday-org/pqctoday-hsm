@@ -1,5 +1,5 @@
 //! K3 acceptance — key attestation (plan R2.3; spec §5.1; reviews K0B-R-01..03).
-#![cfg(feature = "educational-replication")]
+#![cfg(pqc_replication)]
 
 mod replication_common;
 use replication_common::*;

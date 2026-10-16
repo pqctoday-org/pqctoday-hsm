@@ -3,7 +3,7 @@
 //! host holds the admin-authority key; this module never touches a token.
 
 use super::admin::{
-    gtime, signed_bytes, AdminOperation, AdminSignedRequest, AdminTbsRequest, EnrollCrlOp, EnrollPolicyOp, IssueDeviceCrlOp, REQUEST_DOMAIN,
+    gtime, signed_bytes, AdminOperation, AdminSignedRequest, AdminTbsRequest, EnrollCrlOp, EnrollFheRecipientOp, EnrollPolicyOp, IssueDeviceCrlOp, REQUEST_DOMAIN,
 };
 use super::asn1;
 use crate::constants::*;
@@ -29,12 +29,20 @@ pub fn tbs_request(
         rotate_recovery_key: None,
         issue_function_certs: None,
         issue_device_crl: None,
+        enroll_fhe_decrypt_policy: None,
+        enroll_fhe_recipient: None,
     };
     match op {
         AdminOperation::EnrollCrl { crl, issuer_device_cert } => {
             tbs.enroll_crl = Some(EnrollCrlOp { crl: asn1::octets(crl), issuer_device_cert: issuer_device_cert.as_deref().map(asn1::octets) })
         }
         AdminOperation::EnrollPolicy { policy } => tbs.enroll_policy = Some(EnrollPolicyOp { policy: asn1::octets(policy) }),
+        AdminOperation::EnrollFheDecryptPolicy { policy } => {
+            tbs.enroll_fhe_decrypt_policy = Some(EnrollPolicyOp { policy: asn1::octets(policy) })
+        }
+        AdminOperation::EnrollFheRecipient { chain } => {
+            tbs.enroll_fhe_recipient = Some(EnrollFheRecipientOp { chain: chain.iter().map(|c| asn1::octets(c)).collect() })
+        }
         AdminOperation::RotateRecoveryKey => tbs.rotate_recovery_key = Some(der::asn1::Null),
         AdminOperation::IssueFunctionCerts => tbs.issue_function_certs = Some(der::asn1::Null),
         AdminOperation::IssueDeviceCrl { revoke, retired_to_revoke, validity_seconds } => {

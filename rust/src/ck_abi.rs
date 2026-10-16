@@ -2387,10 +2387,10 @@ static INTERFACES: [SyncInterface; 3] = [
 /// K0B separately discovered vendor interface (spec §2). Compiled only with
 /// `educational-replication` and discoverable only after the caller selects
 /// the educational profile; the standard records above never change.
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static REPLICATION_NAME: [u8; 29] = *b"PQCTODAY_KEY_REPLICATION_1_0\0";
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static REPLICATION_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     pInterfaceName: &REPLICATION_NAME as *const u8 as CK_UTF8CHAR_PTR,
     pFunctionList: &crate::replication::abi::REPLICATION_FUNCTION_LIST
@@ -2398,10 +2398,10 @@ static REPLICATION_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static ADMIN_NAME: [u8; 35] = *b"PQCTODAY_KEY_REPLICATION_ADMIN_1_0\0";
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static ADMIN_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     pInterfaceName: &ADMIN_NAME as *const u8 as CK_UTF8CHAR_PTR,
     pFunctionList: &crate::replication::abi::ADMIN_FUNCTION_LIST
@@ -2409,10 +2409,10 @@ static ADMIN_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static CEREMONY_NAME: [u8; 38] = *b"PQCTODAY_KEY_REPLICATION_CEREMONY_1_0\0";
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static CEREMONY_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     pInterfaceName: &CEREMONY_NAME as *const u8 as CK_UTF8CHAR_PTR,
     pFunctionList: &crate::replication::abi::CEREMONY_FUNCTION_LIST
@@ -2420,13 +2420,13 @@ static CEREMONY_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static VENDOR_INTERFACES: [&SyncInterface; 3] = [&REPLICATION_INTERFACE, &ADMIN_INTERFACE, &CEREMONY_INTERFACE];
 
 /// The separately discovered vendor interfaces (v1, admin, ceremony), all
 /// gated on the feature AND the runtime educational profile.
 fn vendor_interfaces() -> &'static [&'static SyncInterface] {
-    #[cfg(feature = "educational-replication")]
+    #[cfg(pqc_replication)]
     if crate::replication::educational_profile_selected() {
         return &VENDOR_INTERFACES;
     }

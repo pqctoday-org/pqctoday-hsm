@@ -68,7 +68,7 @@ pub mod store;
 /// staticlib embedding (openssl.wasm tears the runtime down per command);
 /// serialization halves are target-neutral so native tests cover the seam.
 pub mod state_snapshot;
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 pub mod replication;
 /// FHE browser matrix (FHE plan §7): the token's TFHE derivation exported to
 /// JS for desktop-browser KAT and timing runs. educational-fhe + wasm32 only.
