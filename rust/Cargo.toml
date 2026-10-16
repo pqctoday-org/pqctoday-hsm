@@ -3,7 +3,7 @@ name = "softhsmrustv3"
 version = "0.17.0"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
-license = "BSD-2-Clause"
+license = "AGPL-3.0-only"
 
 # hsm-perf-bench plan §A4.1/§P4 — makes this crate the workspace root, with
 # `bench-harness/` as a sibling member. Purely structural: does not change
@@ -43,32 +43,32 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 #   cargo build --features acvp ...     # an authorized ACVP-lab submission
 # (Was `default = ["acvp"]`; flipped to opt-in per the 2026-06-21 compliance
 # audit — shipping a release build with this hook on is a §5.6 violation.)
-default = ["awslc-pq"]
+default = ["awslc-pq", "fhe-custody"]
 acvp = []
 
 # K2–K4 PQCToday key hierarchy, attestation and protected replication
-# (docs/proposals/pqctoday-key-replication-interface-1.0.md). OPT-IN, NOT
-# default, and EDUCATIONAL ONLY: it uses the RFC 5612 documentation OID
-# profile (1.3.6.1.4.1.32473.20261002), which must never reach a production
-# artifact. No shipped native or WASM build enables it until the private
-# authority allocations land, the K0B review closes and the owner enables
-# advertisement. Even when compiled in, nothing is discoverable until a
-# caller explicitly selects the educational profile at runtime.
+# (docs/proposals/pqctoday-key-replication-interface-1.0.md). It uses the RFC 5612 documentation OID profile
+# (1.3.6.1.4.1.32473.20261002). Owner decision F11 (plan D02387, 2026-10-15): there will be no private IANA
+# enterprise number, and this profile may ship in production builds. The code is compiled by this feature, or by
+# the default `fhe-custody` feature on native targets (see build.rs: cfg `pqc_replication`). Nothing is
+# discoverable until a caller explicitly selects the profile at runtime.
 educational-replication = ["dep:x509-cert", "dep:der", "dep:spki07", "dep:const-oid"]
 
-# FHE P2 (FHE plan §9; P0B spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md):
-# TFHE custody mechanisms on top of educational-replication. OPT-IN, NOT
-# default, EDUCATIONAL ONLY. Pins TFHE-rs 1.8.1 (tag commit 187fc0b9, the
-# reference-runs/tfhe-custody pin) with only the `integer` feature. TFHE-rs is
-# BSD-3-Clause-Clear; Zama states that commercial use needs a separate patent
-# licence, so this feature must never ship in a commercial artefact.
+# TFHE custody (FHE plan §9; spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md). OPT-IN, NOT default.
+# Pins TFHE-rs 1.8.1 (tag commit 187fc0b9) with only the `integer` feature. TFHE-rs is BSD-3-Clause-Clear, which
+# grants no patent rights; Zama requires a commercial patent licence for any commercial use. NON-COMMERCIAL USE
+# ONLY (owner decisions D4, 2026-10-02, and F10, 2026-10-15): education, research and lab images; never in a default
+# or commercial artefact. A move to OpenFHE for TFHE is recorded as a future evolution (plan D02387 §9).
 educational-fhe = ["educational-replication", "dep:tfhe", "educational-ckks"]
 
-# Streamed CKKS custody (pqctoday-fhe plan docs/ckks/…-2026-10-10.md) WITHOUT
-# TFHE-rs: the scheme-neutral custody code plus the CKKS mechanisms only.
-# OPT-IN, NOT default, EDUCATIONAL ONLY. `educational-fhe` implies it, so every
-# educational-fhe build keeps CKKS exactly as before.
+# Streamed CKKS custody WITHOUT TFHE-rs: the scheme-neutral custody code plus the CKKS mechanisms. Opt-in name kept
+# for existing builds; native default builds get the same code through `fhe-custody` (cfg `pqc_ckks_custody`).
 educational-ckks = ["educational-replication"]
+
+# FHE custody in the default build (plan D02387, owner decisions F1, F7, F10): CKKS custody plus the replication
+# layer it needs, on native targets only (build.rs sets cfg `pqc_ckks_custody` and `pqc_replication` unless the
+# target is wasm32, so the Hub's wasm bundles are unchanged). No TFHE-rs: TFHE stays behind `educational-fhe`.
+fhe-custody = ["dep:x509-cert", "dep:der", "dep:spki07", "dep:const-oid"]
 
 # ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
 # mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
@@ -155,7 +155,10 @@ required-features = ["educational-replication", "test-support"]
 # PQCTODAY EDUCATIONAL TEST ONLY; never built without the non-default feature.
 name = "repl_edu_board"
 path = "src/bin/repl_edu_board.rs"
-required-features = ["educational-replication"]
+# Board-local token provisioning (device enrolment, admin authority, policies). Built with the default
+# `fhe-custody` feature so the appliance image can provision FHE custody (plan D02387, owner decision 2026-10-15:
+# one-time board-local provisioning over SSH, then key work over KMIP only).
+required-features = ["fhe-custody"]
 
 [[test]]
 # C1 — two-context variant of replication_store (per-connection contexts).
@@ -169,6 +172,11 @@ required-features = ["educational-replication", "test-support"]
 [[test]]
 name = "replication_admin"
 required-features = ["educational-replication", "test-support"]
+
+# Signed admin operations for FHE custody (plan D02387 WP-A2); runs on default native builds.
+[[test]]
+name = "replication_admin_fhe"
+required-features = ["fhe-custody", "test-support"]
 
 [[test]]
 name = "replication_fhe_p1"

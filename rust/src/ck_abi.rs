@@ -37,16 +37,13 @@
 //!   wasm32 layout into a scratch blob; the shim re-expands it field by
 //!   field into the caller's native `repr(C)` struct.
 //! * `CK_MECHANISM` / `CK_ATTRIBUTE` templates: the top-level struct is
-//!   re-packed into the engine's 12-byte wasm shape. **Embedded pointers**
-//!   (`pParameter` / `pValue`) are the documented residual limit: the
-//!   engine dereferences them as 32-bit linear-memory addresses, so on a
-//!   64-bit host they cannot be represented at all (macOS reserves the low
-//!   4 GiB as `__PAGEZERO`; there is no u32-addressable memory). A non-NULL
-//!   embedded pointer on a 64-bit target therefore returns
-//!   `CKR_FUNCTION_FAILED` instead of risking UB. NULL `pValue` size-query
-//!   templates and parameterless mechanisms translate exactly. On a 32-bit
-//!   native target the layouts coincide and everything passes through with
-//!   full fidelity.
+//!   re-packed into the engine's `[type, pointer, length]` triple at native
+//!   pointer width (`usize`: 12 bytes on wasm32, 24 bytes on a 64-bit host).
+//!   **Embedded pointers** (`pParameter` / `pValue`) are carried in full,
+//!   not truncated, so mechanism parameters and attribute values work on
+//!   64-bit hosts (the H-1 fix; see `embed_ptr`, `xlate_mech`,
+//!   `xlate_template`). A template's native `CK_UNAVAILABLE_INFORMATION`
+//!   length is carried as `usize::MAX`.
 //!
 //! wasm32 builds compile none of this (`lib.rs` gates the module) and keep
 //! the documented JS-shim function table.
@@ -370,16 +367,10 @@ unsafe fn ulong_array_two_call(
 }
 
 /// Represent an EMBEDDED pointer (CK_MECHANISM.pParameter /
-/// CK_ATTRIBUTE.pValue) in the engine's 32-bit linear-memory ABI.
-///
-/// On 32-bit native targets the layouts coincide and the address always
-/// fits. On 64-bit targets there is no u32-addressable memory (macOS keeps
-/// the low 4 GiB as `__PAGEZERO`), and even a low-mapped buffer would be
-/// misparsed (native struct layouts differ) — so a non-NULL embedded
-/// pointer is refused with `CKR_FUNCTION_FAILED` (documented H-1
-/// residual) rather than risking UB.
-/// Native-pointer-width embed of a caller pointer (usize == u32 on wasm32,
-/// u64 on native) — carries the full pointer instead of truncating it.
+/// CK_ATTRIBUTE.pValue) for the engine: native pointer width (usize == u32
+/// on wasm32, u64 on a 64-bit host), so the full pointer is carried instead
+/// of truncated. (Before the H-1 fix a non-NULL embedded pointer was
+/// refused with `CKR_FUNCTION_FAILED` on 64-bit targets.)
 #[inline]
 fn embed_ptr(p: *mut c_void) -> usize {
     p as usize
@@ -410,8 +401,9 @@ fn mech_ptr(m: &mut Option<[usize; 3]>) -> *mut u8 {
     }
 }
 
-/// Re-pack a native CK_ATTRIBUTE template into the engine's 12-byte-entry
-/// wasm shape. Returns the scratch template and the narrowed count.
+/// Re-pack a native CK_ATTRIBUTE template into the engine's
+/// `[type, pValue, ulValueLen]` triples at native pointer width. Returns the
+/// scratch template and the narrowed count.
 unsafe fn xlate_template(
     p: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
@@ -2384,13 +2376,15 @@ static INTERFACES: [SyncInterface; 3] = [
     }),
 ];
 
-/// K0B separately discovered vendor interface (spec §2). Compiled only with
-/// `educational-replication` and discoverable only after the caller selects
-/// the educational profile; the standard records above never change.
-#[cfg(feature = "educational-replication")]
+/// K0B separately discovered vendor interface (spec §2). Compiled with cfg
+/// `pqc_replication` (`educational-replication`, or the default `fhe-custody`
+/// feature on native targets; see build.rs) and discoverable only after the
+/// caller selects the educational profile; the standard records above never
+/// change.
+#[cfg(pqc_replication)]
 static REPLICATION_NAME: [u8; 29] = *b"PQCTODAY_KEY_REPLICATION_1_0\0";
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static REPLICATION_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     pInterfaceName: &REPLICATION_NAME as *const u8 as CK_UTF8CHAR_PTR,
     pFunctionList: &crate::replication::abi::REPLICATION_FUNCTION_LIST
@@ -2398,10 +2392,10 @@ static REPLICATION_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static ADMIN_NAME: [u8; 35] = *b"PQCTODAY_KEY_REPLICATION_ADMIN_1_0\0";
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static ADMIN_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     pInterfaceName: &ADMIN_NAME as *const u8 as CK_UTF8CHAR_PTR,
     pFunctionList: &crate::replication::abi::ADMIN_FUNCTION_LIST
@@ -2409,10 +2403,10 @@ static ADMIN_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static CEREMONY_NAME: [u8; 38] = *b"PQCTODAY_KEY_REPLICATION_CEREMONY_1_0\0";
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static CEREMONY_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     pInterfaceName: &CEREMONY_NAME as *const u8 as CK_UTF8CHAR_PTR,
     pFunctionList: &crate::replication::abi::CEREMONY_FUNCTION_LIST
@@ -2420,13 +2414,13 @@ static CEREMONY_INTERFACE: SyncInterface = SyncInterface(CK_INTERFACE {
     flags: 0,
 });
 
-#[cfg(feature = "educational-replication")]
+#[cfg(pqc_replication)]
 static VENDOR_INTERFACES: [&SyncInterface; 3] = [&REPLICATION_INTERFACE, &ADMIN_INTERFACE, &CEREMONY_INTERFACE];
 
 /// The separately discovered vendor interfaces (v1, admin, ceremony), all
 /// gated on the feature AND the runtime educational profile.
 fn vendor_interfaces() -> &'static [&'static SyncInterface] {
-    #[cfg(feature = "educational-replication")]
+    #[cfg(pqc_replication)]
     if crate::replication::educational_profile_selected() {
         return &VENDOR_INTERFACES;
     }

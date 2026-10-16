@@ -250,16 +250,23 @@ pub(super) fn ledgers() -> std::sync::MutexGuard<'static, BTreeMap<u32, Ledger>>
 /// Drop the ledger of `session` (C_CloseSession).
 pub fn clear_ledger_for_session(session: u32) {
     ledgers().remove(&session);
+    #[cfg(feature = "educational-fhe")]
+    crate::replication::fhe_tfhe::clear_manifest_ledger_for_session(session);
 }
 
 /// Drop every ledger on `slot` (C_CloseAllSessions, C_Logout, C_InitToken).
 pub fn clear_ledgers_for_slot(slot: u32) {
     ledgers().retain(|_, l| l.slot != slot);
+    // The TFHE manifest records are few and keyed by session: a slot event drops them all.
+    #[cfg(feature = "educational-fhe")]
+    crate::replication::fhe_tfhe::clear_manifest_ledgers();
 }
 
 /// Drop every ledger (C_Finalize).
 pub fn clear_ledgers() {
     ledgers().clear();
+    #[cfg(feature = "educational-fhe")]
+    crate::replication::fhe_tfhe::clear_manifest_ledgers();
 }
 
 fn clear_ledgers_for_seed(h: u32) {

@@ -148,6 +148,17 @@ impl AdminAuthorityKey {
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, u32> {
         super::mldsa65_sign(&self.sk, msg)
     }
+
+    /// The ML-DSA-65 secret key, so host-side tooling can keep the admin authority between runs
+    /// (`repl_edu_courier fhe-provision` writes it 0600 next to the trust material). Test material only.
+    pub fn secret_key(&self) -> &[u8] {
+        &self.sk
+    }
+
+    /// Rebuild a key kept with [`Self::secret_key`] and its certificate.
+    pub fn from_parts(sk: Vec<u8>, cert_der: Vec<u8>) -> Self {
+        Self { sk, cert_der }
+    }
 }
 
 /// A host-side rogue "device issuer" (a key the token never held), for

@@ -3,7 +3,7 @@ name = "pqc-hw"
 version = "0.1.0"
 edition = "2024"
 description = "Userspace transport and simulator for PQC Today FPGA accelerators"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [features]
 default = []

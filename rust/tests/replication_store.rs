@@ -1,6 +1,6 @@
 //! K4 under the durable SQLite store (review K0B-R2-02, K0B-R2-03). Own test
 //! binary: configuring a store is process-global.
-#![cfg(feature = "educational-replication")]
+#![cfg(pqc_replication)]
 
 mod replication_common;
 use replication_common::*;

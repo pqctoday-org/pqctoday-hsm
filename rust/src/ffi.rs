@@ -385,7 +385,7 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     crate::state::bump_object_epoch();
     require_init!();
     drop_key_caches();
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     {
         crate::replication::fhe_ckks::mech::clear_generator_cache();
         crate::replication::fhe_ckks::mech::clear_ledgers();
@@ -727,7 +727,7 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
 
 #[wasm_bindgen(js_name = _C_InitToken)]
 pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut u8) -> u32 {
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     {
         crate::replication::fhe_ckks::mech::clear_generator_cache();
         crate::replication::fhe_ckks::mech::clear_ledgers_for_slot(slot_id);
@@ -927,7 +927,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     // PKCS#11 v3.2 §4.4 — session objects die with their creating session.
     crate::state::destroy_session_objects(h_session);
     drop_key_caches();
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     {
         crate::replication::fhe_ckks::mech::clear_generator_cache();
         crate::replication::fhe_ckks::mech::clear_ledger_for_session(h_session);
@@ -971,7 +971,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
 pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     require_init!();
     drop_key_caches();
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     {
         crate::replication::fhe_ckks::mech::clear_generator_cache();
         crate::replication::fhe_ckks::mech::clear_ledgers_for_slot(slot_id);
@@ -1230,7 +1230,7 @@ pub fn C_Logout(h_session: u32) -> u32 {
     crate::state::bump_object_epoch();
     require_init!();
     drop_key_caches();
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     crate::replication::fhe_ckks::mech::clear_generator_cache();
     let session = match SESSIONS.shard(h_session).get(&h_session).cloned() {
         Some(s) => s,
@@ -1238,7 +1238,7 @@ pub fn C_Logout(h_session: u32) -> u32 {
     };
     let slot_id = session.slot_id;
     let context = session.context;
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     crate::replication::fhe_ckks::mech::clear_ledgers_for_slot(slot_id);
     let outcome = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
@@ -2413,11 +2413,11 @@ unsafe fn replication_gate_pre(template: *mut u8, count: u32) -> Result<Option<V
     if !crate::crypto::handlers::template_has_replication_attr(template, count) {
         return Ok(None);
     }
-    #[cfg(feature = "educational-replication")]
+    #[cfg(pqc_replication)]
     {
         crate::replication::binding_request_from_template(template, count).map(Some)
     }
-    #[cfg(not(feature = "educational-replication"))]
+    #[cfg(not(pqc_replication))]
     {
         Err(CKR_ATTRIBUTE_TYPE_INVALID)
     }
@@ -2436,7 +2436,7 @@ unsafe fn replication_gate_post(
     ph_key: *mut u32,
     policy_id: &[u8],
 ) -> u32 {
-    #[cfg(feature = "educational-replication")]
+    #[cfg(pqc_replication)]
     {
         let mech = ck_param::mech(p_mechanism).mechanism;
         let h_pub = ph_pub.map(|p| *p);
@@ -2453,7 +2453,7 @@ unsafe fn replication_gate_post(
             }
         }
     }
-    #[cfg(not(feature = "educational-replication"))]
+    #[cfg(not(pqc_replication))]
     {
         CKR_ATTRIBUTE_TYPE_INVALID
     }
@@ -4577,9 +4577,9 @@ pub fn C_GenerateKey(
     // inspection (the _impl below repeats these checks; they are idempotent).
     require_init!();
     require_session!(_h_session);
-    // FHE P2 (P0B §5.1): CKM_PQCTODAY_FHE_KEY_GEN, educational-ckks (CKKS) /
-    // educational-fhe (adds TFHE) only.
-    #[cfg(feature = "educational-ckks")]
+    // FHE P2 (P0B §5.1): CKM_PQCTODAY_FHE_KEY_GEN, cfg pqc_ckks_custody (CKKS: the
+    // default native `fhe-custody` or `educational-ckks`; TFHE needs `educational-fhe`).
+    #[cfg(pqc_ckks_custody)]
     if !p_mechanism.is_null() && !ph_key.is_null() {
         let m = unsafe { ck_param::mech(p_mechanism) };
         if m.mechanism == CKM_PQCTODAY_FHE_KEY_GEN {
@@ -7361,7 +7361,7 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
     require_init!();
     require_session!(h_session);
     drop_key_caches();
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     crate::replication::fhe_ckks::mech::clear_generator_cache_for(h_object);
     // PKCS#11 v3.2 §4.4 — a private object cannot be destroyed (or even seen)
     // by a session whose token is not logged in.
@@ -10369,8 +10369,9 @@ pub fn C_Encrypt(
 pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
-    // FHE P2 (P0B §5.3): single-part CKM_PQCTODAY_FHE_DECRYPT, educational-ckks only.
-    #[cfg(feature = "educational-ckks")]
+    // FHE P2 (P0B §5.3): single-part CKM_PQCTODAY_FHE_DECRYPT, cfg pqc_ckks_custody
+    // (default native `fhe-custody`, or `educational-ckks`).
+    #[cfg(pqc_ckks_custody)]
     {
         if p_mechanism.is_null() && crate::replication::fhe_custody::cancel(h_session) {
             return CKR_OK;
@@ -10667,7 +10668,7 @@ pub fn C_Decrypt(
     // takes MANDATORY precedence over argument and capability codes, so
     // this must precede every other check in the function.
     require_session!(h_session);
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     if let Some(crate::replication::fhe_custody::FheOp::Decrypt { .. }) = crate::replication::fhe_custody::active(h_session) {
         return unsafe { crate::replication::fhe_custody::ffi_decrypt(h_session, p_encrypted_data, ul_encrypted_data_len, p_data, pul_data_len) };
     }
@@ -12244,9 +12245,9 @@ pub fn C_DeriveKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
-    // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, educational-ckks only
-    // (TFHE kinds additionally need educational-fhe).
-    #[cfg(feature = "educational-ckks")]
+    // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, cfg pqc_ckks_custody (default
+    // native `fhe-custody`, or `educational-ckks`; TFHE kinds also need educational-fhe).
+    #[cfg(pqc_ckks_custody)]
     if !p_mechanism.is_null() && !ph_key.is_null() {
         let m = unsafe { ck_param::mech(p_mechanism) };
         if m.mechanism == CKM_PQCTODAY_FHE_DERIVE_PUBLIC {
@@ -15540,7 +15541,7 @@ pub fn C_DecryptUpdate(
     // this must precede every other check in the function.
     require_session!(h_session);
     // FHE decrypt is single-part only (P0B §5.3).
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     if crate::replication::fhe_custody::active(h_session).is_some() {
         crate::replication::fhe_custody::cancel(h_session);
         return CKR_FUNCTION_NOT_SUPPORTED;
@@ -15609,7 +15610,7 @@ pub fn C_DecryptFinal(h_session: u32, p_last_part: *mut u8, pul_last_part_len: *
     // this must precede every other check in the function.
     require_session!(h_session);
     // FHE decrypt is single-part only (P0B §5.3).
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     if crate::replication::fhe_custody::active(h_session).is_some() {
         crate::replication::fhe_custody::cancel(h_session);
         return CKR_FUNCTION_NOT_SUPPORTED;

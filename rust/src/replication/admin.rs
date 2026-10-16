@@ -87,6 +87,18 @@ pub struct EnrollPolicyOp {
     pub policy: OctetString,
 }
 
+/// `EnrollFheRecipientOp`: the recipient's certificate chain, leaf first (a RecoveryRecipient chain).
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct EnrollFheRecipientOp {
+    pub chain: Vec<OctetString>,
+}
+
+/// `DestroyFheSeedOp`: the lineage (`CKA_PQCTODAY_FHE_LINEAGE_ID`, 32 bytes) of the FHE seed to destroy.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct DestroyFheSeedOp {
+    pub lineage: OctetString,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct IssueDeviceCrlOp {
     pub revoke: Vec<RevocablePurpose>,
@@ -95,8 +107,11 @@ pub struct IssueDeviceCrlOp {
 }
 
 /// `AdminTbsRequest`. The trailing `AdminOperation` CHOICE (explicit tags
-/// [0]–[4]) is modelled as five OPTIONAL explicit-tagged fields of which
+/// [0]–[7]) is modelled as eight OPTIONAL explicit-tagged fields of which
 /// exactly one must be present: the DER is byte-identical to the CHOICE.
+/// [5] and [6] are the FHE custody enrolments (plan D02387 WP-A2, owner decisions F3 and F8: the security officer
+/// enrols FHE decryption policies and release recipients remotely with the same signed-update scheme). [7] destroys an
+/// FHE seed: only the security officer deletes an FHE key (owner decision 2026-10-15).
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct AdminTbsRequest {
     pub version: u8,
@@ -115,6 +130,12 @@ pub struct AdminTbsRequest {
     pub issue_function_certs: Option<Null>,
     #[asn1(context_specific = "4", tag_mode = "EXPLICIT", optional = "true")]
     pub issue_device_crl: Option<IssueDeviceCrlOp>,
+    #[asn1(context_specific = "5", tag_mode = "EXPLICIT", optional = "true")]
+    pub enroll_fhe_decrypt_policy: Option<EnrollPolicyOp>,
+    #[asn1(context_specific = "6", tag_mode = "EXPLICIT", optional = "true")]
+    pub enroll_fhe_recipient: Option<EnrollFheRecipientOp>,
+    #[asn1(context_specific = "7", tag_mode = "EXPLICIT", optional = "true")]
+    pub destroy_fhe_seed: Option<DestroyFheSeedOp>,
 }
 
 /// The operation a request carries, by value.
@@ -125,6 +146,9 @@ pub enum AdminOperation {
     RotateRecoveryKey,
     IssueFunctionCerts,
     IssueDeviceCrl { revoke: Vec<RevocablePurpose>, retired_to_revoke: Vec<Vec<u8>>, validity_seconds: u32 },
+    EnrollFheDecryptPolicy { policy: Vec<u8> },
+    EnrollFheRecipient { chain: Vec<Vec<u8>> },
+    DestroyFheSeed { lineage: [u8; 32] },
 }
 
 impl AdminOperation {
@@ -135,6 +159,9 @@ impl AdminOperation {
             Self::RotateRecoveryKey => "rotateRecoveryKey",
             Self::IssueFunctionCerts => "issueFunctionCerts",
             Self::IssueDeviceCrl { .. } => "issueDeviceCrl",
+            Self::EnrollFheDecryptPolicy { .. } => "enrollFheDecryptPolicy",
+            Self::EnrollFheRecipient { .. } => "enrollFheRecipient",
+            Self::DestroyFheSeed { .. } => "destroyFheSeed",
         }
     }
 }
@@ -149,6 +176,9 @@ impl AdminTbsRequest {
             self.rotate_recovery_key.is_some(),
             self.issue_function_certs.is_some(),
             self.issue_device_crl.is_some(),
+            self.enroll_fhe_decrypt_policy.is_some(),
+            self.enroll_fhe_recipient.is_some(),
+            self.destroy_fhe_seed.is_some(),
         ];
         if arms.iter().filter(|x| **x).count() != 1 {
             return Err(CKR_DATA_INVALID);
@@ -167,6 +197,24 @@ impl AdminTbsRequest {
                 return Err(CKR_DATA_INVALID);
             }
             return Ok(AdminOperation::EnrollPolicy { policy });
+        }
+        if let Some(op) = &self.enroll_fhe_decrypt_policy {
+            let policy = op.policy.as_bytes().to_vec();
+            if policy.is_empty() || policy.len() > 8_192 {
+                return Err(CKR_DATA_INVALID);
+            }
+            return Ok(AdminOperation::EnrollFheDecryptPolicy { policy });
+        }
+        if let Some(op) = &self.enroll_fhe_recipient {
+            let chain: Vec<Vec<u8>> = op.chain.iter().map(|c| c.as_bytes().to_vec()).collect();
+            if chain.is_empty() || chain.len() > 4 || chain.iter().any(|c| c.is_empty() || c.len() > 8_192) {
+                return Err(CKR_DATA_INVALID);
+            }
+            return Ok(AdminOperation::EnrollFheRecipient { chain });
+        }
+        if let Some(op) = &self.destroy_fhe_seed {
+            let lineage: [u8; 32] = op.lineage.as_bytes().try_into().map_err(|_| CKR_DATA_INVALID)?;
+            return Ok(AdminOperation::DestroyFheSeed { lineage });
         }
         if self.rotate_recovery_key.is_some() {
             return Ok(AdminOperation::RotateRecoveryKey);
@@ -565,6 +613,9 @@ struct Prepared {
     sequence: u64,
     nonce: [u8; 32],
     operation: &'static str,
+    /// `destroyFheSeed`: the lineage to destroy once the receipt is committed (also on an exact retry, which
+    /// completes a destruction an interruption left undone).
+    destroy_fhe_seed: Option<[u8; 32]>,
 }
 
 /// B-06: embedded payloads must parse before any trust check.
@@ -584,7 +635,15 @@ fn check_payload_syntax(op: &AdminOperation) -> Result<(), u32> {
                 pki::parse_cert(c).map_err(|_| CKR_DATA_INVALID)?;
             }
         }
-        AdminOperation::RotateRecoveryKey | AdminOperation::IssueFunctionCerts => {}
+        AdminOperation::EnrollFheDecryptPolicy { policy } => {
+            super::fhe::parse_decrypt_policy(policy).map_err(|_| CKR_DATA_INVALID)?;
+        }
+        AdminOperation::EnrollFheRecipient { chain } => {
+            for c in chain {
+                pki::parse_cert(c).map_err(|_| CKR_DATA_INVALID)?;
+            }
+        }
+        AdminOperation::RotateRecoveryKey | AdminOperation::IssueFunctionCerts | AdminOperation::DestroyFheSeed { .. } => {}
     }
     Ok(())
 }
@@ -615,6 +674,10 @@ fn prepare(so_session: u32, request_der: &[u8]) -> Result<Prepared, u32> {
     check_payload_syntax(&op)?;
     let request_hash = super::sha384(request_der);
     let operation = op.name();
+    let destroy_fhe_seed = match &op {
+        AdminOperation::DestroyFheSeed { lineage } => Some(*lineage),
+        _ => None,
+    };
 
     // Step 3: committed retry first — no freshness, nonce or sequence check.
     for (_, e) in ledger(slot)? {
@@ -623,7 +686,7 @@ fn prepare(so_session: u32, request_der: &[u8]) -> Result<Prepared, u32> {
                 return Err(CKR_DEVICE_ERROR); // hash collision or corrupted entry
             }
             let receipt = e.receipt.as_bytes().to_vec();
-            return Ok(Prepared { slot, request_hash, replay: Some(receipt), staged: None, authority: None, sequence: e.sequence, nonce: [0; 32], operation });
+            return Ok(Prepared { slot, request_hash, replay: Some(receipt), staged: None, authority: None, sequence: e.sequence, nonce: [0; 32], operation, destroy_fhe_seed });
         }
     }
     if tombstones(slot)?.iter().any(|t| t.request_hash.as_bytes() == request_hash) {
@@ -686,10 +749,19 @@ fn prepare(so_session: u32, request_der: &[u8]) -> Result<Prepared, u32> {
             let purposes: Vec<Purpose> = revoke.iter().map(|p| p.purpose()).collect();
             enroll::stage_issue_device_crl(slot, &purposes, &retired_to_revoke, validity_seconds as u64)
         }
+        AdminOperation::EnrollFheDecryptPolicy { policy } => super::fhe::stage_enroll_fhe_decrypt_policy(slot, &policy),
+        #[cfg(pqc_ckks_custody)]
+        AdminOperation::EnrollFheRecipient { chain } => super::fhe_custody::stage_enroll_fhe_recipient(slot, &chain),
+        #[cfg(not(pqc_ckks_custody))]
+        AdminOperation::EnrollFheRecipient { .. } => Err(CKR_FUNCTION_NOT_SUPPORTED),
+        #[cfg(pqc_ckks_custody)]
+        AdminOperation::DestroyFheSeed { lineage } => super::fhe_custody::stage_destroy_fhe_seed(slot, &lineage),
+        #[cfg(not(pqc_ckks_custody))]
+        AdminOperation::DestroyFheSeed { .. } => Err(CKR_FUNCTION_NOT_SUPPORTED),
     }
     .map_err(|rv| collapse(slot, rv))?;
     let sequence = tbs.sequence;
-    Ok(Prepared { slot, request_hash, replay: None, staged: Some(staged), authority: Some(auth), sequence, nonce, operation })
+    Ok(Prepared { slot, request_hash, replay: None, staged: Some(staged), authority: Some(auth), sequence, nonce, operation, destroy_fhe_seed })
 }
 
 /// Build and sign the receipt with the CURRENT receipt-signing key (before
@@ -747,6 +819,7 @@ pub fn execute(so_session: u32, request_der: &[u8]) -> Result<Vec<u8>, u32> {
     let slot = p.slot;
     if let Some(r) = p.replay {
         audit("admin_execute", slot, &[("request_hash", super::hex(&p.request_hash)), ("result", "replayed".into())]);
+        finish(slot, p.destroy_fhe_seed);
         return Ok(r);
     }
     let staged = p.staged.as_ref().ok_or(CKR_DEVICE_ERROR)?;
@@ -784,7 +857,19 @@ pub fn execute(so_session: u32, request_der: &[u8]) -> Result<Vec<u8>, u32> {
     enroll::commit_staged(so_session, slot, staged, vec![ledger_obj], vec![seq_update]).map_err(|_| CKR_DEVICE_ERROR)?;
     consume_nonce(slot, &nonce);
     self::audit("admin_execute", slot, &[audit.as_slice(), &[("result", "committed".into())]].concat());
+    finish(slot, p.destroy_fhe_seed);
     Ok(receipt_der)
+}
+
+/// The part of an operation that follows its committed receipt: `destroyFheSeed` destroys the seed (the receipt and
+/// ledger entry exist first, so a destroyed seed always has its signed record).
+fn finish(slot: u32, destroy_fhe_seed: Option<[u8; 32]>) {
+    #[cfg(pqc_ckks_custody)]
+    if let Some(lineage) = destroy_fhe_seed {
+        super::fhe_custody::finish_destroy_fhe_seed(slot, &lineage);
+    }
+    #[cfg(not(pqc_ckks_custody))]
+    let _ = (slot, destroy_fhe_seed);
 }
 
 /// Exact length of [`execute`]'s receipt for the same request (base §3

@@ -1065,7 +1065,7 @@ wasm-pack build --target web --release
 
 ## License
 
-BSD-2-Clause (same as SoftHSM2). See [LICENSE](LICENSE). See [Terms of Service](TERMS.md) for usage terms, export compliance (ECCN 5D002), and sanctions restrictions.
+AGPL-3.0-only for the code written by PQC Today, LLC, with a commercial licence on request; the files taken from SoftHSM2 keep their BSD-2-Clause licence, and vendored third-party code keeps its own. See [COPYRIGHT.md](COPYRIGHT.md) for which parts are under which licence and how to ask for a commercial licence; the licence texts are in [LICENSE](LICENSE) and [LICENSES/](LICENSES/). [Terms of Service](TERMS.md) holds the disclaimers and the export notice. Versions published before 16 October 2026 stay under the licences they were released with.
 
 ## Acknowledgments
 

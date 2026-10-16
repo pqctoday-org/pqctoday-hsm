@@ -929,6 +929,11 @@ fn installed_objects(
     store_bool(&mut a, CKA_EXTRACTABLE, false);
     store_bool(&mut a, CKA_COPYABLE, false);
     store_bool(&mut a, CKA_MODIFIABLE, false);
+    // An FHE seed replica is not destroyable either, like the seed generated on the source (owner decision
+    // 2026-10-15): only the SO paths (`destroyFheSeed`, the CKKS rotation retirement) remove it.
+    if st.key_type == CKK_PQCTODAY_FHE {
+        store_bool(&mut a, CKA_DESTROYABLE, false);
+    }
     store_bool(&mut a, CKA_DERIVE, false);
     // Owner decision 1: imported history plus separate provenance.
     store_bool(&mut a, CKA_LOCAL, false);

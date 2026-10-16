@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Licence: AGPL-3.0-only for the code written by PQC Today, LLC, with a commercial licence on request.** `LICENSE` is
+  now the plain AGPL-3.0 text; the SoftHSM2 licence moved to `LICENSES/BSD-2-Clause.txt`, and the SoftHSM2 files keep it.
+  `COPYRIGHT.md` says which parts are under which licence (vendored and patched crates, openpgp-pkcs11, strongSwan,
+  OASIS material and the other third-party files keep their own) and how to ask for a commercial licence. Own files with
+  a GPL-3.0-only, BSD-2-Clause or Apache-2.0 header, and the own crates' `Cargo.toml` and package fields, now say
+  AGPL-3.0-only; the npm package is `AGPL-3.0-only AND BSD-2-Clause`. Versions published before 16 October 2026 stay
+  under the licences they were released with.
+- Engine notices: the three Rust bundles now also carry the AGPL text and the source offer for the code written here,
+  and the OpenSSL Studio shims are AGPL-3.0-only.
+
 ### Added
 
 - The OpenSSL Studio engine bundle (`openssl-pkcs11`: `openssl.js` + `openssl.wasm`, the OpenSSL 3.6.3 command line

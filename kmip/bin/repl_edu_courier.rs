@@ -45,7 +45,20 @@ repl_edu_courier bootstrap ... --m12 --hook-up CMD --src-kmip IP:PORT --dst-kmip
                  --tls-ca PEM --client-cert PEM --client-key PEM --admin-cert PEM --admin-key PEM
   (M12: board-local admin-authority enrollment, source AES key, then servers up and signed admin
    operations over KMIP on both boards with host-verified receipts and admin negatives)
-  (bootstrap test flag: --fhe-skip-dst-decrypt-policy enrolls the FHE decrypt policy on the source only)";
+  (bootstrap test flag: --fhe-skip-dst-decrypt-policy enrolls the FHE decrypt policy on the source only)
+
+FHE custody over KMIP (plan D02387; one board, one-time board-local provisioning over SSH, then KMIP only):
+repl_edu_courier fhe-provision --board HOST --ssh-key KEY --out DIR [--tfhe]
+                 [--tool /usr/bin/repl_edu_board] [--store /var/lib/pqctoday-kmip/engine] [--pins FILE]
+                 [--before CMD] [--after CMD] [--sudo 'sudo -E']
+  Fresh test manufacturing root (kept in DIR), board-local device enrolment, admin authority (key kept in DIR,
+  0600), FHE replication policies (CKKS; TFHE with --tfhe). The KMIP service must not hold the store: pass
+  --before 'sudo systemctl stop pqctoday-kmip' and --after 'sudo systemctl start pqctoday-kmip'. PINs come from
+  the board file --pins (REPL_SO_PIN, REPL_USER_PIN), default /etc/pqc/kmip-token-pins.env.
+repl_edu_courier fhe-so --kmip IP:PORT --name SNI --tls-ca PEM --admin-cert PEM --admin-key PEM --trust DIR
+                 enroll-ckks-policy PARAMSET MAXDECRYPTS | enroll-tfhe-policy MAXDECRYPTS | destroy-seed LINEAGEHEX
+  Security-officer requests over KMIP interface PQCTODAY_FHE_1_0 (functions 7, 8), signed with the admin authority
+  kept by fhe-provision; every receipt is verified on the host and written to DIR.";
 
 fn main() {
     if let Err(e) = run() {
@@ -62,6 +75,8 @@ fn run() -> Result<(), String> {
         "bootstrap" => bootstrap(&mut a),
         "make-policy" => make_policy(&mut a),
         "ceremony" => ceremony(&mut a),
+        "fhe-provision" => fhe_provision(&mut a),
+        "fhe-so" => fhe_so(&mut a),
         _ => Err(USAGE.into()),
     }
 }
@@ -683,3 +698,181 @@ fn load(dir: &Path, name: &str) -> Result<Vec<u8>, String> {
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+// ── FHE custody: one-time board provisioning and SO requests over KMIP (plan D02387) ──────────
+
+const FHE_IFACE: &str = "PQCTODAY_FHE_1_0";
+
+/// One board, provisioned once over SSH (owner decision 2026-10-15): test manufacturing root and admin authority
+/// stay on the host in `--out`; the board gets its device certificate, the admin authority certificate and the FHE
+/// replication policies. Decryption policies are enrolled later over KMIP (`fhe-so`).
+fn fhe_provision(a: &mut Vec<String>) -> Result<(), String> {
+    use softhsmrustv3::constants::{CKM_PQCTODAY_FHE_DECRYPT, CKM_PQCTODAY_FHE_DERIVE_PUBLIC};
+    use softhsmrustv3::replication::test_ca::AdminAuthorityKey;
+    let host = need(a, "--board")?;
+    let key = need(a, "--ssh-key")?;
+    let out = PathBuf::from(need(a, "--out")?);
+    let tfhe = take_flag(a, "--tfhe");
+    let tool = opt(a, "--tool").unwrap_or_else(|| "/usr/bin/repl_edu_board".into());
+    let store = opt(a, "--store").unwrap_or_else(|| "/var/lib/pqctoday-kmip/engine".into());
+    let pins = opt(a, "--pins").unwrap_or_else(|| "/etc/pqc/kmip-token-pins.env".into());
+    let before = opt(a, "--before");
+    let after = opt(a, "--after");
+    // `--board local` runs the same steps in a local shell (host rehearsal), usually with `--sudo ''`.
+    let sudo = opt(a, "--sudo").unwrap_or_else(|| "sudo -E".into());
+    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let work = format!("/tmp/fhe-provision-{}", std::process::id());
+    let b = Board { host: host.clone(), key, dir: work.clone() };
+    let run_tool = |args: &str| -> Result<String, String> {
+        let o = b.ssh(&format!("set -a; . {pins}; set +a; {sudo} {tool} --store {store} {args}"), None)?;
+        let s = String::from_utf8_lossy(&o).to_string();
+        eprintln!("  [{host}] repl_edu_board {args}\n{}", s.trim_end().lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"));
+        Ok(s)
+    };
+    if let Some(c) = &before {
+        b.ssh(c, None)?;
+    }
+    let r = (|| -> Result<(), String> {
+        b.ssh(&format!("mkdir -p {work}/x && chmod 700 {work}"), None)?;
+        let t = now();
+        let mut ca = TestManufacturingCa::new(t).map_err(rv("test root"))?;
+        run_tool("init")?;
+        run_tool(&format!("csr {work}/x/device.csr"))?;
+        let csr = b.get("device.csr")?;
+        let dev = ca.issue_device(&csr, t).map_err(rv("issue device certificate"))?;
+        let crl = ca.crl(t - 10, t + 30 * 86_400).map_err(rv("root CRL"))?;
+        b.put("root.der", ca.root_der())?;
+        b.put("device.der", &dev)?;
+        b.put("root-crl.der", &crl)?;
+        run_tool(&format!("complete {work}/x/root.der {work}/x/device.der {work}/x/root-crl.der {work}/x"))?;
+        let device_id: [u8; 32] = b.get("device-id.bin")?.try_into().map_err(|_| "device id is not 32 bytes".to_string())?;
+        let device_crl = b.get("device-crl.der")?;
+        let ak = AdminAuthorityKey::new(&ca, t).map_err(rv("admin authority key"))?;
+        b.put("admin-authority.der", &ak.cert_der)?;
+        run_tool(&format!("admin-enroll {work}/x/admin-authority.der"))?;
+        let mut mechs = vec![CKM_PQCTODAY_FHE_DERIVE_PUBLIC, CKM_PQCTODAY_FHE_DECRYPT];
+        mechs.sort_unstable();
+        let mut profiles = vec![("ckks", repl::fhe::ckks_profile_constraint_hash())];
+        if tfhe {
+            profiles.push(("tfhe", repl::fhe::profile_constraint_hash()));
+        }
+        for (name, constraint) in profiles {
+            let pol = repl::records::build_policy_with_constraint(DOMAIN, [true, true, true], vec![device_id], t - 60, t + 365 * 86_400, 4, mechs.clone(), false, constraint)
+                .map_err(rv("build FHE replication policy"))?;
+            b.put(&format!("policy-{name}.der"), &pol)?;
+            run_tool(&format!("policy {work}/x/policy-{name}.der {work}/x/policy-{name}-id.bin"))?;
+            save(&out, &format!("replication-policy-{name}.der"), &pol)?;
+            save(&out, &format!("replication-policy-{name}-id.bin"), &b.get(&format!("policy-{name}-id.bin"))?)?;
+        }
+        // Host-side trust material and the admin authority (test material; the key file is 0600).
+        save(&out, "root.der", ca.root_der())?;
+        save(&out, "root-crl.der", &crl)?;
+        save(&out, "device.der", &dev)?;
+        save(&out, "device-crl.der", &device_crl)?;
+        save(&out, "device-id.bin", &device_id)?;
+        save(&out, "admin-authority.der", &ak.cert_der)?;
+        let kp = out.join("admin-authority.key");
+        std::fs::write(&kp, ak.secret_key()).map_err(|e| format!("{}: {e}", kp.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&kp, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("{}: {e}", kp.display()))?;
+        }
+        save(&out, "sequence.txt", b"0")?;
+        println!("provisioned {host}: device {} (CKKS{} replication policies); trust material in {}", hex(&device_id), if tfhe { " + TFHE" } else { "" }, out.display());
+        Ok(())
+    })();
+    let _ = b.ssh(&format!("rm -rf {work}"), None);
+    if let Some(c) = &after {
+        b.ssh(c, None)?;
+    }
+    r
+}
+
+/// Security-officer requests over KMIP (`PQCTODAY_FHE_1_0` functions 7 and 8), signed with the admin authority
+/// that `fhe-provision` kept; each receipt is verified against the trust material before it is accepted.
+fn fhe_so(a: &mut Vec<String>) -> Result<(), String> {
+    use der::Encode;
+    use softhsmrustv3::replication::admin::AdminOperation;
+    use softhsmrustv3::replication::{admin_host, fhe, test_ca::AdminAuthorityKey, Profile};
+    let (host, port) = split_addr(&need(a, "--kmip")?)?;
+    let sni = need(a, "--name")?;
+    let tls = tls_config(&need(a, "--tls-ca")?, &need(a, "--admin-cert")?, &need(a, "--admin-key")?)?;
+    let trust = PathBuf::from(need(a, "--trust")?);
+    let k = Kmip { host, port, sni, tls };
+    let op_name = if a.is_empty() { String::new() } else { a.remove(0) };
+    let num = |a: &[String], i: usize| -> Result<u32, String> { a.get(i).ok_or("missing argument")?.parse::<u32>().map_err(|e| format!("{e}")) };
+    let op = match op_name.as_str() {
+        "enroll-ckks-policy" => {
+            let ps = repl::fhe_ckks::params::find(num(a, 0)?).ok_or("unknown CKKS parameter set")?;
+            let der = fhe::FheDecryptPolicy {
+                version: 2,
+                allowed_output_types: vec![repl::fhe_ckks::mech::release_type(ps)],
+                never_release: vec![],
+                predicates: vec![],
+                recipients: vec![],
+                recipient_only: false,
+                max_decrypts: num(a, 1)?,
+                ckks: Some(fhe::CkksReleasePolicy { max_values: (ps.n() / 2) as u32, precision_bits: 20, value_bound_log2: 10, scale_log2: ps.log_default_scale as u8, flood_recipients: true, flood_owner: false, stat_security_bits: 30 }),
+            }
+            .to_der()
+            .map_err(|e| format!("policy DER: {e}"))?;
+            AdminOperation::EnrollFheDecryptPolicy { policy: der }
+        }
+        "enroll-tfhe-policy" => {
+            // The fixed educational TFHE policy of `fhe_custodian init` / `repl_edu_board fhe-policy`.
+            let ty = |n: &str, w: u16| fhe::FheType { type_name: n.into(), width_bits: w, param_set: 1, serialization_version: 1, compressed_allowed: false };
+            let der = fhe::FheDecryptPolicy {
+                version: 1,
+                allowed_output_types: vec![ty("FheBool", 1), ty("FheUint16", 16), ty("FheUint32", 32), ty("FheUint8", 8)],
+                never_release: vec![ty("FheUint64", 64)],
+                predicates: vec![],
+                recipients: vec![],
+                recipient_only: false,
+                max_decrypts: num(a, 0)?,
+                ckks: None,
+            }
+            .to_der()
+            .map_err(|e| format!("policy DER: {e}"))?;
+            AdminOperation::EnrollFheDecryptPolicy { policy: der }
+        }
+        "destroy-seed" => {
+            let h = a.first().ok_or("missing LINEAGEHEX")?;
+            let bytes: Vec<u8> = (0..h.len()).step_by(2).map(|i| u8::from_str_radix(h.get(i..i + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "LINEAGEHEX is not hex")?;
+            AdminOperation::DestroyFheSeed { lineage: bytes.try_into().map_err(|_| "a lineage is 32 bytes")? }
+        }
+        _ => return Err(USAGE.into()),
+    };
+    let ak = AdminAuthorityKey::from_parts(load(&trust, "admin-authority.key")?, load(&trust, "admin-authority.der")?);
+    let device_id: [u8; 32] = load(&trust, "device-id.bin")?.try_into().map_err(|_| "device-id.bin: not 32 bytes")?;
+    let seq: u64 = String::from_utf8_lossy(&load(&trust, "sequence.txt")?).trim().parse::<u64>().map_err(|e| format!("sequence.txt: {e}"))? + 1;
+    let (rc, nonce, _, _) = k.call(FHE_IFACE, 7, &[])?;
+    if rc != 0 {
+        return Err(format!("AdminIssueNonce: CK_RV 0x{rc:x}"));
+    }
+    let nonce: [u8; 32] = nonce.try_into().map_err(|_| "nonce is not 32 bytes")?;
+    let tbs = admin_host::tbs_request(&device_id, &ak.key_id(), &nonce, seq, now(), &op).map_err(rv("tbs request"))?;
+    let sig = ak.sign(&admin_host::request_signed_bytes(&tbs)).map_err(rv("sign request"))?;
+    let req = admin_host::signed_request(&tbs, &sig).map_err(rv("signed request"))?;
+    let (rc, receipt, ms, _) = k.call(FHE_IFACE, 8, &req)?;
+    if rc != 0 {
+        return Err(format!("{} refused: CK_RV 0x{rc:x}", op.name()));
+    }
+    let ti = TrustInputs { roots: vec![load(&trust, "root.der")?], crls: vec![load(&trust, "root-crl.der")?, load(&trust, "device-crl.der")?] };
+    let view = host_verify::verify_admin_receipt(&receipt, &req, &ti, now(), Profile::Educational).map_err(|e| format!("receipt does not verify: {e:?}"))?;
+    save(&trust, "sequence.txt", seq.to_string().as_bytes())?;
+    save(&trust, &format!("receipt-{seq:04}-{}.der", op.name()), &receipt)?;
+    save(&trust, &format!("request-{seq:04}-{}.der", op.name()), &req)?;
+    let output = view.output.unwrap_or_default();
+    if matches!(op, AdminOperation::EnrollFheDecryptPolicy { .. }) {
+        save(&trust, &format!("decrypt-policy-{seq:04}-id.bin"), &output)?;
+    }
+    println!("{} committed (sequence {seq}, {ms:.0} ms); output {}; receipt verified", op.name(), hex(&output));
+    Ok(())
+}
+
+fn split_addr(s: &str) -> Result<(String, u16), String> {
+    let (h, p) = s.rsplit_once(':').ok_or_else(|| format!("{s}: expected IP:PORT"))?;
+    Ok((h.to_string(), p.parse().map_err(|e| format!("{s}: {e}"))?))
+}
+

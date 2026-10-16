@@ -1,9 +1,12 @@
 //! K2–K4 PQCToday key hierarchy, key attestation and protected replication.
 //!
-//! **EDUCATIONAL SOFTWARE TOKEN ONLY.** Compiled only with the non-default
-//! `educational-replication` feature and inert until a caller explicitly
-//! selects the educational profile at runtime ([`select_educational_profile`]).
-//! It uses the RFC 5612 documentation OID arc, a host-side test
+//! **SOFTWARE TOKEN, NOT CERTIFIED.** Compiled with cfg `pqc_replication`:
+//! the opt-in `educational-replication` feature, or the default `fhe-custody`
+//! feature on native targets (FHE custody depends on it; see build.rs and plan
+//! D02387, owner decision F1). Inert until a caller explicitly selects the
+//! educational profile at runtime ([`select_educational_profile`]).
+//! It uses the RFC 5612 documentation OID arc (owner decision F11, 2026-10-15:
+//! no private IANA enterprise number; this profile may ship), a host-side test
 //! manufacturing CA and the host clock; nothing here is hardware-backed,
 //! production-identified or rollback-resistant. Every exported artefact must
 //! be labelled `PQCTODAY EDUCATIONAL TEST ONLY` by its consumer.
@@ -30,11 +33,11 @@ pub mod asn1;
 pub mod enroll;
 pub mod evidence;
 pub mod fhe;
-#[cfg(feature = "educational-ckks")]
+#[cfg(pqc_ckks_custody)]
 pub mod fhe_custody;
 #[cfg(feature = "educational-fhe")]
 pub mod fhe_tfhe;
-#[cfg(feature = "educational-ckks")]
+#[cfg(pqc_ckks_custody)]
 pub mod fhe_ckks;
 pub mod host_verify;
 pub mod oids;
@@ -100,8 +103,9 @@ pub(crate) fn require_profile() -> Result<(), u32> {
 static CLOCK_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 
 /// Pin the host clock (seconds since the Unix epoch) for tests of expiry and
-/// freshness; `None` returns to the real clock. Part of the non-shipping
-/// educational feature only.
+/// freshness; `None` returns to the real clock. Test builds only (`test-support`): the replication layer is in
+/// the default native build, and a shipped token must not let a caller move its clock.
+#[cfg(feature = "test-support")]
 pub fn set_clock_override(unix_secs: Option<u64>) {
     CLOCK_OVERRIDE.store(unix_secs.unwrap_or(0), Ordering::SeqCst);
 }

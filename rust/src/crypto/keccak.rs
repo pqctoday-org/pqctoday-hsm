@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 // G11 — Keccak-256 digest (vendor CKM_KECCAK_256 = 0x80000010)
 //

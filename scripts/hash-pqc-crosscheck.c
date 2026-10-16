@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* hash-pqc-crosscheck: verification-only helper for the OpenSSL-provider
  * remediation item 5 (HashML-DSA / HashSLH-DSA pre-hash family). Drives

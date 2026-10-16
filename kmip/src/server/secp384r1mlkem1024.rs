@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 //! `SecP384r1MLKEM1024` (TLS group `0x11ed`) as a rustls `SupportedKxGroup`.
 //!

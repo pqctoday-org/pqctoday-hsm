@@ -26,6 +26,80 @@ pub const LIBRARY_V1: &str = "tfhe-rs 1.8.1 187fc0b9";
 
 pub const PUBLIC_KIND_COMPRESSED_SERVER_KEY: u32 = 1;
 pub const PUBLIC_KIND_COMPACT_PUBLIC_KEY: u32 = 2;
+/// Kind 3 (parameter version 1): the token-signed manifest over the kinds 1 and 2 this session exported for the seed
+/// (plan D02387, owner decision 2026-10-15). Signed by the device's receipt-signing function key with its chain, so an
+/// owner reaching the token over KMIP checks the public material against the manufacturing root, as for CKKS kind 6.
+pub const PUBLIC_KIND_TFHE_MANIFEST: u32 = 3;
+/// Domain separation of the TFHE manifest signature.
+pub const TFHE_MANIFEST_DOMAIN: &[u8] = b"PQCToday TFHE Manifest 1.0";
+
+/// One exported public object: its kind and the SHA-256 of the exact bytes the session read.
+#[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
+pub struct TfheExportHash {
+    pub kind: u32,
+    pub sha256: der::asn1::OctetString,
+}
+
+/// What the token signs.
+#[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
+pub struct TfheManifestTbsV1 {
+    pub version: u32,
+    pub param_hash: der::asn1::OctetString,
+    pub lineage: der::asn1::OctetString,
+    pub entries: Vec<TfheExportHash>,
+}
+
+/// Kind 3 output.
+#[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
+pub struct TfheSignedManifestV1 {
+    pub tbs: TfheManifestTbsV1,
+    pub signature: der::asn1::OctetString,
+    pub signer_chain: Vec<x509_cert::Certificate>,
+}
+
+/// The bytes the receipt-signing key signs for a TFHE manifest.
+pub fn tfhe_manifest_signed_bytes(tbs: &TfheManifestTbsV1) -> Result<Vec<u8>, u32> {
+    let mut msg = TFHE_MANIFEST_DOMAIN.to_vec();
+    msg.push(0);
+    msg.extend_from_slice(&super::asn1::to_der(tbs)?);
+    Ok(msg)
+}
+
+/// Receiver side: decode a `TfheSignedManifestV1`, validate its signer chain for the receipt-signing purpose against
+/// `trust` at `now`, and verify the ML-DSA-65 signature. Returns the TBS and the signer's device id; the caller
+/// compares the entries with the SHA-256 of the files it holds.
+pub fn verify_tfhe_manifest(der: &[u8], trust: &super::pki::TrustInputs, now: u64) -> Result<(TfheManifestTbsV1, [u8; 32]), u32> {
+    use super::{oids::Purpose, pki};
+    let m: TfheSignedManifestV1 = super::asn1::decode_strict(der, MAX_PUBLIC_OBJECT)?;
+    if m.tbs.version != 1 || m.tbs.entries.iter().any(|e| e.sha256.as_bytes().len() != 32) {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    let chain = pki::validate_chain(&m.signer_chain, Purpose::ReceiptSigning, trust, now, super::Profile::Educational).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    let pk = pki::mldsa65_public(&chain.leaf).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    if !super::mldsa65_verify(pk, &tfhe_manifest_signed_bytes(&m.tbs)?, m.signature.as_bytes()) {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    Ok((m.tbs, chain.device_id))
+}
+
+/// Per-session record of the kinds 1 and 2 exported for a seed: (session, seed handle) → kind → SHA-256.
+type ManifestLedger = std::collections::HashMap<(u32, u32), std::collections::BTreeMap<u32, [u8; 32]>>;
+static MANIFEST_LEDGER: std::sync::Mutex<Option<ManifestLedger>> = std::sync::Mutex::new(None);
+
+fn manifest_ledger<R>(f: impl FnOnce(&mut ManifestLedger) -> R) -> R {
+    let mut g = MANIFEST_LEDGER.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(Default::default))
+}
+
+/// Session closed: its exports no longer count towards a manifest.
+pub fn clear_manifest_ledger_for_session(session: u32) {
+    manifest_ledger(|l| l.retain(|(s, _), _| *s != session));
+}
+
+/// Engine reset or token re-initialisation.
+pub fn clear_manifest_ledgers() {
+    manifest_ledger(|l| l.clear());
+}
 
 fn config_v1() -> tfhe::Config {
     ConfigBuilder::default().use_dedicated_oprf_key(false).build()
@@ -78,6 +152,9 @@ pub fn derive_public(session: u32, h_seed: u32, kind: u32) -> Result<u32, u32> {
         // A streamed-CKKS seed uses parameter version 2 (fhe_ckks::mech).
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
+    if kind == PUBLIC_KIND_TFHE_MANIFEST {
+        return derive_manifest(session, slot, h_seed, &so);
+    }
     if kind != PUBLIC_KIND_COMPRESSED_SERVER_KEY && kind != PUBLIC_KIND_COMPACT_PUBLIC_KEY {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
@@ -103,9 +180,48 @@ pub fn derive_public(session: u32, h_seed: u32, kind: u32) -> Result<u32, u32> {
             a.insert(t, v.clone());
         }
     }
+    let digest = super::sha256(&blob);
     a.insert(CKA_VALUE, blob);
     let h = crate::state::commit_objects_atomically(session, vec![a], Vec::new())?[0];
+    // TFHE public material differs at every derivation: the manifest signs exactly what this session exported.
+    manifest_ledger(|l| l.entry((session, h_seed)).or_default().insert(kind, digest));
     super::oplog_event("fhe_derive_public", slot, &[("kind", kind.to_string())]);
+    Ok(h)
+}
+
+/// Kind 3: sign the hashes of the compressed server key and the compact public key this session exported for the
+/// seed. Both must have been exported; the record is used once.
+fn derive_manifest(session: u32, slot: u32, h_seed: u32, so: &SeedObject) -> Result<u32, u32> {
+    let entries = manifest_ledger(|l| l.get(&(session, h_seed)).cloned()).unwrap_or_default();
+    if !(entries.contains_key(&PUBLIC_KIND_COMPRESSED_SERVER_KEY) && entries.contains_key(&PUBLIC_KIND_COMPACT_PUBLIC_KEY)) {
+        super::oplog_event("fhe_tfhe_manifest_refused", slot, &[("reason", "\"kinds 1 and 2 not both exported in this session\"".to_string())]);
+        return Err(CKR_OPERATION_NOT_INITIALIZED);
+    }
+    let tbs = TfheManifestTbsV1 {
+        version: 1,
+        param_hash: super::asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_PARAM_HASH).ok_or(CKR_DEVICE_ERROR)?),
+        lineage: super::asn1::octets(so.attrs.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).ok_or(CKR_DEVICE_ERROR)?),
+        entries: entries.iter().map(|(&kind, h)| TfheExportHash { kind, sha256: super::asn1::octets(h) }).collect(),
+    };
+    let (sig, chain) = super::fhe_custody::receipt_sign(slot, &tfhe_manifest_signed_bytes(&tbs)?)?;
+    let value = super::asn1::to_der(&TfheSignedManifestV1 { tbs, signature: super::asn1::octets(&sig), signer_chain: chain })?;
+    let mut a: Attributes = Default::default();
+    crate::state::store_ulong(&mut a, CKA_CLASS, CKO_PUBLIC_KEY);
+    crate::state::store_ulong(&mut a, CKA_KEY_TYPE, CKK_PQCTODAY_FHE_PUBLIC);
+    crate::state::store_bool(&mut a, CKA_TOKEN, false);
+    crate::state::store_bool(&mut a, CKA_PRIVATE, false);
+    crate::state::store_bool(&mut a, CKA_MODIFIABLE, false);
+    crate::state::store_bool(&mut a, CKA_LOCAL, false);
+    crate::state::store_ulong(&mut a, CKA_PQCTODAY_FHE_PUBLIC_KIND, PUBLIC_KIND_TFHE_MANIFEST);
+    for t in [CKA_PQCTODAY_FHE_PARAM_HASH, CKA_PQCTODAY_FHE_LINEAGE_ID] {
+        if let Some(v) = so.attrs.get(&t) {
+            a.insert(t, v.clone());
+        }
+    }
+    a.insert(CKA_VALUE, value);
+    let h = crate::state::commit_objects_atomically(session, vec![a], Vec::new())?[0];
+    manifest_ledger(|l| l.remove(&(session, h_seed)));
+    super::oplog_event("fhe_derive_public", slot, &[("kind", PUBLIC_KIND_TFHE_MANIFEST.to_string())]);
     Ok(h)
 }
 

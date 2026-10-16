@@ -1,7 +1,7 @@
 //! Streamed-CKKS ledger and token-signed manifest (plan
 //! pqctoday-fhe docs/ckks/ckks-streamed-evaluation-keys-plan-2026-10-10.md
 //! §3.2 kind 6, E3; §7 S5 integrity). INSECURE test ring 0x8002 only.
-#![cfg(all(feature = "educational-ckks", feature = "test-support"))]
+#![cfg(all(pqc_ckks_custody, feature = "test-support"))]
 
 mod replication_common;
 use replication_common::*;

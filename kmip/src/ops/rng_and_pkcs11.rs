@@ -9,10 +9,15 @@
 //!                                    optional parameters
 //!
 //! v0.1 uses `rand::rngs::OsRng` for the RNG side (real CSPRNG, not a
-//! stub). PKCS#11 passthrough acknowledges the request and returns
-//! `CKR_OK` without actually proxying to softhsmrustv3 — the genuine
-//! Plane-3 bridge for the PKCS_11 op lands when a test invokes it
-//! beyond the existing Phase 7b real-bridge paths.
+//! stub). The PKCS_11 operation dispatches for real (see `pkcs11` below):
+//! - named interfaces first: the FHE custody interface `PQCTODAY_FHE_1_0`
+//!   (`fhe_bridge`; compiled with `fhe-custody`, part of `native`, served
+//!   only with `--fhe-custody`) and the protected-replication interfaces
+//!   (`replication_bridge`; `educational-replication` builds only);
+//! - otherwise `C_Initialize` / `C_Finalize` (a server-side virtual
+//!   lifecycle flag; the engine itself stays initialised) and `C_GetInfo`
+//!   (the engine's real `CK_INFO`); every other function returns
+//!   `CKR_FUNCTION_NOT_SUPPORTED`.
 
 use rand::RngCore;
 
@@ -130,6 +135,24 @@ pub fn pkcs11(
         let peer = auth.identity.as_ref().map(|i| i.username.as_str());
         let (rv, out) = super::replication_bridge::dispatch_as(session, peer, &iface, req.function, input);
         emit_pkcs11(deps, correlation_id, "replication", None, rv, &ckr_display_name(rv));
+        emit_success(deps, correlation_id, "PKCS_11");
+        let cv = req.correlation_value.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
+        return Ok(Pkcs11Response {
+            interface: req.interface,
+            function: req.function,
+            correlation_value: Some(cv),
+            output_parameters: out,
+            return_code: rv as i32,
+        });
+    }
+    // FHE key custody (plan D02387 WP-B): served when the server runs with `--fhe-custody`.
+    #[cfg(feature = "fhe-custody")]
+    if super::fhe_bridge::handles(req.interface.as_deref()) {
+        let session = deps.resolve_tenant_session(auth.identity.as_ref()).map_err(|_| ());
+        let input = req.input_parameters.as_deref().unwrap_or(&[]);
+        let peer = auth.identity.as_ref().map(|i| i.username.as_str());
+        let (rv, out) = super::fhe_bridge::dispatch_as(session, peer, req.function, input);
+        emit_pkcs11(deps, correlation_id, "fhe", None, rv, &ckr_display_name(rv));
         emit_success(deps, correlation_id, "PKCS_11");
         let cv = req.correlation_value.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
         return Ok(Pkcs11Response {

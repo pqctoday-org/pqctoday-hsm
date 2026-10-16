@@ -53,7 +53,7 @@ pub struct Staged {
     pub result_digest: [u8; 48],
     /// Audit event emitted after a successful commit; `None` for a no-op
     /// (an idempotent re-enrollment).
-    event: Option<(&'static str, Vec<(&'static str, String)>)>,
+    pub(crate) event: Option<(&'static str, Vec<(&'static str, String)>)>,
 }
 
 /// Apply `staged` and `extra` atomically, then emit the staged audit event.

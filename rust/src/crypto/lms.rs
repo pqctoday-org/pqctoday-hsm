@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 // G10 — Stateful hash-based signatures: LMS (single-level) and HSS (multi-level)
 //

@@ -24,7 +24,8 @@ pub const ROLE_FHE_DECRYPT_POLICY: u8 = 13;
 
 /// The only scheme and generator version P1 accepts.
 pub const FHE_SCHEME_TFHE: &str = "tfhe-rs";
-/// Streamed CKKS (Lattigo-compatible evaluation keys), educational-ckks only.
+/// Streamed CKKS (Lattigo-compatible evaluation keys): cfg `pqc_ckks_custody` (the default native `fhe-custody`, or
+/// `educational-ckks`).
 pub const FHE_SCHEME_CKKS: &str = "ckks-stream";
 pub const FHE_GENERATOR_VERSIONS: &[u32] = &[1];
 /// Opaque P1 seed length (a TFHE-rs client-key seed is 128 bits; 32 bytes
@@ -59,7 +60,7 @@ pub fn scheme_for(param_set: u32) -> Option<&'static str> {
     if FHE_PARAM_SETS.iter().any(|(id, _)| *id == param_set) {
         return Some(FHE_SCHEME_TFHE);
     }
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     if super::fhe_ckks::params::find(param_set).is_some() {
         return Some(FHE_SCHEME_CKKS);
     }
@@ -68,7 +69,7 @@ pub fn scheme_for(param_set: u32) -> Option<&'static str> {
 
 /// DER of `FheParamSetV1` for a registry ID.
 pub fn param_set_der(param_set: u32) -> Option<Vec<u8>> {
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     if let Some(ps) = super::fhe_ckks::params::find(param_set) {
         return asn1::to_der(&FheParamSetV1 {
             id: ps.id,
@@ -106,7 +107,7 @@ pub fn library_id() -> &'static str {
 
 /// `CKA_PQCTODAY_FHE_LIBRARY` for a registered parameter set.
 pub fn library_for(param_set: u32) -> String {
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     if let Some(ps) = super::fhe_ckks::params::find(param_set) {
         return format!("{} {} streamed-evk/v1", ps.library, ps.library_version);
     }
@@ -159,7 +160,7 @@ pub fn profile_constraint_hash() -> [u8; 48] {
 /// every registered CKKS parameter set, so registering a set changes the
 /// profile hash and policies enrolled under the old hash must be re-enrolled
 /// (docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §6.5).
-#[cfg(feature = "educational-ckks")]
+#[cfg(pqc_ckks_custody)]
 pub fn ckks_profile_constraint_der() -> Vec<u8> {
     ckks_profile_constraint_der_for(&super::fhe_ckks::params::CKKS_PARAM_SETS.iter().map(|p| p.id).collect::<Vec<_>>())
 }
@@ -171,7 +172,7 @@ pub fn ckks_profile_constraint_der_for(param_sets: &[u32]) -> Vec<u8> {
 }
 
 /// `typeConstraintHash` of the streamed-CKKS seed profile.
-#[cfg(feature = "educational-ckks")]
+#[cfg(pqc_ckks_custody)]
 pub fn ckks_profile_constraint_hash() -> [u8; 48] {
     super::sha384(&ckks_profile_constraint_der())
 }
@@ -180,7 +181,7 @@ pub fn ckks_profile_constraint_hash() -> [u8; 48] {
 pub fn profile_constraint_hash_for(scheme: &str) -> Option<[u8; 48]> {
     match scheme {
         FHE_SCHEME_TFHE => Some(profile_constraint_hash()),
-        #[cfg(feature = "educational-ckks")]
+        #[cfg(pqc_ckks_custody)]
         FHE_SCHEME_CKKS => Some(ckks_profile_constraint_hash()),
         _ => None,
     }
@@ -322,19 +323,19 @@ pub fn parse_decrypt_policy(der: &[u8]) -> Result<DecryptPolicyView, u32> {
         return Err(CKR_DATA_INVALID);
     }
     if let Some(c) = &p.ckks {
-        #[cfg(feature = "educational-ckks")]
+        #[cfg(pqc_ckks_custody)]
         let max_slots = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(|ps| ps.n() / 2).min().unwrap_or(0);
-        #[cfg(not(feature = "educational-ckks"))]
+        #[cfg(not(pqc_ckks_custody))]
         let max_slots = 0usize;
         // scaleLog2: 20..=60 for one-prime releases; up to 90 only when every
         // listed set releases over two primes (registry ID 3, E13).
-        #[cfg(feature = "educational-ckks")]
+        #[cfg(pqc_ckks_custody)]
         let max_scale = p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).map(super::fhe_ckks::params::max_scale_log2).min().unwrap_or(60);
-        #[cfg(not(feature = "educational-ckks"))]
+        #[cfg(not(pqc_ckks_custody))]
         let max_scale = 60u8;
         // A set without a measured flood bound (registry ID 4) is owner-release-only:
         // no third-party recipient and no flooded release (params::owner_release_only).
-        #[cfg(feature = "educational-ckks")]
+        #[cfg(pqc_ckks_custody)]
         if p.allowed_output_types.iter().filter_map(|t| super::fhe_ckks::params::find(t.param_set)).any(super::fhe_ckks::params::owner_release_only)
             && (!p.recipients.is_empty() || p.recipient_only || c.flood_owner)
         {
@@ -405,6 +406,28 @@ pub fn find_decrypt_policy(slot: u32, id: &[u8]) -> Option<DecryptPolicyView> {
 
 /// SO enrollment of an immutable FHE decryption policy (§6.3 "Policy
 /// provisioning"). Returns its SHA-384 identifier; identical DER is idempotent.
+/// The signed-admin form of `enroll_fhe_decrypt_policy` (admin operation [5], plan D02387 WP-A2): same checks,
+/// returned as a staged change that `admin::execute` commits together with its ledger entry and receipt.
+pub(crate) fn stage_enroll_fhe_decrypt_policy(slot: u32, policy_der: &[u8]) -> Result<super::enroll::Staged, u32> {
+    let view = parse_decrypt_policy(policy_der)?;
+    let id = view.id;
+    let unchanged = super::enroll::Staged { new_objects: Vec::new(), updates: Vec::new(), output: Some(id.to_vec()), result_digest: id, event: None };
+    if find_decrypt_policy(slot, &id).is_some() {
+        return Ok(unchanged);
+    }
+    if records::list(slot, ROLE_FHE_DECRYPT_POLICY).len() >= records::MAX_POLICIES_PER_SLOT {
+        return Err(CKR_DEVICE_MEMORY);
+    }
+    let rec = records::new_record(ROLE_FHE_DECRYPT_POLICY, CKO_DATA, "FHE decryption policy", policy_der.to_vec(), Vec::new(), false);
+    Ok(super::enroll::Staged {
+        new_objects: vec![rec],
+        updates: Vec::new(),
+        output: Some(id.to_vec()),
+        result_digest: id,
+        event: Some(("fhe_policy_enrolled", vec![("policy", super::hex(&id))])),
+    })
+}
+
 pub fn enroll_fhe_decrypt_policy(so_session: u32, policy_der: &[u8]) -> Result<[u8; 48], u32> {
     super::require_profile()?;
     let slot = super::require_so(so_session)?;
@@ -550,6 +573,7 @@ fn generate_fhe_seed_inner(
         (CKA_EXTRACTABLE, false),
         (CKA_COPYABLE, false),
         (CKA_MODIFIABLE, false),
+        (CKA_DESTROYABLE, false),
         (CKA_TRUSTED, false),
         (CKA_DERIVE, true),
         (CKA_DECRYPT, true),
@@ -658,20 +682,20 @@ mod tests {
         assert!(bad(policy(vec![compressed], vec![], None, 1)), "compressed lists refused in v1 (P0B §5.3)");
     }
 
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     fn ckks_policy(c: CkksReleasePolicy) -> FheDecryptPolicy {
         let t = FheType { type_name: "CkksPlaintextQ0".into(), width_bits: 64, param_set: 0x8002, serialization_version: 2, compressed_allowed: false };
         FheDecryptPolicy { version: 2, allowed_output_types: vec![t], never_release: vec![], predicates: vec![], recipients: vec![], recipient_only: false, max_decrypts: 100, ckks: Some(c) }
     }
 
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     fn ckks_block() -> CkksReleasePolicy {
         CkksReleasePolicy { max_values: 512, precision_bits: 20, value_bound_log2: 10, scale_log2: 40, flood_recipients: true, flood_owner: false, stat_security_bits: 30 }
     }
 
     /// PV1–PV3 (plan §4.5): version/scheme pairing, ranges, canonical DER with
     /// defaults omitted, and replication may only narrow a CKKS release.
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     #[test]
     fn decrypt_policy_v2_ckks_rules() {
         let der = |p: &FheDecryptPolicy| asn1::to_der(p).unwrap();
@@ -744,7 +768,7 @@ mod tests {
 
     /// E13: scaleLog2 up to 90 only for the two-prime set (registry ID 3);
     /// a policy that also lists a one-prime set keeps the 20..=60 range.
-    #[cfg(feature = "educational-ckks")]
+    #[cfg(pqc_ckks_custody)]
     #[test]
     fn decrypt_policy_v2_scale_range_per_set() {
         use super::super::fhe_ckks::{mech, params};

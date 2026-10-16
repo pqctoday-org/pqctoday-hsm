@@ -1,5 +1,5 @@
-/* Copyright (C) 2026 pqctoday-org
-   SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (C) 2026 PQC Today, LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
 
 /* hss-w4-keygen: phase-5 R25 test helper. Generates an HSS/LMS keypair
  * with EXPLICIT, non-default CK_HSS_KEY_PAIR_GEN_PARAMS (LMOTS_SHA256_

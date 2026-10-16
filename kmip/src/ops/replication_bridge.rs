@@ -16,9 +16,7 @@
 //! - keys are referenced by `CKA_UNIQUE_ID`, resolved inside the session, exactly one match;
 //! - `CloneKey` is not offered: it needs both sessions in one module, never true over KMIP.
 
-use std::sync::Mutex;
-
-use softhsmrustv3::constants::{CKA_UNIQUE_ID, CKR_OK};
+use softhsmrustv3::constants::CKR_OK;
 use softhsmrustv3::replication as repl;
 
 pub const IFACE_V1: &str = "PQCTODAY_KEY_REPLICATION_1_0";
@@ -31,85 +29,35 @@ pub const IFACE_CEREMONY_TEST: &str = "PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TES
 /// Admin interface (addendum §2.1): 1 AdminIssueNonce, 2 AdminExecute on the KMIP wire.
 pub const IFACE_ADMIN: &str = "PQCTODAY_KEY_REPLICATION_ADMIN_1_0";
 /// mTLS client-certificate CN of the admin role (pre-ABI: CN, not the A-04 EKU).
-pub const ROLE_ADMIN_CN: &str = "replication-admin";
+pub const ROLE_ADMIN_CN: &str = super::engine_bridge::ROLE_SO_CN;
 
-/// Board-local, root-only file holding the SO PIN (owner O7). Set once at server start.
-static SO_PIN_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-/// Slot the admin context logs into (the server's `--slot`).
-static ADMIN_SLOT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Configure the admin path (server start, `--replication-so-pin-file`).
+/// Configure the admin path (server start, `--replication-so-pin-file`). The SO context is shared with the FHE
+/// bridge (`engine_bridge`).
 pub fn configure_admin(pin_file: std::path::PathBuf, slot: u32) {
-    let _ = SO_PIN_FILE.set(pin_file);
-    ADMIN_SLOT.store(slot, std::sync::atomic::Ordering::Relaxed);
+    super::engine_bridge::configure_admin(pin_file, slot);
 }
 
-/// One admin call in a fresh application context: open a R/W session in it, SO login with
-/// the board-local PIN, run the call, log out; the guard destroys the context and its
-/// sessions. The KMIP server closes each connection after one Request Message, so this
-/// per-request context is the per-connection context of addendum §1.1. User work in the
-/// default context is not paused (C1).
 /// Connection metadata for the admin application context (addendum §5, A-16): the client
 /// certificate hash and listener address the TLS listener authenticated for this request. The
 /// engine stamps them into its audit lines. Without a TLS connection (an in-process call) there is
 /// no certificate, and the fields keep their empty values.
 fn admin_context_meta() -> softhsmrustv3::app_context::ContextMeta {
-    let conn = crate::server::conn_meta::current();
-    softhsmrustv3::app_context::ContextMeta {
-        role: ROLE_ADMIN_CN.to_string(),
-        client_cert_sha256: conn.as_ref().map(|c| c.client_cert_sha256).unwrap_or([0u8; 32]),
-        listener: conn.map(|c| c.listener).unwrap_or_else(|| "kmip-replication-bridge".to_string()),
-        correlation: None,
-    }
+    super::engine_bridge::admin_context_meta(ROLE_ADMIN_CN, "kmip-replication-bridge")
 }
 
+/// One admin call in a fresh application context with a real SO login (`engine_bridge::so_call`).
 fn admin_call(ordinal: u32, input: &[u8]) -> Result<Vec<u8>, u32> {
-    use softhsmrustv3::app_context::{self, ContextGuard};
-    let pin = SO_PIN_FILE
-        .get()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-    let guard = ContextGuard::new(admin_context_meta());
-    let slot = ADMIN_SLOT.load(std::sync::atomic::Ordering::Relaxed);
-    let h = app_context::open_session(guard.id(), slot, CKF_SERIAL_SESSION | CKF_RW_SESSION)?;
-    let mut p = pin.into_bytes();
-    let rv = softhsmrustv3::ffi::C_Login(h, CKU_SO, p.as_mut_ptr(), p.len() as u32);
-    zeroize_vec(&mut p);
-    if rv != CKR_OK {
-        return Err(rv);
-    }
-    let r = match (ordinal, input.is_empty()) {
+    super::engine_bridge::so_call(admin_context_meta(), |h| match (ordinal, input.is_empty()) {
         (0, true) => repl::admin::issue_nonce(h).map(|n| n.to_vec()),
         (1, false) => repl::admin::execute(h, input),
         _ => Err(CKR_ARGUMENTS_BAD),
-    };
-    let _ = softhsmrustv3::ffi::C_Logout(h);
-    drop(guard);
-    r
+    })
 }
 
-fn zeroize_vec(v: &mut [u8]) {
-    for b in v.iter_mut() {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-}
-
-// PKCS#11 return codes used here (values from pkcs11t.h).
-const CKR_ARGUMENTS_BAD: u32 = 0x0000_0007;
-const CKR_FUNCTION_NOT_SUPPORTED: u32 = 0x0000_0054;
-const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
-const CKR_DATA_INVALID: u32 = 0x0000_0020;
-const CKR_USER_NOT_LOGGED_IN: u32 = 0x0000_0101;
-const CKR_USER_TYPE_INVALID: u32 = 0x0000_0103;
-use softhsmrustv3::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKU_SO};
+use super::engine_bridge::{by_uid, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_FUNCTION_NOT_SUPPORTED, CKR_USER_NOT_LOGGED_IN, CKR_USER_TYPE_INVALID};
 
 /// Maximum Input Parameters accepted before anything else (base §10 package bound + wrapper).
 const MAX_INPUT: usize = 256 * 1024 + 64;
-
-/// The engine's find operation is per-session state, and KMIP connections share one engine
-/// session in single-tenant mode, so key lookups are serialised.
-static FIND_LOCK: Mutex<()> = Mutex::new(());
 
 /// True when `interface` names one of the replication interfaces this build serves.
 pub fn handles(interface: Option<&str>) -> bool {
@@ -214,21 +162,6 @@ fn ceremony(s: u32, legacy: bool, ordinal: u32, input: &[u8]) -> Result<Vec<u8>,
     }
 }
 
-/// Exactly one object visible to `s` with this `CKA_UNIQUE_ID`, else `CKR_KEY_HANDLE_INVALID`.
-fn by_uid(s: u32, uid: &[u8]) -> Result<u32, u32> {
-    let _g = FIND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let value = uid.to_vec();
-    let template = [CKA_UNIQUE_ID as usize, value.as_ptr() as usize, value.len()];
-    let ffi = |rv: u32| if rv == CKR_OK { Ok(()) } else { Err(rv) };
-    ffi(softhsmrustv3::ffi::C_FindObjectsInit(s, template.as_ptr() as *mut u8, 1))?;
-    let mut buf = [0u32; 2];
-    let mut n = 0u32;
-    let rv = softhsmrustv3::ffi::C_FindObjects(s, buf.as_mut_ptr(), 2, &mut n);
-    let _ = softhsmrustv3::ffi::C_FindObjectsFinal(s);
-    ffi(rv)?;
-    if n == 1 { Ok(buf[0]) } else { Err(CKR_KEY_HANDLE_INVALID) }
-}
-
 /// Strict DER: `SEQUENCE { keyUniqueID UTF8String (SIZE(36)), payload OCTET STRING }`,
 /// definite minimal lengths, nothing trailing. Returns `(uid, payload)`.
 fn key_call(der: &[u8]) -> Result<(&[u8], &[u8]), u32> {
@@ -309,11 +242,7 @@ mod tests {
         assert!(tlv(&[0x04, 0x82, 0x00, 0x90]).is_none(), "leading zero length octet");
     }
 
-    /// The educational profile is process-global: tests that select or clear it must not overlap.
-    fn profile_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        L.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    use crate::ops::engine_bridge::profile_lock;
 
     /// True when the call got past the bridge's own routing and decoding (the engine, which is not
     /// initialised in these unit tests, answered), as opposed to being refused by the bridge.

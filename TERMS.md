@@ -9,7 +9,7 @@ These Terms of Service ("Terms") accompany SoftHSMv3 (the "Software"), available
 
 ## 2. License
 
-The Software is licensed under the **BSD 2-Clause License** (same as the upstream SoftHSM2 project). The full license text is available in the [LICENSE](./LICENSE) file. Nothing in these Terms restricts rights granted under the BSD 2-Clause License.
+The code written for the Software by PQC Today, LLC is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0-only)**, with a commercial licence on request; the files taken from SoftHSM2 keep the **BSD 2-Clause License**, and vendored third-party code keeps its own licence. [COPYRIGHT.md](./COPYRIGHT.md) says which parts are under which licence; the texts are in [LICENSE](./LICENSE) and [LICENSES/](./LICENSES/). Nothing in these Terms restricts rights granted under those licences.
 
 ## 3. Purpose and Cryptographic Disclaimer
 
@@ -44,7 +44,7 @@ Users are responsible for complying with the export control and sanctions laws t
 
 ## 6. No Warranty
 
-THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, OR NON-INFRINGEMENT. This is consistent with the BSD 2-Clause License.
+THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, OR NON-INFRINGEMENT. This is consistent with the AGPL-3.0 and the BSD 2-Clause License.
 
 ## 7. Limitation of Liability
 
@@ -62,7 +62,7 @@ Each component is subject to its own license terms.
 
 ## 9. Intellectual Property
 
-- The Software's source code is licensed under BSD 2-Clause.
+- The code written by PQC Today, LLC is licensed under AGPL-3.0-only; the SoftHSM2 files under BSD 2-Clause (see COPYRIGHT.md).
 - PQC algorithm implementations (ML-KEM, ML-DSA, SLH-DSA) are based on NIST FIPS 203/204/205 standards, which are in the public domain.
 - The PKCS#11 v3.2 specification is published by OASIS under its IPR Policy.
 

@@ -449,6 +449,11 @@ run_step_host "pre-push hook test (delete-only pushes allowed)" \
 run_step_host "engine third-party notices complete and current (engine_notices.py check)" \
   "cd '$ROOT' && python3 scripts/engine_notices.py check"
 
+# Licence labels match COPYRIGHT.md (AGPL plan step 9): own files and crates
+# say AGPL-3.0-only, third-party files keep theirs, new code files carry a header.
+run_step_host "licence labels (own files AGPL-3.0-only)" \
+  "cd '$ROOT' && python3 -m unittest tests/test_check_licences.py && python3 scripts/check_licences.py"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 

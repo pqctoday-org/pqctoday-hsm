@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 pqctoday
- * SPDX-License-Identifier: BSD-2-Clause
+ * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 /*****************************************************************************

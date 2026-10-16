@@ -2,7 +2,7 @@
 name = "pqctoday-mls-interop"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "IETF mls-implementations gRPC interop client backed by openmls_pqctoday_crypto."
 
 [lib]

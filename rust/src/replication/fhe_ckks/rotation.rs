@@ -94,8 +94,10 @@
 //! session ledger that names it, and logs
 //! `fhe_ckks_rotation_old_seed_destroyed` with both lineages and the record's
 //! hash. The token cannot verify the server's re-encryption itself; no
-//! further protocol is added. The seed's user can still destroy it with
-//! `C_DestroyObject` as before (that path writes no retirement record).
+//! further protocol is added. FHE seeds are created with
+//! `CKA_DESTROYABLE = FALSE` (plan D02387, owner decision F16), so the
+//! seed's user cannot destroy it with `C_DestroyObject`; the other SO removal
+//! path is the signed admin operation `[7] destroyFheSeed` (spec §13.4).
 //!
 //! The retirement ledger is a set of public, immutable token objects
 //! (`CKO_DATA`, engine role 15, `CKA_TOKEN`, not modifiable, copyable or
@@ -505,9 +507,6 @@ pub fn retire_old_seed(so_session: u32, old_lineage: &[u8; 32]) -> Result<u32, u
         Some((_, ROTATION_SIGNED, None)) => return Err(refuse("retire needs the rotation manifest signed again")),
         _ => return Err(refuse("retire before a signed rotation manifest")),
     };
-    if old.attrs.get(&CKA_DESTROYABLE).is_some_and(|v| v.first() == Some(&0)) {
-        return Err(CKR_ACTION_PROHIBITED);
-    }
     // The ledger entry first: a retired seed always has its record. An entry
     // left by an interrupted earlier call for this pair is reused.
     let ledger = retirement_records(slot);

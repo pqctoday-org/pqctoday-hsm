@@ -9,7 +9,7 @@
 //! docs/ckks/ckks-openfhe-registry-entry-spec-2026-10-12.md): known answers
 //! against the oracle, and the owner-release-only rule of a set without a
 //! measured flood bound.
-#![cfg(all(feature = "educational-ckks", feature = "test-support"))]
+#![cfg(all(pqc_ckks_custody, feature = "test-support"))]
 
 mod replication_common;
 use replication_common::*;

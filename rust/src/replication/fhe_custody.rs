@@ -1,8 +1,10 @@
 //! FHE custody inside the token, scheme-neutral half (P0B spec
-//! `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`, revision 2).
+//! `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`, revision 7).
 //!
-//! Compiled with `educational-ckks` (streamed CKKS, no TFHE-rs) and with
-//! `educational-fhe` (which implies it and adds TFHE in `fhe_tfhe`). Holds
+//! Compiled with cfg `pqc_ckks_custody`: the default `fhe-custody` feature on
+//! native targets (streamed CKKS, no TFHE-rs; plan D02387, F1/F10),
+//! `educational-ckks`, and `educational-fhe` (which implies it and adds TFHE in
+//! `fhe_tfhe`; non-commercial use only). Holds
 //! the seed-object access, the decrypt counter, the signed HPKE-sealed
 //! release, recipient enrollment and the C ABI dispatch helpers both schemes
 //! share. The seed never leaves the engine; only public material,
@@ -330,6 +332,27 @@ pub const ROLE_FHE_RECIPIENT: u8 = 14;
 /// SO enrollment of a third-party release recipient: an ML-KEM-768
 /// recovery-recipient certificate of a device that chains to an enrolled
 /// root. Returns the SPKI hash a decryption policy names.
+/// The signed-admin form of `enroll_fhe_recipient` (admin operation [6], plan D02387 WP-A2): same chain validation,
+/// returned as a staged change that `admin::execute` commits together with its ledger entry and receipt.
+pub(crate) fn stage_enroll_fhe_recipient(slot: u32, recipient_chain: &[Vec<u8>]) -> Result<super::enroll::Staged, u32> {
+    let chain = super::pki::chain_from_ders(recipient_chain).map_err(|_| CKR_DATA_INVALID)?;
+    let trust = super::enroll::trust_inputs(slot);
+    let v = super::pki::validate_chain(&chain, Purpose::RecoveryRecipient, &trust, super::now_unix(), super::Profile::Educational)
+        .map_err(|_| CKR_SIGNATURE_INVALID)?;
+    let h = super::pki::spki_hash(&v.leaf);
+    if recipient_key(slot, &h).is_some() {
+        return Ok(super::enroll::Staged { new_objects: Vec::new(), updates: Vec::new(), output: Some(h.to_vec()), result_digest: h, event: None });
+    }
+    let rec = records::new_record(ROLE_FHE_RECIPIENT, CKO_CERTIFICATE, "FHE release recipient certificate", recipient_chain[0].clone(), Vec::new(), false);
+    Ok(super::enroll::Staged {
+        new_objects: vec![rec],
+        updates: Vec::new(),
+        output: Some(h.to_vec()),
+        result_digest: h,
+        event: Some(("fhe_recipient_enrolled", vec![("recipient", super::hex(&h))])),
+    })
+}
+
 pub fn enroll_fhe_recipient(so_session: u32, recipient_chain: &[Vec<u8>]) -> Result<[u8; 48], u32> {
     super::require_profile()?;
     let slot = super::require_so(so_session)?;
@@ -344,6 +367,52 @@ pub fn enroll_fhe_recipient(so_session: u32, recipient_chain: &[Vec<u8>]) -> Res
         crate::state::commit_objects_atomically(so_session, vec![rec], Vec::new())?;
     }
     Ok(h)
+}
+
+/// The handle of the one token FHE seed on `slot` whose lineage is `lineage`; `None` when there is none or more than
+/// one. No session: the admin path names seeds by lineage (an SO session cannot find private objects).
+fn seed_handle_by_lineage(slot: u32, lineage: &[u8; 32]) -> Option<u32> {
+    let found: Vec<u32> = crate::state::OBJECTS.with(|o| {
+        o.borrow()
+            .iter()
+            .filter(|(_, a)| {
+                crate::state::object_slot_of(a) == slot
+                    && crate::state::read_bool_attr(a, CKA_TOKEN)
+                    && crate::state::get_object_attr_u32_from(a, CKA_KEY_TYPE) == Some(CKK_PQCTODAY_FHE)
+                    && a.get(&CKA_PQCTODAY_FHE_LINEAGE_ID).map(|v| v.as_slice()) == Some(lineage.as_slice())
+            })
+            .map(|(h, _)| *h)
+            .collect()
+    });
+    (found.len() == 1).then(|| found[0])
+}
+
+/// Admin operation [7] `destroyFheSeed`, stage (plan D02387; owner decision 2026-10-15: only the security officer
+/// deletes an FHE key). FHE seeds carry `CKA_DESTROYABLE = FALSE`, so `C_DestroyObject` refuses them; this signed
+/// request is the one way to remove a seed. Exactly one token seed on the slot carries the lineage; nothing is
+/// written here.
+/// The admin commit records the signed receipt and ledger entry, then [`finish_destroy_fhe_seed`] destroys the seed.
+/// The receipt's output is the lineage.
+pub(crate) fn stage_destroy_fhe_seed(slot: u32, lineage: &[u8; 32]) -> Result<super::enroll::Staged, u32> {
+    seed_handle_by_lineage(slot, lineage).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    Ok(super::enroll::Staged {
+        new_objects: Vec::new(),
+        updates: Vec::new(),
+        output: Some(lineage.to_vec()),
+        result_digest: super::sha384(lineage),
+        event: Some(("fhe_seed_destroy_committed", vec![("lineage", super::hex(lineage))])),
+    })
+}
+
+/// Admin operation [7] `destroyFheSeed`, after the commit (and on an exact retry): destroy the seed, clear the caches
+/// that hold material derived from it, and log it. Nothing to do when the seed is already gone.
+pub(crate) fn finish_destroy_fhe_seed(slot: u32, lineage: &[u8; 32]) {
+    if let Some(h) = seed_handle_by_lineage(slot, lineage) {
+        super::fhe_ckks::mech::clear_generator_cache_for(h);
+        crate::ffi::drop_key_caches();
+        super::discard_object(h);
+        super::oplog_event("fhe_seed_destroyed", slot, &[("lineage", super::hex(lineage))]);
+    }
 }
 
 /// TFHE test encryption only (`fhe_tfhe::encrypt_for_test`).
@@ -537,12 +606,25 @@ pub unsafe fn ffi_decrypt(session: u32, input: *const u8, in_len: u32, out: *mut
             }
         };
     }
+    // PKCS#11 v3.2 §5.2: a buffer below the length the size query reports gets CKR_BUFFER_TOO_SMALL and the
+    // operation stays active. Checked before decrypting, so no decryption runs and no counter unit is spent.
+    match decrypt(session, key, &recipient, data, true) {
+        Ok((need, _)) if (*out_len as usize) < need => {
+            *out_len = need as u32;
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            cancel(session);
+            return e;
+        }
+    }
     let r = decrypt(session, key, &recipient, data, false);
     cancel(session);
     match r {
         Ok((n, Some(DecryptOutput::Owner(b) | DecryptOutput::Sealed(b)))) => {
             if (*out_len as usize) < n {
-                // The counter unit is already spent: a caller must size first.
+                // Not reached when the size query's length is exact or an upper bound (checked above).
                 *out_len = n as u32;
                 return CKR_BUFFER_TOO_SMALL;
             }
