@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! FHE decrypt counters across an engine restart (plan D02387 WP-A3; spec
 //! docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §6.4, §10 gate 5) under the durable SQLite store. Own test
 //! binary: configuring a store is process-global.

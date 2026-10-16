@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! FHE custody mechanisms in C_GetMechanismList / C_GetMechanismInfo (owner decision F19, plan D02387 WP-A3; spec
 //! docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §8, §10, §12). Runs in the default native build: KEY_GEN,
 //! DERIVE_PUBLIC and DECRYPT are listed and answered once the replication profile is selected, never before, and the

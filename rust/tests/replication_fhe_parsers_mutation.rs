@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Parser robustness for FHE custody (plan D02387 WP-A3; spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md
 //! §10 gate 5, "fuzzing of the policy and parameter parsers"). The repository has no cargo-fuzz targets, so these are
 //! deterministic mutation tests with a fixed-seed xorshift: every truncation, extensions, every single-byte change at

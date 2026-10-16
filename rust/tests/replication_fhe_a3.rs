@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! FHE custody hardening for the default build (plan D02387 WP-A3; spec
 //! docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md §10 gate 5): native known answers through the token for every
 //! registered parameter set, the negative cases (wrong role, budget exhausted, wrong lineage or foreign seed,
