@@ -94,8 +94,10 @@
 //! session ledger that names it, and logs
 //! `fhe_ckks_rotation_old_seed_destroyed` with both lineages and the record's
 //! hash. The token cannot verify the server's re-encryption itself; no
-//! further protocol is added. The seed's user can still destroy it with
-//! `C_DestroyObject` as before (that path writes no retirement record).
+//! further protocol is added. FHE seeds are created with
+//! `CKA_DESTROYABLE = FALSE` (plan D02387, owner decision F16), so the
+//! seed's user cannot destroy it with `C_DestroyObject`; the other SO removal
+//! path is the signed admin operation `[7] destroyFheSeed` (spec §13.4).
 //!
 //! The retirement ledger is a set of public, immutable token objects
 //! (`CKO_DATA`, engine role 15, `CKA_TOKEN`, not modifiable, copyable or
