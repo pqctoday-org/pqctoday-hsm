@@ -13,7 +13,7 @@
     {
       "path": "docs/refs/mceliece-spec-20221023.pdf",
       "url": "https://classic.mceliece.org/mceliece-spec-20221023.pdf",
-      "title": "Classic McEliece: conservative code-based cryptography — cryptosystem specification",
+      "title": "Classic McEliece: conservative code-based cryptography \u2014 cryptosystem specification",
       "date": "2022-10-23",
       "publisher": "Classic McEliece team",
       "bytes": 249199,
@@ -22,7 +22,7 @@
     {
       "path": "docs/refs/pkcs11-profiles-v3.2-os.pdf",
       "url": "https://docs.oasis-open.org/pkcs11/pkcs11-profiles/v3.2/os/pkcs11-profiles-v3.2-os.pdf",
-      "title": "PKCS #11 Profiles Version 3.2 — OASIS Standard",
+      "title": "PKCS #11 Profiles Version 3.2 \u2014 OASIS Standard",
       "date": "2026-06-03",
       "publisher": "OASIS",
       "bytes": 530083,
@@ -31,7 +31,7 @@
     {
       "path": "docs/refs/pkcs11-spec-v3.2-csd01.pdf",
       "url": "https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf",
-      "title": "PKCS #11 Specification Version 3.2 — CSD01 (superseded)",
+      "title": "PKCS #11 Specification Version 3.2 \u2014 CSD01 (superseded)",
       "date": "2025-04-16",
       "publisher": "OASIS",
       "bytes": 5142051,
@@ -40,7 +40,7 @@
     {
       "path": "docs/refs/pkcs11-spec-v3.2-os.pdf",
       "url": "https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.pdf",
-      "title": "PKCS #11 Specification Version 3.2 — OASIS Standard",
+      "title": "PKCS #11 Specification Version 3.2 \u2014 OASIS Standard",
       "date": "2026-06-03",
       "publisher": "OASIS",
       "bytes": 6540028,
@@ -49,7 +49,7 @@
     {
       "path": "docs/refs/pkcs11-ug-v3.2-cn01.pdf",
       "url": "https://docs.oasis-open.org/pkcs11/pkcs11-ug/v3.2/cn01/pkcs11-ug-v3.2-cn01.pdf",
-      "title": "PKCS #11 Usage Guide Version 3.2 — Committee Note 01",
+      "title": "PKCS #11 Usage Guide Version 3.2 \u2014 Committee Note 01",
       "date": "2025-04-15",
       "publisher": "OASIS",
       "bytes": 468117,
@@ -67,7 +67,7 @@
     {
       "path": "kmip/spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v2.1/os/kmip-spec-v2.1-os.pdf",
-      "title": "KMIP Specification Version 2.1 — OASIS Standard",
+      "title": "KMIP Specification Version 2.1 \u2014 OASIS Standard",
       "date": "2020-12-14",
       "publisher": "OASIS",
       "bytes": 6796775,
@@ -76,7 +76,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-profiles-v3.0-csd02.docx",
       "url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.docx",
-      "title": "KMIP Profiles Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Profiles Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-21",
       "publisher": "OASIS",
       "bytes": 201667,
@@ -85,7 +85,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-profiles-v3.0-csd02.html",
       "url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.html",
-      "title": "KMIP Profiles Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Profiles Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-21",
       "publisher": "OASIS",
       "bytes": 3061928,
@@ -95,7 +95,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-profiles-v3.0-csd02.pdf",
       "url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.pdf",
-      "title": "KMIP Profiles Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Profiles Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-21",
       "publisher": "OASIS",
       "bytes": 1278197,
@@ -104,7 +104,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-profiles-v3.0-csd02.zip",
       "url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.zip",
-      "title": "KMIP Profiles Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Profiles Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-21",
       "publisher": "OASIS",
       "bytes": 1429398,
@@ -113,7 +113,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-profiles-v3.0.pdf",
       "url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd01/kmip-profiles-v3.0-csd01.pdf",
-      "title": "KMIP Profiles Version 3.0 — CSD01 (superseded)",
+      "title": "KMIP Profiles Version 3.0 \u2014 CSD01 (superseded)",
       "date": "2023-11-30",
       "publisher": "OASIS",
       "bytes": 1142181,
@@ -122,7 +122,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-profiles-v3.0.zip",
       "url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd01/kmip-profiles-v3.0-csd01.zip",
-      "title": "KMIP Profiles Version 3.0 — CSD01 (superseded)",
+      "title": "KMIP Profiles Version 3.0 \u2014 CSD01 (superseded)",
       "date": "2023-11-30",
       "publisher": "OASIS",
       "bytes": 8389246,
@@ -131,7 +131,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.docx",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.docx",
-      "title": "KMIP Specification Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-07",
       "publisher": "OASIS",
       "bytes": 559666,
@@ -140,7 +140,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.html",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.html",
-      "title": "KMIP Specification Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-07",
       "publisher": "OASIS",
       "bytes": 19266598,
@@ -150,7 +150,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.pdf",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.pdf",
-      "title": "KMIP Specification Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-07",
       "publisher": "OASIS",
       "bytes": 2962732,
@@ -159,7 +159,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.zip",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.zip",
-      "title": "KMIP Specification Version 3.0 — CSD02 (current baseline)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD02 (current baseline)",
       "date": "2026-05-07",
       "publisher": "OASIS",
       "bytes": 3396388,
@@ -168,7 +168,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf",
       "url": "https://groups.oasis-open.org/higherlogic/ws/public/download/72645/kmip-spec-v3.0-wd19-clean.pdf",
-      "title": "KMIP Specification Version 3.0 — Working Draft 19 (PQC Updates; superseded by CSD02)",
+      "title": "KMIP Specification Version 3.0 \u2014 Working Draft 19 (PQC Updates; superseded by CSD02)",
       "date": "2025-02-14",
       "publisher": "OASIS KMIP TC (public document repository)",
       "bytes": 3142670,
@@ -177,7 +177,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0.docx",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.docx",
-      "title": "KMIP Specification Version 3.0 — CSD01 (superseded)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD01 (superseded)",
       "date": "2024-08-23",
       "publisher": "OASIS",
       "bytes": 603495,
@@ -186,7 +186,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0.html",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.html",
-      "title": "KMIP Specification Version 3.0 — CSD01 (superseded)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD01 (superseded)",
       "date": "2024-08-23",
       "publisher": "OASIS",
       "bytes": 19055347,
@@ -196,7 +196,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.pdf",
-      "title": "KMIP Specification Version 3.0 — CSD01 (superseded)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD01 (superseded)",
       "date": "2024-08-23",
       "publisher": "OASIS",
       "bytes": 3141715,
@@ -205,7 +205,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0.zip",
       "url": "https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.zip",
-      "title": "KMIP Specification Version 3.0 — CSD01 (superseded)",
+      "title": "KMIP Specification Version 3.0 \u2014 CSD01 (superseded)",
       "date": "2024-08-23",
       "publisher": "OASIS",
       "bytes": 3496808,
@@ -214,7 +214,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-ug-v3.0/kmip-ug-v3.0.docx",
       "url": "https://docs.oasis-open.org/kmip/kmip-ug/v3.0/cnd01/kmip-ug-v3.0-cnd01.docx",
-      "title": "KMIP Usage Guide Version 3.0 — Committee Note Draft 01",
+      "title": "KMIP Usage Guide Version 3.0 \u2014 Committee Note Draft 01",
       "date": "2026-06-18",
       "publisher": "OASIS",
       "bytes": 608090,
@@ -223,7 +223,7 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-ug-v3.0/kmip-ug-v3.0.html",
       "url": "https://docs.oasis-open.org/kmip/kmip-ug/v3.0/cnd01/kmip-ug-v3.0-cnd01.html",
-      "title": "KMIP Usage Guide Version 3.0 — Committee Note Draft 01",
+      "title": "KMIP Usage Guide Version 3.0 \u2014 Committee Note Draft 01",
       "date": "2026-06-18",
       "publisher": "OASIS",
       "bytes": 544012,
@@ -233,11 +233,20 @@
     {
       "path": "kmip/spec/oasis-kmip-3.0/kmip-ug-v3.0/kmip-ug-v3.0.pdf",
       "url": "https://docs.oasis-open.org/kmip/kmip-ug/v3.0/cnd01/kmip-ug-v3.0-cnd01.pdf",
-      "title": "KMIP Usage Guide Version 3.0 — Committee Note Draft 01",
+      "title": "KMIP Usage Guide Version 3.0 \u2014 Committee Note Draft 01",
       "date": "2026-06-18",
       "publisher": "OASIS",
       "bytes": 1097859,
       "sha256": "7d3b3ecb720f372a3bf2b199b83d59b3ae2399425146dcdffe2f5008e041a1fa"
+    },
+    {
+      "path": "docs/refs/draft-ietf-hpke-pq-05.txt",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-hpke-pq-05.txt",
+      "title": "draft-ietf-hpke-pq-05, Post-Quantum and Post-Quantum/Traditional Hybrid Algorithms for HPKE",
+      "date": "2026-07-06",
+      "publisher": "IETF",
+      "bytes": 164525,
+      "sha256": "c3afa3981c7e2aacac4912a8b58eca14a92a10c66c4fd4e9ff078195a1ac9c5d"
     }
   ],
   "git_snapshots": [

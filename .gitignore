@@ -137,6 +137,7 @@ rust/pkg-acvp/
 # docs/refs/pkcs11{t,f}-canonical-v3.2.h stay tracked.
 /docs/refs/*.pdf
 /docs/refs/rfc9180-hpke.txt
+/docs/refs/draft-ietf-hpke-pq-05.txt
 /docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/
 /kmip/spec/oasis-kmip-*/**/*.pdf
 /kmip/spec/oasis-kmip-*/**/*.docx

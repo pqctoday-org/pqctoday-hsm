@@ -11,8 +11,6 @@ pinned to:
 | `pkcs11t-canonical-v3.2.h` | Canonical type header, byte-identical to <https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/pkcs11-v3.2/pkcs11t.h> | `95738fdcd9b5c9c73f55f9132aefa87354556cec1c46f681b8a2000b8b5dbccb` |
 | `pkcs11f-canonical-v3.2.h` | Canonical function header, byte-identical to <https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/pkcs11-v3.2/pkcs11f.h> | `3a205ff9a12247108193d124571fac88e38b59f1273e462baa1b5e00cd182fa0` |
 
-`draft-ietf-hpke-pq-05.txt` is still in this directory pending a decision.
-
 Every other document the code and docs cite is listed below with its publisher
 URL and the SHA-256 of the exact copy the code was audited against. The same
 data, machine-readable, is in [`third-party-documents.json`](third-party-documents.json).
@@ -117,16 +115,15 @@ nothing new in kind since v3.2: no "quantum-safe only" profile, no attribute
 beside `CKA_ALLOWED_MECHANISMS`, no `C_DisableMechanism`-style function.
 Deprecation stays textual. See [`../PKCS11_PROFILE_TRACEABILITY.md`](../PKCS11_PROFILE_TRACEABILITY.md).
 
-## HPKE — RFC 9180
+## HPKE — RFC 9180 and the post-quantum draft
 
 | Local path (gitignored) | Document (publisher link) | Date | Bytes | SHA-256 |
 |---|---|---|---|---|
 | `docs/refs/rfc9180-hpke.txt` | [RFC 9180, Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.txt) | 2022-02 | 192,749 | `f45a8b7c30231b26d668b1e8168074e5ab514b174d656b67e859895117f1f8f6` |
+| `docs/refs/draft-ietf-hpke-pq-05.txt` | [draft-ietf-hpke-pq-05, Post-Quantum and Post-Quantum/Traditional Hybrid Algorithms for HPKE](https://www.ietf.org/archive/id/draft-ietf-hpke-pq-05.txt) | 2026-07-06 | 164,525 | `c3afa3981c7e2aacac4912a8b58eca14a92a10c66c4fd4e9ff078195a1ac9c5d` |
 
-`draft-ietf-hpke-pq-05.txt` (Internet-Draft, revision 05, 2026-07-06,
-SHA-256 `c3afa398…1ac9c5d`, from <https://www.ietf.org/archive/id/draft-ietf-hpke-pq-05.txt>)
-is still committed here. It expires 2027-01-07 and is work in progress, so
-re-check the datatracker before citing it as current.
+The Internet-Draft expires 2027-01-07 and is work in progress, so re-check the
+datatracker before citing it as current.
 
 ## FrodoKEM and Classic McEliece
 
