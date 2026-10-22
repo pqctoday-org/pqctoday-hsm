@@ -479,6 +479,102 @@ add({"create.generate_key_pair.ml_dsa_44", "create",
          gen_pair(e, r, s, "gen", CKM_ML_DSA_KEY_PAIR_GEN, pub, 5, priv, 7);
      }});
 
+// CKM_ML_DSA_EXTERNAL_MU_GEN / CKM_ML_DSA_EXTERNAL_MU and CK_MU_GEN_PARAMS —
+// values and layout from src/lib/vendor_mechanisms.h (the v3.3 working-draft
+// codepoints, ml_dsa.md; not in the v3.2 pkcs11t.h this harness compiles
+// against).
+static const CK_MECHANISM_TYPE kMlDsaExternalMuGen = 0x0000403bUL;
+static const CK_MECHANISM_TYPE kMlDsaExternalMu    = 0x0000403cUL;
+struct MuGenParams {
+    CK_OBJECT_HANDLE hKey;
+    CK_BYTE_PTR      pTR;
+    CK_ULONG         ulTRLen;
+    CK_BYTE_PTR      pctx;
+    CK_ULONG         ulctxLen;
+};
+
+add({"sign.ml_dsa_external_mu_gen_key_handle", "sign",
+     "CKM_ML_DSA_EXTERNAL_MU_GEN from a key handle: tr comes from the PUBLIC key "
+     "for a public or private ML-DSA handle; other keys and non-keys are refused",
+     {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, kMlDsaExternalMuGen, kMlDsaExternalMu}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // PKCS#11 v3.3 working draft, ml_dsa.md: CK_MU_GEN_PARAMS.hKey is a
+         // "public or private" key and the mechanism takes "a key handle or a
+         // precomputed TR of the public key", so tr = H(pk, 64) either way.
+         // Key pairs are random, so the observations are equalities and return
+         // codes, never µ bytes: µ(private handle) == µ(public handle), and a
+         // signature over that µ verifies as plain CKM_ML_DSA over the message.
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,         &clPublic,  sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,      &ktMlDsa,   sizeof ktMlDsa),
+             ATTR(CKA_PARAMETER_SET, &psMlDsa44, sizeof psMlDsa44),
+             ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+             ATTR(CKA_VERIFY,        &bTrue,     sizeof bTrue),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,      &ktMlDsa,   sizeof ktMlDsa),
+             ATTR(CKA_PARAMETER_SET, &psMlDsa44, sizeof psMlDsa44),
+             ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+             ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+         };
+         CK_MECHANISM km = { CKM_ML_DSA_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+         r.rv("keygen", rv);
+         if (rv != CKR_OK) return;
+
+         CK_BYTE msg[] = "external-mu message";
+         auto mu_from = [&](const std::string& tag, CK_OBJECT_HANDLE h, std::vector<CK_BYTE>& out) {
+             MuGenParams p = { h, NULL_PTR, 0, NULL_PTR, 0 };
+             CK_MECHANISM m = { kMlDsaExternalMuGen, &p, sizeof p };
+             CK_RV irv = e.fl->C_DigestInit(s, &m);
+             r.rv(tag + ".init", irv);
+             if (irv != CKR_OK) return;
+             out.assign(64, 0);
+             CK_ULONG len = 64;
+             CK_RV drv = e.fl->C_Digest(s, msg, sizeof msg - 1, out.data(), &len);
+             r.rv(tag + ".digest", drv);
+             out.resize(drv == CKR_OK ? len : 0);
+         };
+         std::vector<CK_BYTE> muPub, muPriv, unused;
+         mu_from("pub", hPub, muPub);
+         mu_from("priv", hPriv, muPriv);
+         r.put("mu_priv_equals_mu_pub", (!muPub.empty() && muPub == muPriv) ? "yes" : "no");
+
+         if (muPriv.size() == 64) {
+             CK_MECHANISM sm = { kMlDsaExternalMu, NULL_PTR, 0 };
+             r.rv("sign_mu.init", e.fl->C_SignInit(s, &sm, hPriv));
+             CK_BYTE sig[4096]; CK_ULONG sigLen = sizeof sig;
+             CK_RV srv = e.fl->C_Sign(s, muPriv.data(), 64, sig, &sigLen);
+             r.rv("sign_mu", srv);
+             if (srv == CKR_OK) {
+                 CK_MECHANISM vm = { CKM_ML_DSA, NULL_PTR, 0 };
+                 r.rv("verify_plain.init", e.fl->C_VerifyInit(s, &vm, hPub));
+                 r.rv("verify_plain", e.fl->C_Verify(s, msg, sizeof msg - 1, sig, sigLen));
+             }
+         }
+
+         // Another key type, and a handle that is not a key.
+         CK_ULONG aesLen = 32;
+         CK_ATTRIBUTE aes[] = {
+             ATTR(CKA_VALUE_LEN, &aesLen, sizeof aesLen),
+             ATTR(CKA_TOKEN,     &bFalse, sizeof bFalse),
+         };
+         CK_MECHANISM akm = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hAes = 0;
+         if (e.fl->C_GenerateKey(s, &akm, aes, 2, &hAes) == CKR_OK) mu_from("aes", hAes, unused);
+         CK_OBJECT_CLASS clData = CKO_DATA;
+         CK_BYTE dataValue[] = { 1, 2, 3 };
+         CK_ATTRIBUTE data[] = {
+             ATTR(CKA_CLASS, &clData,    sizeof clData),
+             ATTR(CKA_TOKEN, &bFalse,    sizeof bFalse),
+             ATTR(CKA_VALUE, dataValue,  sizeof dataValue),
+         };
+         CK_OBJECT_HANDLE hData = 0;
+         if (e.fl->C_CreateObject(s, data, 3, &hData) == CKR_OK) mu_from("data_object", hData, unused);
+     }});
+
 add({"create.generate_key_pair.ml_kem_768", "create",
      "ML-KEM-768 key pair — decapsulation key must be raw FIPS 203 bytes (E3)",
      {CKM_ML_KEM_KEY_PAIR_GEN}, true, true,
