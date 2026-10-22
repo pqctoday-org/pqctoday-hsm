@@ -1810,9 +1810,15 @@ mod demo_ca_tests {
             assert_eq!(rec.algorithm, a, "{name} stored as its composite variant");
             assert_eq!(rec.pkcs11_cka_id_secondary, None, "{name}: one engine object, no second handle");
             let session = pg.deps.engine_session.unwrap();
-            let h = softhsmrustv3::native::find_all_by_cka_id(session, &rec.pkcs11_cka_id).unwrap();
-            assert_eq!(h.len(), 2, "{name}: one public + one private object");
-            for h in h {
+            // The CA certificate's engine projection shares the CKA_ID; the
+            // key objects are exactly one public and one private composite key.
+            let keys: Vec<u32> = softhsmrustv3::native::find_all_by_cka_id(session, &rec.pkcs11_cka_id)
+                .unwrap()
+                .into_iter()
+                .filter(|&h| softhsmrustv3::native::get_attribute_u32(session, h, c::CKA_CLASS) != Some(c::CKO_CERTIFICATE))
+                .collect();
+            assert_eq!(keys.len(), 2, "{name}: one public + one private object");
+            for h in keys {
                 assert_eq!(softhsmrustv3::native::get_attribute_u32(session, h, c::CKA_KEY_TYPE), Some(c::CKK_COMP_SIG), "{name}");
             }
             minted += 1;
