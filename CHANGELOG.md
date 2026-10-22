@@ -27,6 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - C++ `C_VerifySignature` returns `CKR_SIGNATURE_LEN_RANGE` for a wrong-length SLH-DSA signature, as `C_Verify` does.
 - A pre-hashed message of the wrong length on the generic and hash-specific ML-DSA / SLH-DSA pre-hash mechanisms returns
   `CKR_DATA_LEN_RANGE` in both engines (previously `CKR_FUNCTION_FAILED` in the Rust engine).
+- The generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA` are single-part only in both engines, as PKCS#11 v3.3 states: the C++
+  engine no longer accepts a multi-part `C_VerifySignatureUpdate`/`Final` on them (`CKR_OPERATION_NOT_INITIALIZED`).
 
 ### Removed
 
