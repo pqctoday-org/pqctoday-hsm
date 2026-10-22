@@ -763,3 +763,186 @@ fn unwrap_template_is_applied_then_checked() {
     agree.push((CKA_EXTRACTABLE, vec![0]));
     assert_eq!(unwrap(&agree).0, CKR_OK);
 }
+
+// ── HSS key generation and CKA_KEYS_REMAINING ───────────────────────────────
+
+fn ulongs(vals: &[u32]) -> Vec<u8> {
+    vals.iter().flat_map(|v| ulong(*v)).collect()
+}
+
+fn hss_keypair(param: Option<&[usize; 17]>, prv_extra: Vec<(u32, Vec<u8>)>, pub_extra: Vec<(u32, Vec<u8>)>) -> (u32, u32, u32) {
+    let mut pub_entries = vec![
+        (CKA_CLASS, ulong(CKO_PUBLIC_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_HSS)),
+        (CKA_TOKEN, vec![0]),
+    ];
+    pub_entries.extend(pub_extra);
+    let mut prv_entries = vec![
+        (CKA_CLASS, ulong(CKO_PRIVATE_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_HSS)),
+        (CKA_TOKEN, vec![0]),
+    ];
+    prv_entries.extend(prv_extra);
+    let mut m: [usize; 3] = match param {
+        Some(p) => [CKM_HSS_KEY_PAIR_GEN as usize, p.as_ptr() as usize, std::mem::size_of_val(p)],
+        None => [CKM_HSS_KEY_PAIR_GEN as usize, 0, 0],
+    };
+    let mut pw = words(&pub_entries);
+    let mut sw = words(&prv_entries);
+    let (mut hp, mut hs) = (0u32, 0u32);
+    let rv = C_GenerateKeyPair(
+        SESSION,
+        m.as_mut_ptr() as *mut u8,
+        pw.as_mut_ptr() as *mut u8,
+        pub_entries.len() as u32,
+        sw.as_mut_ptr() as *mut u8,
+        prv_entries.len() as u32,
+        &mut hp,
+        &mut hs,
+    );
+    (rv, hp, hs)
+}
+
+fn legacy_hss_param(lms: &[u32], lmots: &[u32]) -> [usize; 17] {
+    let mut p = [0usize; 17];
+    p[0] = lms.len();
+    for (i, v) in lms.iter().enumerate() {
+        p[1 + i] = *v as usize;
+    }
+    for (i, v) in lmots.iter().enumerate() {
+        p[9 + i] = *v as usize;
+    }
+    p
+}
+
+fn hss_template(levels: u32, lms: &[u32], lmots: &[u32]) -> Vec<(u32, Vec<u8>)> {
+    vec![
+        (CKA_HSS_LEVELS, ulong(levels)),
+        (CKA_HSS_LMS_TYPES, ulongs(lms)),
+        (CKA_HSS_LMOTS_TYPES, ulongs(lmots)),
+    ]
+}
+
+/// The attribute as a caller reads it: (rv, ulValueLen, value).
+fn read_ulong_attr(h: u32, t: u32) -> (u32, usize, u64) {
+    let mut buf = vec![0u8; 8];
+    let mut a: [usize; 3] = [t as usize, buf.as_mut_ptr() as usize, buf.len()];
+    let rv = C_GetAttributeValue(SESSION, h, a.as_mut_ptr() as *mut u8, 1);
+    let mut w = [0u8; 8];
+    if rv == CKR_OK {
+        w[..a[2]].copy_from_slice(&buf[..a[2]]);
+    }
+    (rv, a[2], u64::from_le_bytes(w))
+}
+
+/// v3.2 §6.14 / v3.3 hss.md: "The mechanism generates HSS public/private key
+/// pairs for the scheme specified by the CKA_HSS_LEVELS, CKA_HSS_LMS_TYPES,
+/// and CKA_HSS_LMOTS_TYPES attributes of the template for the private key."
+/// Before the fix those attributes were ignored and a spec-following caller
+/// silently got the single-level default.
+#[test]
+fn hss_keygen_takes_the_scheme_from_the_private_template() {
+    let _guard = test_lock::acquire();
+    setup();
+    let lms = [CKP_LMS_SHA256_M32_H5, CKP_LMS_SHA256_M32_H5];
+    let lmots = [CKP_LMOTS_SHA256_N32_W8, CKP_LMOTS_SHA256_N32_W4];
+    let (rv, hp, hs) = hss_keypair(None, hss_template(2, &lms, &lmots), vec![]);
+    assert_eq!(rv, CKR_OK);
+    // Contributed to the public key: the level count and the top level's types.
+    assert_eq!(read_ulong_attr(hp, CKA_HSS_LEVELS).2, 2);
+    assert_eq!(read_ulong_attr(hp, CKA_HSS_LMS_TYPE).2, CKP_LMS_SHA256_M32_H5 as u64);
+    assert_eq!(read_ulong_attr(hp, CKA_HSS_LMOTS_TYPE).2, CKP_LMOTS_SHA256_N32_W8 as u64);
+    // The private key keeps the full lists.
+    assert_eq!(attr_bytes(hs, CKA_HSS_LMS_TYPES), Some(ulongs(&lms)));
+    assert_eq!(attr_bytes(hs, CKA_HSS_LMOTS_TYPES), Some(ulongs(&lmots)));
+    // The key really is two levels: 2^5 * 2^5 signatures, and an HSS
+    // signature with one signed public key (RFC 8554 §6.2: 4 + (L-1)*... ),
+    // longer than a single-level one.
+    assert_eq!(read_ulong_attr(hs, CKA_KEYS_REMAINING), (CKR_OK, std::mem::size_of::<usize>(), 1024));
+    let msg = b"two-level HSS";
+    let sig = sign_with(hs, CKM_HSS, None, msg).expect("sign");
+    assert_eq!(verify_with(hp, CKM_HSS, None, msg, &sig), CKR_OK);
+    let (_, hp1, hs1) = hss_keypair(None, vec![], vec![]);
+    let sig1 = sign_with(hs1, CKM_HSS, None, msg).unwrap();
+    assert_eq!(u32::from_be_bytes(sig[..4].try_into().unwrap()), 1, "Nspk = L-1 = 1");
+    assert_eq!(u32::from_be_bytes(sig1[..4].try_into().unwrap()), 0, "default stays single-level");
+    assert_eq!(verify_with(hp1, CKM_HSS, None, msg, &sig1), CKR_OK);
+    // The scheme is fixed once the key exists.
+    let v = ulong(1);
+    let mut t: [usize; 3] = [CKA_HSS_LEVELS as usize, v.as_ptr() as usize, v.len()];
+    assert_eq!(C_SetAttributeValue(SESSION, hs, t.as_mut_ptr() as *mut u8, 1), CKR_ATTRIBUTE_READ_ONLY);
+}
+
+/// The legacy vendor mechanism parameter keeps working; with the template it
+/// must describe the same scheme. Incomplete, inconsistent and invalid
+/// template schemes are refused.
+#[test]
+fn hss_keygen_parameter_precedence_and_template_checks() {
+    let _guard = test_lock::acquire();
+    setup();
+    let lms = [CKP_LMS_SHA256_M32_H5, CKP_LMS_SHA256_M32_H5];
+    let lmots = [CKP_LMOTS_SHA256_N32_W4, CKP_LMOTS_SHA256_N32_W4];
+    let param = legacy_hss_param(&lms, &lmots);
+    let (rv, hp, _) = hss_keypair(Some(&param), vec![], vec![]);
+    assert_eq!(rv, CKR_OK, "legacy parameter alone");
+    assert_eq!(read_ulong_attr(hp, CKA_HSS_LEVELS).2, 2);
+    assert_eq!(hss_keypair(Some(&param), hss_template(2, &lms, &lmots), vec![]).0, CKR_OK, "agreeing");
+    assert_eq!(
+        hss_keypair(Some(&param), hss_template(1, &lms[..1], &lmots[..1]), vec![]).0,
+        CKR_TEMPLATE_INCONSISTENT,
+        "template and parameter disagree"
+    );
+    // One or two of the three attributes.
+    assert_eq!(
+        hss_keypair(None, vec![(CKA_HSS_LEVELS, ulong(1))], vec![]).0,
+        CKR_TEMPLATE_INCOMPLETE
+    );
+    // List lengths must equal CKA_HSS_LEVELS.
+    assert_eq!(
+        hss_keypair(None, hss_template(2, &lms[..1], &lmots), vec![]).0,
+        CKR_TEMPLATE_INCONSISTENT
+    );
+    // Levels out of range, unknown or mixed-family types.
+    assert_eq!(hss_keypair(None, hss_template(0, &[], &[]), vec![]).0, CKR_ATTRIBUTE_VALUE_INVALID);
+    assert_eq!(
+        hss_keypair(None, hss_template(1, &[0x77], &[CKP_LMOTS_SHA256_N32_W4]), vec![]).0,
+        CKR_ATTRIBUTE_VALUE_INVALID
+    );
+    assert_eq!(
+        hss_keypair(None, hss_template(1, &[CKP_LMS_SHA256_M32_H5], &[CKP_LMOTS_SHAKE_N32_W4]), vec![]).0,
+        CKR_ATTRIBUTE_VALUE_INVALID
+    );
+    // A public template naming a contributed attribute with another value.
+    assert_eq!(
+        hss_keypair(None, hss_template(2, &lms, &lmots), vec![(CKA_HSS_LEVELS, ulong(1))]).0,
+        CKR_TEMPLATE_INCONSISTENT
+    );
+}
+
+/// hss.md: CKA_KEYS_REMAINING is on the private key only, is a CK_ULONG, and
+/// is capped at 2^32-1 — a real count, not CK_UNAVAILABLE_INFORMATION. It
+/// used to be on the public key too, read "unavailable" at the cap, and was
+/// rewritten as 4 bytes after the first signature.
+#[test]
+fn hss_keys_remaining_width_cap_and_placement() {
+    let _guard = test_lock::acquire();
+    setup();
+    let word = std::mem::size_of::<usize>();
+    let (rv, hp, hs) = hss_keypair(None, vec![], vec![]);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(read_ulong_attr(hp, CKA_KEYS_REMAINING).0, CKR_ATTRIBUTE_TYPE_INVALID, "not on the public key");
+    assert_eq!(read_ulong_attr(hs, CKA_KEYS_REMAINING), (CKR_OK, word, 32));
+    sign_with(hs, CKM_HSS, None, b"one").unwrap();
+    assert_eq!(read_ulong_attr(hs, CKA_KEYS_REMAINING), (CKR_OK, word, 31), "still a CK_ULONG");
+
+    // A scheme above 2^32 signatures (H25 over H10 = 2^35): the count stays
+    // at the cap after a signature. The levels are restated on the object
+    // directly — generating an H25 tree in a unit test is not practical.
+    assert_eq!(crate::native::hbs::hss_capacity(&[CKP_LMS_SHA256_M32_H25, CKP_LMS_SHA256_M32_H10]), 1u64 << 35);
+    crate::state::set_object_attrs_bytes_batch(
+        hs,
+        &[(CKA_HSS_LMS_TYPES, ulongs(&[CKP_LMS_SHA256_M32_H25, CKP_LMS_SHA256_M32_H10]))],
+    );
+    sign_with(hs, CKM_HSS, None, b"two").unwrap();
+    assert_eq!(read_ulong_attr(hs, CKA_KEYS_REMAINING), (CKR_OK, word, 0xFFFF_FFFF));
+}

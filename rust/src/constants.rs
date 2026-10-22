@@ -1463,6 +1463,12 @@ pub const CKA_PQCTODAY_FHE_DECRYPT_POLICY: u32 = 0x8000_0112;
 pub const CKA_HSS_LEVELS: u32 = 0x0000_0617;
 pub const CKA_HSS_LMS_TYPE: u32 = 0x0000_0618;
 pub const CKA_HSS_LMOTS_TYPE: u32 = 0x0000_0619;
+// The private-key attributes CKM_HSS_KEY_PAIR_GEN reads the scheme from
+// ("the CKA_HSS_LEVELS, CKA_HSS_LMS_TYPES, and CKA_HSS_LMOTS_TYPES attributes
+// of the template for the private key"): CK_ULONG arrays, one entry per level
+// from top to bottom (v3.2 pkcs11t.h:639-640; v3.3 hss.md private key table).
+pub const CKA_HSS_LMS_TYPES: u32 = 0x0000_061a;
+pub const CKA_HSS_LMOTS_TYPES: u32 = 0x0000_061b;
 // CKA_KEYS_REMAINING: PKCS#11 v3.3 working-draft name for 0x61c, which now
 // also covers XMSS and XMSS^MT keys. CKA_HSS_KEYS_REMAINING (v3.2 §6.14) stays
 // as an alias with the same value, as the TC header keeps it ("Deprecated")

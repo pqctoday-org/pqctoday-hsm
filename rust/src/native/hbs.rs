@@ -21,12 +21,32 @@
 //! buffer — it calls `sign_prepare` then `sign_commit` back-to-back.
 
 use crate::constants::{
-    CKA_HSS_KEYS_REMAINING, CKA_PRIV_LEAF_INDEX, CKA_LMS_PARAM_SET, CKA_PRIV_STATEFUL_KEY_STATE,
-    CKR_FUNCTION_FAILED, CKR_KEY_TYPE_INCONSISTENT,
+    CKA_HSS_LMS_TYPES, CKA_KEYS_REMAINING, CKA_PRIV_LEAF_INDEX, CKA_LMS_PARAM_SET,
+    CKA_PRIV_STATEFUL_KEY_STATE, CKR_FUNCTION_FAILED, CKR_KEY_TYPE_INCONSISTENT,
 };
 use crate::state::{
     get_object_attr_bytes, get_object_attr_u32, get_object_attr_u64, set_object_attrs_bytes_batch,
 };
+
+/// Total one-time signatures of an HSS scheme: ∏ 2^H over its levels' LMS
+/// types (RFC 8554 §6), saturating. Unknown types contribute nothing.
+pub fn hss_capacity(lms_types: &[u32]) -> u64 {
+    lms_types
+        .iter()
+        .filter_map(|p| crate::crypto::lms::lms_param_max_leaves(*p))
+        .fold(1u64, |acc, leaves| acc.saturating_mul(leaves))
+}
+
+/// The per-level LMS types an HSS private key carries in CKA_HSS_LMS_TYPES
+/// (CK_ULONG array), if it has them.
+fn lms_types_of(handle: u32) -> Option<Vec<u32>> {
+    let word = crate::ck_param::WORD;
+    let b = get_object_attr_bytes(handle, CKA_HSS_LMS_TYPES)?;
+    if b.is_empty() || b.len() % word != 0 {
+        return None;
+    }
+    Some(b.chunks_exact(word).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
 
 /// A computed HSS/LMS signature plus the not-yet-persisted next private-key
 /// state needed to commit it. Dropping this without calling [`sign_commit`]
@@ -73,11 +93,22 @@ pub(crate) fn sign_commit(handle: u32, prepared: &Prepared) {
     let mut changes = vec![(CKA_PRIV_STATEFUL_KEY_STATE, prepared.new_priv_state.clone())];
     let old_idx = get_object_attr_u64(handle, CKA_PRIV_LEAF_INDEX).unwrap_or(0);
     changes.push((CKA_PRIV_LEAF_INDEX, (old_idx + 1).to_le_bytes().to_vec()));
-    if let Some(mut remaining) = get_object_attr_u32(handle, CKA_HSS_KEYS_REMAINING) {
-        if remaining > 0 {
-            remaining -= 1;
-            changes.push((CKA_HSS_KEYS_REMAINING, remaining.to_le_bytes().to_vec()));
-        }
+    // CKA_KEYS_REMAINING (hss.md private key table): min(remaining, 2^32-1)
+    // at CK_ULONG width. It was rewritten as 4 bytes, so after the first
+    // signature a 64-bit caller read a 4-byte CK_ULONG. Recomputed from the
+    // capacity and the leaf index when the key records its levels (so a tree
+    // above 2^32 stays at the cap until it really drops below it); keys
+    // without CKA_HSS_LMS_TYPES (imported, or generated before it was stored)
+    // count down from the stored value.
+    if get_object_attr_bytes(handle, CKA_KEYS_REMAINING).is_some() {
+        let remaining = match lms_types_of(handle) {
+            Some(types) => hss_capacity(&types).saturating_sub(old_idx + 1),
+            None => (get_object_attr_u32(handle, CKA_KEYS_REMAINING).unwrap_or(0) as u64).saturating_sub(1),
+        };
+        changes.push((
+            CKA_KEYS_REMAINING,
+            crate::crypto::xmss_bridge::keys_remaining_attr_bytes(remaining),
+        ));
     }
     set_object_attrs_bytes_batch(handle, &changes);
 }

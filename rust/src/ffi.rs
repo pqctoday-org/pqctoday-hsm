@@ -2456,6 +2456,97 @@ mod ec_extra_bits_tests {
     }
 }
 
+/// The HSS scheme `(levels, LMS types, LM-OTS types)` for
+/// `CKM_HSS_KEY_PAIR_GEN`.
+///
+/// The specification route (v3.2 §6.14 key pair generation; unchanged in the
+/// v3.3 draft's hss.md): "This mechanism does not have a parameter. The
+/// mechanism generates HSS public/private key pairs for the scheme specified
+/// by the CKA_HSS_LEVELS, CKA_HSS_LMS_TYPES, and CKA_HSS_LMOTS_TYPES
+/// attributes of the template for the private key." These are read first.
+///
+/// The engine also keeps its older `CK_HSS_KEY_PAIR_GEN_PARAMS` mechanism
+/// parameter (`ck_param::hss_key_pair_gen`), which existing callers use (the
+/// in-browser HSM's stateful-signature helpers, the JS test helpers). It is a
+/// vendor extension: OASIS never specified a parameter for this mechanism,
+/// and the v3.3 TC deleted the matching dead types (#140, commit 32b5b7f).
+///
+/// Precedence: template attributes, else the mechanism parameter, else the
+/// single-level default (H5 / W4, SHA-256). When both are given they must
+/// describe the same scheme, else CKR_TEMPLATE_INCONSISTENT.
+///
+/// Template checks: the three attributes come together (one or two alone is
+/// CKR_TEMPLATE_INCOMPLETE); CKA_HSS_LEVELS is a CK_ULONG in 1..=8 and each
+/// list holds exactly that many CK_ULONGs ("This number must match the
+/// CKA_HSS_LEVELS attribute value", else CKR_TEMPLATE_INCONSISTENT); every
+/// type must be a known LMS / LM-OTS type of one hash family
+/// (CKR_ATTRIBUTE_VALUE_INVALID).
+unsafe fn hss_keygen_scheme(
+    p_mechanism: *const u8,
+    prv_template: *mut u8,
+    prv_count: u32,
+) -> Result<(usize, Vec<u32>, Vec<u32>), u32> {
+    let from_param = match ck_param::mech(p_mechanism)
+        .opt_params(&ck_param::hss_key_pair_gen::LAYOUT, ck_param::hss_key_pair_gen::FIELD_COUNT)
+    {
+        Ok(None) => None,
+        Err(_) => return Err(CKR_MECHANISM_PARAM_INVALID),
+        Ok(Some(r)) => {
+            let levels = r.ulong(ck_param::hss_key_pair_gen::UL_LEVELS);
+            if levels == 0 || levels > 8 {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            let lms: Vec<u32> = (0..levels).map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMS_0 + i)).collect();
+            let lmots: Vec<u32> = (0..levels).map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMOTS_0 + i)).collect();
+            Some((levels, lms, lmots))
+        }
+    };
+
+    let get = |t| crate::crypto::handlers::get_attr_bytes_present(prv_template, prv_count, t);
+    let from_template = match (get(CKA_HSS_LEVELS), get(CKA_HSS_LMS_TYPES), get(CKA_HSS_LMOTS_TYPES)) {
+        (None, None, None) => None,
+        (Some(l), Some(lms), Some(lmots)) => {
+            let word = ck_param::WORD;
+            let ulongs = |b: &[u8]| -> Result<Vec<u32>, u32> {
+                b.chunks_exact(word)
+                    .map(|c| {
+                        let mut v = [0u8; 8];
+                        v[..word].copy_from_slice(c);
+                        u32::try_from(u64::from_le_bytes(v)).map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)
+                    })
+                    .collect()
+            };
+            if l.len() != word {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            let levels = ulongs(&l)?[0] as usize;
+            if levels == 0 || levels > 8 {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            if lms.len() != levels * word || lmots.len() != levels * word {
+                return Err(CKR_TEMPLATE_INCONSISTENT);
+            }
+            let (lms, lmots) = (ulongs(&lms)?, ulongs(&lmots)?);
+            let family = crate::crypto::lms::lms_family(lms[0]).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+            let same = |f: Option<u32>| f == Some(family);
+            if !lms.iter().all(|p| same(crate::crypto::lms::lms_family(*p)))
+                || !lmots.iter().all(|p| same(crate::crypto::lms::lmots_family(*p)))
+            {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            Some((levels, lms, lmots))
+        }
+        _ => return Err(CKR_TEMPLATE_INCOMPLETE),
+    };
+
+    match (from_template, from_param) {
+        (Some(t), Some(p)) if t != p => Err(CKR_TEMPLATE_INCONSISTENT),
+        (Some(t), _) => Ok(t),
+        (None, Some(p)) => Ok(p),
+        (None, None) => Ok((1, vec![CKP_LMS_SHA256_M32_H5], vec![CKP_LMOTS_SHA256_N32_W4])),
+    }
+}
+
 /// K0B replication gate, pre-generation half. `Ok(None)`: the template names
 /// no replication attribute. `Ok(Some(policy_id))`: a validated request to
 /// bind the new key to an enrolled policy (educational-replication only).
@@ -4148,33 +4239,19 @@ fn C_GenerateKeyPair_impl(
             }
 
             // ── HSS keygen (PKCS#11 v3.2 §6.14 CKM_HSS_KEY_PAIR_GEN) ─────────
-            // Single-level LMS: use levels=1 in CK_HSS_KEY_PAIR_GEN_PARAMS.
+            // The scheme comes from the private template's CKA_HSS_LEVELS /
+            // CKA_HSS_LMS_TYPES / CKA_HSS_LMOTS_TYPES, as the specification
+            // says, or from the engine's legacy mechanism parameter; see
+            // hss_keygen_scheme for the precedence.
             CKM_HSS_KEY_PAIR_GEN => {
-                // CK_HSS_KEY_PAIR_GEN_PARAMS (optional): ulLevels + ulLmsParamSet[8]
-                // + ulLmotsParamSet[8], all CK_ULONG → 17 words at native width
-                // (68 B wasm32, 136 B native). Absent params ⇒ a single-level LMS
-                // with the default SHA-256 parameter set (PKCS#11 v3.2 §6.14).
-                let (levels, lms_params, lmots_params): (usize, Vec<u32>, Vec<u32>) =
-                    match ck_param::mech(p_mechanism).opt_params(
-                        &ck_param::hss_key_pair_gen::LAYOUT,
-                        ck_param::hss_key_pair_gen::FIELD_COUNT,
-                    ) {
-                        Ok(None) => (1, vec![CKP_LMS_SHA256_M32_H5], vec![CKP_LMOTS_SHA256_N32_W4]),
-                        Err(_) => return CKR_MECHANISM_PARAM_INVALID,
-                        Ok(Some(r)) => {
-                            let levels = r.ulong(ck_param::hss_key_pair_gen::UL_LEVELS);
-                            if levels == 0 || levels > 8 {
-                                return CKR_MECHANISM_PARAM_INVALID;
-                            }
-                            let lms: Vec<u32> = (0..levels)
-                                .map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMS_0 + i))
-                                .collect();
-                            let lmots: Vec<u32> = (0..levels)
-                                .map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMOTS_0 + i))
-                                .collect();
-                            (levels, lms, lmots)
-                        }
-                    };
+                let (levels, lms_params, lmots_params) = match hss_keygen_scheme(
+                    p_mechanism,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                ) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                };
 
                 let (pub_bytes, priv_bytes) =
                     match crate::crypto::lms::hss_keygen(levels, &lms_params, &lmots_params) {
@@ -4217,16 +4294,19 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
                 store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut prv_attrs, CKA_SIGN, true);
-                // Total HSS capacity = ∏(2^H_i) for each level, capped at u32::MAX per PKCS#11 v3.2 §6.14.
-                let mut total_sigs: u64 = 1u64;
-                for &p in &lms_params {
-                    if let Some(leaves) = crate::crypto::lms::lms_param_max_leaves(p) {
-                        total_sigs = total_sigs.saturating_mul(leaves);
-                    }
-                }
-                let total_sigs = total_sigs.min(u32::MAX as u64) as u32;
-                store_ulong(&mut pub_attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
-                store_ulong(&mut prv_attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
+                // CKA_KEYS_REMAINING (hss.md private key table): "The minimum
+                // of … the number of one-time private keys remaining [and]
+                // 2^32-1", total capacity ∏(2^H_i). Private key only — the
+                // public key table does not list it, and nothing decremented
+                // the public copy this used to carry. Stored at CK_ULONG
+                // width with 2^32-1 a real count (keys_remaining_attr_bytes),
+                // not store_ulong, which turns 0xFFFF_FFFF into
+                // CK_UNAVAILABLE_INFORMATION on a 64-bit CK_ULONG.
+                let total_sigs = crate::native::hbs::hss_capacity(&lms_params);
+                prv_attrs.insert(
+                    CKA_KEYS_REMAINING,
+                    crate::crypto::xmss_bridge::keys_remaining_attr_bytes(total_sigs),
+                );
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
@@ -4248,6 +4328,30 @@ fn C_GenerateKeyPair_impl(
                 if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
                     return rv;
                 }
+                // The scheme attributes are engine truth once the key exists:
+                // the ones the mechanism contributes to the public key
+                // (hss.md, "contributes … CKA_HSS_LEVELS, CKA_HSS_LMS_TYPE,
+                // CKA_HSS_LMOTS_TYPE"), and the private key's full per-level
+                // lists, stored in CK_ULONG form whichever route chose the
+                // scheme. A public template that names one with another value
+                // asks for a key this generation did not make.
+                let w = |v: u32| (v as usize).to_le_bytes().to_vec();
+                let contributed = [
+                    (CKA_HSS_LEVELS, w(levels as u32)),
+                    (CKA_HSS_LMS_TYPE, w(lms_params[0])),
+                    (CKA_HSS_LMOTS_TYPE, w(lmots_params[0])),
+                ];
+                for (t, v) in &contributed {
+                    if let Some(given) = find_template_entry(p_public_key_template, ul_public_key_attribute_count, *t) {
+                        if &given != v {
+                            return CKR_TEMPLATE_INCONSISTENT;
+                        }
+                    }
+                    pub_attrs.insert(*t, v.clone());
+                    prv_attrs.insert(*t, v.clone());
+                }
+                prv_attrs.insert(CKA_HSS_LMS_TYPES, lms_params.iter().flat_map(|p| w(*p)).collect());
+                prv_attrs.insert(CKA_HSS_LMOTS_TYPES, lmots_params.iter().flat_map(|p| w(*p)).collect());
                 match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
                     Ok((hp, hk)) => {
                         *ph_public_key = hp;
