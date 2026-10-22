@@ -1139,3 +1139,70 @@ void OptionalRandomInputTests::testVerifySignatureLengthRange()
 		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_INVALID, verifySignatureOnce(h, v.get(), hPub, msg, bad));
 	}
 }
+
+void OptionalRandomInputTests::testGenericPreHashSinglePartOnly()
+{
+	// Owner decision D8: the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA are
+	// single-part only (v3.3 "^1^ Single-part operations only": C_Sign,
+	// C_Verify, C_VerifySignature). Every *Update / C_VerifySignatureFinal is
+	// CKR_OPERATION_NOT_INITIALIZED and ends the operation. The hash-specific
+	// and pure mechanisms keep multi-part.
+	CK_SESSION_HANDLE h;
+	openSession(h);
+	const CK_RV NI = CKR_OPERATION_NOT_INITIALIZED;
+	for (int alg = 0; alg < 2; alg++)
+	{
+		const bool mldsa = (alg == 0);
+		nlohmann::json doc = acvpkat::load(mldsa ? "mldsa_siggen_optional_input_test.json"
+		                                         : "slhdsa_siggen_optional_input_test.json");
+		nlohmann::json g, t;
+		CPPUNIT_ASSERT(findCase(doc, [&](const nlohmann::json& x) {
+			return x["preHash"] == "pure" && (mldsa || x["parameterSet"] == "SLH-DSA-SHAKE-128f"); }, g, t));
+		const CK_ULONG ps = mldsa ? mldsaSet(g["parameterSet"].get<std::string>()) : slhSet(g["parameterSet"].get<std::string>());
+		const CK_KEY_TYPE kt = mldsa ? CKK_ML_DSA : CKK_SLH_DSA;
+		CK_OBJECT_HANDLE hPrk, hPub;
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, importKey(h, kt, true, ps, acvpkat::hexField(t, "sk"), hPrk));
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, importKey(h, kt, false, ps, acvpkat::hexField(t, "pk"), hPub));
+		const std::string id = mldsa ? "ML-DSA" : "SLH-DSA";
+		const CK_MECHANISM_TYPE generic = mldsa ? CKM_HASH_ML_DSA : CKM_HASH_SLH_DSA;
+		Bytes ph(32, 0x33), sig;
+		SignMech gm(generic, CKH_DETERMINISTIC_REQUIRED, Bytes(), Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false, true, CKM_SHA256);
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signOnce(h, gm.get(), hPrk, ph, sig));
+		Bytes buf(sig.size());
+		CK_ULONG bl = (CK_ULONG)buf.size();
+
+		// C_SignUpdate, then the operation is gone.
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_SignInit(h, gm.get(), hPrk) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_SignUpdate(h, ph.data(), (CK_ULONG)ph.size()) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_Sign(h, ph.data(), (CK_ULONG)ph.size(), buf.data(), &bl) ));
+		// C_VerifyUpdate, then the operation is gone.
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifyInit(h, gm.get(), hPub) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_VerifyUpdate(h, ph.data(), (CK_ULONG)ph.size()) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_Verify(h, ph.data(), (CK_ULONG)ph.size(), sig.data(), (CK_ULONG)sig.size()) ));
+		// C_VerifySignatureUpdate, then the operation is gone.
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureInit(h, gm.get(), hPub, sig.data(), (CK_ULONG)sig.size()) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_VerifySignatureUpdate(h, ph.data(), (CK_ULONG)ph.size()) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_VerifySignature(h, ph.data(), (CK_ULONG)ph.size()) ));
+		// C_VerifySignatureFinal with no update: refused as well.
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureInit(h, gm.get(), hPub, sig.data(), (CK_ULONG)sig.size()) ));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, NI, CRYPTOKI_F_PTR( C_VerifySignatureFinal(h) ));
+		// Single-part works.
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifyOnce(h, gm.get(), hPub, ph, sig));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifySignatureOnce(h, gm.get(), hPub, ph, sig));
+
+		// Hash-specific and pure mechanisms keep multi-part C_VerifySignature*.
+		const Bytes msg = { 'a', 'b', 'c', 'd' };
+		for (CK_MECHANISM_TYPE mech : { mldsa ? (CK_MECHANISM_TYPE)CKM_HASH_ML_DSA_SHA256 : (CK_MECHANISM_TYPE)CKM_HASH_SLH_DSA_SHA256,
+		                                mldsa ? (CK_MECHANISM_TYPE)CKM_ML_DSA : (CK_MECHANISM_TYPE)CKM_SLH_DSA })
+		{
+			SignMech m(mech, CKH_DETERMINISTIC_REQUIRED, Bytes(), Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false);
+			Bytes s2;
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signOnce(h, m.get(), hPrk, msg, s2));
+			Bytes m1(msg.begin(), msg.begin() + 2), m2(msg.begin() + 2, msg.end());
+			CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureInit(h, m.get(), hPub, s2.data(), (CK_ULONG)s2.size()) ));
+			CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureUpdate(h, m1.data(), (CK_ULONG)m1.size()) ));
+			CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureUpdate(h, m2.data(), (CK_ULONG)m2.size()) ));
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureFinal(h) ));
+		}
+	}
+}
