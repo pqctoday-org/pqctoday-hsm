@@ -469,6 +469,11 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
     if BARE.contains(&name) {
         return true;
     }
+    // Composite names (`ML-DSA-65-Ed25519`, …) — exactly the composite
+    // variants that exist, derived from `KmipAlgorithm`, never a name list.
+    if is_composite_algorithm_name(name) {
+        return true;
+    }
     // Hash names (used as algorithm names in some deny rules, e.g. SHA-256).
     if is_known_hash_name(name) {
         return true;
@@ -501,50 +506,30 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
         .any(|(pfx, ok)| name.strip_prefix(pfx).is_some_and(|rest| ok(rest)))
 }
 
-/// ML-DSA suffix: a bare level (`44`/`65`/`87`) or a composite tail
-/// (`65-Ed25519`, `87-ECDSA-P384`) LAMPS names use. The classical tail is
-/// matched case-insensitively so the KMIP 3.0 spelling (`Ed25519`, per RFC 8032)
-/// and the legacy uppercase (`ED25519`) both validate — the engine likewise
-/// matches composites case-insensitively.
-///
-/// The tail set must stay a superset of what the real
-/// `KmipAlgorithm::CompositeMlDsa*` variants produce via `spec_name()`
-/// (draft-ietf-lamps-pq-composite-sigs-19 §6), or a legitimate composite
-/// policy target would fail its own linter and the rule would be rejected.
-/// Names carry no hash-function suffix — the LAMPS profile's hash choice is
-/// baked into the OID and engine mechanism, not distinguished at the
-/// policy-name layer.
-///
-/// `RSA3072-PSS` added 2026-08-18 with the .41 profile. It was missed at first:
-/// the test guarding this set listed its three variants by hand, so it stayed
-/// green while three of the seven real variants went unchecked. The test now
-/// discovers variants by sweeping the vendor codepoint range, which is what
-/// caught the omission — see
-/// `known_algorithm_names_accepts_every_real_composite_sig_variant`.
+/// ML-DSA suffix: a bare level (`44`/`65`/`87`). Composite names
+/// (`ML-DSA-65-Ed25519`) are accepted earlier, by [`is_composite_algorithm_name`],
+/// and never reach this check.
 fn is_ml_dsa_suffix(s: &str) -> bool {
-    match s {
-        "44" | "65" | "87" => true,
-        // composite: <level>-<classical>
-        _ => {
-            let mut parts = s.splitn(2, '-');
-            let level = parts.next().unwrap_or("");
-            let tail = parts.next().unwrap_or("");
-            matches!(level, "44" | "65" | "87") && is_ml_dsa_composite_tail(tail)
-        }
-    }
+    matches!(s, "44" | "65" | "87")
 }
 
-/// The classical half of an `ML-DSA-<level>-<tail>` LAMPS composite name —
-/// factored out of [`is_ml_dsa_suffix`] so `rule::is_composite_algorithm_name`
-/// (A6.1, 2026-08-28 gaps-remediation plan) can recognise a full composite
-/// name without a second, hand-maintained copy of this tail set. Case-folded
-/// (KMIP 3.0 spells it `Ed25519`; legacy policy YAML may spell it `ED25519`).
-pub(crate) fn is_ml_dsa_composite_tail(tail: &str) -> bool {
-    matches!(
-        tail.to_ascii_uppercase().as_str(),
-        "ED25519" | "ED448" | "ECDSA-P256" | "ECDSA-P384" | "ECDSA-P521"
-            | "RSA2048-PSS" | "RSA3072-PSS" | "RSA4096-PSS"
-    )
+/// `true` if `name` is the `spec_name()` of a real composite algorithm
+/// variant (`KmipAlgorithm::is_composite`), compared ASCII case-insensitively
+/// — the KMIP 3.0 spelling (`Ed25519`, per RFC 8032) and the legacy upper case
+/// (`ED25519`) both validate, as the engine matches composites
+/// case-insensitively. Shared with `rule.rs`, which uses it to keep composites
+/// out of family-prefix matching.
+///
+/// Derived from `KmipAlgorithm::ALL`, not a hand-kept tail set. The tail set
+/// it replaces drifted both ways: `RSA3072-PSS` was missing until 2026-08-18
+/// (a real profile failed its own linter), and `ED448`, `ECDSA-P521` and
+/// `RSA4096-PSS` were accepted, along with every level/tail pairing, though
+/// no variant implements them. A composite variant added later (the
+/// composite-KEM family included) is accepted here with no edit. Names carry
+/// no hash-function suffix — the LAMPS profile's hash choice is baked into
+/// the OID and engine mechanism, not distinguished at the policy-name layer.
+pub(crate) fn is_composite_algorithm_name(name: &str) -> bool {
+    crate::kmip30::KmipAlgorithm::composite_from_spec_name(name).is_some()
 }
 
 /// SLH-DSA suffix: `<hash>-<size><s|f>`, e.g. `SHA2-128s`, `SHAKE-256f`.
@@ -597,10 +582,8 @@ mod tests {
     #[test]
     fn known_algorithm_names_accepts_every_real_composite_sig_variant() {
         use crate::kmip30::KmipAlgorithm;
-        let composites: Vec<KmipAlgorithm> = (0x8000_0000u32..=0x8000_00ff)
-            .filter_map(KmipAlgorithm::from_wire_value)
-            .filter(|a| a.is_composite_sig())
-            .collect();
+        let composites: Vec<KmipAlgorithm> =
+            KmipAlgorithm::ALL.iter().copied().filter(|a| a.is_composite()).collect();
 
         // Guard against the sweep silently finding nothing (e.g. if the
         // codepoint range moved), which would make the loop below vacuous.
@@ -613,6 +596,23 @@ mod tests {
         for a in composites {
             let name = a.spec_name();
             assert!(is_known_algorithm_name(name), "should accept {name}");
+        }
+    }
+
+    /// The composite names the old hand-kept tail set accepted with no
+    /// variant behind them, and level/tail pairings no variant implements,
+    /// are refused.
+    #[test]
+    fn known_algorithm_names_rejects_composites_with_no_variant() {
+        for bad in [
+            "ML-DSA-44-Ed448", "ML-DSA-65-ED448", "ML-DSA-87-Ed448",
+            "ML-DSA-87-ECDSA-P521", "ML-DSA-65-ECDSA-P521",
+            "ML-DSA-87-RSA4096-PSS", "ML-DSA-65-RSA4096-PSS",
+            "ML-DSA-87-Ed25519", "ML-DSA-87-RSA2048-PSS", "ML-DSA-44-ECDSA-P384",
+            "ML-DSA-65-RSA2048-PSS", "ML-DSA-44-RSA3072-PSS",
+        ] {
+            assert!(!is_known_algorithm_name(bad), "should reject {bad}");
+            assert!(!is_composite_algorithm_name(bad), "not a composite: {bad}");
         }
     }
 

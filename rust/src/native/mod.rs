@@ -71,6 +71,10 @@
 //! design that relies on native-surface isolation is real.
 
 pub mod agree;
+pub mod composite;
+pub mod composite_kem;
+pub mod composite_key;
+pub mod composite_sig;
 pub mod derive;
 pub mod encrypt;
 pub(crate) mod hbs;
@@ -96,6 +100,9 @@ pub use sign::*;
 /// so KMIP can map them to KMIP `ResultReason` without an intermediate
 /// type. `CKR_OK = 0x00000000` is `Ok(_)`; any other `CK_RV` is `Err(_)`.
 pub type CkRv = u32;
+
+#[cfg(test)]
+pub(crate) mod composite_vectors;
 
 #[cfg(test)]
 mod parity;

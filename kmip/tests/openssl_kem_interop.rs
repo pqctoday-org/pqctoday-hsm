@@ -8,8 +8,8 @@
 //! a whole-hybrid-key exchange through the CLI is impossible. But OpenSSL DOES
 //! serialize standalone ML-KEM-768, and our hybrid is exactly
 //! `ek_mlkem ‖ x_pub` / `ct_mlkem ‖ x_eph` / `ss_mlkem ‖ ss_x25519`. So we test
-//! the ML-KEM half whole (here) and the hybrid decomposed (see
-//! openssl_hybrid_interop.rs). Together with the RFC 7748 X25519 KAT and the
+//! the ML-KEM half whole and the hybrid decomposed, both in this file
+//! (`x25519mlkem768_*_component_*`). Together with the RFC 7748 X25519 KAT and the
 //! draft-order structural asserts, that is a full interop proof.
 //!
 //! Requires the `openssl` CLI on PATH (present in the build container, 3.5.6).

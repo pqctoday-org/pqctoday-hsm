@@ -1179,7 +1179,7 @@ fn oaep_for(p: &OaepParams) -> rsa::Oaep {
 
 /// RSA OAEP encrypt — accepts both X.509 SPKI and PKCS#1 RSAPublicKey
 /// DER for the public-key bytes.
-fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+pub(crate) fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
     let public_key = rsa_public_key_from_any_der(pub_der)?;
     let padding = oaep_for(params);
     let mut rng = rand::rngs::OsRng;
@@ -1192,7 +1192,7 @@ fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Re
 /// RSAPrivateKey DER. CS-AC-M-OAEP-10 registers with
 /// `KeyFormatType=PKCS_1`, `HashingAlgorithm=SHA_384`,
 /// `MaskGeneratorHashingAlgorithm=SHA_256`, and a `PSource` label.
-fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+pub(crate) fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
     // AWS-LC owns the unpad on native → constant time, no Marvin oracle on
     // the path KMIP Decrypt (:5696) reaches. `None` means "not handled here"
     // — wasm32, a PKCS#1 `RSAPrivateKey` DER (which AWS-LC's loader

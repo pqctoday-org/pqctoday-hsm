@@ -10,9 +10,9 @@
   "counts": {
     "canonical_header_mechanisms": 473,
     "cpp_advertised": 169,
-    "rust_advertised": 178,
+    "rust_advertised": 183,
     "cpp_only": [],
-    "rust_only_count": 9
+    "rust_only_count": 14
   },
   "scope_reasons": {
     "legacy-block-ciphers": "Pre-AES or regional block ciphers (DES/3DES, RC2/RC4/RC5, CAST, IDEA, Blowfish/Twofish, SKIPJACK/BATON/JUNIPER/FORTEZZA, SEED, ARIA, Camellia, GOST 28147). This is a PQC engine with a deliberately narrow symmetric surface: AES and ChaCha20. Adding any of these would widen the attack surface to primitives no current caller should select.",
@@ -3063,6 +3063,46 @@
       "cpp_max": 64,
       "rust_min": 16,
       "rust_max": 64
+    },
+    "CKM_COMP_KEM": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x4041 (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_kem.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-KEM per draft-ietf-lamps-pq-composite-kem-23 through C_EncapsulateKey/C_DecapsulateKey, no parameter; 10 of 12 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_kem.md).",
+      "rust_min": 1216,
+      "rust_max": 1966
+    },
+    "CKM_COMP_KEM_KEY_PAIR_GEN": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x4040 (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_kem.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Generates single-object CKK_COMP_KEM key pairs for 10 of 12 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_kem.md).",
+      "rust_min": 1216,
+      "rust_max": 1966
+    },
+    "CKM_COMP_SIG": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x403e (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-DSA per draft-ietf-lamps-pq-composite-sigs-19 through C_Sign/C_Verify (single- and multi-part, the pre-hash streamed) and C_VerifySignature, optional CK_SIGN_ADDITIONAL_CONTEXT; 16 of 18 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
+      "rust_min": 1344,
+      "rust_max": 3118
+    },
+    "CKM_COMP_SIG_EXTERNAL_HASH": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x403f (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-DSA over a caller-supplied PH(M) of exactly the set's pre-hash length (draft-ietf-lamps-pq-composite-sigs-19 §10.5), single-part only, optional CK_SIGN_ADDITIONAL_CONTEXT; 16 of 18 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
+      "rust_min": 1344,
+      "rust_max": 3118
+    },
+    "CKM_COMP_SIG_KEY_PAIR_GEN": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x403d (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Generates single-object CKK_COMP_SIG key pairs for 16 of 18 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
+      "rust_min": 1344,
+      "rust_max": 3118
     },
     "CKM_EC_MONTGOMERY_KEY_DERIVE": {
       "value": "engine-extension",

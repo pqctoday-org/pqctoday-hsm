@@ -142,6 +142,7 @@ rust/pkg-acvp/
 /docs/refs/rfc9180-hpke.txt
 /docs/refs/draft-ietf-hpke-pq-05.txt
 /docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/
+/docs/refs/pkcs11-v3.3-draft-git-snapshot-20261021/
 /kmip/spec/oasis-kmip-*/**/*.pdf
 /kmip/spec/oasis-kmip-*/**/*.docx
 /kmip/spec/oasis-kmip-*/**/*.html

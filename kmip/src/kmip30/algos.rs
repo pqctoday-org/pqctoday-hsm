@@ -675,6 +675,72 @@ impl KmipAlgorithm {
         )
     }
 
+    /// Every variant, in declaration order — the single list callers sweep
+    /// instead of keeping their own hand-written name tables (the policy
+    /// linter's composite names, the WASM demo-CA resolver). Pinned by the
+    /// `all_lists_every_variant_in_declaration_order` test, which also sweeps
+    /// the wire-value ranges so a variant missing here is caught.
+    pub const ALL: &'static [KmipAlgorithm] = {
+        use KmipAlgorithm::*;
+        &[
+            Aes, Dsa, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ec,
+            X25519, X448, Xmss, HmacSha3_256, HmacSha3_512, ChaCha20, ChaCha20Poly1305,
+            Ed25519, Ed448,
+            MlKem512, MlKem768, MlKem1024,
+            MlDsa44, MlDsa65, MlDsa87,
+            SlhDsaSha2_128s, SlhDsaSha2_128f,
+            SlhDsaSha2_192s, SlhDsaSha2_192f,
+            SlhDsaSha2_256s, SlhDsaSha2_256f,
+            SlhDsaShake128s, SlhDsaShake128f,
+            SlhDsaShake192s, SlhDsaShake192f,
+            SlhDsaShake256s, SlhDsaShake256f,
+            HashSlhDsaSha2_128sWithSha256, HashSlhDsaSha2_128fWithSha256,
+            HashSlhDsaSha2_192sWithSha512, HashSlhDsaSha2_192fWithSha512,
+            HashSlhDsaSha2_256sWithSha512, HashSlhDsaSha2_256fWithSha512,
+            HashSlhDsaShake128sWithShake128, HashSlhDsaShake128fWithShake128,
+            HashSlhDsaShake192sWithShake256, HashSlhDsaShake192fWithShake256,
+            HashSlhDsaShake256sWithShake256, HashSlhDsaShake256fWithShake256,
+            HashMlDsa44WithSha512, HashMlDsa65WithSha512, HashMlDsa87WithSha512,
+            X25519MlKem768, SecP256r1MlKem768, SecP384r1MlKem1024,
+            ClassicMcEliece6688128, ClassicMcEliece6960119, ClassicMcEliece8192128,
+            FrodoKem640Aes, FrodoKem640Shake, FrodoKem976Aes, FrodoKem976Shake,
+            FrodoKem1344Aes, FrodoKem1344Shake,
+            Hss,
+            CompositeMlDsa44Rsa2048PssSha256,
+            CompositeMlDsa65EcdsaP256Sha512,
+            CompositeMlDsa87EcdsaP384Sha512,
+            CompositeMlDsa44Ed25519Sha512,
+            CompositeMlDsa44EcdsaP256Sha256,
+            CompositeMlDsa65Rsa3072PssSha512,
+            CompositeMlDsa65Ed25519Sha512,
+            CompositeMlDsa65EcdsaP384Sha512,
+            ClassicMcEliece348864, ClassicMcEliece348864F,
+            ClassicMcEliece460896, ClassicMcEliece460896F,
+            ClassicMcEliece6688128F, ClassicMcEliece6960119F, ClassicMcEliece8192128F,
+        ]
+    };
+
+    /// `true` for every composite algorithm — one KMIP object carrying a PQ
+    /// and a traditional component under one composite OID. Today that is
+    /// the LAMPS composite signatures; a composite-KEM family joins here
+    /// when its variants exist, and every name-based caller
+    /// ([`Self::composite_from_spec_name`]) then picks it up with no further
+    /// edit.
+    pub const fn is_composite(self) -> bool {
+        self.is_composite_sig()
+    }
+
+    /// The composite variant whose [`Self::spec_name`] is `name`, compared
+    /// ASCII case-insensitively (policy YAML has long spelled the tail in
+    /// upper case, e.g. `ML-DSA-65-ED25519`). Derived from [`Self::ALL`], so
+    /// it accepts exactly the composites that exist — no hand-kept name list.
+    pub fn composite_from_spec_name(name: &str) -> Option<KmipAlgorithm> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|a| a.is_composite() && a.spec_name().eq_ignore_ascii_case(name))
+    }
+
     /// `true` if this is a KMIP 3.0 CSD02 hybrid KEM (K6), composed in-process
     /// from ML-KEM-768 + a classical ECDH rather than a single PKCS#11 mech.
     pub const fn is_hybrid_kem(self) -> bool {
@@ -734,6 +800,13 @@ impl KmipAlgorithm {
     /// safe at ≥ 256-bit (Grover margin — AES-128 is flagged at-risk, the
     /// Migration tab's whole point); hybrids count as safe (secure while
     /// EITHER component holds); classical public-key algorithms do not.
+    ///
+    /// Exhaustive on purpose — no `_` arm. It used to end in `_ => is_pqc()`
+    /// and list only two of the three hybrid KEMs, so `SecP384r1MlKem1024`
+    /// fell through to `is_pqc()` (false) and its badge read "not quantum
+    /// safe"; the same fallthrough also caught the stateful hash signatures,
+    /// the pre-hash ML-DSA/SLH-DSA variants, FrodoKEM and Classic McEliece.
+    /// A new variant now fails to compile until it is classified here.
     pub const fn quantum_safe_with_length(self, length_bits: u32) -> bool {
         use KmipAlgorithm::*;
         match self {
@@ -742,9 +815,39 @@ impl KmipAlgorithm {
             | HmacSha3_256 | HmacSha3_512 => {
                 length_bits >= 256
             }
-            Rsa | Ecdsa | Ecdh | Ed25519 | Ed448 => false,
-            X25519MlKem768 | SecP256r1MlKem768 => true,
-            _ => self.is_pqc(),
+            Rsa | Dsa | Ecdsa | Ecdh | Ec | X25519 | X448 | Ed25519 | Ed448 => false,
+            X25519MlKem768 | SecP256r1MlKem768 | SecP384r1MlKem1024 => true,
+            MlKem512 | MlKem768 | MlKem1024
+            | MlDsa44 | MlDsa65 | MlDsa87
+            | SlhDsaSha2_128s | SlhDsaSha2_128f
+            | SlhDsaSha2_192s | SlhDsaSha2_192f
+            | SlhDsaSha2_256s | SlhDsaSha2_256f
+            | SlhDsaShake128s | SlhDsaShake128f
+            | SlhDsaShake192s | SlhDsaShake192f
+            | SlhDsaShake256s | SlhDsaShake256f
+            | HashSlhDsaSha2_128sWithSha256 | HashSlhDsaSha2_128fWithSha256
+            | HashSlhDsaSha2_192sWithSha512 | HashSlhDsaSha2_192fWithSha512
+            | HashSlhDsaSha2_256sWithSha512 | HashSlhDsaSha2_256fWithSha512
+            | HashSlhDsaShake128sWithShake128 | HashSlhDsaShake128fWithShake128
+            | HashSlhDsaShake192sWithShake256 | HashSlhDsaShake192fWithShake256
+            | HashSlhDsaShake256sWithShake256 | HashSlhDsaShake256fWithShake256
+            | HashMlDsa44WithSha512 | HashMlDsa65WithSha512 | HashMlDsa87WithSha512
+            | Xmss | Hss
+            | FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+            | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake
+            | ClassicMcEliece6688128 | ClassicMcEliece6960119 | ClassicMcEliece8192128
+            | ClassicMcEliece348864 | ClassicMcEliece348864F
+            | ClassicMcEliece460896 | ClassicMcEliece460896F
+            | ClassicMcEliece6688128F | ClassicMcEliece6960119F | ClassicMcEliece8192128F => true,
+            // Composites: secure while the ML-DSA half holds (see `is_pqc`).
+            CompositeMlDsa44Rsa2048PssSha256
+            | CompositeMlDsa65EcdsaP256Sha512
+            | CompositeMlDsa87EcdsaP384Sha512
+            | CompositeMlDsa44Ed25519Sha512
+            | CompositeMlDsa44EcdsaP256Sha256
+            | CompositeMlDsa65Rsa3072PssSha512
+            | CompositeMlDsa65Ed25519Sha512
+            | CompositeMlDsa65EcdsaP384Sha512 => true,
         }
     }
 
@@ -1119,35 +1222,80 @@ mod tests {
     /// Every variant of `KmipAlgorithm`; centralising the enumeration so each
     /// test below exhausts the whole set without repeating itself.
     fn all_algos() -> &'static [KmipAlgorithm] {
+        KmipAlgorithm::ALL
+    }
+
+    /// `ALL` is the list every name-based caller derives from, so it must be
+    /// complete. Two independent checks: its order matches the declaration
+    /// order (a fieldless enum's `as usize` is its declaration index), and
+    /// every wire value `from_wire_value` recognises in either range lands in
+    /// `ALL` — a variant added to the enum and the codec but not to `ALL`
+    /// fails here.
+    #[test]
+    fn all_lists_every_variant_in_declaration_order() {
+        for (i, &a) in KmipAlgorithm::ALL.iter().enumerate() {
+            assert_eq!(a as usize, i, "ALL[{i}] = {} is out of declaration order", a.spec_name());
+        }
+        for v in (0u32..=0xffff).chain(0x8000_0000u32..=0x8000_ffff) {
+            if let Some(a) = KmipAlgorithm::from_wire_value(v) {
+                assert!(KmipAlgorithm::ALL.contains(&a), "{} ({v:#x}) missing from ALL", a.spec_name());
+            }
+        }
+    }
+
+    /// Every variant's keystore-badge classification, stated per family
+    /// independently of the `match` it checks. `SecP384r1MlKem1024` used to
+    /// read as not quantum safe.
+    #[test]
+    fn quantum_safe_classification_covers_every_variant() {
         use KmipAlgorithm::*;
-        &[
-            Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, HmacSha3_256, HmacSha3_512, Ecdh,
-            Ed25519, Ed448,
-            MlKem512, MlKem768, MlKem1024,
-            MlDsa44, MlDsa65, MlDsa87,
-            SlhDsaSha2_128s, SlhDsaSha2_128f,
-            SlhDsaSha2_192s, SlhDsaSha2_192f,
-            SlhDsaSha2_256s, SlhDsaSha2_256f,
-            SlhDsaShake128s, SlhDsaShake128f,
-            SlhDsaShake192s, SlhDsaShake192f,
-            SlhDsaShake256s, SlhDsaShake256f,
-            X25519MlKem768, SecP256r1MlKem768, SecP384r1MlKem1024,
-            ClassicMcEliece6688128, ClassicMcEliece6960119, ClassicMcEliece8192128,
-            FrodoKem640Aes, FrodoKem640Shake, FrodoKem976Aes, FrodoKem976Shake,
-            FrodoKem1344Aes, FrodoKem1344Shake,
-            Hss,
-            CompositeMlDsa44Rsa2048PssSha256,
-            CompositeMlDsa65EcdsaP256Sha512,
-            CompositeMlDsa87EcdsaP384Sha512,
-            CompositeMlDsa44Ed25519Sha512,
-            CompositeMlDsa44EcdsaP256Sha256,
-            CompositeMlDsa65Rsa3072PssSha512,
-            CompositeMlDsa65Ed25519Sha512,
-            CompositeMlDsa65EcdsaP384Sha512,
-            ClassicMcEliece348864, ClassicMcEliece348864F,
-            ClassicMcEliece460896, ClassicMcEliece460896F,
-            ClassicMcEliece6688128F, ClassicMcEliece6960119F, ClassicMcEliece8192128F,
-        ]
+        for &a in all_algos() {
+            let symmetric = matches!(
+                a,
+                Aes | ChaCha20 | ChaCha20Poly1305 | HmacSha256 | HmacSha384 | HmacSha512
+                    | HmacSha3_256 | HmacSha3_512
+            );
+            let classical_public_key =
+                matches!(a, Rsa | Dsa | Ecdsa | Ecdh | Ec | X25519 | X448 | Ed25519 | Ed448);
+            if symmetric {
+                assert!(!a.quantum_safe_with_length(128), "{} at 128 bits", a.spec_name());
+                assert!(a.quantum_safe_with_length(256), "{} at 256 bits", a.spec_name());
+            } else {
+                // Everything else is a PQ family, a hybrid KEM or a composite
+                // (safe at any length) or classical public key (never safe).
+                for len in [0, 128, 256, 4096] {
+                    assert_eq!(
+                        a.quantum_safe_with_length(len),
+                        !classical_public_key,
+                        "{} at {len} bits",
+                        a.spec_name()
+                    );
+                }
+            }
+            if a.is_hybrid_kem() || a.is_composite() || a.is_pqc() {
+                assert!(a.quantum_safe_with_length(0), "{}", a.spec_name());
+            }
+        }
+        assert!(SecP384r1MlKem1024.quantum_safe_with_length(0));
+    }
+
+    /// Every composite resolves from its own `spec_name()`, in both spellings
+    /// policies use, and nothing else does.
+    #[test]
+    fn composite_from_spec_name_resolves_exactly_the_composites() {
+        let composites: Vec<_> = all_algos().iter().copied().filter(|a| a.is_composite()).collect();
+        assert_eq!(composites.len(), 8, "8 composite signature variants today");
+        for &a in &composites {
+            assert_eq!(KmipAlgorithm::composite_from_spec_name(a.spec_name()), Some(a));
+            let upper = a.spec_name().to_ascii_uppercase();
+            assert_eq!(KmipAlgorithm::composite_from_spec_name(&upper), Some(a), "{upper}");
+        }
+        for &a in all_algos().iter().filter(|a| !a.is_composite()) {
+            assert_eq!(KmipAlgorithm::composite_from_spec_name(a.spec_name()), None, "{}", a.spec_name());
+        }
+        for bogus in ["ML-DSA-44-Ed448", "ML-DSA-87-ECDSA-P521", "ML-DSA-87-RSA4096-PSS", "ML-DSA-87-Ed25519", ""] {
+            assert_eq!(KmipAlgorithm::composite_from_spec_name(bogus), None, "{bogus}");
+        }
     }
 
     #[test]
@@ -1314,11 +1462,16 @@ mod tests {
         // pair out explicitly rather than asserting it can never appear.
         assert_eq!(Hss.to_pkcs11_mech(KeyGen), Some(0x4032), "{}", Hss.spec_name());
         assert_eq!(Hss.to_pkcs11_mech(SignVerify), Some(0x4033), "{}", Hss.spec_name());
+        // XMSS, likewise: CKM_XMSS_KEY_PAIR_GEN 0x4034 and CKM_XMSS 0x4036
+        // are its real codepoints (`src/lib/pkcs11/pkcs11t.h`). This loop
+        // used to sweep a hand list that omitted `Xmss`, so it never met them.
+        assert_eq!(Xmss.to_pkcs11_mech(KeyGen), Some(0x4034), "{}", Xmss.spec_name());
+        assert_eq!(Xmss.to_pkcs11_mech(SignVerify), Some(0x4036), "{}", Xmss.spec_name());
 
         // No OTHER (algorithm, op) pair may emit a retired pseudo-vendor
-        // codepoint — HSS is the sole, explicitly-checked-above exception.
+        // codepoint — HSS and XMSS are the explicitly-checked-above exceptions.
         for &a in all_algos() {
-            if a == Hss {
+            if a == Hss || a == Xmss {
                 continue;
             }
             for op in [KeyGen, SignVerify, Encrypt, Decrypt, Mac] {

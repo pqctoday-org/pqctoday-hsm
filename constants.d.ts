@@ -151,6 +151,10 @@ export declare const CKK_HSS: number
 export declare const CKK_ML_DSA: number
 /** SLH-DSA (FIPS 205) key type — PKCS#11 v3.2 */
 export declare const CKK_SLH_DSA: number
+/** Composite ML-KEM key type — PKCS#11 v3.3 working draft */
+export declare const CKK_COMP_KEM: number
+/** Composite ML-DSA key type — PKCS#11 v3.3 working draft */
+export declare const CKK_COMP_SIG: number
 /** ML-KEM (FIPS 203) key type — PKCS#11 v3.2 */
 export declare const CKK_ML_KEM: number
 export declare const CKK_VENDOR_DEFINED: number
@@ -233,6 +237,16 @@ export declare const CKM_HASH_ML_DSA: number
 export declare const CKM_SLH_DSA_KEY_PAIR_GEN: number
 /** SLH-DSA pure sign/verify (FIPS 205) — PKCS#11 v3.2 */
 export declare const CKM_SLH_DSA: number
+/** Composite ML-DSA key pair generation — PKCS#11 v3.3 working draft */
+export declare const CKM_COMP_SIG_KEY_PAIR_GEN: number
+/** Composite ML-DSA sign/verify — PKCS#11 v3.3 working draft */
+export declare const CKM_COMP_SIG: number
+/** Composite ML-DSA over an external pre-hash — PKCS#11 v3.3 working draft */
+export declare const CKM_COMP_SIG_EXTERNAL_HASH: number
+/** Composite ML-KEM key pair generation — PKCS#11 v3.3 working draft */
+export declare const CKM_COMP_KEM_KEY_PAIR_GEN: number
+/** Composite ML-KEM encapsulate/decapsulate — PKCS#11 v3.3 working draft */
+export declare const CKM_COMP_KEM: number
 /** HSS / LMS key pair generation — RFC 8554 + SP 800-208, PKCS#11 v3.2 */
 export declare const CKM_HSS_KEY_PAIR_GEN: number
 /** HSS / LMS sign / verify — RFC 8554 + SP 800-208 */
@@ -313,6 +327,8 @@ export declare const CKA_HSS_LMS_TYPES: number
 export declare const CKA_HSS_LMOTS_TYPES: number
 /** Remaining HSS signature uses — PKCS#11 v3.2 §6.14 */
 export declare const CKA_HSS_KEYS_REMAINING: number
+/** Remaining signatures (HSS, XMSS, XMSS^MT) — PKCS#11 v3.3 working-draft name; same value as CKA_HSS_KEYS_REMAINING */
+export declare const CKA_KEYS_REMAINING: number
 /** Allow key to be used for encapsulation — PKCS#11 v3.2 */
 export declare const CKA_ENCAPSULATE: number
 /** Allow key to be used for decapsulation — PKCS#11 v3.2 */
@@ -343,6 +359,38 @@ export declare const CKP_SLH_DSA_SHAKE_192S: number
 export declare const CKP_SLH_DSA_SHAKE_192F: number
 export declare const CKP_SLH_DSA_SHAKE_256S: number
 export declare const CKP_SLH_DSA_SHAKE_256F: number
+// Composite ML-DSA — PKCS#11 v3.3 working draft
+export declare const CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256: number
+export declare const CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256: number
+export declare const CKP_COMP_SIG_MLDSA44_ED25519_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA44_ECDSA_P256_SHA256: number
+export declare const CKP_COMP_SIG_MLDSA65_RSA3072_PSS_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_RSA3072_PKCS15_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_RSA4096_PSS_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_RSA4096_PKCS15_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_ECDSA_P384_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_ECDSA_BRAINPOOLP256R1_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA65_ED25519_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA87_ECDSA_P384_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA87_ECDSA_BRAINPOOLP384R1_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA87_ED448_SHAKE256: number
+export declare const CKP_COMP_SIG_MLDSA87_RSA3072_PSS_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA87_RSA4096_PSS_SHA512: number
+export declare const CKP_COMP_SIG_MLDSA87_ECDSA_P521_SHA512: number
+// Composite ML-KEM — PKCS#11 v3.3 working draft
+export declare const CKP_COMP_KEM_MLKEM768_RSA2048: number
+export declare const CKP_COMP_KEM_MLKEM768_RSA3072: number
+export declare const CKP_COMP_KEM_MLKEM768_RSA4096: number
+export declare const CKP_COMP_KEM_MLKEM768_X25519: number
+export declare const CKP_COMP_KEM_MLKEM768_ECDH_P256: number
+export declare const CKP_COMP_KEM_MLKEM768_ECDH_P384: number
+export declare const CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1: number
+export declare const CKP_COMP_KEM_MLKEM1024_RSA3072: number
+export declare const CKP_COMP_KEM_MLKEM1024_ECDH_P384: number
+export declare const CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1: number
+export declare const CKP_COMP_KEM_MLKEM1024_X448: number
+export declare const CKP_COMP_KEM_MLKEM1024_ECDH_P521: number
 
 // ── LMS parameter sets (RFC 8554 + SP 800-208) ───────────────────────────────
 /** LMS SHA-256/N32, tree height H=5 (RFC 8554) */

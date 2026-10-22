@@ -1,0 +1,221 @@
+{
+ "_provenance": {
+  "what": "Name -> value of the PKCS#11 v3.3 working-draft identifiers this engine uses (composite ML-DSA / ML-KEM, CKA_KEYS_REMAINING, ML-DSA external mu), extracted from the OASIS PKCS 11 TC header. Facts only; the header itself is not committed.",
+  "source_repo": "https://github.com/oasis-tcs/pkcs11",
+  "source_commit": "9ef73f9f44ed8a240b05484427a0851ab36be251",
+  "source_path": "working/headers/pkcs11t.h",
+  "source_url": "https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h",
+  "source_sha256": "765a28ac349d3cd940e5a90392fb9bc4a939151b29f63b5c156723c64f61f70e",
+  "source_git_blob_sha": "025b78a3a48591ac5cd8b6e871ee012c8cee01da",
+  "retrieved": "2026-10-21",
+  "status": "unpublished working draft; the header still declares CRYPTOKI_VERSION_MINOR 2"
+ },
+ "identifiers": [
+  {
+   "name": "CKK_COMP_KEM",
+   "value": "0x0000004c",
+   "line": 443
+  },
+  {
+   "name": "CKK_COMP_SIG",
+   "value": "0x0000004d",
+   "line": 444
+  },
+  {
+   "name": "CKA_KEYS_REMAINING",
+   "value": "0x0000061c",
+   "line": 644
+  },
+  {
+   "name": "CKA_HSS_KEYS_REMAINING",
+   "value": "0x0000061c",
+   "line": 645,
+   "alias_of": "CKA_KEYS_REMAINING"
+  },
+  {
+   "name": "CKM_COMP_SIG_KEY_PAIR_GEN",
+   "value": "0x0000403d",
+   "line": 1225
+  },
+  {
+   "name": "CKM_COMP_SIG",
+   "value": "0x0000403e",
+   "line": 1226
+  },
+  {
+   "name": "CKM_COMP_SIG_EXTERNAL_HASH",
+   "value": "0x0000403f",
+   "line": 1227
+  },
+  {
+   "name": "CKM_COMP_KEM_KEY_PAIR_GEN",
+   "value": "0x00004040",
+   "line": 1228
+  },
+  {
+   "name": "CKM_COMP_KEM",
+   "value": "0x00004041",
+   "line": 1229
+  },
+  {
+   "name": "CKM_ML_DSA_EXTERNAL_MU_GEN",
+   "value": "0x0000403b",
+   "line": 1232
+  },
+  {
+   "name": "CKM_ML_DSA_EXTERNAL_MU",
+   "value": "0x0000403c",
+   "line": 1233
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256",
+   "value": "0x00000001",
+   "line": 2780
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256",
+   "value": "0x00000002",
+   "line": 2781
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA44_ED25519_SHA512",
+   "value": "0x00000003",
+   "line": 2782
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA44_ECDSA_P256_SHA256",
+   "value": "0x00000004",
+   "line": 2783
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_RSA3072_PSS_SHA512",
+   "value": "0x00000005",
+   "line": 2784
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_RSA3072_PKCS15_SHA512",
+   "value": "0x00000006",
+   "line": 2785
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_RSA4096_PSS_SHA512",
+   "value": "0x00000007",
+   "line": 2786
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_RSA4096_PKCS15_SHA512",
+   "value": "0x00000008",
+   "line": 2787
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512",
+   "value": "0x00000009",
+   "line": 2788
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_ECDSA_P384_SHA512",
+   "value": "0x0000000a",
+   "line": 2789
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_ECDSA_BRAINPOOLP256R1_SHA512",
+   "value": "0x0000000b",
+   "line": 2790
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA65_ED25519_SHA512",
+   "value": "0x0000000c",
+   "line": 2791
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA87_ECDSA_P384_SHA512",
+   "value": "0x0000000d",
+   "line": 2792
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA87_ECDSA_BRAINPOOLP384R1_SHA512",
+   "value": "0x0000000e",
+   "line": 2793
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA87_ED448_SHAKE256",
+   "value": "0x0000000f",
+   "line": 2794
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA87_RSA3072_PSS_SHA512",
+   "value": "0x00000010",
+   "line": 2795
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA87_RSA4096_PSS_SHA512",
+   "value": "0x00000011",
+   "line": 2796
+  },
+  {
+   "name": "CKP_COMP_SIG_MLDSA87_ECDSA_P521_SHA512",
+   "value": "0x00000012",
+   "line": 2797
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_RSA2048",
+   "value": "0x00000001",
+   "line": 2801
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_RSA3072",
+   "value": "0x00000002",
+   "line": 2802
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_RSA4096",
+   "value": "0x00000003",
+   "line": 2803
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_X25519",
+   "value": "0x00000004",
+   "line": 2804
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_ECDH_P256",
+   "value": "0x00000005",
+   "line": 2805
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_ECDH_P384",
+   "value": "0x00000006",
+   "line": 2806
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1",
+   "value": "0x00000007",
+   "line": 2807
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM1024_RSA3072",
+   "value": "0x00000008",
+   "line": 2808
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM1024_ECDH_P384",
+   "value": "0x00000009",
+   "line": 2809
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1",
+   "value": "0x0000000a",
+   "line": 2810
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM1024_X448",
+   "value": "0x0000000b",
+   "line": 2811
+  },
+  {
+   "name": "CKP_COMP_KEM_MLKEM1024_ECDH_P521",
+   "value": "0x0000000c",
+   "line": 2812
+  }
+ ]
+}

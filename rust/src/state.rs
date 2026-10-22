@@ -419,6 +419,19 @@ lazy_static! {
     pub static ref SIGN_MULTIPART_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
     /// T4 — C_VerifyUpdate accumulator (see SIGN_MULTIPART_ACC).
     pub static ref VERIFY_MULTIPART_ACC: Sharded<HashMap<u32, Vec<u8>>> = Sharded::new();
+    /// Streaming pre-hash PH(M) of a `CKM_COMP_SIG` sign op (PKCS#11 v3.3
+    /// working draft, comp_sig.md; draft-ietf-lamps-pq-composite-sigs-19
+    /// §2.1). C_SignUpdate feeds the parts here instead of into
+    /// SIGN_MULTIPART_ACC, which then only marks the multi-part phase (its
+    /// Vec stays empty), so the message is never buffered. Written fresh by
+    /// every CKM_COMP_SIG C_SignInit and only read while SIGN_STATE's own
+    /// mechanism is CKM_COMP_SIG, so a leftover entry is never read (the
+    /// GENERIC_HASH_STATE rule); also cleared with SIGN_MULTIPART_ACC on
+    /// session close and finalize. Message-derived state only, no key
+    /// material.
+    pub static ref COMP_SIG_SIGN_PREHASH: Sharded<HashMap<u32, crate::native::composite_sig::PreHasher>> = Sharded::new();
+    /// The C_VerifyUpdate twin of COMP_SIG_SIGN_PREHASH.
+    pub static ref COMP_SIG_VERIFY_PREHASH: Sharded<HashMap<u32, crate::native::composite_sig::PreHasher>> = Sharded::new();
     pub static ref FIND_STATE: Sharded<HashMap<u32, FindCtx>> = Sharded::new();
     /// Persistent ACVP deterministic RNG — created once in C_Initialize, advances
     /// across all operations, cleared in C_Finalize. Uses IETF ChaCha20 (RFC 8439)
@@ -683,6 +696,9 @@ pub struct VerifySigCtx {
     pub msg_acc: Vec<u8>,
     pub slh_ctx: Vec<u8>,
     pub slh_det: bool,
+    /// `CKM_COMP_SIG` only: the streaming PH(M) that C_VerifySignatureUpdate
+    /// feeds instead of `msg_acc` (see COMP_SIG_SIGN_PREHASH).
+    pub comp_prehash: Option<crate::native::composite_sig::PreHasher>,
 }
 
 /// Set PKCS#11 v3.2 mandatory object-management attribute defaults on a key before it

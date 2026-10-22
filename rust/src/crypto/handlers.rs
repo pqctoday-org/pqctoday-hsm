@@ -2993,6 +2993,12 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             CKP_ML_DSA_87 => 4627,
             _ => 3309,
         },
+        // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md):
+        // mldsaSig ‖ tradSig, at its maximum for the DER ECDSA sets
+        // (draft-ietf-lamps-pq-composite-sigs-19 Appendix A, native::composite).
+        CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => get_object_attr_u32(hkey, CKA_PARAMETER_SET)
+            .and_then(crate::native::composite::sig_params)
+            .map_or(0, |p| p.signature_size().bytes() as u32),
         CKM_SLH_DSA => match ps {
             CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
             CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
