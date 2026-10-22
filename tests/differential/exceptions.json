@@ -280,6 +280,15 @@
       "unobservable": "CKD_* values appear only inside derive parameters, which no scenario enumerates"
     },
     {
+      "id": "LEGAL-V33-DRAFT-EXTERNAL-MU-MULTI-PART",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "DELIBERATE DEVIATION from the PKCS#11 v3.3 working draft, recorded 2026-10-21 (v3.2 to v3.3 delta audit, item P2). The draft makes CKM_ML_DSA_EXTERNAL_MU single-part only for C_Sign, C_Verify and C_VerifySignature. BOTH engines accept it multi-part (C_SignUpdate/C_SignFinal and the verify counterparts buffer the parts and process the whole 64-byte mu once), because OpenSSL's provider interface drives every ML-DSA signature through EVP_DigestSign, i.e. C_SignInit/C_SignUpdate/C_SignFinal, never a single C_Sign (docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md, 'The vendor mechanism needed multi-part support after all'). The input is still exactly 64 bytes in total (CKR_DATA_LEN_RANGE otherwise), so the signature computed is the one the single-part call would compute. The two engines agree, so no divergence is expected; this entry exists so the deviation is written down where the other adjudications live, not to absorb a diff.",
+      "citation": "PKCS#11 v3.3 working draft, OASIS PKCS 11 TC commit 9ef73f9 (https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251), working/doc/spec/ml_dsa.md, 'ExternalMu-ML-DSA Signature': 'a mechanism for single-part signatures and verification', and its 'ExternalMu ML-DSA: Key and Data Length' table footnote 1, 'Single-part operations only' (TC commit 6fa1270). v3.2 OS has no CKM_ML_DSA_EXTERNAL_MU at all; it is a v3.3 identifier the engines use under the v3.2-baseline / v3.3-fills-gaps rule. The v3.3 markdown has no section numbers, so the file name is the citation.",
+      "unobservable": "no differential scenario drives CKM_ML_DSA_EXTERNAL_MU through C_SignUpdate or C_VerifyUpdate, and both engines take the same multi-part path"
+    },
+    {
       "id": "LEGAL-USAGE-FLAG-DEFAULT-RECOVER",
       "status": "legal",
       "path": "*.CKA_SIGN_RECOVER.*|*.CKA_VERIFY_RECOVER.*",
