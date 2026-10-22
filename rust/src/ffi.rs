@@ -5355,20 +5355,28 @@ fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attribut
 /// An absent attribute adds nothing; an unparseable stored template fails
 /// closed. Called after every other attribute is final and before the object
 /// exists, so a refusal creates nothing.
+///
+/// The template can add CKA_TOKEN=TRUE the caller never asked for, which the
+/// caller-template gate (`gate_ro_session_for_template`) cannot see. So the
+/// FINAL attribute set is re-checked here: a token object from a R/O session
+/// is CKR_SESSION_READ_ONLY (`state::check_rw_for_token_object`; v3.2 §5.7.1
+/// "Only session objects can be created during a read-only session").
 unsafe fn apply_key_template(
+    h_session: u32,
     h_key: u32,
     template_attr: u32,
     user_template: *mut u8,
     user_count: u32,
     attrs: &mut Attributes,
 ) -> Result<(), u32> {
-    apply_key_template_fixed(h_key, template_attr, user_template, user_count, attrs, &[])
+    apply_key_template_fixed(h_session, h_key, template_attr, user_template, user_count, attrs, &[])
 }
 
 /// [`apply_key_template`] for a creation path that also fixes some attributes
 /// the caller could otherwise set (`engine_fixed`): those are compared, never
 /// added, exactly like the server-managed set.
 unsafe fn apply_key_template_fixed(
+    h_session: u32,
     h_key: u32,
     template_attr: u32,
     user_template: *mut u8,
@@ -5394,7 +5402,7 @@ unsafe fn apply_key_template_fixed(
             attrs.insert(t, v);
         }
     }
-    Ok(())
+    crate::state::check_rw_for_token_object(h_session, read_bool_attr(attrs, CKA_TOKEN))
 }
 
 /// `CKM_COMP_KEM` (PKCS#11 v3.3 working draft, comp_kem.md): "It has no
@@ -5464,7 +5472,7 @@ unsafe fn comp_kem_secret_object(
         find_template_entry(template, count, CKA_CHECK_VALUE).as_deref(),
     )?;
     if decapsulate {
-        apply_key_template(h_kem_key, CKA_DECAPSULATE_TEMPLATE, template, count, &mut ss_attrs)?;
+        apply_key_template(h_session, h_kem_key, CKA_DECAPSULATE_TEMPLATE, template, count, &mut ss_attrs)?;
     } else if !kem_template_permits(h_kem_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
         return Err(CKR_KEY_HANDLE_INVALID);
     }
@@ -6406,7 +6414,7 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
-            if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+            if let Err(rv) = apply_key_template(_h_session, h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
                 return rv;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
@@ -6572,7 +6580,7 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
-            if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+            if let Err(rv) = apply_key_template(_h_session, h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
                 return rv;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
@@ -6728,7 +6736,7 @@ fn C_DecapsulateKey_impl(
                 ) {
                     return rv;
                 }
-                if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                if let Err(rv) = apply_key_template(_h_session, h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
                     return rv;
                 }
                 *ph_key = match ffi_alloc(_h_session, ss_attrs) {
@@ -13328,6 +13336,7 @@ pub fn C_DeriveKey(
             // / CKA_EXTRACTABLE itself, so the template is compared on those,
             // never added.
             if let Err(rv) = apply_key_template_fixed(
+                _h_session,
                 h_base_key,
                 CKA_DERIVE_TEMPLATE,
                 p_template,
@@ -14284,12 +14293,7 @@ pub fn C_DeriveKey(
             // caller's template (apply_key_template). It used to be
             // compare-only, which refused an omitted attribute instead of
             // applying it.
-            if let Err(rv) = apply_key_template(h_base_key, CKA_DERIVE_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
-                return rv;
-            }
-            // An applied CKA_TOKEN=TRUE needs a R/W session, as if the caller
-            // had asked for it (the caller's own template was gated above).
-            if let Err(rv) = crate::state::check_rw_for_token_object(_h_session, read_bool_attr(&attrs, CKA_TOKEN)) {
+            if let Err(rv) = apply_key_template(_h_session, h_base_key, CKA_DERIVE_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
                 return rv;
             }
         }
@@ -15438,7 +15442,7 @@ pub fn C_UnwrapKey(
         // by contradicting it (CKR_TEMPLATE_INCONSISTENT, no object). See
         // apply_key_template; it used to be compare-only, which refused an
         // omitted attribute instead of applying it.
-        if let Err(rv) = apply_key_template(h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+        if let Err(rv) = apply_key_template(_h_session, h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
             return rv;
         }
 
@@ -15874,7 +15878,7 @@ pub fn C_UnwrapKeyAuthenticated(
 
         // The unwrapping key's CKA_UNWRAP_TEMPLATE, as in C_UnwrapKey (this
         // path never consulted it, so the restriction did not hold here).
-        if let Err(rv) = apply_key_template(h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+        if let Err(rv) = apply_key_template(_h_session, h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
             return rv;
         }
 
