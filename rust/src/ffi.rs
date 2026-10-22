@@ -4311,6 +4311,13 @@ fn C_GenerateKeyPair_impl(
                 let xmss_max_sigs = crate::crypto::xmss_bridge::xmss_param_max_sigs(xmss_param);
                 store_ulong(&mut pub_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, xmss_max_sigs);
                 store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, xmss_max_sigs);
+                // PKCS#11 v3.3 working draft, xmss_and_xmss-mt.md: key pair
+                // generation contributes the standard CKA_KEYS_REMAINING to the
+                // PRIVATE key only (it is absent from the public key table).
+                prv_attrs.insert(
+                    CKA_KEYS_REMAINING,
+                    crate::crypto::xmss_bridge::keys_remaining_attr_bytes(xmss_max_sigs as u64),
+                );
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
@@ -4411,10 +4418,17 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut prv_attrs, CKA_SIGN, true);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
-                let mt_max = crate::crypto::xmss_bridge::xmssmt_param_max_sigs(mt_param)
-                    .min(u32::MAX as u64) as u32;
+                let mt_total = crate::crypto::xmss_bridge::xmssmt_param_max_sigs(mt_param);
+                let mt_max = crate::crypto::xmss_bridge::keys_remaining_cap(mt_total);
                 store_ulong(&mut pub_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
                 store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
+                // PKCS#11 v3.3 working draft, xmss_and_xmss-mt.md: the standard
+                // CKA_KEYS_REMAINING on the private key, capped at 2^32-1 (a
+                // height-40 or height-60 tree exceeds it).
+                prv_attrs.insert(
+                    CKA_KEYS_REMAINING,
+                    crate::crypto::xmss_bridge::keys_remaining_attr_bytes(mt_total),
+                );
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
                 mirror_public_key_info(&pub_attrs, &mut prv_attrs);
@@ -8765,14 +8779,21 @@ fn C_Sign_impl(
                             // state (the index width differs from single-tree).
                             let mt_param = xmss_param_set_of(hkey, true)
                                 .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
-                            let remaining = crate::crypto::xmss_bridge::xmssmt_keys_remaining(
+                            let remaining_full = crate::crypto::xmss_bridge::xmssmt_keys_remaining(
                                 mt_param,
                                 new_priv_bytes,
-                            )
-                            .min(u32::MAX as u64) as u32;
+                            );
+                            let remaining =
+                                crate::crypto::xmss_bridge::keys_remaining_cap(remaining_full);
                             changes.push((
                                 CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
+                            ));
+                            // The standard counter moves in the same batch
+                            // (v3.3 working draft, xmss_and_xmss-mt.md).
+                            changes.push((
+                                CKA_KEYS_REMAINING,
+                                crate::crypto::xmss_bridge::keys_remaining_attr_bytes(remaining_full),
                             ));
                         } else {
                             // XMSS: derive remaining from the updated signing key state.
@@ -8788,6 +8809,10 @@ fn C_Sign_impl(
                             changes.push((
                                 CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
+                            ));
+                            changes.push((
+                                CKA_KEYS_REMAINING,
+                                crate::crypto::xmss_bridge::keys_remaining_attr_bytes(remaining as u64),
                             ));
                         }
                         crate::state::set_object_attrs_bytes_batch(hkey, &changes);
@@ -28000,6 +28025,12 @@ mod composite_kem_tests;
 #[cfg(test)]
 #[path = "composite_sig_tests.rs"]
 mod composite_sig_tests;
+
+/// CKA_KEYS_REMAINING on XMSS and XMSS^MT private keys (PKCS#11 v3.3 working
+/// draft) — see the module's own docs.
+#[cfg(test)]
+#[path = "xmss_keys_remaining_tests.rs"]
+mod xmss_keys_remaining_tests;
 
 /// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
 /// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.
