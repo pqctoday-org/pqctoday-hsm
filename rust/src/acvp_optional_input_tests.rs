@@ -1026,3 +1026,76 @@ fn d7_wrong_phm_length_is_data_len_range() {
         }
     }
 }
+
+/// Owner decision D8 ("follow the standard"): the generic CKM_HASH_ML_DSA /
+/// CKM_HASH_SLH_DSA are single-part only (v3.3 "^1^ Single-part operations
+/// only"). The C++ testGenericPreHashSinglePartOnly matrix: every *Update
+/// and a C_VerifySignatureFinal straight after init return
+/// CKR_OPERATION_NOT_INITIALIZED and end the operation (the next call is
+/// CKR_OPERATION_NOT_INITIALIZED too), with hash = CKM_SHA256. It also proves
+/// an operation that STARTED as generic is still gated, whatever
+/// remap_generic_hash_mech stores. Single-part works; the hash-specific and
+/// pure mechanisms keep multi-part verify-signature.
+#[test]
+fn d8_generic_prehash_single_part_only() {
+    let _guard = test_lock::acquire();
+    let session = setup();
+    let doc = fixture();
+    let ((dsk, dpk, dps), (ssk, spk, sps)) = keys(&doc);
+    let ni = CKR_OPERATION_NOT_INITIALIZED;
+    for (id, kt, ps, sk, pk, generic, specific, pure) in [
+        ("ML-DSA", CKK_ML_DSA, dps, &dsk, &dpk, CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHA256, CKM_ML_DSA),
+        ("SLH-DSA", CKK_SLH_DSA, sps, &ssk, &spk, CKM_HASH_SLH_DSA, CKM_HASH_SLH_DSA_SHA256, CKM_SLH_DSA),
+    ] {
+        let hk = private_key(session, kt, ps, sk, false);
+        let hp = public_key(session, kt, ps, pk, CKA_VERIFY);
+        let gp = ext_hash_ctx(CKH_DETERMINISTIC_REQUIRED, &[], CKM_SHA256, &[], 0);
+        let gm = mechanism(generic, &gp);
+        let ph = [0x33u8; 32];
+        let sig = sign(session, generic, &gp, hk, &ph).expect(id);
+        let mut buf = vec![0u8; sig.len()];
+        let mut bl = buf.len() as u32;
+        let phm = ph.as_ptr() as *mut u8;
+
+        // C_SignUpdate, then the operation is gone.
+        assert_eq!(C_SignInit(session, gm.as_ptr() as *mut u8, hk), CKR_OK);
+        assert_eq!(crate::state::SIGN_STATE.shard(session).get(&session).map(|s| s.0), Some(generic), "{id}: stored as generic");
+        assert_eq!(C_SignUpdate(session, phm, 32), ni, "{id}: C_SignUpdate");
+        assert_eq!(C_Sign(session, phm, 32, buf.as_mut_ptr(), &mut bl), ni, "{id}: C_Sign after");
+        // C_VerifyUpdate, then the operation is gone.
+        assert_eq!(C_VerifyInit(session, gm.as_ptr() as *mut u8, hp), CKR_OK);
+        assert_eq!(C_VerifyUpdate(session, phm, 32), ni, "{id}: C_VerifyUpdate");
+        assert_eq!(C_Verify(session, phm, 32, sig.as_ptr() as *mut u8, sig.len() as u32), ni, "{id}: C_Verify after");
+        // C_VerifySignatureUpdate, then the operation is gone.
+        let mut s1 = sig.clone();
+        assert_eq!(C_VerifySignatureInit(session, gm.as_ptr() as *mut u8, hp, s1.as_mut_ptr(), s1.len() as u32), CKR_OK);
+        assert_eq!(
+            crate::state::VERIFY_SIG_STATE.shard(session).get(&session).map(|c| c.mech_type),
+            Some(generic),
+            "{id}: verify-signature stored as generic"
+        );
+        assert_eq!(C_VerifySignatureUpdate(session, phm, 32), ni, "{id}: C_VerifySignatureUpdate");
+        assert_eq!(C_VerifySignature(session, phm, 32), ni, "{id}: C_VerifySignature after");
+        // C_VerifySignatureFinal with no update: refused as well.
+        assert_eq!(C_VerifySignatureInit(session, gm.as_ptr() as *mut u8, hp, s1.as_mut_ptr(), s1.len() as u32), CKR_OK);
+        assert_eq!(C_VerifySignatureFinal(session), ni, "{id}: C_VerifySignatureFinal");
+        assert_eq!(C_VerifySignatureFinal(session), ni, "{id}: ended");
+        // Single-part works.
+        assert_eq!(verify(session, generic, &gp, hp, &ph, &sig), CKR_OK, "{id}: C_Verify");
+        assert_eq!(C_VerifySignatureInit(session, gm.as_ptr() as *mut u8, hp, s1.as_mut_ptr(), s1.len() as u32), CKR_OK);
+        assert_eq!(C_VerifySignature(session, phm, 32), CKR_OK, "{id}: C_VerifySignature");
+
+        // Hash-specific and pure mechanisms keep multi-part C_VerifySignature*.
+        let msg = b"abcd";
+        for mech in [specific, pure] {
+            let p = std_ctx(CKH_DETERMINISTIC_REQUIRED, &[]);
+            let s2 = sign(session, mech, &p, hk, msg).expect(id);
+            let mut s2b = s2.clone();
+            let m = mechanism(mech, &p);
+            assert_eq!(C_VerifySignatureInit(session, m.as_ptr() as *mut u8, hp, s2b.as_mut_ptr(), s2b.len() as u32), CKR_OK);
+            assert_eq!(C_VerifySignatureUpdate(session, msg.as_ptr() as *mut u8, 2), CKR_OK);
+            assert_eq!(C_VerifySignatureUpdate(session, msg[2..].as_ptr() as *mut u8, 2), CKR_OK);
+            assert_eq!(C_VerifySignatureFinal(session), CKR_OK, "{id} 0x{mech:x}: multi-part");
+        }
+    }
+}
