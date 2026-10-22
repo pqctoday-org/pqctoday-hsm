@@ -30,6 +30,7 @@ impl CkError {
             CKR_SESSION_HANDLE_INVALID => "session-handle-invalid",
             CKR_PIN_INCORRECT => "pin-incorrect",
             CKR_ARGUMENTS_BAD => "arguments-bad",
+            CKR_DATA_LEN_RANGE => "data-len-range",
             CKR_ATTRIBUTE_VALUE_INVALID => "attribute-value-invalid",
             CKR_MECHANISM_INVALID => "mechanism-invalid",
             CKR_KEY_TYPE_INCONSISTENT => "key-type-inconsistent",

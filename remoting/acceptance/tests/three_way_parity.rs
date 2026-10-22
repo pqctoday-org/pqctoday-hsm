@@ -689,7 +689,7 @@ fn a8_ml_dsa_65_external_mu_parity_and_cross_mode_rejection_all_three_transports
             session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu[..63], true,
         )
         .unwrap_err();
-        assert_eq!(control_bad_len.raw(), CKR_ARGUMENTS_BAD);
+        assert_eq!(control_bad_len.raw(), CKR_DATA_LEN_RANGE);
         let (_, ed_prv_h) =
             verbs::generate_key_pair(session, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, b"\xA9", "a8-ed")
                 .unwrap();
@@ -787,7 +787,7 @@ fn a8_ml_dsa_65_external_mu_parity_and_cross_mode_rejection_all_three_transports
             })
             .await
             .unwrap_err();
-        assert_eq!(grpc_raw_ck_rv(&g_bad_len_err), Some(CKR_ARGUMENTS_BAD));
+        assert_eq!(grpc_raw_ck_rv(&g_bad_len_err), Some(CKR_DATA_LEN_RANGE));
         let g_ed_keys = grpc
             .generate_key_pair(pqctoday_pkcs11_remote_proto::GenerateKeyPairRequest {
                 session_handle: g_session,
@@ -870,7 +870,7 @@ fn a8_ml_dsa_65_external_mu_parity_and_cross_mode_rejection_all_three_transports
             .post(format!("{rest_base}/v1/keys/{r_prv}/sign"))
             .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu[..63]), "external_mu": true }))
             .send().await.unwrap().json().await.unwrap();
-        assert_eq!(rest_raw_ck_rv(&r_bad_len_body), Some(CKR_ARGUMENTS_BAD));
+        assert_eq!(rest_raw_ck_rv(&r_bad_len_body), Some(CKR_DATA_LEN_RANGE));
         let r_ed_keys: serde_json::Value = http
             .post(format!("{rest_base}/v1/keys"))
             .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ed25519", "cka_id": b64(&[0xAD]), "label": "a8-rest-ed" }))

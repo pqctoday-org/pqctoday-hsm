@@ -1745,7 +1745,11 @@ pub fn sign_ml_dsa_external_mu(
     mu: &[u8],
     rnd: [u8; 32],
 ) -> Result<Vec<u8>, u32> {
-    let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    // ml_dsa.md (PKCS#11 v3.3 working draft), "ExternalMu ML-DSA: Key and
+    // Data Length": the input is exactly 64 bytes; a wrong data length is
+    // CKR_DATA_LEN_RANGE, as on the C_Sign / C_Verify path (v3.2 §5.13.2 /
+    // §5.15.2). Was CKR_ARGUMENTS_BAD.
+    let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
     macro_rules! sign_with {
         ($m:ident) => {{
             use fips204::traits::SerDes;
@@ -1794,7 +1798,8 @@ pub fn verify_ml_dsa_external_mu(
         return if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) };
     }
     use fips204::traits::Verifier;
-    let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    // Wrong µ length: CKR_DATA_LEN_RANGE, see sign_ml_dsa_external_mu.
+    let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
     macro_rules! ver {
         ($m:ident) => {{
             use fips204::traits::SerDes;

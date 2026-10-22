@@ -35,7 +35,7 @@ fn grpc_code(rv: u32) -> Code {
         CKR_SESSION_HANDLE_INVALID => Code::NotFound,
         CKR_PIN_INCORRECT => Code::PermissionDenied,
         CKR_ARGUMENTS_BAD | CKR_ATTRIBUTE_VALUE_INVALID | CKR_MECHANISM_INVALID
-        | CKR_KEY_TYPE_INCONSISTENT | CKR_TEMPLATE_INCOMPLETE => Code::InvalidArgument,
+        | CKR_KEY_TYPE_INCONSISTENT | CKR_TEMPLATE_INCOMPLETE | CKR_DATA_LEN_RANGE => Code::InvalidArgument,
         CKR_KEY_FUNCTION_NOT_PERMITTED => Code::PermissionDenied,
         _ => Code::Internal,
     }
