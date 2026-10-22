@@ -5223,6 +5223,60 @@ fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attribut
     }
 }
 
+/// CKA_DECAPSULATE_TEMPLATE / CKA_UNWRAP_TEMPLATE: the template is APPLIED to
+/// the key being created, then checked against the caller's template.
+///
+/// Both have the same SHALL text, v3.2 §5.18.4 for unwrap and v3.3
+/// key_management_functions.md for decapsulate: the attribute holds "an
+/// attribute set that will be added to attributes of the key to be
+/// [unwrapped / decapsulated]. If the attributes do not conflict with the
+/// user supplied attribute template, in 'pTemplate', then the [operation]
+/// will proceed … If any attribute conflict occurs … the function SHALL
+/// return CKR_TEMPLATE_INCONSISTENT", and the private/secret key tables add
+/// "Any user supplied template is applied after this template as if the
+/// object has already been created". The engine only compared, so an
+/// attribute the caller left out failed against the engine default instead of
+/// being added.
+///
+/// `attrs` is the new key's FULLY resolved attribute set (defaults, the
+/// caller's template, engine truth). For each entry of the key's template:
+///
+/// * the caller's template names it, or it is engine truth the caller cannot
+///   set either (key material, the server-managed set, CKA_VALUE_LEN): the
+///   resolved value must equal it — a conflict is CKR_TEMPLATE_INCONSISTENT,
+///   so engine truth is never overwritten;
+/// * otherwise it is added.
+///
+/// An absent attribute adds nothing; an unparseable stored template fails
+/// closed. Called after every other attribute is final and before the object
+/// exists, so a refusal creates nothing.
+unsafe fn apply_key_template(
+    h_key: u32,
+    template_attr: u32,
+    user_template: *mut u8,
+    user_count: u32,
+    attrs: &mut Attributes,
+) -> Result<(), u32> {
+    let blob = match crate::state::with_object(h_key, |a| a.get(&template_attr).cloned()).flatten() {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let entries = crate::crypto::handlers::parse_flat_attr_array(&blob).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+    for (t, v) in entries {
+        let compare_only = find_template_entry(user_template, user_count, t).is_some()
+            || crate::crypto::handlers::template_attr_is_skipped(t)
+            || t == CKA_VALUE_LEN;
+        if compare_only {
+            if attrs.get(&t) != Some(&v) {
+                return Err(CKR_TEMPLATE_INCONSISTENT);
+            }
+        } else {
+            attrs.insert(t, v);
+        }
+    }
+    Ok(())
+}
+
 /// `CKM_COMP_KEM` (PKCS#11 v3.3 working draft, comp_kem.md): "It has no
 /// parameters." A non-NULL pParameter or a non-zero ulParameterLen is
 /// CKR_MECHANISM_PARAM_INVALID (v3.2 §5.1.6: "Invalid parameters were
@@ -5289,13 +5343,10 @@ unsafe fn comp_kem_secret_object(
         &mut ss_attrs,
         find_template_entry(template, count, CKA_CHECK_VALUE).as_deref(),
     )?;
-    let (template_attr, refused) = if decapsulate {
-        (CKA_DECAPSULATE_TEMPLATE, CKR_TEMPLATE_INCONSISTENT)
-    } else {
-        (CKA_ENCAPSULATE_TEMPLATE, CKR_KEY_HANDLE_INVALID)
-    };
-    if !kem_template_permits(h_kem_key, template_attr, &ss_attrs) {
-        return Err(refused);
+    if decapsulate {
+        apply_key_template(h_kem_key, CKA_DECAPSULATE_TEMPLATE, template, count, &mut ss_attrs)?;
+    } else if !kem_template_permits(h_kem_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+        return Err(CKR_KEY_HANDLE_INVALID);
     }
     ffi_alloc(h_session, ss_attrs)
 }
@@ -6235,8 +6286,8 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
-            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
-                return CKR_TEMPLATE_INCONSISTENT;
+            if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                return rv;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
                 Ok(h) => h,
@@ -6401,8 +6452,8 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
-            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
-                return CKR_TEMPLATE_INCONSISTENT;
+            if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                return rv;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
                 Ok(h) => h,
@@ -6557,8 +6608,8 @@ fn C_DecapsulateKey_impl(
                 ) {
                     return rv;
                 }
-                if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
-                    return CKR_TEMPLATE_INCONSISTENT;
+                if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                    return rv;
                 }
                 *ph_key = match ffi_alloc(_h_session, ss_attrs) {
                     Ok(h) => h,
@@ -15250,17 +15301,15 @@ pub fn C_UnwrapKey(
         // the C++ engine's C_UnwrapKey path (SoftHSM_keygen.cpp §C_UnwrapKey).
         crate::state::compute_kcv(&mut attrs);
 
-        // S2 (2026-08-13) — §5.18.3's CKA_UNWRAP_TEMPLATE twin: the
-        // unwrapping key may constrain the attribute set of the key it
-        // produces. Evaluated against the FULLY resolved attributes (template
-        // ‖ engine defaults), so a caller cannot evade the constraint by
-        // simply omitting the attribute. A contradiction is
-        // CKR_TEMPLATE_INCONSISTENT, and no object is created.
-        let kek_attrs = OBJECTS.with(|o| o.borrow().get(&h_unwrapping_key).cloned());
-        if let Some(kek_attrs) = kek_attrs {
-            if !crate::state::key_template_permits(&kek_attrs, CKA_UNWRAP_TEMPLATE, &attrs) {
-                return CKR_TEMPLATE_INCONSISTENT;
-            }
+        // S2 (2026-08-13) — §5.18.4's CKA_UNWRAP_TEMPLATE: the unwrapping
+        // key's template is ADDED to the FULLY resolved attributes (template
+        // ‖ engine defaults) and checked against the caller's template, so a
+        // caller cannot evade it by omitting the attribute (it is applied) or
+        // by contradicting it (CKR_TEMPLATE_INCONSISTENT, no object). See
+        // apply_key_template; it used to be compare-only, which refused an
+        // omitted attribute instead of applying it.
+        if let Err(rv) = apply_key_template(h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+            return rv;
         }
 
         // An SLH-DSA private key whose PK.root disagrees with its seeds is
@@ -15692,6 +15741,12 @@ pub fn C_UnwrapKeyAuthenticated(
         // secret-key object — C_UnwrapKeyAuthenticated counts as a new
         // object-creation path per §5.18.7.
         crate::state::compute_kcv(&mut attrs);
+
+        // The unwrapping key's CKA_UNWRAP_TEMPLATE, as in C_UnwrapKey (this
+        // path never consulted it, so the restriction did not hold here).
+        if let Err(rv) = apply_key_template(h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+            return rv;
+        }
 
         // Same SLH-DSA PK.root check as C_UnwrapKey.
         if check_imported_slh_dsa_private(&attrs).is_err() {

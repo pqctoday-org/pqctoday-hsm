@@ -644,3 +644,122 @@ fn nested_template_attributes_are_refused() {
     assert_eq!(C_SetAttributeValue(SESSION, kek, t.as_mut_ptr() as *mut u8, 1), CKR_ATTRIBUTE_VALUE_INVALID);
     OBJECTS.with(|o| o.borrow_mut().remove(&kek));
 }
+
+// ── CKA_DECAPSULATE_TEMPLATE / CKA_UNWRAP_TEMPLATE applied ──────────────────
+
+fn flat(entries: &[(u32, Vec<u8>)]) -> (Vec<usize>, Vec<u8>) {
+    let w = words(entries);
+    let b = unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * std::mem::size_of::<usize>()).to_vec() };
+    (w, b)
+}
+
+fn attr_bytes(h: u32, t: u32) -> Option<Vec<u8>> {
+    OBJECTS.with(|o| o.borrow().get(&h).and_then(|a| a.get(&t).cloned()))
+}
+
+/// key_management_functions.md (v3.3): CKA_DECAPSULATE_TEMPLATE is "an
+/// attribute set that will be added to attributes of the key to be
+/// decapsulated"; the user template is applied after it, and a conflict is
+/// CKR_TEMPLATE_INCONSISTENT. The engine used to compare only, so a caller
+/// who left an attribute out was refused instead of getting it applied.
+#[test]
+fn decapsulate_template_is_applied_then_checked() {
+    let _guard = test_lock::acquire();
+    setup();
+    let restrict = vec![(CKA_EXTRACTABLE, vec![0u8]), (CKA_SENSITIVE, vec![1u8])];
+    let (_w, rbytes) = flat(&restrict);
+    let (hp, hs) = ml_kem_pair(vec![], vec![(CKA_DECAPSULATE_TEMPLATE, rbytes)]);
+    let (rv, ct, _) = encapsulate(hp, &secret_template(true));
+    assert_eq!(rv, CKR_OK);
+
+    // The caller names neither attribute: both are added.
+    let bare = vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+        (CKA_TOKEN, vec![0]),
+    ];
+    let (rv, hk) = decapsulate(hs, &bare, &ct);
+    assert_eq!(rv, CKR_OK, "omitted attributes are applied, not refused");
+    assert_eq!(attr_bytes(hk, CKA_EXTRACTABLE), Some(vec![0u8]));
+    assert_eq!(attr_bytes(hk, CKA_SENSITIVE), Some(vec![1u8]));
+
+    // Agreeing with the template is fine; contradicting it is refused.
+    assert_eq!(decapsulate(hs, &secret_template(false), &ct).0, CKR_OK);
+    assert_eq!(decapsulate(hs, &secret_template(true), &ct).0, CKR_TEMPLATE_INCONSISTENT);
+
+    // An entry naming engine truth the template cannot change (the 32-byte
+    // ML-KEM secret's CKA_VALUE_LEN) must agree with it.
+    let lentries = vec![(CKA_VALUE_LEN, ulong(16))];
+    let (_w, lbytes) = flat(&lentries);
+    let (_hp2, hs2) = ml_kem_pair(vec![], vec![(CKA_DECAPSULATE_TEMPLATE, lbytes)]);
+    let (_, ct2, _) = encapsulate(_hp2, &secret_template(true));
+    assert_eq!(decapsulate(hs2, &bare, &ct2).0, CKR_TEMPLATE_INCONSISTENT);
+}
+
+/// v3.2 §5.18.4: CKA_UNWRAP_TEMPLATE has the same "added to" rule, on
+/// C_UnwrapKey and C_UnwrapKeyAuthenticated (which never consulted it).
+#[test]
+fn unwrap_template_is_applied_then_checked() {
+    let _guard = test_lock::acquire();
+    setup();
+    let uentries = vec![(CKA_EXTRACTABLE, vec![0u8])];
+    let (_w, ubytes) = flat(&uentries);
+    let kek = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x44; 16]),
+        (CKA_WRAP, vec![1]),
+        (CKA_UNWRAP, vec![1]),
+        (CKA_UNWRAP_TEMPLATE, ubytes),
+    ])
+    .unwrap();
+    let target = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x55; 16]),
+        (CKA_EXTRACTABLE, vec![1]),
+        (CKA_SENSITIVE, vec![0]),
+    ])
+    .unwrap();
+    let mut m: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+    let mut wrapped = vec![0u8; 64];
+    let mut wlen = wrapped.len() as u32;
+    assert_eq!(
+        C_WrapKey(SESSION, m.as_mut_ptr() as *mut u8, kek, target, wrapped.as_mut_ptr(), &mut wlen),
+        CKR_OK
+    );
+    wrapped.truncate(wlen as usize);
+    let unwrap = |tmpl: &[(u32, Vec<u8>)]| -> (u32, u32) {
+        let mut m: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+        let mut w = words(tmpl);
+        let mut wr = wrapped.clone();
+        let mut h = 0u32;
+        let rv = C_UnwrapKey(
+            SESSION,
+            m.as_mut_ptr() as *mut u8,
+            kek,
+            wr.as_mut_ptr(),
+            wr.len() as u32,
+            w.as_mut_ptr() as *mut u8,
+            tmpl.len() as u32,
+            &mut h,
+        );
+        (rv, h)
+    };
+    let base = vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+    ];
+    let (rv, h) = unwrap(&base);
+    assert_eq!(rv, CKR_OK, "an omitted attribute is applied");
+    assert_eq!(attr_bytes(h, CKA_EXTRACTABLE), Some(vec![0u8]));
+    let mut contra = base.clone();
+    contra.push((CKA_EXTRACTABLE, vec![1]));
+    assert_eq!(unwrap(&contra).0, CKR_TEMPLATE_INCONSISTENT);
+    let mut agree = base.clone();
+    agree.push((CKA_EXTRACTABLE, vec![0]));
+    assert_eq!(unwrap(&agree).0, CKR_OK);
+}
