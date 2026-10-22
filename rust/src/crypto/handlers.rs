@@ -252,7 +252,7 @@ pub unsafe fn get_attr_ulong_native(
     }
     let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize) as u32;
+        let t = canonical_attr_type(*ptr.add((i * 3) as usize) as u32);
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *ptr.add((i * 3 + 2) as usize);
@@ -294,7 +294,7 @@ pub unsafe fn get_attr_bytes(template: *mut u8, count: u32, attr_type: u32) -> O
     }
     let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize) as u32;
+        let t = canonical_attr_type(*ptr.add((i * 3) as usize) as u32);
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
@@ -329,7 +329,7 @@ pub unsafe fn get_attr_bytes_present(template: *mut u8, count: u32, attr_type: u
     }
     let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize) as u32;
+        let t = canonical_attr_type(*ptr.add((i * 3) as usize) as u32);
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
@@ -428,7 +428,7 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
     }
     let ptr = template as *mut usize;
     for i in 0..count {
-        let attr_type = *ptr.add((i * 3) as usize) as u32;
+        let attr_type = canonical_attr_type(*ptr.add((i * 3) as usize) as u32);
         let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
         let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
         // Skip key/seed material, internal private attrs, and server-managed attrs.
@@ -442,11 +442,12 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
             // attribute does) would store pointers, not data. Flatten instead.
             let v = if attr_is_attribute_array(attr_type) {
                 match flatten_attr_array(val_ptr, val_len) {
-                    Some(flat) => flat,
-                    // Malformed array — drop it rather than store a
-                    // half-decoded restriction. `validate_create_template`
-                    // rejects the same shape up front on the create path.
-                    None => continue,
+                    Ok(flat) => flat,
+                    // Malformed or nested array — drop it rather than store
+                    // a half-decoded restriction. Every entry point that
+                    // reaches here refuses the same shape first
+                    // (`check_template_arrays`).
+                    Err(_) => continue,
                 }
             } else {
                 std::slice::from_raw_parts(val_ptr, val_len).to_vec()
@@ -475,7 +476,7 @@ pub unsafe fn find_template_entry(
     }
     let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize) as u32;
+        let t = canonical_attr_type(*ptr.add((i * 3) as usize) as u32);
         if t != attr_type {
             continue;
         }
@@ -487,6 +488,32 @@ pub unsafe fn find_template_entry(
         return Some(std::slice::from_raw_parts(val_ptr, val_len).to_vec());
     }
     None
+}
+
+/// `CKA_ENCAPSULATE_TEMPLATE` / `CKA_DECAPSULATE_TEMPLATE` as the PUBLISHED
+/// v3.2 header defines them (`docs/refs/pkcs11t-canonical-v3.2.h:658-659`,
+/// 0x62a / 0x62b, without `CKF_ARRAY_ATTRIBUTE`). The engine's own values are
+/// the v3.3 ones (`CKF_ARRAY_ATTRIBUTE | 0x62a/0x62b`, TC commit 941c208,
+/// working/headers/pkcs11t.h:662-663; `V33_CORRECTIONS` in
+/// scripts/check_pkcs11_constants.py). Not `CKA_*` names: they are not a
+/// second pair of attributes, only the other spelling of the same two.
+const V32_HEADER_ENCAPSULATE_TEMPLATE: u32 = 0x0000_062a;
+const V32_HEADER_DECAPSULATE_TEMPLATE: u32 = 0x0000_062b;
+
+/// The engine's attribute type for a caller-supplied one. A program built
+/// against the published v3.2 header sends the KEM template attributes as
+/// 0x62a / 0x62b; without this mapping its template was stored under an
+/// attribute type nothing reads, so the restriction it set was never
+/// enforced and could not be read back under the v3.3 value. Every reader of
+/// a caller's `CK_ATTRIBUTE` type field goes through here (create, set, get,
+/// find, the generate/derive/unwrap/copy/KEM templates and the template
+/// lookups below), so both spellings name the one stored attribute.
+pub fn canonical_attr_type(attr_type: u32) -> u32 {
+    match attr_type {
+        V32_HEADER_ENCAPSULATE_TEMPLATE => crate::constants::CKA_ENCAPSULATE_TEMPLATE,
+        V32_HEADER_DECAPSULATE_TEMPLATE => crate::constants::CKA_DECAPSULATE_TEMPLATE,
+        t => t,
+    }
 }
 
 /// PKCS#11 v3.2 §5.18.3 — the attribute types whose value is a
@@ -521,32 +548,44 @@ pub(crate) fn attr_is_attribute_array(attr_type: u32) -> bool {
 ///
 /// `byte_len` is the array's size in bytes (the `ulValueLen` the caller
 /// supplied), which must be a whole number of `CK_ATTRIBUTE` structs.
-/// Returns `None` for a ragged length or an entry whose `pValue` is NULL
-/// with a non-zero length.
+/// Inner attribute types are stored canonical ([`canonical_attr_type`]).
+///
+/// Errors: a ragged length, an entry whose `pValue` is NULL with a non-zero
+/// length, or an implausible length is CKR_ATTRIBUTE_VALUE_INVALID. An inner
+/// entry that is itself a template attribute is CKR_TEMPLATE_INCONSISTENT:
+/// v3.3 key_objects.md ("Template Attributes") lets an implementation "deny
+/// any recursion, returning CKR_TEMPLATE_INCONSISTENT if the template can't be
+/// accepted for reading or writing to the object", and this engine does. A
+/// nested entry's value is another caller `CK_ATTRIBUTE[]` whose pointers die
+/// with the call; it used to be stored as those raw pointer bytes.
 ///
 /// # Safety
 /// `arr` must point to `byte_len` readable bytes shaped as `CK_ATTRIBUTE[]`.
-pub unsafe fn flatten_attr_array(arr: *const u8, byte_len: usize) -> Option<Vec<u8>> {
+pub unsafe fn flatten_attr_array(arr: *const u8, byte_len: usize) -> Result<Vec<u8>, u32> {
+    use crate::constants::{CKR_ATTRIBUTE_VALUE_INVALID, CKR_TEMPLATE_INCONSISTENT};
     let word = std::mem::size_of::<usize>();
     let stride = word * 3;
-    if byte_len == 0 || byte_len % stride != 0 {
-        return None;
+    if arr.is_null() || byte_len == 0 || byte_len % stride != 0 {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     let n = byte_len / stride;
     if n > 65536 {
-        return None;
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     let ptr = arr as *const usize;
     let mut out = Vec::with_capacity(byte_len);
     for i in 0..n {
-        let t = *ptr.add(i * 3) as u32;
+        let t = canonical_attr_type(*ptr.add(i * 3) as u32);
         let vp = *ptr.add(i * 3 + 1) as *const u8;
         let vl = *ptr.add(i * 3 + 2);
+        if attr_is_attribute_array(t) {
+            return Err(CKR_TEMPLATE_INCONSISTENT);
+        }
         if vp.is_null() && vl > 0 {
-            return None;
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
         if vl > byte_len.max(1 << 20) {
-            return None; // implausible length — refuse rather than read wild
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID); // implausible length — refuse rather than read wild
         }
         out.extend_from_slice(&t.to_le_bytes());
         out.extend_from_slice(&(vl as u32).to_le_bytes());
@@ -554,7 +593,149 @@ pub unsafe fn flatten_attr_array(arr: *const u8, byte_len: usize) -> Option<Vec<
             out.extend_from_slice(std::slice::from_raw_parts(vp, vl));
         }
     }
-    Some(out)
+    Ok(out)
+}
+
+/// The owned value of one caller `CK_ATTRIBUTE` (`attr_type` already
+/// canonical): a template attribute is deep-copied through
+/// [`flatten_attr_array`], anything else is copied verbatim. The single rule
+/// every template reader uses, so no path stores a caller's inner pointers.
+///
+/// # Safety
+/// `val_ptr` must be NULL or point to `val_len` readable bytes.
+pub unsafe fn template_entry_value(attr_type: u32, val_ptr: *const u8, val_len: usize) -> Result<Vec<u8>, u32> {
+    if attr_is_attribute_array(attr_type) {
+        return flatten_attr_array(val_ptr, val_len);
+    }
+    if val_ptr.is_null() || val_len == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(std::slice::from_raw_parts(val_ptr, val_len).to_vec())
+}
+
+/// Up-front check of every template attribute in a caller's template, for the
+/// object-creating calls whose templates are read by
+/// [`absorb_template_attrs`] (which cannot return an error and drops a bad
+/// array): the same codes [`flatten_attr_array`] gives on the create path.
+///
+/// # Safety
+/// Same contract as [`absorb_template_attrs`].
+pub unsafe fn check_template_arrays(template: *mut u8, count: u32) -> Result<(), u32> {
+    if template.is_null() || count == 0 || count > 65536 {
+        return Ok(());
+    }
+    let ptr = template as *mut usize;
+    for i in 0..count as usize {
+        let t = canonical_attr_type(*ptr.add(i * 3) as u32);
+        if !attr_is_attribute_array(t) {
+            continue;
+        }
+        let vp = *ptr.add(i * 3 + 1) as *const u8;
+        let vl = *ptr.add(i * 3 + 2);
+        if !vp.is_null() && vl > 0 {
+            flatten_attr_array(vp, vl)?;
+        }
+    }
+    Ok(())
+}
+
+/// Outcome of [`fill_template_attribute`] for one outer template entry.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TemplateFill {
+    Ok,
+    /// An inner buffer was too small (its `ulValueLen` is now
+    /// CK_UNAVAILABLE_INFORMATION): CKR_BUFFER_TOO_SMALL for the call.
+    TooSmall,
+    /// The caller's inner array does not describe the stored template:
+    /// CKR_TEMPLATE_INCONSISTENT for the call.
+    Inconsistent,
+}
+
+/// `C_GetAttributeValue` for a template attribute — v3.3 working draft,
+/// key_objects.md "Template Attributes" (TC commit 4c27b62). The value is
+/// returned as a `CK_ATTRIBUTE[]`, never as the engine's stored blob:
+///
+/// * `pValue` NULL: `ulValueLen` = n × sizeof(CK_ATTRIBUTE) (n stored entries).
+/// * Otherwise the array must have exactly n entries ("the array size matches
+///   the number of elements present in the internal representation"; the
+///   smaller-array case is only for excluded nested templates, which this
+///   engine never stores) and either
+///   - every type is CK_UNAVAILABLE_INFORMATION: each entry receives its type
+///     and value length, `pValue` is left as the caller set it (NULL); or
+///   - no type is CK_UNAVAILABLE_INFORMATION and the types are exactly the
+///     stored ones (any order): each entry is filled with the top-level
+///     §5.7.5 rules (NULL `pValue` → length; large enough → value; too small
+///     → CK_UNAVAILABLE_INFORMATION and CKR_BUFFER_TOO_SMALL).
+///   Anything else is CKR_TEMPLATE_INCONSISTENT ("otherwise,
+///   CKR_TEMPLATE_INCONSISTENT MUST be returned").
+///
+/// Widths are the build's own `CK_ATTRIBUTE` (`usize` words), so the same
+/// code serves LP64 hosts and wasm32.
+///
+/// # Safety
+/// `val_len_ptr` must be writable; a non-NULL `val_ptr` must point to
+/// `*val_len_ptr` bytes shaped as `CK_ATTRIBUTE[]` whose non-NULL `pValue`s
+/// can each receive their `ulValueLen` bytes.
+pub unsafe fn fill_template_attribute(stored: &[u8], val_ptr: *mut u8, val_len_ptr: *mut usize) -> TemplateFill {
+    let entries = match parse_flat_attr_array(stored) {
+        Some(e) => e,
+        None => {
+            *val_len_ptr = usize::MAX;
+            return TemplateFill::Inconsistent;
+        }
+    };
+    let stride = std::mem::size_of::<usize>() * 3;
+    let need = entries.len() * stride;
+    if val_ptr.is_null() {
+        *val_len_ptr = need;
+        return TemplateFill::Ok;
+    }
+    if *val_len_ptr != need {
+        *val_len_ptr = usize::MAX;
+        return TemplateFill::Inconsistent;
+    }
+    let arr = val_ptr as *mut usize;
+    let n = entries.len();
+    let unavailable = (0..n).filter(|&i| *arr.add(i * 3) == usize::MAX).count();
+    if unavailable == n {
+        for (i, (t, v)) in entries.iter().enumerate() {
+            *arr.add(i * 3) = *t as usize;
+            *arr.add(i * 3 + 2) = v.len();
+        }
+        return TemplateFill::Ok;
+    }
+    if unavailable != 0 {
+        *val_len_ptr = usize::MAX;
+        return TemplateFill::Inconsistent;
+    }
+    // Every requested type must name a distinct stored entry.
+    let mut picks = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = canonical_attr_type(*arr.add(i * 3) as u32);
+        match entries.iter().position(|(st, _)| *st == t) {
+            Some(j) if !picks.contains(&j) => picks.push(j),
+            _ => {
+                *val_len_ptr = usize::MAX;
+                return TemplateFill::Inconsistent;
+            }
+        }
+    }
+    let mut result = TemplateFill::Ok;
+    for (i, j) in picks.into_iter().enumerate() {
+        let v = &entries[j].1;
+        let inner_ptr = *arr.add(i * 3 + 1) as *mut u8;
+        let inner_len = arr.add(i * 3 + 2);
+        if inner_ptr.is_null() {
+            *inner_len = v.len();
+        } else if *inner_len >= v.len() {
+            std::ptr::copy_nonoverlapping(v.as_ptr(), inner_ptr, v.len());
+            *inner_len = v.len();
+        } else {
+            *inner_len = usize::MAX;
+            result = TemplateFill::TooSmall;
+        }
+    }
+    result
 }
 
 /// Inverse of [`flatten_attr_array`]. `None` if the blob is truncated.

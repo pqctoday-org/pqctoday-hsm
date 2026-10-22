@@ -2537,6 +2537,16 @@ fn generate_key_pair_with_replication_gate(
     } {
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    for (t, n) in [
+        (p_public_key_template, ul_public_key_attribute_count),
+        (p_private_key_template, ul_private_key_attribute_count),
+    ] {
+        // Template attributes well formed and not nested (key_objects.md
+        // "Template Attributes"); absorb_template_attrs cannot refuse.
+        if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(t, n) } {
+            return rv;
+        }
+    }
     let binding = match unsafe { replication_gate_pre(p_private_key_template, ul_private_key_attribute_count) } {
         Ok(b) => b,
         Err(rv) => return rv,
@@ -4795,6 +4805,11 @@ pub fn C_GenerateKey(
         Ok(b) => b,
         Err(rv) => return rv,
     };
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_count) } {
+        return rv;
+    }
     let rv = C_GenerateKey_impl(_h_session, p_mechanism, p_template, ul_count, ph_key);
     if rv != CKR_OK {
         return rv;
@@ -5158,14 +5173,12 @@ unsafe fn hpke_read_derived_key_template(p: *const u8) -> Option<(*const u8, Vec
     if !p_template.is_null() && count > 0 && count <= 65536 {
         let ptr = p_template as *const usize;
         for i in 0..count {
-            let t = *ptr.add(i * 3) as u32;
+            let t = crate::crypto::handlers::canonical_attr_type(*ptr.add(i * 3) as u32);
             let val_ptr = *ptr.add(i * 3 + 1) as *const u8;
             let val_len = *ptr.add(i * 3 + 2);
-            let bytes = if !val_ptr.is_null() && val_len > 0 {
-                std::slice::from_raw_parts(val_ptr, val_len).to_vec()
-            } else {
-                Vec::new()
-            };
+            // A template attribute is deep-copied, never stored as the
+            // caller's pointers (key_objects.md "Template Attributes").
+            let bytes = crate::crypto::handlers::template_entry_value(t, val_ptr, val_len).ok()?;
             out.push((t, bytes));
         }
     }
@@ -5362,6 +5375,12 @@ fn C_EncapsulateKey_impl(
     use ml_kem::KemCore;
 
     nonnull!(p_mechanism, ph_key, pul_ciphertext_len);
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(_p_template, _ul_attribute_count) } {
+        return rv;
+    }
+
     // E10 (2026-09-25) — §5.7.1 / §5.18.8 CKR_SESSION_READ_ONLY: the new key
     // is a token object when the template says CKA_TOKEN = CK_TRUE, which a
     // read-only session may not create (the same S7 gate C_GenerateKey,
@@ -6020,6 +6039,11 @@ fn C_DecapsulateKey_impl(
     require_session!(_h_session);
 
     nonnull!(p_mechanism, p_ciphertext, ph_key);
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(_p_template, _ul_attribute_count) } {
+        return rv;
+    }
     // E10 (2026-09-25) — §5.7.1 / §5.18.9 CKR_SESSION_READ_ONLY for a
     // CKA_TOKEN = CK_TRUE template in a read-only session (see
     // C_EncapsulateKey_impl).
@@ -6645,10 +6669,11 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         let mut had_missing = false;
         let mut had_sensitive = false;
         let mut had_small = false;
+        let mut had_inconsistent = false;
         unsafe {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as *mut u8;
                 let val_len_ptr = tmpl_ptr.add((i * 3 + 2) as usize); // *mut usize (native width)
                 // Block CKA_VALUE / CKA_SEED (raw secret material — see
@@ -6697,6 +6722,22 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                     had_sensitive = true;
                     continue;
                 }
+                // A template attribute is returned as a CK_ATTRIBUTE[] with the
+                // v3.3 retrieval protocol (key_objects.md "Template
+                // Attributes"), never as the engine's stored blob — which
+                // is what this loop handed out before, already wrong under
+                // v3.2's CK_ATTRIBUTE_PTR data type.
+                if crate::crypto::handlers::attr_is_attribute_array(attr_type) {
+                    if let Some(stored) = obj_attrs.get(&attr_type) {
+                        use crate::crypto::handlers::{fill_template_attribute, TemplateFill};
+                        match fill_template_attribute(stored, val_ptr, val_len_ptr) {
+                            TemplateFill::Ok => {}
+                            TemplateFill::TooSmall => had_small = true,
+                            TemplateFill::Inconsistent => had_inconsistent = true,
+                        }
+                        continue;
+                    }
+                }
                 if let Some(val) = obj_attrs.get(&attr_type) {
                     if val_ptr.is_null() {
                         *val_len_ptr = val.len();
@@ -6720,8 +6761,14 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         }
         // §5.7.5 precedence — sensitive/unextractable first, then invalid type,
         // then buffer-too-small.
+        // A template attribute whose inner array does not describe the
+        // stored template is CKR_TEMPLATE_INCONSISTENT ("MUST be returned",
+        // key_objects.md "Template Attributes"), ranked after the
+        // sensitivity class and before the plain §5.7.5 codes.
         if had_sensitive {
             CKR_ATTRIBUTE_SENSITIVE
+        } else if had_inconsistent {
+            CKR_TEMPLATE_INCONSISTENT
         } else if had_missing {
             CKR_ATTRIBUTE_TYPE_INVALID
         } else if had_small {
@@ -7779,26 +7826,23 @@ pub fn C_CreateObject(
         let tmpl_ptr = p_template as *mut usize;
         let mut new_attrs = HashMap::new();
         for i in 0..count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+            // The published v3.2 header's KEM template values name the same
+            // attributes (canonical_attr_type).
+            let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if !val_ptr.is_null() && val_len > 0 {
                 // S2 — an ATTRIBUTE-array attribute (CKA_WRAP_TEMPLATE and
                 // friends) has a CK_ATTRIBUTE[] as its value, whose inner
                 // pValue pointers die with this call. Flatten it into a
-                // self-contained blob; every other attribute is copied
+                // self-contained blob (a nested template is
+                // CKR_TEMPLATE_INCONSISTENT); every other attribute is copied
                 // verbatim as before. Same treatment absorb_template_attrs
                 // applies on the keygen paths, so a wrapping key created
                 // either way carries the same stored form.
-                let v = if crate::crypto::handlers::attr_is_attribute_array(attr_type) {
-                    match crate::crypto::handlers::flatten_attr_array(val_ptr, val_len as usize) {
-                        Some(flat) => flat,
-                        None => return CKR_ATTRIBUTE_VALUE_INVALID,
-                    }
-                } else {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    v
+                let v = match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
                 };
                 new_attrs.insert(attr_type, v);
             }
@@ -12103,7 +12147,7 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
         if !p_template.is_null() && ul_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as usize;
                 // R3 (2026-10-02) — §5.7.7: "an exact byte-for-byte match
@@ -12117,10 +12161,12 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
                 } else if val_ptr.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 } else {
-                    match_attrs.push((
-                        attr_type,
-                        std::slice::from_raw_parts(val_ptr, val_len).to_vec(),
-                    ));
+                    // A template attribute matches in its stored (flattened)
+                    // form; the caller's raw CK_ATTRIBUTE structs never could.
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len) {
+                        Ok(v) => match_attrs.push((attr_type, v)),
+                        Err(rv) => return rv,
+                    }
                 }
             }
         }
@@ -12859,6 +12905,11 @@ pub fn C_DeriveKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_attribute_count) } {
+        return rv;
+    }
     // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, cfg pqc_ckks_custody (default
     // native `fhe-custody`, or `educational-ckks`; TFHE kinds also need educational-fhe).
     #[cfg(pqc_ckks_custody)]
@@ -12922,13 +12973,16 @@ pub fn C_DeriveKey(
             let mut attrs = std::collections::HashMap::new();
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 if !val_ptr.is_null() && val_len > 0 {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    attrs.insert(attr_type, v);
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                        Ok(v) => {
+                            attrs.insert(attr_type, v);
+                        }
+                        Err(rv) => return rv,
+                    }
                 }
             }
 
@@ -14835,6 +14889,11 @@ pub fn C_UnwrapKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_attribute_count) } {
+        return rv;
+    }
     // §5.18.4 — pWrappedKey is the input ciphertext and phKey the required
     // out-param; neither may be NULL.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
@@ -15064,7 +15123,7 @@ pub fn C_UnwrapKey(
         if !p_template.is_null() && ul_attribute_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 // Skip CKA_VALUE — it comes from the unwrap operation
@@ -15072,9 +15131,14 @@ pub fn C_UnwrapKey(
                     continue;
                 }
                 if !val_ptr.is_null() && val_len > 0 {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    attrs.insert(attr_type, v);
+                    // Template attributes deep-copied (check_template_arrays
+                    // already refused a malformed or nested one).
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                        Ok(v) => {
+                            attrs.insert(attr_type, v);
+                        }
+                        Err(rv) => return rv,
+                    }
                 }
             }
         }
@@ -15397,6 +15461,11 @@ pub fn C_UnwrapKeyAuthenticated(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_attribute_count) } {
+        return rv;
+    }
     // Same required-pointer surface as C_UnwrapKey.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
     unsafe {
@@ -15495,16 +15564,21 @@ pub fn C_UnwrapKeyAuthenticated(
         if !p_template.is_null() && ul_attribute_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 if attr_type == CKA_VALUE {
                     continue;
                 }
                 if !val_ptr.is_null() && val_len > 0 {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    attrs.insert(attr_type, v);
+                    // Template attributes deep-copied (check_template_arrays
+                    // already refused a malformed or nested one).
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                        Ok(v) => {
+                            attrs.insert(attr_type, v);
+                        }
+                        Err(rv) => return rv,
+                    }
                 }
             }
         }
@@ -17257,6 +17331,11 @@ pub fn C_CopyObject(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_count) } {
+        return rv;
+    }
     nonnull!(ph_new_object);
     if p_template.is_null() && ul_count > 0 {
         return CKR_ARGUMENTS_BAD;
@@ -17268,16 +17347,16 @@ pub fn C_CopyObject(
         let tmpl_ptr = p_template as *mut usize;
         let mut template = Attributes::new();
         for i in 0..ul_count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+            let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if val_ptr.is_null() && val_len > 0 {
                 return CKR_ATTRIBUTE_VALUE_INVALID;
             }
-            let mut v = vec![0u8; val_len as usize];
-            if val_len > 0 {
-                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-            }
+            let v = match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
             template.insert(attr_type, v);
         }
         match copy_object_from_attrs(h_session, h_object, template) {
@@ -17399,16 +17478,20 @@ pub fn C_SetAttributeValue(
     unsafe {
         let tmpl_ptr = p_template as *mut usize;
         for i in 0..ul_count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+            let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if val_ptr.is_null() && val_len > 0 {
                 return CKR_ATTRIBUTE_VALUE_INVALID;
             }
-            let mut v = vec![0u8; val_len as usize];
-            if val_len > 0 {
-                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-            }
+            // v3.3 key_objects.md "Template Attributes": a template attribute
+            // received "via C_SetAttributeValue" MUST be deep-copied. This
+            // path copied the caller's CK_ATTRIBUTE structs verbatim, i.e.
+            // stored pointers into caller memory.
+            let v = match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
             updates.push((attr_type, v));
         }
     }

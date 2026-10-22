@@ -302,3 +302,345 @@ fn external_mu_wrong_length_is_data_len_range() {
         o.borrow_mut().remove(&hs);
     });
 }
+
+// ── Template attributes ─────────────────────────────────────────────────────
+
+/// The published v3.2 header's values (pkcs11t-canonical-v3.2.h:658-659).
+const V32_ENCAPSULATE_TEMPLATE: u32 = 0x0000_062a;
+const V32_DECAPSULATE_TEMPLATE: u32 = 0x0000_062b;
+
+const STRIDE: usize = std::mem::size_of::<usize>() * 3;
+
+fn create(entries: &[(u32, Vec<u8>)]) -> Result<u32, u32> {
+    let mut w = words(entries);
+    let mut h = 0u32;
+    match C_CreateObject(SESSION, w.as_mut_ptr() as *mut u8, entries.len() as u32, &mut h) {
+        CKR_OK => Ok(h),
+        rv => Err(rv),
+    }
+}
+
+fn ml_kem_pair(pub_extra: Vec<(u32, Vec<u8>)>, prv_extra: Vec<(u32, Vec<u8>)>) -> (u32, u32) {
+    let mut pub_entries = vec![
+        (CKA_CLASS, ulong(CKO_PUBLIC_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_ML_KEM)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_ENCAPSULATE, vec![1]),
+        (CKA_PARAMETER_SET, ulong(CKP_ML_KEM_768)),
+    ];
+    pub_entries.extend(pub_extra);
+    let mut prv_entries = vec![
+        (CKA_CLASS, ulong(CKO_PRIVATE_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_ML_KEM)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_DECAPSULATE, vec![1]),
+    ];
+    prv_entries.extend(prv_extra);
+    let (rv, hp, hs) = keypair(CKM_ML_KEM_KEY_PAIR_GEN, &pub_entries, &prv_entries);
+    assert_eq!(rv, CKR_OK, "ML-KEM key pair");
+    (hp, hs)
+}
+
+fn secret_template(extractable: bool) -> Vec<(u32, Vec<u8>)> {
+    vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_EXTRACTABLE, vec![extractable as u8]),
+    ]
+}
+
+fn encapsulate(hp: u32, tmpl: &[(u32, Vec<u8>)]) -> (u32, Vec<u8>, u32) {
+    let mut m: [usize; 3] = [CKM_ML_KEM as usize, 0, 0];
+    let mut w = words(tmpl);
+    let mut ct = vec![0u8; 4096];
+    let mut ct_len = ct.len() as u32;
+    let mut hk = 0u32;
+    let rv = C_EncapsulateKey(
+        SESSION,
+        m.as_mut_ptr() as *mut u8,
+        hp,
+        w.as_mut_ptr() as *mut u8,
+        tmpl.len() as u32,
+        ct.as_mut_ptr(),
+        &mut ct_len,
+        &mut hk,
+    );
+    ct.truncate(ct_len as usize);
+    (rv, ct, hk)
+}
+
+fn decapsulate(hs: u32, tmpl: &[(u32, Vec<u8>)], ct: &[u8]) -> (u32, u32) {
+    let mut m: [usize; 3] = [CKM_ML_KEM as usize, 0, 0];
+    let mut w = words(tmpl);
+    let mut c = ct.to_vec();
+    let mut hk = 0u32;
+    let rv = C_DecapsulateKey(
+        SESSION,
+        m.as_mut_ptr() as *mut u8,
+        hs,
+        w.as_mut_ptr() as *mut u8,
+        tmpl.len() as u32,
+        c.as_mut_ptr(),
+        c.len() as u32,
+        &mut hk,
+    );
+    (rv, hk)
+}
+
+/// Read one attribute's length (NULL pValue) through C_GetAttributeValue.
+fn attr_len(h: u32, t: u32) -> (u32, usize) {
+    let mut a: [usize; 3] = [t as usize, 0, 0];
+    let rv = C_GetAttributeValue(SESSION, h, a.as_mut_ptr() as *mut u8, 1);
+    (rv, a[2])
+}
+
+/// The full two-step v3.3 read of a template attribute: discover the types
+/// and lengths, then fetch the values. Returns the (type, value) pairs.
+fn read_template_attr(h: u32, t: u32) -> Vec<(u32, Vec<u8>)> {
+    let (rv, len) = attr_len(h, t);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(len % STRIDE, 0, "a CK_ATTRIBUTE[] length");
+    let n = len / STRIDE;
+    // Discovery: every type CK_UNAVAILABLE_INFORMATION, pValue NULL, len 0.
+    let mut inner: Vec<usize> = (0..n).flat_map(|_| [usize::MAX, 0, 0]).collect();
+    let mut a: [usize; 3] = [t as usize, inner.as_mut_ptr() as usize, len];
+    assert_eq!(C_GetAttributeValue(SESSION, h, a.as_mut_ptr() as *mut u8, 1), CKR_OK);
+    assert_eq!(a[2], len);
+    let mut bufs: Vec<Vec<u8>> = (0..n).map(|i| vec![0u8; inner[i * 3 + 2]]).collect();
+    for (i, b) in bufs.iter_mut().enumerate() {
+        inner[i * 3 + 1] = if b.is_empty() { 0 } else { b.as_mut_ptr() as usize };
+    }
+    assert_eq!(C_GetAttributeValue(SESSION, h, a.as_mut_ptr() as *mut u8, 1), CKR_OK);
+    (0..n).map(|i| (inner[i * 3] as u32, bufs[i][..inner[i * 3 + 2]].to_vec())).collect()
+}
+
+/// A program built against the published v3.2 header names the KEM template
+/// attributes 0x62a / 0x62b. Before the fix the engine stored them under that
+/// unknown type and enforced nothing; now they are the same attributes as the
+/// v3.3 values, enforced and readable under either value.
+#[test]
+fn v32_header_kem_template_values_are_enforced() {
+    let _guard = test_lock::acquire();
+    setup();
+    let restrict = vec![(CKA_EXTRACTABLE, vec![0u8])];
+    let rw = words(&restrict);
+    let as_bytes = |w: &Vec<usize>| unsafe {
+        std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * std::mem::size_of::<usize>()).to_vec()
+    };
+    let rbytes = as_bytes(&rw);
+    let (hp, hs) = ml_kem_pair(
+        vec![(V32_ENCAPSULATE_TEMPLATE, rbytes.clone())],
+        vec![(V32_DECAPSULATE_TEMPLATE, rbytes.clone())],
+    );
+    // Enforced: CKR_KEY_HANDLE_INVALID on encapsulate, CKR_TEMPLATE_INCONSISTENT
+    // on decapsulate (key_management_functions.md).
+    let (rv, _, _) = encapsulate(hp, &secret_template(true));
+    assert_eq!(rv, CKR_KEY_HANDLE_INVALID, "encapsulate template set at 0x62a");
+    let (rv, ct, _) = encapsulate(hp, &secret_template(false));
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(decapsulate(hs, &secret_template(true), &ct).0, CKR_TEMPLATE_INCONSISTENT);
+    assert_eq!(decapsulate(hs, &secret_template(false), &ct).0, CKR_OK);
+    // One attribute, two names.
+    for (h, a, b) in [
+        (hp, V32_ENCAPSULATE_TEMPLATE, CKA_ENCAPSULATE_TEMPLATE),
+        (hs, V32_DECAPSULATE_TEMPLATE, CKA_DECAPSULATE_TEMPLATE),
+    ] {
+        assert_eq!(attr_len(h, a), (CKR_OK, STRIDE));
+        assert_eq!(read_template_attr(h, a), vec![(CKA_EXTRACTABLE, vec![0u8])]);
+        assert_eq!(read_template_attr(h, b), vec![(CKA_EXTRACTABLE, vec![0u8])]);
+    }
+    // C_SetAttributeValue under the v3.2 value replaces the same attribute.
+    let allow = vec![(CKA_EXTRACTABLE, vec![1u8])];
+    let aw = words(&allow);
+    let abytes = as_bytes(&aw);
+    let mut t: [usize; 3] = [V32_ENCAPSULATE_TEMPLATE as usize, abytes.as_ptr() as usize, abytes.len()];
+    assert_eq!(C_SetAttributeValue(SESSION, hp, t.as_mut_ptr() as *mut u8, 1), CKR_OK);
+    assert_eq!(read_template_attr(hp, CKA_ENCAPSULATE_TEMPLATE), vec![(CKA_EXTRACTABLE, vec![1u8])]);
+    assert_eq!(encapsulate(hp, &secret_template(true)).0, CKR_OK);
+    assert_eq!(encapsulate(hp, &secret_template(false)).0, CKR_KEY_HANDLE_INVALID);
+}
+
+/// v3.3 key_objects.md "Template Attributes": C_GetAttributeValue returns a
+/// CK_ATTRIBUTE[] — length query, discovery with CK_UNAVAILABLE_INFORMATION
+/// types, value fetch in any order, CKR_TEMPLATE_INCONSISTENT for an array
+/// that does not describe the stored template, CKR_BUFFER_TOO_SMALL for a
+/// small inner buffer. Before the fix the caller got the engine's internal
+/// `u32 type ‖ u32 len ‖ bytes` blob.
+#[test]
+fn template_attribute_read_back_is_a_ck_attribute_array() {
+    let _guard = test_lock::acquire();
+    setup();
+    let label = b"wrapped-by-kek".to_vec();
+    let inner = vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_EXTRACTABLE, vec![1u8]),
+        (CKA_SUBJECT, label.clone()),
+    ];
+    let iw = words(&inner);
+    let ibytes = unsafe {
+        std::slice::from_raw_parts(iw.as_ptr() as *const u8, iw.len() * std::mem::size_of::<usize>()).to_vec()
+    };
+    let kek = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x11; 16]),
+        (CKA_WRAP, vec![1]),
+        (CKA_WRAP_TEMPLATE, ibytes),
+    ])
+    .expect("KEK with a wrap template");
+
+    assert_eq!(attr_len(kek, CKA_WRAP_TEMPLATE), (CKR_OK, 3 * STRIDE));
+    assert_eq!(read_template_attr(kek, CKA_WRAP_TEMPLATE), inner, "discovery, then values");
+
+    // Known types in another order, values fetched directly.
+    let mut cls = vec![0u8; std::mem::size_of::<usize>()];
+    let mut lab = vec![0u8; 64];
+    let mut ext = vec![0u8; 1];
+    let mut arr: Vec<usize> = vec![
+        CKA_SUBJECT as usize, lab.as_mut_ptr() as usize, lab.len(),
+        CKA_CLASS as usize, cls.as_mut_ptr() as usize, cls.len(),
+        CKA_EXTRACTABLE as usize, ext.as_mut_ptr() as usize, ext.len(),
+    ];
+    let mut a: [usize; 3] = [CKA_WRAP_TEMPLATE as usize, arr.as_mut_ptr() as usize, 3 * STRIDE];
+    assert_eq!(C_GetAttributeValue(SESSION, kek, a.as_mut_ptr() as *mut u8, 1), CKR_OK);
+    assert_eq!(&lab[..arr[2]], &label[..]);
+    assert_eq!(cls, ulong(CKO_SECRET_KEY));
+    assert_eq!(ext, vec![1u8]);
+
+    // NULL inner pValue with a known type: the length only.
+    let mut arr: Vec<usize> = vec![
+        CKA_SUBJECT as usize, 0, 0,
+        CKA_CLASS as usize, 0, 0,
+        CKA_EXTRACTABLE as usize, 0, 0,
+    ];
+    let mut a: [usize; 3] = [CKA_WRAP_TEMPLATE as usize, arr.as_mut_ptr() as usize, 3 * STRIDE];
+    assert_eq!(C_GetAttributeValue(SESSION, kek, a.as_mut_ptr() as *mut u8, 1), CKR_OK);
+    assert_eq!([arr[2], arr[5], arr[8]], [label.len(), std::mem::size_of::<usize>(), 1]);
+
+    // A small inner buffer: CK_UNAVAILABLE_INFORMATION and BUFFER_TOO_SMALL.
+    let mut small = vec![0u8; 3];
+    let mut arr: Vec<usize> = vec![
+        CKA_SUBJECT as usize, small.as_mut_ptr() as usize, small.len(),
+        CKA_CLASS as usize, 0, 0,
+        CKA_EXTRACTABLE as usize, 0, 0,
+    ];
+    let mut a: [usize; 3] = [CKA_WRAP_TEMPLATE as usize, arr.as_mut_ptr() as usize, 3 * STRIDE];
+    assert_eq!(C_GetAttributeValue(SESSION, kek, a.as_mut_ptr() as *mut u8, 1), CKR_BUFFER_TOO_SMALL);
+    assert_eq!(arr[2], usize::MAX);
+
+    // Inconsistent arrays: an unknown type, a duplicate, a mix of known and
+    // CK_UNAVAILABLE_INFORMATION types, and a wrong array size.
+    for bad in [
+        vec![CKA_SUBJECT as usize, 0, 0, CKA_CLASS as usize, 0, 0, CKA_SIGN as usize, 0, 0],
+        vec![CKA_SUBJECT as usize, 0, 0, CKA_SUBJECT as usize, 0, 0, CKA_CLASS as usize, 0, 0],
+        vec![CKA_SUBJECT as usize, 0, 0, usize::MAX, 0, 0, usize::MAX, 0, 0],
+    ] {
+        let mut arr = bad.clone();
+        let mut a: [usize; 3] = [CKA_WRAP_TEMPLATE as usize, arr.as_mut_ptr() as usize, 3 * STRIDE];
+        assert_eq!(
+            C_GetAttributeValue(SESSION, kek, a.as_mut_ptr() as *mut u8, 1),
+            CKR_TEMPLATE_INCONSISTENT,
+            "{bad:x?}"
+        );
+        assert_eq!(a[2], usize::MAX);
+    }
+    let mut arr: Vec<usize> = vec![usize::MAX, 0, 0, usize::MAX, 0, 0];
+    let mut a: [usize; 3] = [CKA_WRAP_TEMPLATE as usize, arr.as_mut_ptr() as usize, 2 * STRIDE];
+    assert_eq!(C_GetAttributeValue(SESSION, kek, a.as_mut_ptr() as *mut u8, 1), CKR_TEMPLATE_INCONSISTENT);
+    OBJECTS.with(|o| o.borrow_mut().remove(&kek));
+}
+
+/// C_SetAttributeValue deep-copies a template attribute (key_objects.md:
+/// tokens "MUST NOT store the template attribute value as received"). It used
+/// to store the caller's CK_ATTRIBUTE structs, i.e. pointers into memory the
+/// caller frees right after the call.
+#[test]
+fn set_attribute_value_deep_copies_a_template() {
+    let _guard = test_lock::acquire();
+    setup();
+    let kek = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x22; 16]),
+        (CKA_WRAP, vec![1]),
+    ])
+    .unwrap();
+    {
+        let label = b"short-lived caller buffer".to_vec();
+        let inner = vec![(CKA_SUBJECT, label)];
+        let iw = words(&inner);
+        let mut t: [usize; 3] = [
+            CKA_WRAP_TEMPLATE as usize,
+            iw.as_ptr() as usize,
+            iw.len() * std::mem::size_of::<usize>(),
+        ];
+        assert_eq!(C_SetAttributeValue(SESSION, kek, t.as_mut_ptr() as *mut u8, 1), CKR_OK);
+        // The stored form holds the label bytes themselves, not a pointer.
+        let stored = OBJECTS.with(|o| o.borrow()[&kek][&CKA_WRAP_TEMPLATE].clone());
+        assert_eq!(
+            crate::crypto::handlers::parse_flat_attr_array(&stored),
+            Some(vec![(CKA_SUBJECT, b"short-lived caller buffer".to_vec())])
+        );
+    } // caller memory released here
+    assert_eq!(
+        read_template_attr(kek, CKA_WRAP_TEMPLATE),
+        vec![(CKA_SUBJECT, b"short-lived caller buffer".to_vec())]
+    );
+    OBJECTS.with(|o| o.borrow_mut().remove(&kek));
+}
+
+/// key_objects.md: an implementation may "deny any recursion, returning
+/// CKR_TEMPLATE_INCONSISTENT". A template attribute inside a template
+/// attribute is refused on every path that takes one; before the fix its
+/// raw pointer bytes were stored.
+#[test]
+fn nested_template_attributes_are_refused() {
+    let _guard = test_lock::acquire();
+    setup();
+    let deepest = vec![(CKA_EXTRACTABLE, vec![0u8])];
+    let dw = words(&deepest);
+    let nested = vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_DERIVE_TEMPLATE, unsafe {
+            std::slice::from_raw_parts(dw.as_ptr() as *const u8, dw.len() * std::mem::size_of::<usize>()).to_vec()
+        }),
+    ];
+    let nw = words(&nested);
+    let nbytes = unsafe {
+        std::slice::from_raw_parts(nw.as_ptr() as *const u8, nw.len() * std::mem::size_of::<usize>()).to_vec()
+    };
+    let base = vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x33; 16]),
+        (CKA_WRAP, vec![1]),
+    ];
+    // C_CreateObject.
+    let mut with_nested = base.clone();
+    with_nested.push((CKA_WRAP_TEMPLATE, nbytes.clone()));
+    assert_eq!(create(&with_nested), Err(CKR_TEMPLATE_INCONSISTENT));
+    // C_SetAttributeValue.
+    let kek = create(&base).unwrap();
+    let mut t: [usize; 3] = [CKA_UNWRAP_TEMPLATE as usize, nbytes.as_ptr() as usize, nbytes.len()];
+    assert_eq!(C_SetAttributeValue(SESSION, kek, t.as_mut_ptr() as *mut u8, 1), CKR_TEMPLATE_INCONSISTENT);
+    assert_eq!(attr_len(kek, CKA_UNWRAP_TEMPLATE).0, CKR_ATTRIBUTE_TYPE_INVALID, "nothing stored");
+    // Key pair generation (the template absorbed by absorb_template_attrs).
+    let pub_entries = vec![
+        (CKA_CLASS, ulong(CKO_PUBLIC_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_ML_KEM)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_PARAMETER_SET, ulong(CKP_ML_KEM_768)),
+        (CKA_ENCAPSULATE_TEMPLATE, nbytes.clone()),
+    ];
+    let prv_entries = vec![(CKA_CLASS, ulong(CKO_PRIVATE_KEY)), (CKA_TOKEN, vec![0])];
+    assert_eq!(keypair(CKM_ML_KEM_KEY_PAIR_GEN, &pub_entries, &prv_entries).0, CKR_TEMPLATE_INCONSISTENT);
+    // A ragged array is CKR_ATTRIBUTE_VALUE_INVALID, as on the create path.
+    let ragged = vec![0u8; STRIDE + 1];
+    let mut t: [usize; 3] = [CKA_WRAP_TEMPLATE as usize, ragged.as_ptr() as usize, ragged.len()];
+    assert_eq!(C_SetAttributeValue(SESSION, kek, t.as_mut_ptr() as *mut u8, 1), CKR_ATTRIBUTE_VALUE_INVALID);
+    OBJECTS.with(|o| o.borrow_mut().remove(&kek));
+}
