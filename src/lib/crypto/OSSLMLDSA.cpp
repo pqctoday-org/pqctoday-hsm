@@ -77,6 +77,15 @@ static const unsigned char OID_SHA384[] = {
 static const unsigned char OID_SHA512[] = {
 	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03
 };
+// SHA-512/224 and SHA-512/256 (NIST hashAlgs 2.16.840.1.101.3.4.2.5 / .6):
+// reachable through the generic pre-hash mechanism's `hash` field only
+// (owner decision D5, 2026-10-22; PKCS#11 v3.3 draft has no typed variant).
+static const unsigned char OID_SHA512_224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x05
+};
+static const unsigned char OID_SHA512_256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x06
+};
 static const unsigned char OID_SHA3_224[] = {
 	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07
 };
@@ -113,6 +122,8 @@ static const PreHashInfo* getPreHashInfo(HashAlgo::Type hashAlg)
 		{ "SHA3-512",  OID_SHA3_512,  OID_DER_LEN, 64, false, NULL },
 		{ "SHAKE128",  OID_SHAKE128,  OID_DER_LEN, 32, true,  NULL },
 		{ "SHAKE256",  OID_SHAKE256,  OID_DER_LEN, 64, true,  NULL },
+		{ "SHA2-512/224", OID_SHA512_224, OID_DER_LEN, 28, false, NULL },
+		{ "SHA2-512/256", OID_SHA512_256, OID_DER_LEN, 32, false, NULL },
 	};
 
 	switch (hashAlg)
@@ -127,6 +138,8 @@ static const PreHashInfo* getPreHashInfo(HashAlgo::Type hashAlg)
 		case HashAlgo::SHA3_512: return &table[7];
 		case HashAlgo::SHAKE128: return &table[8];
 		case HashAlgo::SHAKE256: return &table[9];
+		case HashAlgo::SHA512_224: return &table[10];
+		case HashAlgo::SHA512_256: return &table[11];
 		default: return NULL;
 	}
 }
@@ -137,7 +150,8 @@ void OSSLMLDSA_cleanupPreHashCache()
 	static const HashAlgo::Type allAlgs[] = {
 		HashAlgo::SHA224, HashAlgo::SHA256, HashAlgo::SHA384, HashAlgo::SHA512,
 		HashAlgo::SHA3_224, HashAlgo::SHA3_256, HashAlgo::SHA3_384, HashAlgo::SHA3_512,
-		HashAlgo::SHAKE128, HashAlgo::SHAKE256
+		HashAlgo::SHAKE128, HashAlgo::SHAKE256,
+		HashAlgo::SHA512_224, HashAlgo::SHA512_256
 	};
 	for (auto alg : allAlgs)
 	{
@@ -364,9 +378,6 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	{
 		signData = dataToSign.const_byte_str();
 		signDataLen = dataToSign.size();
-		// Internal message encoding (extended sign context): the caller's
-		// data IS M' (FIPS 204 Alg 7 Sign_internal), signed as given.
-		if (mldsaParams && mldsaParams->internalEncoding) useRawEncoding = true;
 	}
 
 	// Pre-size the output buffer to the maximum signature length
@@ -562,8 +573,6 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	{
 		verifyData = originalData.const_byte_str();
 		verifyDataLen = originalData.size();
-		// Internal message encoding: M' as given (FIPS 204 Alg 8).
-		if (mldsaParams && mldsaParams->internalEncoding) useRawEncoding = true;
 	}
 
 	EVP_MD_CTX* ctx = EVP_MD_CTX_new();

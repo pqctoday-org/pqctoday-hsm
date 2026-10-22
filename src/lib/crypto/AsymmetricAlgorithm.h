@@ -201,9 +201,10 @@ struct MLDSA_SIGN_PARAMS
 	HashAlgo::Type hashAlg;      // hash algorithm (when preHash or phmInput)
 	size_t contextLen;           // 0-255
 	unsigned char context[255];  // FIPS 204 max context length
-	// Optional test inputs from the extended parameter form
+	// Optional test input from the extended parameter form
 	// (CK_PQCTODAY_*SIGN_ADDITIONAL_CONTEXT_EXT, vendor_mechanisms.h).
-	bool internalEncoding;       // messageEncoding = internal: M' as given
+	// No internal encoding: refused for ML-DSA (D6, CKM_ML_DSA_EXTERNAL_MU is
+	// the standard route).
 	size_t randomLen;            // 0 = absent (draw rnd as usual), else 32
 	unsigned char random[32];    // caller-supplied rnd (FIPS 204 Alg 7)
 };

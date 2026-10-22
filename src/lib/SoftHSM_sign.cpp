@@ -671,11 +671,13 @@ static CK_RV applySignContextExtension(CK_MECHANISM_PTR pMechanism, const SignCt
 	}
 	if (f.messageEncoding == PQCTODAY_MESSAGE_ENCODING_INTERNAL)
 	{
-		// FIPS 204 Sign/Verify_internal and FIPS 205 slh_sign/slh_verify_
-		// _internal have no context and no pre-hash: pure mechanisms only.
-		if (pMechanism->mechanism != CKM_ML_DSA && pMechanism->mechanism != CKM_SLH_DSA)
+		// FIPS 205 slh_sign/slh_verify_internal: pure CKM_SLH_DSA only (no
+		// context, no pre-hash). Owner decision D6 (2026-10-22): refused for
+		// every ML-DSA mechanism, whose internal interface has a standard
+		// route -- CKM_ML_DSA_EXTERNAL_MU over µ = SHAKE256(tr || M', 64).
+		if (pMechanism->mechanism != CKM_SLH_DSA)
 		{
-			ERROR_MSG("Internal message encoding needs CKM_ML_DSA or CKM_SLH_DSA");
+			ERROR_MSG("Internal message encoding is CKM_SLH_DSA only");
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		if (f.ulContextLen != 0)
@@ -768,8 +770,9 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 		memcpy(out.context, f.pContext, f.ulContextLen);
 	}
 
+	bool internal = false;  // always refused for ML-DSA (D6), never set
 	rv = applySignContextExtension(pMechanism, f, use, out.random, sizeof(out.random),
-	                               out.randomLen, out.internalEncoding);
+	                               out.randomLen, internal);
 	if (rv != CKR_OK) return rv;
 	if (out.randomLen != 0 && out.randomLen != PQCTODAY_ML_DSA_RND_LEN)
 	{
@@ -1405,6 +1408,9 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				case CKM_SHA3_256: mldsaSignParam.hashAlg = HashAlgo::SHA3_256; break;
 				case CKM_SHA3_384: mldsaSignParam.hashAlg = HashAlgo::SHA3_384; break;
 				case CKM_SHA3_512: mldsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
+				// D5: SHA-512/224 and SHA-512/256 via the generic `hash` field only.
+				case CKM_SHA512_224: mldsaSignParam.hashAlg = HashAlgo::SHA512_224; break;
+				case CKM_SHA512_256: mldsaSignParam.hashAlg = HashAlgo::SHA512_256; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_ML_DSA", hctx->hash);
 					return CKR_MECHANISM_PARAM_INVALID;
@@ -1511,6 +1517,9 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				case CKM_SHA3_256: slhdsaSignParam.hashAlg = HashAlgo::SHA3_256; break;
 				case CKM_SHA3_384: slhdsaSignParam.hashAlg = HashAlgo::SHA3_384; break;
 				case CKM_SHA3_512: slhdsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
+				// D5: SHA-512/224 and SHA-512/256 via the generic `hash` field only.
+				case CKM_SHA512_224: slhdsaSignParam.hashAlg = HashAlgo::SHA512_224; break;
+				case CKM_SHA512_256: slhdsaSignParam.hashAlg = HashAlgo::SHA512_256; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_SLH_DSA",
 					          hctx->hash);
@@ -1887,6 +1896,35 @@ static CK_RV MacSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK
 }
 
 // AsymmetricAlgorithm version of C_Sign
+// Owner decision D7 (2026-10-22, v3.3 HashML-DSA / HashSLH-DSA input-length
+// rule): for the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA the data IS PH(M),
+// so a length other than the selected hash's digest length is
+// CKR_DATA_LEN_RANGE. Returns true when `mechanism` is not one of the two
+// generic mechanisms or the length matches.
+static bool genericPhmLenOk(AsymMech::Type mechanism, const void* param, size_t paramLen, CK_ULONG dataLen)
+{
+	HashAlgo::Type alg;
+	if (mechanism == AsymMech::HASH_MLDSA && param != NULL && paramLen >= sizeof(MLDSA_SIGN_PARAMS))
+		alg = ((const MLDSA_SIGN_PARAMS*)param)->hashAlg;
+	else if (mechanism == AsymMech::HASH_SLHDSA && param != NULL && paramLen >= sizeof(SLHDSA_SIGN_PARAMS))
+		alg = ((const SLHDSA_SIGN_PARAMS*)param)->hashAlg;
+	else
+		return true;
+	CK_ULONG want = 0;
+	switch (alg)
+	{
+		case HashAlgo::SHA224: case HashAlgo::SHA3_224: case HashAlgo::SHA512_224: want = 28; break;
+		case HashAlgo::SHA256: case HashAlgo::SHA3_256: case HashAlgo::SHA512_256: want = 32; break;
+		case HashAlgo::SHA384: case HashAlgo::SHA3_384: want = 48; break;
+		case HashAlgo::SHA512: case HashAlgo::SHA3_512: want = 64; break;
+		default: return true;  // unreachable: the init switch admits only these
+	}
+	if (dataLen == want) return true;
+	ERROR_MSG("Generic pre-hash: PH(M) is %lu bytes, the hash's digest is %lu",
+		(unsigned long)dataLen, (unsigned long)want);
+	return false;
+}
+
 static CK_RV AsymSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen)
 {
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
@@ -1924,6 +1962,12 @@ static CK_RV AsymSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, C
 	{
 		*pulSignatureLen = size;
 		return CKR_BUFFER_TOO_SMALL;
+	}
+
+	if (!genericPhmLenOk(mechanism, param, paramLen, ulDataLen))
+	{
+		session->resetOp();
+		return CKR_DATA_LEN_RANGE;
 	}
 
 	// Get the data
@@ -3192,6 +3236,9 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				case CKM_SHA3_256: mldsaSignParam.hashAlg = HashAlgo::SHA3_256; break;
 				case CKM_SHA3_384: mldsaSignParam.hashAlg = HashAlgo::SHA3_384; break;
 				case CKM_SHA3_512: mldsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
+				// D5: SHA-512/224 and SHA-512/256 via the generic `hash` field only.
+				case CKM_SHA512_224: mldsaSignParam.hashAlg = HashAlgo::SHA512_224; break;
+				case CKM_SHA512_256: mldsaSignParam.hashAlg = HashAlgo::SHA512_256; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_ML_DSA", hctx->hash);
 					return CKR_MECHANISM_PARAM_INVALID;
@@ -3298,6 +3345,9 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				case CKM_SHA3_256: slhdsaSignParam.hashAlg = HashAlgo::SHA3_256; break;
 				case CKM_SHA3_384: slhdsaSignParam.hashAlg = HashAlgo::SHA3_384; break;
 				case CKM_SHA3_512: slhdsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
+				// D5: SHA-512/224 and SHA-512/256 via the generic `hash` field only.
+				case CKM_SHA512_224: slhdsaSignParam.hashAlg = HashAlgo::SHA512_224; break;
+				case CKM_SHA512_256: slhdsaSignParam.hashAlg = HashAlgo::SHA512_256; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_SLH_DSA",
 					          hctx->hash);
@@ -3705,6 +3755,12 @@ static CK_RV AsymVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen,
 		ERROR_MSG("The size of the signature differs from the size of the mechanism");
 		session->resetOp();
 		return CKR_SIGNATURE_LEN_RANGE;
+	}
+
+	if (!genericPhmLenOk(mechanism, param, paramLen, ulDataLen))
+	{
+		session->resetOp();
+		return CKR_DATA_LEN_RANGE;
 	}
 
 	// Get the data
@@ -4734,6 +4790,25 @@ CK_RV SoftHSM::C_VerifySignature(CK_SESSION_HANDLE hSession,
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
 
+	// Same length rule as C_Verify / C_VerifyFinal (AsymVerify): a signature
+	// whose length is wrong for the key is CKR_SIGNATURE_LEN_RANGE (§5.1.6),
+	// not CKR_SIGNATURE_INVALID. Until 2026-10-22 this path skipped the check,
+	// so a too-short SLH-DSA signature answered CKR_SIGNATURE_INVALID here
+	// while C_Verify (and the Rust engine, which routes C_VerifySignature
+	// through C_Verify) answered CKR_SIGNATURE_LEN_RANGE.
+	if (hdr->sigLen != publicKey->getOutputLength())
+	{
+		ERROR_MSG("The size of the signature differs from the size of the mechanism");
+		session->resetOp();
+		return CKR_SIGNATURE_LEN_RANGE;
+	}
+
+	if (!genericPhmLenOk(mechanism, algoParam, hdr->algoParamLen, ulDataLen))
+	{
+		session->resetOp();
+		return CKR_DATA_LEN_RANGE;
+	}
+
 	ByteString data(pData, ulDataLen);
 	ByteString signature(sigBytes, hdr->sigLen);
 	bool ok = asymCrypto->verify(publicKey, data, signature, mechanism,
@@ -4827,6 +4902,24 @@ CK_RV SoftHSM::C_VerifySignatureFinal(CK_SESSION_HANDLE hSession)
 	// Use the one-shot verify with the accumulated message — this works for all
 	// PQC mechanisms (ML-DSA, SLH-DSA) without requiring verifyFinal() to be
 	// implemented.  The accumulated message was built by C_VerifySignatureUpdate.
+	// Same length rule as C_Verify / C_VerifyFinal (AsymVerify): a signature
+	// whose length is wrong for the key is CKR_SIGNATURE_LEN_RANGE (§5.1.6),
+	// not CKR_SIGNATURE_INVALID. Until 2026-10-22 this path skipped the check,
+	// so a too-short SLH-DSA signature answered CKR_SIGNATURE_INVALID in C_VerifySignature[Final]
+	// while C_Verify (and the Rust engine, which routes C_VerifySignature
+	// through C_Verify) answered CKR_SIGNATURE_LEN_RANGE.
+	if (hdr->sigLen != publicKey->getOutputLength())
+	{
+		ERROR_MSG("The size of the signature differs from the size of the mechanism");
+		session->resetOp();
+		return CKR_SIGNATURE_LEN_RANGE;
+	}
+
+	if (!genericPhmLenOk(mechanism, algoParam, hdr->algoParamLen, (CK_ULONG)session->getMsgBuffer().size()))
+	{
+		session->resetOp();
+		return CKR_DATA_LEN_RANGE;
+	}
 	ByteString msg(session->getMsgBuffer());
 	ByteString signature(sigBytes, hdr->sigLen);
 	bool ok = asymCrypto->verify(publicKey, msg, signature, mechanism,

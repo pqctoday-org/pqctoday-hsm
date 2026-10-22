@@ -65,10 +65,14 @@
 //                        with CKH_DETERMINISTIC_REQUIRED it is refused.
 //                        Refused on verification.
 //   messageEncoding      PQCTODAY_MESSAGE_ENCODING_STANDARD (0) or
-//                        PQCTODAY_MESSAGE_ENCODING_INTERNAL (1): sign/verify M'
-//                        exactly as given (FIPS 204 Alg 7/8, FIPS 205 Alg 19/20).
-//                        Internal: pure CKM_ML_DSA / CKM_SLH_DSA only, empty
-//                        context only.
+//                        PQCTODAY_MESSAGE_ENCODING_INTERNAL (1): sign/verify M
+//                        exactly as given (FIPS 205 Alg 19/20). Internal: pure
+//                        CKM_SLH_DSA only, empty context only. Refused for every
+//                        ML-DSA mechanism (owner decision D6): the ML-DSA
+//                        internal interface goes through the standard
+//                        CKM_ML_DSA_EXTERNAL_MU, µ = SHAKE256(tr || M', 64).
+//   CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA (generic) also accept CKM_SHA512_224 and
+//   CKM_SHA512_256 as `hash` (owner decision D5; standard v3.3 behaviour).
 // Refusals are CKR_MECHANISM_PARAM_INVALID at the Init call. The extended
 // form is single/multi-part C_Sign*/C_Verify*/C_VerifySignature* only;
 // message-based signing (C_MessageSignInit/C_MessageVerifyInit and the
