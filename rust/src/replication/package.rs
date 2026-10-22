@@ -290,8 +290,8 @@ fn receive_request(
 fn payload_allowlist(key_type: u32) -> &'static [u32] {
     match key_type {
         CKK_AES => &[CKA_ENCRYPT, CKA_DECRYPT, CKA_WRAP, CKA_UNWRAP, CKA_SIGN, CKA_VERIFY],
-        CKK_ML_DSA => &[CKA_SIGN],
-        CKK_ML_KEM => &[CKA_DECAPSULATE],
+        CKK_ML_DSA | CKK_COMP_SIG => &[CKA_SIGN],
+        CKK_ML_KEM | CKK_COMP_KEM => &[CKA_DECAPSULATE],
         // FHE P1: the seed's custody flags (DERIVE_PUBLIC and DECRYPT are its
         // only mechanisms, fixed by the policy allowlist).
         CKK_PQCTODAY_FHE => &[CKA_DECRYPT, CKA_DERIVE],
@@ -329,6 +329,7 @@ fn source_key(session: u32, h_key: u32) -> Result<(u32, SourceKey), u32> {
         (CKO_SECRET_KEY, CKK_AES)
     ) || (class == CKO_PRIVATE_KEY && key_type == CKK_ML_KEM && ps == CKP_ML_KEM_768)
         || (class == CKO_PRIVATE_KEY && key_type == CKK_ML_DSA && ps == CKP_ML_DSA_65)
+        || (class == CKO_PRIVATE_KEY && matches!(key_type, CKK_COMP_KEM | CKK_COMP_SIG) && super::composite_replicable(key_type, ps))
         || (class == CKO_SECRET_KEY && key_type == CKK_PQCTODAY_FHE && super::fhe::param_hash(ps).is_some());
     let policy = attrs.get(&CKA_PQCTODAY_REPLICATION_POLICY_ID).cloned();
     let binding = attrs.get(&CKA_PRIV_REPL_BINDING).cloned();
@@ -805,6 +806,9 @@ struct Staged {
     usage: Vec<(u32, bool)>,
     /// FHE P1: the validated recovery descriptor of an FHE seed.
     fhe: Option<super::fhe::FheRecoveryDescriptor>,
+    /// The `CKP_COMP_*` set of a composite key (0 otherwise); the other
+    /// asymmetric profiles have one fixed set each.
+    param_set: u32,
 }
 
 impl Drop for Staged {
@@ -878,6 +882,25 @@ fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims, header: &Replicatio
                 return Err(bad);
             }
         }
+        // Composite ML-KEM / ML-DSA (PKCS#11 v3.3 working draft): the set is
+        // the signed evidence's, and must be one this engine supports; the
+        // private value `mlSeed ‖ tradSK` must re-derive the paired public
+        // `mlPK ‖ tradPK` (both halves, native::composite_key — the
+        // C_CreateObject check), and the evidence's public hash is the
+        // composite SPKI's.
+        (KeyClass::PrivateKey, kt @ (CKK_COMP_KEM | CKK_COMP_SIG)) => {
+            let pk = public.as_deref().ok_or(bad)?;
+            if !super::composite_replicable(kt, ev_key.parameter_set) {
+                return Err(bad);
+            }
+            let layout = crate::native::composite_key::supported_layout(kt, ev_key.parameter_set, bad).map_err(|_| bad)?;
+            if crate::native::composite_key::public_from_private(&layout, &secret).map_err(|_| bad)? != pk {
+                return Err(bad);
+            }
+            if ev_key.public_hash != Some(super::sha384(&crate::native::composite_key::spki(layout.params.oid(), pk))) {
+                return Err(bad);
+            }
+        }
         _ => return Err(bad),
     }
     if p.key_type != ev_key.key_type {
@@ -895,7 +918,8 @@ fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims, header: &Replicatio
         }
         usage.push((a.attr_type, v[0] == 1));
     }
-    Ok(Staged { key_type: p.key_type, secret, public, usage, fhe })
+    let param_set = if matches!(p.key_type, CKK_COMP_KEM | CKK_COMP_SIG) { ev_key.parameter_set } else { 0 };
+    Ok(Staged { key_type: p.key_type, secret, public, usage, fhe, param_set })
 }
 
 /// Build the installed private/secret object and its public partner.
@@ -909,16 +933,22 @@ fn installed_objects(
 ) -> (Attributes, Option<Attributes>) {
     let mut a: Attributes = Default::default();
     let lineage = header.lineage_id.as_bytes().to_vec();
+    let composite = matches!(st.key_type, CKK_COMP_KEM | CKK_COMP_SIG);
     let (class, ps, algo) = match st.key_type {
         CKK_AES | CKK_PQCTODAY_FHE => (CKO_SECRET_KEY, 0, 0),
         CKK_ML_KEM => (CKO_PRIVATE_KEY, CKP_ML_KEM_768, ALGO_ML_KEM),
+        // A composite object carries its set and no algorithm family, as
+        // native::composite_key::key_pair_attrs writes it.
+        CKK_COMP_KEM | CKK_COMP_SIG => (CKO_PRIVATE_KEY, st.param_set, 0),
         _ => (CKO_PRIVATE_KEY, CKP_ML_DSA_65, ALGO_ML_DSA),
     };
     store_ulong(&mut a, CKA_CLASS, class);
     store_ulong(&mut a, CKA_KEY_TYPE, st.key_type);
     if ps != 0 {
         crate::state::store_param_set(&mut a, ps);
-        crate::state::store_algo_family(&mut a, algo);
+        if !composite {
+            crate::state::store_algo_family(&mut a, algo);
+        }
         store_ulong(&mut a, CKA_PARAMETER_SET, ps);
     } else {
         store_ulong(&mut a, CKA_VALUE_LEN, st.secret.len() as u32);
@@ -976,7 +1006,13 @@ fn installed_objects(
         return (a, None);
     }
     let pk = st.public.clone().unwrap_or_default();
-    let spki = if st.key_type == CKK_ML_KEM {
+    let spki = if composite {
+        match crate::native::composite::params_for_key(st.key_type, ps) {
+            Some(p) => crate::native::composite_key::spki(p.oid(), &pk),
+            // validate_payload admitted only supported sets.
+            None => Vec::new(),
+        }
+    } else if st.key_type == CKK_ML_KEM {
         crate::crypto::handlers::build_mlkem768_spki(&pk)
     } else {
         crate::crypto::handlers::build_mldsa65_spki(&pk)
@@ -988,15 +1024,17 @@ fn installed_objects(
     store_ulong(&mut p, CKA_CLASS, CKO_PUBLIC_KEY);
     store_ulong(&mut p, CKA_KEY_TYPE, st.key_type);
     crate::state::store_param_set(&mut p, ps);
-    crate::state::store_algo_family(&mut p, algo);
+    if !composite {
+        crate::state::store_algo_family(&mut p, algo);
+    }
     store_ulong(&mut p, CKA_PARAMETER_SET, ps);
     store_bool(&mut p, CKA_TOKEN, true);
     store_bool(&mut p, CKA_PRIVATE, false);
     store_bool(&mut p, CKA_MODIFIABLE, false);
     store_bool(&mut p, CKA_LOCAL, false);
     store_ulong(&mut p, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
-    store_bool(&mut p, CKA_VERIFY, st.key_type == CKK_ML_DSA);
-    store_bool(&mut p, CKA_ENCAPSULATE, st.key_type == CKK_ML_KEM);
+    store_bool(&mut p, CKA_VERIFY, matches!(st.key_type, CKK_ML_DSA | CKK_COMP_SIG));
+    store_bool(&mut p, CKA_ENCAPSULATE, matches!(st.key_type, CKK_ML_KEM | CKK_COMP_KEM));
     store_bool(&mut p, CKA_ENCRYPT, false);
     store_bool(&mut p, CKA_WRAP, false);
     store_bool(&mut p, CKA_DERIVE, false);

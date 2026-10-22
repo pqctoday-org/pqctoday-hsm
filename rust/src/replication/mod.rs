@@ -294,7 +294,9 @@ pub unsafe fn binding_request_from_template(template: *mut u8, count: u32) -> Re
 
 /// Bind a just-generated key to an enrolled policy, or fail (the FFI caller
 /// then discards the key). Eligibility is opt-in and fixed at creation:
-/// AES-128/192/256, ML-KEM-768 and ML-DSA-65 only, generated in this token
+/// AES-128/192/256, ML-KEM-768, ML-DSA-65 and the composite ML-KEM /
+/// ML-DSA keys of every set the engine supports (PKCS#11 v3.3 working
+/// draft, one `CKK_COMP_KEM` / `CKK_COMP_SIG` object), generated in this token
 /// (`CKA_LOCAL`), token-resident, sensitive, non-extractable, non-copyable,
 /// non-modifiable, non-derivable.
 pub fn bind_generated_key(
@@ -310,6 +312,8 @@ pub fn bind_generated_key(
         CKM_AES_KEY_GEN => (CKO_SECRET_KEY, CKK_AES),
         CKM_ML_KEM_KEY_PAIR_GEN => (CKO_PRIVATE_KEY, CKK_ML_KEM),
         CKM_ML_DSA_KEY_PAIR_GEN => (CKO_PRIVATE_KEY, CKK_ML_DSA),
+        CKM_COMP_KEM_KEY_PAIR_GEN => (CKO_PRIVATE_KEY, CKK_COMP_KEM),
+        CKM_COMP_SIG_KEY_PAIR_GEN => (CKO_PRIVATE_KEY, CKK_COMP_SIG),
         _ => return Err(CKR_TEMPLATE_INCONSISTENT),
     };
     let policy = records::find_policy(slot, policy_id).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
@@ -330,6 +334,9 @@ pub fn bind_generated_key(
             return Err(CKR_TEMPLATE_INCONSISTENT)
         }
         CKK_ML_DSA if crate::state::get_object_param_set_from(&attrs) != CKP_ML_DSA_65 => {
+            return Err(CKR_TEMPLATE_INCONSISTENT)
+        }
+        CKK_COMP_KEM | CKK_COMP_SIG if !composite_replicable(expected.1, crate::state::get_object_param_set_from(&attrs)) => {
             return Err(CKR_TEMPLATE_INCONSISTENT)
         }
         _ => {}
@@ -401,6 +408,12 @@ pub fn bind_generated_key(
     crate::state::commit_objects_atomically(h_session, Vec::new(), updates)?;
     oplog_event("bind", slot, &[("policy", hex(policy_id)), ("lineage", hex(&lineage))]);
     Ok(())
+}
+
+/// A composite key of a set this engine supports (`native::composite`): the
+/// only composite keys that can be bound, packaged or installed.
+pub(crate) fn composite_replicable(key_type: u32, ckp: u32) -> bool {
+    crate::native::composite::params_for_key(key_type, ckp).is_some_and(|p| p.supported())
 }
 
 /// F16 audit: one `oplog` record per replication event, carrying public
