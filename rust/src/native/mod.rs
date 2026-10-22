@@ -99,6 +99,9 @@ pub use sign::*;
 pub type CkRv = u32;
 
 #[cfg(test)]
+mod composite_vectors;
+
+#[cfg(test)]
 mod parity;
 
 #[cfg(test)]
