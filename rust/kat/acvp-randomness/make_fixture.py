@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Build rust/kat/acvp-randomness/nist_optional_input.json.
 
 The Rust engine's optional-test-input tests (ACVP explicit-randomness plan,

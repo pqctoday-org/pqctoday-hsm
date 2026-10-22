@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 pqctoday
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 /*****************************************************************************
  OptionalRandomInputTests.h
 

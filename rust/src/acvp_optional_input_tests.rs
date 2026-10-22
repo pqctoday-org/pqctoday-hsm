@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
 //! Optional test inputs — the ACVP explicit-randomness model (plan
 //! `acvp-explicit-randomness-model-plan-10212026.md`, revision 9; P1/P4) —
 //! through the real `C_*` entry points.

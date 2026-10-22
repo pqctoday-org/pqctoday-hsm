@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `d192acf8c3d7` · **Generated:** 2026-10-22T01:00:32.816Z — machine-written
+**Engine commit:** `7dee23c2ea40` · **Generated:** 2026-10-22T15:29:16.287Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**1099 passed / 0 failed** across 52 sections in this JS harness.
+**1098 passed / 0 failed** across 52 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -168,7 +168,7 @@ silently double-succeed. Regression test:
 - G7 — stateful hash-based signatures: HSS (§6.14) (7 passed / 0 failed)
 - G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED) (29 passed / 0 failed)
 - G8b — Classic McEliece (BSI TR-02102-1 §2.4.2, all 10 parameter sets) (6 passed / 0 failed)
-- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (297 passed / 0 failed)
+- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (296 passed / 0 failed)
 
 ## Full transcript
 
@@ -305,7 +305,7 @@ silently double-succeed. Regression test:
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
-  ✅ all 180 advertised mechanisms answerable → 0 missing
+  ✅ all 179 advertised mechanisms answerable → 0 missing
 
 ── R3.1 — C_CreateObject template validation (§4.1.1) ──
   ✅ no CKA_CLASS → TEMPLATE_INCOMPLETE
@@ -1079,7 +1079,7 @@ silently double-succeed. Regression test:
   ✅ Classic McEliece: encapsulate → decapsulate agree on the SAME shared secret (real SEAM)
 
 ── G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) ──
-  ✅ fixture: live advertised mechanism count → 180
+  ✅ fixture: live advertised mechanism count → 179
   ✅ 0x0 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x9 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x9 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
@@ -1368,14 +1368,13 @@ silently double-succeed. Regression test:
   ✅ 0x4037 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x80000010 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x80000013 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
-  ✅ 0x80000015 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x4040 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x403d GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x403e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x403e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x403f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x403f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
-  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (295 probes total)
+  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (294 probes total)
 
-════════ RESULT: 1099 passed, 0 failed ════════
+════════ RESULT: 1098 passed, 0 failed ════════
 ```
