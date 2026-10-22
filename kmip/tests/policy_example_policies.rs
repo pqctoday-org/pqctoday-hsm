@@ -82,6 +82,7 @@ fn all_shipped_policies_parse() {
         "fips-only-encryption.yaml",
         "fips-only-global.yaml",
         "hybrid-migration-window-signing.yaml",
+        "hybrid-migration-window-key-establishment.yaml",
         "hybrid-migration-window-global.yaml",
         "cnsa-2.0-signing.yaml",
         "cnsa-2.0-key-establishment.yaml",
@@ -304,6 +305,72 @@ fn hybrid_window_demands_composite_mid_window() {
             *fired_rule_index != 3 && *fired_rule_index != 4,
             "hybrid gate should accept composite; got deny from rule {fired_rule_index}: {human}"
         );
+    }
+}
+
+/// B6 (PKCS#11 v3.3 composites, 2026-10-21) — the composite-KEM opt-in:
+/// tagged key establishment is held to the LAMPS composite ML-KEM; a TLS
+/// hybrid group or pure ML-KEM does not satisfy it; untagged requests and
+/// Decapsulate stay open. Same outcome from the single file and from the
+/// split modules.
+#[test]
+fn hybrid_window_composite_kem_opt_in() {
+    let split = engine_for_set(&[
+        "hybrid-migration-window-signing.yaml",
+        "hybrid-migration-window-key-establishment.yaml",
+        "hybrid-migration-window-global.yaml",
+    ]);
+    let single = engine_for("hybrid-migration-window.yaml");
+    let none = HashMap::new();
+    let mut kem_tag = HashMap::new();
+    kem_tag.insert("pqctoday-composite-kem".to_string(), "required".to_string());
+    let mut high = HashMap::new();
+    high.insert("pqctoday-assurance".to_string(), "high".to_string());
+    for eng in [&split, &single] {
+        for op in ["CreateKeyPair:KeyAgreement", "Encapsulate"] {
+            assert!(eng.evaluate(&req(op, Some("ML-KEM-768"), &none)).is_allow(), "{op}: untagged pure ML-KEM");
+            assert!(eng.evaluate(&req(op, Some("X25519MLKEM768"), &none)).is_allow(), "{op}: untagged TLS hybrid");
+            assert!(eng.evaluate(&req(op, Some("ML-KEM-768-X25519"), &kem_tag)).is_allow(), "{op}: the composite");
+            // Case-insensitive like every composite name.
+            assert!(eng.evaluate(&req(op, Some("ML-KEM-768-x25519"), &kem_tag)).is_allow(), "{op}: casing");
+            for wrong in ["ML-KEM-768", "X25519MLKEM768", "ML-KEM-768-ECDH-P256", "ML-KEM-1024-X448"] {
+                assert!(eng.evaluate(&req(op, Some(wrong), &kem_tag)).is_deny(), "{op}: {wrong} under the tag");
+            }
+            assert!(eng.evaluate(&req(op, Some("ML-KEM-1024-ECDH-P384"), &high)).is_allow(), "{op}: high");
+            assert!(eng.evaluate(&req(op, Some("ML-KEM-768-X25519"), &high)).is_deny(), "{op}: high wants 1024/P-384");
+        }
+        // Decapsulate is never held to the composite.
+        assert!(eng.evaluate(&req("Decapsulate", Some("ML-KEM-768"), &kem_tag)).is_allow());
+        // The signing mandates do not reach key establishment and vice versa.
+        let mut dual = HashMap::new();
+        dual.insert("pqctoday-dual-sign".to_string(), "required".to_string());
+        assert!(eng.evaluate(&req("CreateKeyPair:KeyAgreement", Some("ML-KEM-768"), &dual)).is_allow());
+        assert!(eng.evaluate(&req("CreateKeyPair:Sign", Some("ML-DSA-65"), &kem_tag)).is_allow());
+    }
+}
+
+/// Every composite name (18 signature + 12 KEM) is a name a policy may use,
+/// in the spelling `KmipAlgorithm::spec_name` gives and upper case; pairings
+/// no LAMPS set defines are refused by the strict linter.
+#[test]
+fn policies_accept_every_composite_name_and_refuse_unknown_ones() {
+    use pqctoday_kmip::kmip30::KmipAlgorithm;
+    use pqctoday_kmip::policy::load_from_str_strict;
+    let rule = |a: &str| {
+        format!(
+            "schema_version: 1\nmetadata: {{name: t, description: t, authority: t, effective: always}}\n\
+             rules:\n  - type: algorithm_allowlist\n    ops: [Sign]\n    algorithms: [\"{a}\"]\n    reason: t\n"
+        )
+    };
+    let composites: Vec<_> = KmipAlgorithm::ALL.iter().copied().filter(|a| a.is_composite()).collect();
+    assert_eq!(composites.len(), 30);
+    for a in composites {
+        for name in [a.spec_name().to_string(), a.spec_name().to_ascii_uppercase()] {
+            load_from_str_strict(&rule(&name), Path::new("<t>")).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+    for bad in ["ML-KEM-768-X448", "ML-KEM-1024-X25519", "ML-DSA-44-Ed448", "ML-KEM-768-ECDH-P521"] {
+        assert!(load_from_str_strict(&rule(bad), Path::new("<t>")).is_err(), "{bad} must be refused");
     }
 }
 
