@@ -25,6 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Decapsulation (`CKM_ML_KEM`) and ECDSA verification now refuse a mechanism parameter, and a signing-context
   structure of any size other than the standard or extended one is refused instead of being read as absent.
 - C++ `C_VerifySignature` returns `CKR_SIGNATURE_LEN_RANGE` for a wrong-length SLH-DSA signature, as `C_Verify` does.
+- A pre-hashed message of the wrong length on the generic and hash-specific ML-DSA / SLH-DSA pre-hash mechanisms returns
+  `CKR_DATA_LEN_RANGE` in both engines (previously `CKR_FUNCTION_FAILED` in the Rust engine).
 
 ### Removed
 
