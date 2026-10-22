@@ -168,6 +168,12 @@ fn sign_with_pss_salt_impl(
     pss_salt_len: Option<usize>,
     eddsa_ctx: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
+    // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md): one
+    // CKK_COMP_SIG object; this surface signs with the empty context,
+    // hedged (native::composite_ops; `sign_pqc` takes a context).
+    if mechanism == CKM_COMP_SIG || mechanism == CKM_COMP_SIG_EXTERNAL_HASH {
+        return super::composite_ops::sign(session, key_handle, mechanism, data, &[], false);
+    }
     // Isolation gate (rust-hsm-perf-bench-scenario-plan-07182026.md Part F)
     // + CKA_SIGN + CKA_ALLOWED_MECHANISMS + CKA_VALUE + CKA_PRIV_PARAM_SET,
     // ALL read from the SAME borrowed attrs — one OBJECTS lock instead of
@@ -356,6 +362,14 @@ fn verify_with_pss_salt_impl(
     pss_salt_len: Option<usize>,
     eddsa_ctx: Option<&[u8]>,
 ) -> Result<bool, CkRv> {
+    // Composite ML-DSA, empty context (see sign_with_pss_salt_impl).
+    if mechanism == CKM_COMP_SIG || mechanism == CKM_COMP_SIG_EXTERNAL_HASH {
+        return match super::composite_ops::verify(session, key_handle, mechanism, data, signature, &[]) {
+            Ok(()) => Ok(true),
+            Err(CKR_SIGNATURE_INVALID) => Ok(false),
+            Err(e) => Err(e),
+        };
+    }
     // Isolation gate + CKA_VERIFY + CKA_ALLOWED_MECHANISMS + every
     // key-material shape a verify mechanism might need, ALL read from one
     // borrowed attrs — one OBJECTS lock. `CKA_VALUE` holds the
@@ -549,6 +563,17 @@ fn sign_pqc_impl(
     external_mu: bool,
     random: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
+    // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md): the
+    // context and CKH_DETERMINISTIC_REQUIRED apply (CK_SIGN_ADDITIONAL_CONTEXT);
+    // the internal, external-µ and caller-randomness interfaces are ML-DSA
+    // component interfaces the composite mechanisms do not define, so they
+    // are an invalid mechanism parameter.
+    if mechanism == CKM_COMP_SIG || mechanism == CKM_COMP_SIG_EXTERNAL_HASH {
+        if internal || external_mu || random.is_some() {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        return super::composite_ops::sign(session, key_handle, mechanism, data, ctx, deterministic);
+    }
     let access = resolve_session_access(session)?;
     let (can_sign, mech_ok, sk, ps) = with_object_checked(&access, key_handle, |attrs| {
         (
@@ -729,6 +754,13 @@ fn verify_pqc_impl(
     internal: bool,
     external_mu: bool,
 ) -> Result<(), CkRv> {
+    // Composite ML-DSA, see sign_pqc_impl.
+    if mechanism == CKM_COMP_SIG || mechanism == CKM_COMP_SIG_EXTERNAL_HASH {
+        if internal || external_mu {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        return super::composite_ops::verify(session, key_handle, mechanism, data, signature, ctx);
+    }
     let access = resolve_session_access(session)?;
     let (can_verify, mech_ok, pk, ps) = with_object_checked(&access, key_handle, |attrs| {
         (

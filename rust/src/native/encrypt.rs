@@ -116,6 +116,13 @@ fn encapsulate_impl(
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     let access = resolve_session_access(session)?;
 
+    // Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md): one
+    // CKK_COMP_KEM object, the draft-ietf-lamps-pq-composite-kem-23 §3.4
+    // combiner (native::composite_ops).
+    if mechanism == CKM_COMP_KEM {
+        let (ct, ss) = super::composite_ops::encapsulate(session, public_key_handle)?;
+        return Ok((ct, ss.to_vec()));
+    }
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
         return classical_encapsulate(&access, public_key_handle, mechanism);
     }
@@ -286,6 +293,10 @@ fn decapsulate_impl(
 ) -> Result<Vec<u8>, CkRv> {
     let access = resolve_session_access(session)?;
 
+    // Composite ML-KEM, see encapsulate_impl.
+    if mechanism == CKM_COMP_KEM {
+        return super::composite_ops::decapsulate(session, private_key_handle, ciphertext).map(|ss| ss.to_vec());
+    }
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
         return classical_decapsulate(&access, private_key_handle, mechanism, ciphertext);
     }

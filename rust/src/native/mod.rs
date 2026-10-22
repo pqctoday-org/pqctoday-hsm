@@ -74,6 +74,7 @@ pub mod agree;
 pub mod composite;
 pub mod composite_kem;
 pub mod composite_key;
+pub mod composite_ops;
 pub mod composite_sig;
 pub mod derive;
 pub mod encrypt;
