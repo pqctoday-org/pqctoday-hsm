@@ -984,3 +984,128 @@ fn exhausted_xmss_keys_report_key_exhausted() {
     crate::state::set_object_attrs_bytes_batch(hs, &[(CKA_PRIV_STATEFUL_KEY_STATE, st)]);
     assert_eq!(sign_with(hs, CKM_XMSSMT, None, msg), Err(CKR_KEY_EXHAUSTED));
 }
+
+// ── Multi-part signing for HSS / XMSS; C_VerifySignatureUpdate single-part ──
+
+fn sign_update(parts: &[&[u8]]) -> u32 {
+    for p in parts {
+        let mut d = p.to_vec();
+        let rv = C_SignUpdate(SESSION, d.as_mut_ptr(), d.len() as u32);
+        if rv != CKR_OK {
+            return rv;
+        }
+    }
+    CKR_OK
+}
+
+fn verify_signature(h_key: u32, mech: u32, params: Option<&[usize]>, parts: &[&[u8]], sig: &[u8]) -> u32 {
+    let mut m: [usize; 3] = match params {
+        Some(p) => [mech as usize, p.as_ptr() as usize, std::mem::size_of_val(p)],
+        None => [mech as usize, 0, 0],
+    };
+    let mut s = sig.to_vec();
+    let rv = C_VerifySignatureInit(SESSION, m.as_mut_ptr() as *mut u8, h_key, s.as_mut_ptr(), s.len() as u32);
+    if rv != CKR_OK {
+        return rv;
+    }
+    for p in parts {
+        let mut d = p.to_vec();
+        let rv = C_VerifySignatureUpdate(SESSION, d.as_mut_ptr(), d.len() as u32);
+        if rv != CKR_OK {
+            return rv;
+        }
+    }
+    C_VerifySignatureFinal(SESSION)
+}
+
+/// v3.3 working draft (TC commit 3f7d0dd, #69): HSS, XMSS and XMSS^MT signing
+/// may be multi-part. The parts are buffered and the leaf is consumed once,
+/// at C_SignFinal, and only when the output buffer is adequate — a size query
+/// or a too-small buffer spends nothing. Verification stays single-part on
+/// C_Verify / C_VerifyUpdate and multi-part through C_VerifySignature*.
+/// The engine refused C_SignUpdate for these mechanisms (the v3.2 rule).
+#[test]
+fn stateful_signing_is_multi_part_and_consumes_one_leaf() {
+    let _guard = test_lock::acquire();
+    setup();
+    let parts: [&[u8]; 3] = [b"multi-", b"part ", b"stateful signing"];
+    let whole: Vec<u8> = parts.concat();
+    let (rv, hp_hss, hs_hss) = hss_keypair(None, vec![], vec![]);
+    assert_eq!(rv, CKR_OK);
+    let (hp_x, hs_x) = stateful_pair(CKM_XMSS_KEY_PAIR_GEN, CKP_XMSS_SHA2_10_256);
+    for (mech, hp, hs, start) in [(CKM_HSS, hp_hss, hs_hss, 32u64), (CKM_XMSS, hp_x, hs_x, 1024)] {
+        let remaining = || read_ulong_attr(hs, CKA_KEYS_REMAINING).2;
+        assert_eq!(remaining(), start);
+        let mut m: [usize; 3] = [mech as usize, 0, 0];
+        assert_eq!(C_SignInit(SESSION, m.as_mut_ptr() as *mut u8, hs), CKR_OK);
+        assert_eq!(sign_update(&parts), CKR_OK, "C_SignUpdate, mech {mech:#x}");
+        // One-shot C_Sign during the multi-part phase stays a sequencing error.
+        let mut d = whole.clone();
+        let mut tmp = vec![0u8; 8];
+        let mut tl = tmp.len() as u32;
+        assert_eq!(C_Sign(SESSION, d.as_mut_ptr(), d.len() as u32, tmp.as_mut_ptr(), &mut tl), CKR_OPERATION_ACTIVE);
+        // Size query and a too-small buffer: no leaf consumed, op still active.
+        let mut len = 0u32;
+        assert_eq!(C_SignFinal(SESSION, std::ptr::null_mut(), &mut len), CKR_OK);
+        assert!(len > 0);
+        let mut small = vec![0u8; 16];
+        let mut sl = small.len() as u32;
+        assert_eq!(C_SignFinal(SESSION, small.as_mut_ptr(), &mut sl), CKR_BUFFER_TOO_SMALL);
+        assert_eq!(remaining(), start, "no leaf spent before the signature is delivered");
+        let mut sig = vec![0u8; len.max(sl) as usize];
+        let mut l = sig.len() as u32;
+        assert_eq!(C_SignFinal(SESSION, sig.as_mut_ptr(), &mut l), CKR_OK);
+        sig.truncate(l as usize);
+        assert_eq!(remaining(), start - 1, "exactly one leaf");
+        // The signature is over the concatenated parts.
+        assert_eq!(verify_with(hp, mech, None, &whole, &sig), CKR_OK);
+        assert_eq!(verify_signature(hp, mech, None, &parts, &sig), CKR_OK, "C_VerifySignatureUpdate");
+        // C_VerifyUpdate stays refused for these mechanisms.
+        let mut m: [usize; 3] = [mech as usize, 0, 0];
+        assert_eq!(C_VerifyInit(SESSION, m.as_mut_ptr() as *mut u8, hp), CKR_OK);
+        let mut d = whole.clone();
+        assert_eq!(C_VerifyUpdate(SESSION, d.as_mut_ptr(), d.len() as u32), CKR_OPERATION_NOT_INITIALIZED);
+        // The next multi-part signature uses the next leaf.
+        assert_eq!(C_SignInit(SESSION, m.as_mut_ptr() as *mut u8, hs), CKR_OK);
+        assert_eq!(sign_update(&parts), CKR_OK);
+        let mut sig2 = vec![0u8; sig.len() + 64];
+        let mut l2 = sig2.len() as u32;
+        assert_eq!(C_SignFinal(SESSION, sig2.as_mut_ptr(), &mut l2), CKR_OK);
+        sig2.truncate(l2 as usize);
+        assert_ne!(sig2, sig, "a different one-time key");
+        assert_eq!(remaining(), start - 2);
+    }
+}
+
+/// v3.3 ml_dsa.md: the generic CKM_HASH_ML_DSA's C_VerifySignature is
+/// single-part only. C_VerifySignatureUpdate (and Final) now refuse every
+/// mechanism C_VerifyUpdate refuses — ending the operation with
+/// CKR_OPERATION_NOT_INITIALIZED — instead of buffering all but one.
+#[test]
+fn verify_signature_update_enforces_single_part_mechanisms() {
+    let _guard = test_lock::acquire();
+    setup();
+    let (hp, hs) = ml_dsa_pair(CKP_ML_DSA_44);
+    // The generic mechanism signs a caller-computed digest (here a SHA-256-sized one).
+    let msg = &[0x6d_u8; 32];
+    // CK_HASH_SIGN_ADDITIONAL_CONTEXT {hedgeVariant, pContext, ulContextLen, hash}.
+    let params: [usize; 4] = [0, 0, 0, CKM_SHA256 as usize];
+    let sig = sign_with(hs, CKM_HASH_ML_DSA, Some(&params), msg).expect("generic HashML-DSA sign");
+    // Single-part through C_VerifySignature is fine.
+    assert_eq!(verify_signature_one(hp, &params, msg, &sig), CKR_OK);
+    // Multi-part is refused and the operation is gone.
+    assert_eq!(verify_signature(hp, CKM_HASH_ML_DSA, Some(&params), &[msg], &sig), CKR_OPERATION_NOT_INITIALIZED);
+    assert_eq!(C_VerifySignatureFinal(SESSION), CKR_OPERATION_NOT_INITIALIZED);
+    // Pure ML-DSA stays multi-part.
+    let sig = sign_with(hs, CKM_ML_DSA, None, msg).unwrap();
+    assert_eq!(verify_signature(hp, CKM_ML_DSA, None, &[&msg[..5], &msg[5..]], &sig), CKR_OK);
+}
+
+/// One-shot C_VerifySignatureInit + C_VerifySignature.
+fn verify_signature_one(hp: u32, params: &[usize], msg: &[u8], sig: &[u8]) -> u32 {
+    let mut m: [usize; 3] = [CKM_HASH_ML_DSA as usize, params.as_ptr() as usize, std::mem::size_of_val(params)];
+    let mut s = sig.to_vec();
+    assert_eq!(C_VerifySignatureInit(SESSION, m.as_mut_ptr() as *mut u8, hp, s.as_mut_ptr(), s.len() as u32), CKR_OK);
+    let mut d = msg.to_vec();
+    C_VerifySignature(SESSION, d.as_mut_ptr(), d.len() as u32)
+}

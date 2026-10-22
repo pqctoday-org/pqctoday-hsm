@@ -10078,19 +10078,30 @@ pub fn C_VerifySignature(h_session: u32, p_data: *mut u8, ul_data_len: u32) -> u
     }
 }
 
+/// The single-part rule for C_VerifySignatureUpdate / C_VerifySignatureFinal:
+/// a mechanism that is single-part only ends the operation with
+/// CKR_OPERATION_NOT_INITIALIZED, the answer C_VerifyUpdate's
+/// multipart_op_mech gives. The multi-part set is C_VerifyUpdate's
+/// (sign_mech_supports_multipart, so CKM_COMP_SIG_EXTERNAL_HASH, raw
+/// RSA/ECDSA and the GENERIC CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA — the v3.3
+/// ml_dsa.md HashML-DSA table gives them a "C_VerifySignature ^1^", single
+/// part only — are refused), plus the stateful HSS / XMSS / XMSS^MT, whose
+/// only multi-part verification is exactly this interface (hss.md). These
+/// used to buffer every mechanism except CKM_COMP_SIG_EXTERNAL_HASH.
+fn verify_signature_single_part_gate(h_session: u32) -> Option<u32> {
+    let mech = VERIFY_SIG_STATE.shard(h_session).get(&h_session).map(|c| c.mech_type)?;
+    if sign_mech_supports_multipart(mech) || stateful_sign_mech(mech) {
+        return None;
+    }
+    VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
+    Some(CKR_OPERATION_NOT_INITIALIZED)
+}
+
 #[wasm_bindgen(js_name = _C_VerifySignatureUpdate)]
 pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
-    // CKM_COMP_SIG_EXTERNAL_HASH is single-part only (comp_sig.md, table
-    // footnote 1): the same answer as C_VerifyUpdate's multipart_op_mech —
-    // the operation ends, CKR_OPERATION_NOT_INITIALIZED.
-    let external_hash = VERIFY_SIG_STATE
-        .shard(h_session)
-        .get(&h_session)
-        .is_some_and(|c| c.mech_type == CKM_COMP_SIG_EXTERNAL_HASH);
-    if external_hash {
-        VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
-        return CKR_OPERATION_NOT_INITIALIZED;
+    if let Some(rv) = verify_signature_single_part_gate(h_session) {
+        return rv;
     }
     let mut ok = false;
     VERIFY_SIG_STATE.with(|s| {
@@ -10123,6 +10134,9 @@ pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32
 #[wasm_bindgen(js_name = _C_VerifySignatureFinal)]
 pub fn C_VerifySignatureFinal(h_session: u32) -> u32 {
     require_init!();
+    if let Some(rv) = verify_signature_single_part_gate(h_session) {
+        return rv;
+    }
     let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
         // CKM_COMP_SIG: the streamed PH(M) is verified as the external-hash
@@ -15888,7 +15902,8 @@ pub fn C_UnwrapKeyAuthenticated(
 /// so the accumulator can buffer the streamed parts and Final delegates to the
 /// one-shot handler over the concatenation. Still single-part only: raw
 /// CKM_RSA_PKCS / CKM_ECDSA (caller supplies the digest), the pre-hash ML-DSA /
-/// SLH-DSA / EdDSA-ph variants, and the stateful HSS/XMSS mechanisms.
+/// SLH-DSA / EdDSA-ph variants. The stateful HSS/XMSS mechanisms are
+/// multi-part for signing only ([`stateful_sign_mech`]).
 fn sign_mech_supports_multipart(mech: u32) -> bool {
     matches!(
         mech,
@@ -15974,9 +15989,27 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
         || is_prehash_slh_dsa(mech)
 }
 
+/// The stateful hash-based signature mechanisms. The v3.3 working draft
+/// allows them multi-part for SIGNING (TC commit 3f7d0dd, #69: the C_Sign
+/// "single-part only" footnote removed from hss.md and
+/// xmss_and_xmss-mt.md), while verification stays single-part on C_Verify and
+/// multi-part only through C_VerifySignature* (hss.md: "Verification is only
+/// for single part verifications or multipart verifications when the
+/// C_VerifySignatureInit interface is used").
+///
+/// Multi-part signing buffers the parts and signs once at C_SignFinal, which
+/// goes through the one-shot C_Sign: the leaf is consumed there and only
+/// once the output buffer is known to be large enough (the same
+/// buffer-before-consume rule C_Sign applies to a single-part call), so a
+/// size query or CKR_BUFFER_TOO_SMALL never spends a one-time key.
+fn stateful_sign_mech(mech: u32) -> bool {
+    matches!(mech, CKM_HSS | CKM_XMSS | CKM_XMSSMT)
+}
+
 /// Shared §5.13.3/§5.15.3 gate for the four Update/Final entry points:
 /// resolve the active op's mechanism and tear the op down if it is
-/// single-part-only.
+/// single-part-only (`signing` selects the sign-side rule for the stateful
+/// mechanisms, see [`stateful_sign_mech`]).
 ///
 /// Return code for the single-part-only case, pinned from the spec
 /// (https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf): the §5.13.3 C_SignUpdate and
@@ -15991,12 +16024,13 @@ fn multipart_op_mech(
     h_session: u32,
     op_state: &crate::state::Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>>,
     acc: &crate::state::Sharded<HashMap<u32, Vec<u8>>>,
+    signing: bool,
 ) -> Result<u32, u32> {
     let mech = match op_state.with(|s| s.shard(h_session).get(&h_session).map(|st| st.0)) {
         Some(m) => m,
         None => return Err(CKR_OPERATION_NOT_INITIALIZED),
     };
-    if !sign_mech_supports_multipart(mech) {
+    if !(sign_mech_supports_multipart(mech) || (signing && stateful_sign_mech(mech))) {
         op_state.with(|s| s.shard(h_session).remove(&h_session));
         acc.with(|s| s.shard(h_session).remove(&h_session));
         return Err(CKR_OPERATION_NOT_INITIALIZED);
@@ -16088,7 +16122,7 @@ pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC, true) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -16117,7 +16151,7 @@ fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mu
     // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(pul_signature_len);
-    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC, true) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -16158,7 +16192,7 @@ pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC, false) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -16184,7 +16218,7 @@ fn C_VerifyFinal_impl(h_session: u32, p_signature: *mut u8, ul_signature_len: u3
     // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(p_signature);
-    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC, false) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -24973,8 +25007,10 @@ mod multipart_sign_verify_ffi_tests {
         // 0x1 = CKM_RSA_PKCS (raw, digest-less — value from pkcs11t.h; the
         // constant is not defined in constants.rs).
         const CKM_RSA_PKCS_RAW: u32 = 0x0000_0001;
-        // Genuinely single-part: raw RSA/ECDSA (caller supplies the digest) and
-        // the stateful HSS/XMSS schemes. Pure ML-DSA / SLH-DSA / EdDSA are NOT
+        // Genuinely single-part: raw RSA/ECDSA (caller supplies the digest) and,
+        // for VERIFY only, the stateful HSS/XMSS schemes (the v3.3 draft made
+        // their signing multi-part; see stateful_sign_mech and
+        // pkcs11_v33_audit_tests). Pure ML-DSA / SLH-DSA / EdDSA are NOT
         // listed — they gained multi-part buffering (sign_mech_supports_multipart).
         //
         // Each mechanism gets a key of its OWN type: the init now checks
@@ -24999,22 +25035,24 @@ mod multipart_sign_verify_ffi_tests {
                 o.borrow_mut().insert(TYPED_KEY, attrs);
             });
             const HMAC_KEY: u32 = TYPED_KEY;
-            // SignUpdate path.
-            assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
-            assert_eq!(
-                s_update(SESSION, &data),
-                CKR_OPERATION_NOT_INITIALIZED,
-                "SignUpdate mech 0x{mech:x}"
-            );
-            // The op was terminated — a new Init is not CKR_OPERATION_ACTIVE.
-            assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "re-init 0x{mech:x}");
-            // SignFinal path terminates too.
-            assert_eq!(
-                C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
-                CKR_OPERATION_NOT_INITIALIZED,
-                "SignFinal mech 0x{mech:x}"
-            );
-            assert!(!SIGN_STATE.shard(SESSION).contains_key(&SESSION));
+            if !stateful_sign_mech(mech) {
+                // SignUpdate path.
+                assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
+                assert_eq!(
+                    s_update(SESSION, &data),
+                    CKR_OPERATION_NOT_INITIALIZED,
+                    "SignUpdate mech 0x{mech:x}"
+                );
+                // The op was terminated — a new Init is not CKR_OPERATION_ACTIVE.
+                assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "re-init 0x{mech:x}");
+                // SignFinal path terminates too.
+                assert_eq!(
+                    C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
+                    CKR_OPERATION_NOT_INITIALIZED,
+                    "SignFinal mech 0x{mech:x}"
+                );
+                assert!(!SIGN_STATE.shard(SESSION).contains_key(&SESSION));
+            }
 
             // Verify side.
             assert_eq!(verify_init(SESSION, mech, HMAC_KEY), CKR_OK);
