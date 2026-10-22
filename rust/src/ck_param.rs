@@ -590,6 +590,157 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// The **extended form** of `CK_SIGN_ADDITIONAL_CONTEXT` — a pqctoday
+    /// test interface OUTSIDE the PKCS#11 standard (ACVP explicit-randomness
+    /// plan, model M3; neither v3.2 nor the v3.3 working draft at 9ef73f9 has
+    /// these fields). The three standard fields first, unchanged, then:
+    /// `pRandom`/`ulRandomLen` — the value the operation would otherwise draw
+    /// (ML-DSA rnd, SLH-DSA addrnd, a composite's concatenated values); NULL/0
+    /// draws it as usual — and `messageEncoding` (0 standard, 1 internal:
+    /// FIPS 204 Sign/Verify_internal, FIPS 205 slh_sign/slh_verify_internal).
+    /// C mirror: `CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT`.
+    sign_ctx_ext, "CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT", {
+    HEDGE_VARIANT: F::Ulong,
+    P_CONTEXT: F::Ptr,
+    UL_CONTEXT_LEN: F::Ulong,
+    P_RANDOM: F::Ptr,
+    UL_RANDOM_LEN: F::Ulong,
+    MESSAGE_ENCODING: F::Ulong,
+});
+
+ck_struct!(
+    /// The extended form of `CK_HASH_SIGN_ADDITIONAL_CONTEXT`: its four
+    /// standard fields, then the same three optional fields as
+    /// [`sign_ctx_ext`]. C mirror: `CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT`.
+    hash_sign_ctx_ext, "CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT", {
+    HEDGE_VARIANT: F::Ulong,
+    P_CONTEXT: F::Ptr,
+    UL_CONTEXT_LEN: F::Ulong,
+    HASH: F::Ulong,
+    P_RANDOM: F::Ptr,
+    UL_RANDOM_LEN: F::Ulong,
+    MESSAGE_ENCODING: F::Ulong,
+});
+
+/// `messageEncoding` = standard: the message is wrapped with the context
+/// exactly as FIPS 204 Alg 2/4 and FIPS 205 Alg 22/23 say.
+pub const MESSAGE_ENCODING_STANDARD: usize = 0;
+/// `messageEncoding` = internal: M′ is signed / verified exactly as given
+/// (FIPS 204 §6.2–6.3 Alg 7/8, FIPS 205 §9.2–9.3 Alg 19/20).
+pub const MESSAGE_ENCODING_INTERNAL: usize = 1;
+
+/// Which form of the signing-settings structure a caller passed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignCtxForm {
+    /// `sizeof(CK_SIGN_ADDITIONAL_CONTEXT)` (or the hash variant).
+    Standard,
+    /// The standard size plus `pRandom`, `ulRandomLen`, `messageEncoding`.
+    Extended,
+}
+
+/// THE one rule that tells the two forms apart (plan M3): `ulParameterLen`
+/// must be exactly the standard size or exactly the extended size **for
+/// the ABI whose word width is `word`** (wasm32 4: 12/24 plain, 16/28 hash;
+/// LP64 8: 24/48 plain, 32/56 hash). Any other length is `None`, which every
+/// caller maps to `CKR_MECHANISM_PARAM_INVALID`. Kept width-parametric so the
+/// tests pin both ABIs on one host.
+pub fn sign_ctx_form_at(len: usize, hash_form: bool, word: usize) -> Option<SignCtxForm> {
+    let (std_l, ext_l) = if hash_form {
+        (&hash_sign_ctx::LAYOUT, &hash_sign_ctx_ext::LAYOUT)
+    } else {
+        (&sign_ctx::LAYOUT, &sign_ctx_ext::LAYOUT)
+    };
+    if len == size_at(std_l.fields, word) {
+        Some(SignCtxForm::Standard)
+    } else if len == size_at(ext_l.fields, word) {
+        Some(SignCtxForm::Extended)
+    } else {
+        None
+    }
+}
+
+/// A parsed `CK_SIGN_ADDITIONAL_CONTEXT` / `CK_HASH_SIGN_ADDITIONAL_CONTEXT`,
+/// standard or extended form. The standard form reads as `random: None`,
+/// `message_encoding: 0`.
+#[derive(Debug)]
+pub struct SignCtx<'a> {
+    pub form: SignCtxForm,
+    pub hedge_variant: usize,
+    pub context_len: usize,
+    pub context: &'a [u8],
+    /// The hash form's `hash` field; `None` for the plain form.
+    pub hash: Option<u32>,
+    /// The caller's value, when `pRandom` is non-NULL with a non-zero length.
+    pub random: Option<&'a [u8]>,
+    pub message_encoding: usize,
+}
+
+/// Why [`sign_additional_ctx`] refused a parameter. Both map to
+/// `CKR_MECHANISM_PARAM_INVALID` at every call site; they are kept apart only
+/// so tests can say which rule fired.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignCtxErr {
+    /// `ulParameterLen` is neither the standard nor the extended size.
+    WrongSize,
+    /// `pRandom` NULL with a non-zero `ulRandomLen`, or the reverse.
+    RandomPointerMismatch,
+}
+
+/// The single shared parser for the ML-DSA / SLH-DSA / composite signing
+/// settings, standard or extended (plan M3: "one shared helper decides
+/// standard or extended form from ulParameterLen. No inline length checks per
+/// mechanism"). `hash_form` selects `CK_HASH_SIGN_ADDITIONAL_CONTEXT` (the
+/// two generic pre-hash mechanisms) over `CK_SIGN_ADDITIONAL_CONTEXT`.
+/// An absent parameter (NULL or length 0) is `Ok(None)`: the spec default.
+///
+/// # Safety
+/// `m.p_parameter`/`m.ul_parameter_len` must describe readable memory, and
+/// a non-NULL `pContext`/`pRandom` must point to their declared lengths.
+pub unsafe fn sign_additional_ctx<'a>(m: &Mech, hash_form: bool) -> Result<Option<SignCtx<'a>>, SignCtxErr> {
+    if !m.has_param() {
+        return Ok(None);
+    }
+    let form = sign_ctx_form_at(m.ul_parameter_len, hash_form, WORD).ok_or(SignCtxErr::WrongSize)?;
+    let layout: &'static Struct = match (hash_form, form) {
+        (false, SignCtxForm::Standard) => &sign_ctx::LAYOUT,
+        (false, SignCtxForm::Extended) => &sign_ctx_ext::LAYOUT,
+        (true, SignCtxForm::Standard) => &hash_sign_ctx::LAYOUT,
+        (true, SignCtxForm::Extended) => &hash_sign_ctx_ext::LAYOUT,
+    };
+    let r = unsafe { ParamReader::new(m.p_parameter, m.ul_parameter_len, layout, layout.fields.len()) }
+        .map_err(|_| SignCtxErr::WrongSize)?;
+    // The three leading fields sit at the same indices in all four layouts.
+    let hedge_variant = unsafe { r.ulong(sign_ctx::HEDGE_VARIANT) };
+    let context_len = unsafe { r.ulong(sign_ctx::UL_CONTEXT_LEN) };
+    // A context longer than 255 bytes is refused by the caller before it is
+    // ever read; only borrow it when it is in range.
+    let context = if context_len <= 255 {
+        unsafe { r.buffer(sign_ctx::P_CONTEXT, sign_ctx::UL_CONTEXT_LEN) }
+    } else {
+        &[]
+    };
+    let hash = hash_form.then(|| unsafe { r.ulong32(hash_sign_ctx::HASH) });
+    let (random, message_encoding) = match form {
+        SignCtxForm::Standard => (None, MESSAGE_ENCODING_STANDARD),
+        SignCtxForm::Extended => {
+            let (pi, li, ei) = if hash_form {
+                (hash_sign_ctx_ext::P_RANDOM, hash_sign_ctx_ext::UL_RANDOM_LEN, hash_sign_ctx_ext::MESSAGE_ENCODING)
+            } else {
+                (sign_ctx_ext::P_RANDOM, sign_ctx_ext::UL_RANDOM_LEN, sign_ctx_ext::MESSAGE_ENCODING)
+            };
+            let p = unsafe { r.ptr(pi) };
+            let n = unsafe { r.ulong(li) };
+            if p.is_null() != (n == 0) {
+                return Err(SignCtxErr::RandomPointerMismatch);
+            }
+            let random = (!p.is_null()).then(|| unsafe { r.buffer(pi, li) });
+            (random, unsafe { r.ulong(ei) })
+        }
+    };
+    Ok(Some(SignCtx { form, hedge_variant, context_len, context, hash, random, message_encoding }))
+}
+
+ck_struct!(
     /// `CK_MU_GEN_PARAMS` (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU
     /// — adopted natively 2026-08-30 from the real PKCS#11 v3.3 working
     /// draft's own struct, `working/doc/spec/ml_dsa.md`) — token-side µ
@@ -926,6 +1077,14 @@ mod tests {
             ),
             (&sign_ctx::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&hash_sign_ctx::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
+            (&sign_ctx_ext::LAYOUT, vec![0, 4, 8, 12, 16, 20], 24, vec![0, 8, 16, 24, 32, 40], 48),
+            (
+                &hash_sign_ctx_ext::LAYOUT,
+                vec![0, 4, 8, 12, 16, 20, 24],
+                28,
+                vec![0, 8, 16, 24, 32, 40, 48],
+                56,
+            ),
             (&mu_gen_params::LAYOUT, vec![0, 4, 8, 12, 16], 20, vec![0, 8, 16, 24, 32], 40),
             (&key_deriv_string::LAYOUT, vec![0, 4], 8, vec![0, 8], 16),
             (&prf_data_param::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
@@ -1346,5 +1505,64 @@ mod tests {
         assert_eq!(got.ul_parameter_len, WORD);
         let r = unsafe { got.params(&mac_general::LAYOUT, 1) }.unwrap();
         assert_eq!(unsafe { r.ulong(mac_general::UL_MAC_LENGTH) }, 20);
+    }
+
+    /// The one standard-or-extended rule, on both ABIs (plan M3): exact
+    /// sizes only; one byte more or less is neither form.
+    #[test]
+    fn sign_ctx_form_is_exact_size_per_abi() {
+        use SignCtxForm::*;
+        for (word, plain, plain_ext, hash, hash_ext) in [(4usize, 12usize, 24usize, 16usize, 28usize), (8, 24, 48, 32, 56)] {
+            assert_eq!(sign_ctx_form_at(plain, false, word), Some(Standard));
+            assert_eq!(sign_ctx_form_at(plain_ext, false, word), Some(Extended));
+            assert_eq!(sign_ctx_form_at(hash, true, word), Some(Standard));
+            assert_eq!(sign_ctx_form_at(hash_ext, true, word), Some(Extended));
+            for bad in [1, plain - 1, plain + 1, plain_ext - 1, plain_ext + 1, plain_ext + word] {
+                assert_eq!(sign_ctx_form_at(bad, false, word), None, "word {word} len {bad}");
+            }
+            for bad in [plain, hash - 1, hash + 1, hash_ext + 1] {
+                assert_eq!(sign_ctx_form_at(bad, true, word), None, "hash word {word} len {bad}");
+            }
+        }
+    }
+
+    #[test]
+    fn sign_additional_ctx_reads_both_forms() {
+        let ctx = [7u8; 3];
+        let rnd = [9u8; 32];
+        let std_p = build(&sign_ctx::LAYOUT, &[V::U(2), V::P(ctx.as_ptr()), V::U(3)]);
+        let m = Mech { mechanism: 0, p_parameter: std_p.as_ptr(), ul_parameter_len: std_p.len() };
+        let r = unsafe { sign_additional_ctx(&m, false) }.unwrap().unwrap();
+        assert_eq!((r.form, r.hedge_variant, r.context, r.random, r.message_encoding), (SignCtxForm::Standard, 2, &ctx[..], None, 0));
+
+        let ext = build(
+            &sign_ctx_ext::LAYOUT,
+            &[V::U(0), V::P(ctx.as_ptr()), V::U(3), V::P(rnd.as_ptr()), V::U(32), V::U(1)],
+        );
+        let m = Mech { mechanism: 0, p_parameter: ext.as_ptr(), ul_parameter_len: ext.len() };
+        let r = unsafe { sign_additional_ctx(&m, false) }.unwrap().unwrap();
+        assert_eq!((r.form, r.random, r.message_encoding), (SignCtxForm::Extended, Some(&rnd[..]), 1));
+
+        let hext = build(
+            &hash_sign_ctx_ext::LAYOUT,
+            &[V::U(1), V::P(core::ptr::null()), V::U(0), V::U(0x250), V::P(rnd.as_ptr()), V::U(32), V::U(0)],
+        );
+        let m = Mech { mechanism: 0, p_parameter: hext.as_ptr(), ul_parameter_len: hext.len() };
+        let r = unsafe { sign_additional_ctx(&m, true) }.unwrap().unwrap();
+        assert_eq!((r.hash, r.random.map(|x| x.len())), (Some(0x250), Some(32)));
+        // The hash form's extended size is not a plain-form size.
+        assert_eq!(unsafe { sign_additional_ctx(&m, false) }.unwrap_err(), SignCtxErr::WrongSize);
+
+        // pRandom NULL with a length, and a pointer with length 0.
+        let bad = build(&sign_ctx_ext::LAYOUT, &[V::U(0), V::P(core::ptr::null()), V::U(0), V::P(core::ptr::null()), V::U(32), V::U(0)]);
+        let m = Mech { mechanism: 0, p_parameter: bad.as_ptr(), ul_parameter_len: bad.len() };
+        assert_eq!(unsafe { sign_additional_ctx(&m, false) }.unwrap_err(), SignCtxErr::RandomPointerMismatch);
+        let bad = build(&sign_ctx_ext::LAYOUT, &[V::U(0), V::P(core::ptr::null()), V::U(0), V::P(rnd.as_ptr()), V::U(0), V::U(0)]);
+        let m = Mech { mechanism: 0, p_parameter: bad.as_ptr(), ul_parameter_len: bad.len() };
+        assert_eq!(unsafe { sign_additional_ctx(&m, false) }.unwrap_err(), SignCtxErr::RandomPointerMismatch);
+
+        // Absent is the spec default.
+        let m = Mech { mechanism: 0, p_parameter: core::ptr::null(), ul_parameter_len: 0 };
+        assert!(unsafe { sign_additional_ctx(&m, false) }.unwrap().is_none());
     }
 }

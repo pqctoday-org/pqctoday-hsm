@@ -76,9 +76,64 @@ fn combine(
     Ok(ss)
 }
 
-/// `TradKEM.Encaps(tradPK)` (§2.1 / §2.2) → `(tradCT, tradSS)`.
-fn trad_encaps(trad: TradKey, trad_pk: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkRv> {
+/// The traditional half's drawn values under the ACVP explicit-randomness
+/// model (plan D4, shape 1), in the order `trad_encaps` draws them:
+/// RSA-OAEP the 32-byte secret (§2.1, ss_len 256 bits) then the OAEP seed
+/// (hLen = 32, SHA-256, §6.1 Table 2); ECDH the ephemeral private scalar,
+/// big-endian, the curve's field length (§2.2); X25519 / X448 the RFC 7748
+/// ephemeral private key (32 / 56 bytes).
+fn trad_random_len(trad: TradKey) -> usize {
+    use super::composite::EcCurve;
+    match trad {
+        TradKey::Rsa { .. } => COMPOSITE_KEM_SS_LEN + 32,
+        TradKey::Ec(EcCurve::P256 | EcCurve::BrainpoolP256r1) => 32,
+        TradKey::Ec(EcCurve::P384 | EcCurve::BrainpoolP384r1) => 48,
+        TradKey::Ec(EcCurve::P521) => 66,
+        TradKey::X25519 => 32,
+        TradKey::X448 => 56,
+        TradKey::Ed25519 | TradKey::Ed448 => 0,
+    }
+}
+
+/// The exact length of the optional `CKM_COMP_KEM` encapsulation input
+/// (plan D4, shape 1): ML-KEM m (32 bytes, FIPS 203 Alg 17) then the
+/// traditional half's values, post-quantum first as in the ciphertext
+/// (§4.3). RSA 96, X25519 64, X448 88, P-256 / brainpoolP256r1 64,
+/// P-384 / brainpoolP384r1 80, P-521 98.
+pub fn supplied_random_len(p: &CompositeKemParams) -> usize {
+    32 + trad_random_len(TradKey::from(p.classical))
+}
+
+/// Check a supplied value before any work (plan M4): its length, and that an
+/// ECDH scalar is a valid private key (1 <= d < n). Anything else is
+/// CKR_MECHANISM_PARAM_INVALID.
+pub fn check_supplied_random(p: &'static CompositeKemParams, random: &[u8]) -> Result<(), CkRv> {
+    if random.len() != supplied_random_len(p) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let d = &random[32..];
+    let ok = match TradKey::from(p.classical) {
+        TradKey::Ec(super::composite::EcCurve::P256) => p256::SecretKey::from_slice(d).is_ok(),
+        TradKey::Ec(super::composite::EcCurve::P384) => p384::SecretKey::from_slice(d).is_ok(),
+        TradKey::Ec(super::composite::EcCurve::P521) => p521::SecretKey::from_slice(d).is_ok(),
+        TradKey::Ec(curve) => crate::crypto::brainpool::public_from_private(curve.engine_curve(), d).is_ok(),
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CKR_MECHANISM_PARAM_INVALID)
+    }
+}
+
+/// `TradKEM.Encaps(tradPK)` (§2.1 / §2.2) → `(tradCT, tradSS)`, with the
+/// traditional values drawn here, or taken from `supplied` (already checked
+/// by [`check_supplied_random`]).
+fn trad_encaps(trad: TradKey, trad_pk: &[u8], supplied: Option<&[u8]>) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkRv> {
     use p256::elliptic_curve::sec1::ToEncodedPoint;
+    if let Some(v) = supplied {
+        return trad_encaps_supplied(trad, trad_pk, v);
+    }
     let mut rng = rand::rngs::OsRng;
     macro_rules! dhkem {
         ($c:ident) => {{
@@ -127,6 +182,57 @@ fn trad_encaps(trad: TradKey, trad_pk: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<
             getrandom::getrandom(eph.as_mut()).map_err(|_| CKR_FUNCTION_FAILED)?;
             let ct = x448::PublicKey::from(&x448::StaticSecret::from(*eph)).as_bytes().to_vec();
             // RFC 7748 §6.2: the all-zero K is refused (x448 returns None).
+            let k = x448::x448(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
+            (ct, Zeroizing::new(k.to_vec()))
+        }
+        TradKey::Ed25519 | TradKey::Ed448 => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    })
+}
+
+/// [`trad_encaps`] with every drawn value supplied: the same computation,
+/// the scalar / secret / seed taken from `v` instead of an RNG.
+fn trad_encaps_supplied(trad: TradKey, trad_pk: &[u8], v: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkRv> {
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    macro_rules! dhkem {
+        ($c:ident) => {{
+            let peer = $c::PublicKey::from_sec1_bytes(trad_pk).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let eph = $c::SecretKey::from_slice(v).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            let ct = eph.public_key().to_encoded_point(false).as_bytes().to_vec();
+            let z = $c::ecdh::diffie_hellman(eph.to_nonzero_scalar(), peer.as_affine());
+            (ct, Zeroizing::new(z.raw_secret_bytes().to_vec()))
+        }};
+    }
+    Ok(match trad {
+        TradKey::Rsa { .. } => {
+            let (ss, seed) = v.split_at(COMPOSITE_KEM_SS_LEN);
+            let ss = Zeroizing::new(ss.to_vec());
+            let ct = super::encrypt::rsa_oaep_encrypt_with_seed(trad_pk, &ss, &oaep_params(), Some(seed))?;
+            (ct, ss)
+        }
+        TradKey::Ec(super::composite::EcCurve::P256) => dhkem!(p256),
+        TradKey::Ec(super::composite::EcCurve::P384) => dhkem!(p384),
+        TradKey::Ec(super::composite::EcCurve::P521) => dhkem!(p521),
+        TradKey::Ec(curve) => {
+            let c = curve.engine_curve();
+            if !crate::crypto::brainpool::validate_public(c, trad_pk) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let ct = crate::crypto::brainpool::public_from_private(c, v).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            (ct, crate::crypto::brainpool::ecdh(c, v, trad_pk)?)
+        }
+        TradKey::X25519 => {
+            let peer: [u8; 32] = trad_pk.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let d: [u8; 32] = v.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            let eph = x25519_dalek::StaticSecret::from(d);
+            let ct = x25519_dalek::PublicKey::from(&eph).as_bytes().to_vec();
+            let k = crate::crypto::handlers::x25519_contributory(eph.diffie_hellman(&peer.into()))
+                .ok_or(CKR_FUNCTION_FAILED)?;
+            (ct, Zeroizing::new(k.as_bytes().to_vec()))
+        }
+        TradKey::X448 => {
+            let peer: [u8; 56] = trad_pk.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let eph: Zeroizing<[u8; 56]> = Zeroizing::new(v.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?);
+            let ct = x448::PublicKey::from(&x448::StaticSecret::from(*eph)).as_bytes().to_vec();
             let k = x448::x448(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
             (ct, Zeroizing::new(k.to_vec()))
         }
@@ -213,19 +319,40 @@ fn trad_curve(trad: TradKey) -> super::composite::EcCurve {
 /// `CKR_KEY_TYPE_INCONSISTENT`, the code the CKM_ML_KEM arm returns for
 /// wrong-length key material. Component errors are forwarded (§3.2 step 3).
 pub fn encapsulate(session: u32, p: &'static CompositeKemParams, pk: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkRv> {
+    encapsulate_with_random(session, p, pk, None)
+}
+
+/// [`encapsulate`] with the optional shape-1 input of the ACVP
+/// explicit-randomness model (plan D4): `random` = m ‖ the traditional
+/// half's values ([`supplied_random_len`]) replaces every value the
+/// encapsulation would draw, so `(ct, ss)` is reproducible. The ciphertext
+/// is ordinary: [`decapsulate`] recovers the same secret.
+pub fn encapsulate_with_random(
+    session: u32,
+    p: &'static CompositeKemParams,
+    pk: &[u8],
+    random: Option<&[u8]>,
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkRv> {
     use rand::RngCore;
     if !p.supported {
         return Err(CKR_PARAMETER_SET_NOT_SUPPORTED);
     }
+    if let Some(r) = random {
+        check_supplied_random(p, r)?;
+    }
     let layout = Layout::from(CompositeParams::Kem(p));
     let (ek, trad_pk) = layout.split_public(pk).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
-    // ML-KEM.Encaps(ek): m drawn here, then the engine's single-algorithm
-    // Encaps_internal (crypto::handlers::ml_kem_encaps, AWS-LC or ml-kem).
+    // ML-KEM.Encaps(ek): m drawn here (or supplied), then the engine's
+    // single-algorithm Encaps_internal (crypto::handlers::ml_kem_encaps,
+    // AWS-LC or ml-kem).
     let mut m = Zeroizing::new([0u8; 32]);
-    rand::rngs::OsRng.fill_bytes(m.as_mut());
+    match random {
+        Some(r) => m.copy_from_slice(&r[..32]),
+        None => rand::rngs::OsRng.fill_bytes(m.as_mut()),
+    }
     let (mut ct, mlkem_ss) = crate::crypto::handlers::ml_kem_encaps(p.ml_kem, ek, &m)?;
     let mlkem_ss = Zeroizing::new(mlkem_ss);
-    let (trad_ct, trad_ss) = trad_encaps(layout.trad, trad_pk)?;
+    let (trad_ct, trad_ss) = trad_encaps(layout.trad, trad_pk, random.map(|r| &r[32..]))?;
     // §3.4 wants fixed-length combiner inputs and §4.3 a fixed ciphertext
     // length; the FFI copies `ct` into a buffer sized from the table. A
     // hard check, not a debug assertion: a component that ever returned

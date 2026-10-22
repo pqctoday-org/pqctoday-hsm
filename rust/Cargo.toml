@@ -354,7 +354,8 @@ ecdsa017 = { package = "ecdsa", version = "0.17", default-features = false, feat
 # exactly these features (their "ecdsa" feature enables ecdsa/signing, which
 # includes hazmat + arithmetic) — no new crate, no new feature. It exists only
 # so `ecdsa::hazmat::sign_prehashed` (sign with a caller-supplied k) can be
-# named, for CKM_PQCTODAY_ECDSA_EXPLICIT_K.
+# named, for CKM_ECDSA with a supplied k (ACVP explicit-randomness model,
+# shape 1; formerly CKM_PQCTODAY_ECDSA_EXPLICIT_K).
 ecdsa = { version = "0.16", default-features = false, features = ["hazmat", "arithmetic"] }
 pkcs8 = { version = "0.11.0-rc.11", features = ["alloc"] }  # TODO: upgrade when stable release available
 # "hazmat" — the raw RSASP1/RSAVP1 modexp primitives (rsa::hazmat::
