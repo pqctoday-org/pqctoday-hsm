@@ -361,6 +361,14 @@
       "citation": "PKCS#11 v3.2 defines only CKA_HSS_KEYS_REMAINING (0x0000061c, pkcs11t.h:641) and Table 270 scopes it to HSS private keys. The v3.3 draft deprecates the name in favour of CKA_KEYS_REMAINING — that rename is NOT in v3.2 and this harness targets v3.2, so the attribute probed here is the correct spelling for this specification version. The Rust engine's XMSS/XMSS-MT value follows the v3.3 working draft (TC commit 9ef73f9, working/doc/spec/xmss_and_xmss-mt.md private key tables: CKA_KEYS_REMAINING, \"The minimum of ... 1) The number of one-time private keys remaining; 2) 2^32-1\"), the gap-fill rule in CLAUDE.md; v3.2 Table 270 is silent on XMSS."
     },
     {
+      "id": "LEGAL-HSS-KEYS-REMAINING-PRIVATE-KEY-ONLY",
+      "status": "legal",
+      "scenario": "create.generate_key_pair.hss",
+      "path": "gen.pub.CKA_HSS_KEYS_REMAINING.*",
+      "justification": "ADDED 2026-10-21 (v3.2 to v3.3 delta audit, item P8b). The remaining-signatures count belongs to the HSS PRIVATE key. The Rust engine now keeps it there only, at CK_ULONG width with the 2^32-1 cap, so C_GetAttributeValue of 0x61c on an HSS public key returns CKR_ATTRIBUTE_TYPE_INVALID. The C++ engine still materialises it on the public half (8 bytes, the full-tree count) as part of its whole-class attribute table. Nothing reads it there: neither engine consults the public half to decide whether a key is exhausted. Rust's answer is the one the attribute tables support; C++ is out of scope for this change.",
+      "citation": "PKCS#11 v3.2 defines CKA_HSS_KEYS_REMAINING for the HSS private key only (see LEGAL-XMSS-STATE-REPRESENTATION). The v3.3 working draft keeps that split: OASIS PKCS 11 TC commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/doc/spec/hss.md lines 42-46 (table 'HSS Public Key Object Attributes': CKA_HSS_LEVELS, CKA_HSS_LMS_TYPE, CKA_HSS_LMOTS_TYPE, CKA_VALUE, no remaining count) and line 85 (CKA_KEYS_REMAINING in 'HSS Private Key Object Attributes'). v3.2 section 5.2 (C_GetAttributeValue): an attribute that is not valid for the object returns CKR_ATTRIBUTE_TYPE_INVALID."
+    },
+    {
       "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ENCAPSULATE-TEMPLATE",
       "status": "legal",
       "path": "*.CKA_ENCAPSULATE_TEMPLATE.*",
