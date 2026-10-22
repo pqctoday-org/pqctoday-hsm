@@ -4721,8 +4721,16 @@ CK_RV SoftHSM::C_VerifySignatureInit(CK_SESSION_HANDLE hSession,
 	// single-part-only in the standard verifyUpdate/verifyFinal sense), but G4
 	// multi-part accumulates data in session->msgBuffer and calls the one-shot
 	// verify at Final time, so both flags must be true here.
+	//
+	// Except the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA (owner decision D8,
+	// 2026-10-22): the v3.3 tables mark them "Single-part operations only"
+	// (C_Sign, C_Verify, C_VerifySignature), so multi-part stays off and
+	// C_VerifySignatureUpdate / C_VerifySignatureFinal answer
+	// CKR_OPERATION_NOT_INITIALIZED and end the operation, as in the Rust
+	// engine. The hash-specific CKM_HASH_*_<hash> and pure mechanisms keep it.
 	session->clearMsgBuffer();
-	session->setAllowMultiPartOp(true);
+	const AsymMech::Type vsMech = session->getMechanism();
+	session->setAllowMultiPartOp(vsMech != AsymMech::HASH_MLDSA && vsMech != AsymMech::HASH_SLHDSA);
 	session->setOpType(SESSION_OP_VERIFY_SIGNATURE);
 	return CKR_OK;
 }

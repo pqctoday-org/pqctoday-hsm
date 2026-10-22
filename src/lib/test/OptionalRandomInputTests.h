@@ -40,6 +40,7 @@ class OptionalRandomInputTests : public TestsBase
 	CPPUNIT_TEST(testOperationLogNotesSuppliedInput);
 	CPPUNIT_TEST(testGenericPreHashSha512t);
 	CPPUNIT_TEST(testVerifySignatureLengthRange);
+	CPPUNIT_TEST(testGenericPreHashSinglePartOnly);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -57,6 +58,7 @@ public:
 	void testOperationLogNotesSuppliedInput();
 	void testGenericPreHashSha512t();
 	void testVerifySignatureLengthRange();
+	void testGenericPreHashSinglePartOnly();
 
 protected:
 	void openSession(CK_SESSION_HANDLE& hSession);
