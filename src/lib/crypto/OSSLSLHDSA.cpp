@@ -62,6 +62,15 @@ static const unsigned char SLHDSA_OID_SHA384[]   = {
 static const unsigned char SLHDSA_OID_SHA512[]   = {
 	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03
 };
+// SHA-512/224 and SHA-512/256 (NIST hashAlgs 2.16.840.1.101.3.4.2.5 / .6):
+// reachable through the generic pre-hash mechanism's `hash` field only
+// (owner decision D5, 2026-10-22; PKCS#11 v3.3 draft has no typed variant).
+static const unsigned char SLHDSA_OID_SHA512_224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x05
+};
+static const unsigned char SLHDSA_OID_SHA512_256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x06
+};
 static const unsigned char SLHDSA_OID_SHA3_224[] = {
 	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07
 };
@@ -107,6 +116,8 @@ static const SLHDSAPreHashInfo* getSLHDSAPreHashInfo(HashAlgo::Type hashAlg)
 		{ "SHA3-512",  SLHDSA_OID_SHA3_512,  SLHDSA_OID_DER_LEN, 64, false, NULL },
 		{ "SHAKE128",  SLHDSA_OID_SHAKE128,  SLHDSA_OID_DER_LEN, 32, true,  NULL },
 		{ "SHAKE256",  SLHDSA_OID_SHAKE256,  SLHDSA_OID_DER_LEN, 64, true,  NULL },
+		{ "SHA2-512/224", SLHDSA_OID_SHA512_224, SLHDSA_OID_DER_LEN, 28, false, NULL },
+		{ "SHA2-512/256", SLHDSA_OID_SHA512_256, SLHDSA_OID_DER_LEN, 32, false, NULL },
 	};
 
 	switch (hashAlg)
@@ -121,6 +132,8 @@ static const SLHDSAPreHashInfo* getSLHDSAPreHashInfo(HashAlgo::Type hashAlg)
 		case HashAlgo::SHA3_512: return &table[7];
 		case HashAlgo::SHAKE128: return &table[8];
 		case HashAlgo::SHAKE256: return &table[9];
+		case HashAlgo::SHA512_224: return &table[10];
+		case HashAlgo::SHA512_256: return &table[11];
 		default: return NULL;
 	}
 }
@@ -131,7 +144,8 @@ void OSSLSLHDSA_cleanupPreHashCache()
 	static const HashAlgo::Type allAlgs[] = {
 		HashAlgo::SHA224, HashAlgo::SHA256, HashAlgo::SHA384, HashAlgo::SHA512,
 		HashAlgo::SHA3_224, HashAlgo::SHA3_256, HashAlgo::SHA3_384, HashAlgo::SHA3_512,
-		HashAlgo::SHAKE128, HashAlgo::SHAKE256
+		HashAlgo::SHAKE128, HashAlgo::SHAKE256,
+		HashAlgo::SHA512_224, HashAlgo::SHA512_256
 	};
 	for (auto alg : allAlgs)
 	{
@@ -380,9 +394,14 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	// HashSLH-DSA signature verified. Hence: message-encoding 0 (OpenSSL
 	// 3.5+ OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, "raw") and NO context
 	// param, because the context is already inside M'.
+	//
+	// Internal message encoding (extended sign context): the caller's data IS
+	// M (FIPS 205 Alg 19 slh_sign_internal) -- the same raw encoding, no
+	// context (validated empty at C_SignInit).
 	const bool preEncoded = slhdsaParams &&
-	                        (slhdsaParams->preHash || slhdsaParams->phmInput);
-	OSSL_PARAM osslParams[4];
+	                        (slhdsaParams->preHash || slhdsaParams->phmInput ||
+	                         slhdsaParams->internalEncoding);
+	OSSL_PARAM osslParams[5];  // CONTEXT_STRING, MESSAGE_ENCODING, DETERMINISTIC, TEST_ENTROPY, end
 	int nParams = 0;
 	int deterministic = 0;
 	int msgEncoding = 0;
@@ -404,6 +423,15 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 			deterministic = 1;
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_DETERMINISTIC, &deterministic);
+		}
+		// Caller-supplied addrnd (FIPS 205 Alg 19's opt_rand instead of a
+		// fresh draw). Validated at C_SignInit: exactly n bytes for the key,
+		// never with CKH_DETERMINISTIC_REQUIRED.
+		if (slhdsaParams->randomLen > 0)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_octet_string(
+				OSSL_SIGNATURE_PARAM_TEST_ENTROPY,
+				(void*)slhdsaParams->random, slhdsaParams->randomLen);
 		}
 	}
 	osslParams[nParams] = OSSL_PARAM_construct_end();
@@ -519,8 +547,10 @@ bool OSSLSLHDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	// EVP_DigestVerifyInit_ex so slh_dsa_digest_signverify_init receives them.
 	// Pre-hash: verifyData is the complete M' -- raw message encoding, no
 	// context param (see sign()'s comment; FIPS 205 §10.3 Algorithm 25).
+	// Internal message encoding: M as given (FIPS 205 Alg 20), same raw path.
 	const bool preEncoded = slhdsaParams &&
-	                        (slhdsaParams->preHash || slhdsaParams->phmInput);
+	                        (slhdsaParams->preHash || slhdsaParams->phmInput ||
+	                         slhdsaParams->internalEncoding);
 	OSSL_PARAM osslParams[3];
 	int nParams = 0;
 	int msgEncoding = 0;

@@ -50,9 +50,12 @@ public:
 	// Per FIPS 203 §6.1:
 	//   ciphertext   — to send to the holder of the private key
 	//   sharedSecret — 32-byte shared secret (kept locally)
+	//   m            — optional caller-supplied FIPS 203 Alg 17 randomness
+	//                  (32 bytes, OpenSSL "ikme"); NULL = drawn as usual
 	virtual bool encapsulate(PublicKey* publicKey,
 	                         ByteString& ciphertext,
-	                         ByteString& sharedSecret);
+	                         ByteString& sharedSecret,
+	                         const ByteString* m = NULL);
 
 	// Decapsulate: given a private key and a received ciphertext, recover
 	// the shared secret.

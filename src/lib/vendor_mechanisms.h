@@ -28,16 +28,80 @@
 
 #define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
 
-// ── Vendor: ECDSA with a caller-supplied nonce k — BOTH engines ─────────────
-// A deliberate key-recovery primitive for teaching (SECURITY.md, "Deliberate
-// key-recovery primitive"): anyone who knows k and one signature recovers the
-// private key, d = r^-1 (s*k - z) mod n. Same input as CKM_ECDSA (the caller's
-// digest); pParameter is k, big-endian, exactly the order's byte length,
-// 1 <= k < n, else CKR_MECHANISM_PARAM_INVALID at C_SignInit. Sign only,
-// single-part, P-256 / P-384 / P-521. Allocated in the priv vendor ledger
-// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in rust/src/constants.rs.
+// ── RETIRED: 0x80000015 (was CKM_PQCTODAY_ECDSA_EXPLICIT_K) ────────────────
+// ECDSA with a caller-supplied nonce k. Retired 2026-10-22 (owner decision D1,
+// acvp-explicit-randomness-model plan): k now travels as the optional
+// parameter of the standard CKM_ECDSA (shape 1, below). Both engines refuse
+// 0x80000015 with CKR_MECHANISM_INVALID and no longer advertise it. The
+// number stays allocated in the priv vendor ledger (pkcs11-vendor-mech-
+// allocation.md §1.4) and must NEVER be reused.
 
-#define CKM_PQCTODAY_ECDSA_EXPLICIT_K 0x80000015UL  /* vendor */
+// ── Optional caller-supplied randomness (test input, outside PKCS#11) ───────
+// Owner decisions S1/S3/D1/D3, acvp-explicit-randomness-model plan (2026-10).
+// Every operation that draws a random value accepts that value as an
+// OPTIONAL input; absent means standard behaviour, byte for byte unchanged.
+// FIPS 203 §6, FIPS 204 §6 and FIPS 205 §9 reserve such interfaces for
+// testing; this HSM is an education/development tool (SECURITY.md).
+//
+// Shape 1 — mechanisms with no standard parameter: pParameter IS the value.
+//   CKM_ML_KEM    C_EncapsulateKey only: m (FIPS 203 Alg 17), exactly 32 bytes.
+//                 C_DecapsulateKey refuses any parameter.
+//   CKM_ECDSA     C_SignInit only: k, big-endian, exactly the order's byte
+//                 length, 1 <= k < n, P-256/P-384/P-521; single-part.
+//                 C_VerifyInit refuses any parameter.
+//   ulParameterLen == 0 means absent; ulParameterLen > 0 with a NULL
+//   pParameter, or a wrong length, is CKR_MECHANISM_PARAM_INVALID.
+//
+// Shape 2 — mechanisms whose standard parameter is CK_SIGN_ADDITIONAL_CONTEXT
+// or CK_HASH_SIGN_ADDITIONAL_CONTEXT (CKM_ML_DSA, CKM_HASH_ML_DSA[_*],
+// CKM_ML_DSA_EXTERNAL_MU, CKM_SLH_DSA, CKM_HASH_SLH_DSA[_*]): the parameter
+// may be the extended form below — the standard fields first, unchanged,
+// then three more. The form is recognised by ulParameterLen alone: exactly
+// sizeof(standard) or sizeof(extended) for the ABI (wasm32: 12/24 and 16/28;
+// LP64: 24/48 and 32/56); any other size is CKR_MECHANISM_PARAM_INVALID.
+//   pRandom/ulRandomLen  rnd (ML-DSA, 32 bytes) or addrnd (SLH-DSA, n = 16/24/32
+//                        for the key's parameter set). ulRandomLen == 0 = absent.
+//                        Needs hedgeVariant HEDGE_PREFERRED/HEDGE_REQUIRED;
+//                        with CKH_DETERMINISTIC_REQUIRED it is refused.
+//                        Refused on verification.
+//   messageEncoding      PQCTODAY_MESSAGE_ENCODING_STANDARD (0) or
+//                        PQCTODAY_MESSAGE_ENCODING_INTERNAL (1): sign/verify M
+//                        exactly as given (FIPS 205 Alg 19/20). Internal: pure
+//                        CKM_SLH_DSA only, empty context only. Refused for every
+//                        ML-DSA mechanism (owner decision D6): the ML-DSA
+//                        internal interface goes through the standard
+//                        CKM_ML_DSA_EXTERNAL_MU, µ = SHAKE256(tr || M', 64).
+//   CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA (generic) also accept CKM_SHA512_224 and
+//   CKM_SHA512_256 as `hash` (owner decision D5; standard v3.3 behaviour).
+// Refusals are CKR_MECHANISM_PARAM_INVALID at the Init call. The extended
+// form is single/multi-part C_Sign*/C_Verify*/C_VerifySignature* only;
+// message-based signing (C_MessageSignInit/C_MessageVerifyInit and the
+// per-message parameter) refuses it.
+
+#define PQCTODAY_MESSAGE_ENCODING_STANDARD 0UL
+#define PQCTODAY_MESSAGE_ENCODING_INTERNAL 1UL
+
+typedef struct CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT {
+    CK_HEDGE_TYPE   hedgeVariant;     /* standard fields, unchanged */
+    CK_BYTE_PTR     pContext;
+    CK_ULONG        ulContextLen;
+    CK_BYTE_PTR     pRandom;          /* optional extension */
+    CK_ULONG        ulRandomLen;
+    CK_ULONG        messageEncoding;
+} CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT;
+
+typedef struct CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT {
+    CK_HEDGE_TYPE     hedgeVariant;   /* standard fields, unchanged */
+    CK_BYTE_PTR       pContext;
+    CK_ULONG          ulContextLen;
+    CK_MECHANISM_TYPE hash;
+    CK_BYTE_PTR       pRandom;        /* optional extension */
+    CK_ULONG          ulRandomLen;
+    CK_ULONG          messageEncoding;
+} CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT;
+
+#define PQCTODAY_ML_KEM_M_LEN   32  /* FIPS 203 Alg 17: m in B^32 */
+#define PQCTODAY_ML_DSA_RND_LEN 32  /* FIPS 204 Alg 7: rnd in B^32 */
 
 // ── Classic McEliece (BSI TR-02102-1 §2.4.2) — implementation plan D-2/D-3 ───
 // First mechanism/key-type pair genuinely SHARED between both engines: the

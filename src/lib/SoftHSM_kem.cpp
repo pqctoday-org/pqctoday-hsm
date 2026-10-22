@@ -222,12 +222,16 @@ CK_RV SoftHSM::C_EncapsulateKey
 		if (secretLen > 0) snprintf(secret, sizeof(secret), "%lu", secretLen);
 		else               snprintf(secret, sizeof(secret), "-");
 
+		// test_input=random only when a caller-supplied m was used (plan M4).
+		const bool suppliedM = rv == CKR_OK && pMechanism != NULL_PTR &&
+		                       pMechanism->mechanism == CKM_ML_KEM &&
+		                       pMechanism->ulParameterLen > 0 && pCiphertext != NULL_PTR;
 		OpLog::emit("C_EncapsulateKey",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx dur=%llu",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s%s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
-		            keyFields.c_str(),
+		            keyFields.c_str(), suppliedM ? " test_input=random" : "",
 		            (unsigned long)(pulCiphertextLen != NULL_PTR ? *pulCiphertextLen : 0),
 		            secret,
 		            (pCiphertext == NULL_PTR) ? 1 : 0,
@@ -342,6 +346,19 @@ CK_RV SoftHSM::encapsulateKeyImpl
 		return CKR_MECHANISM_INVALID;
 	}
 
+	// Shape 1 (vendor_mechanisms.h, "Optional caller-supplied randomness"):
+	// an optional parameter IS m, exactly 32 bytes (FIPS 203 Alg 17).
+	// ulParameterLen 0 = absent = standard ML-KEM.Encaps (Alg 20). Checked
+	// before any session or key work, like a C_*Init parameter check.
+	const bool suppliedM = pMechanism->ulParameterLen > 0;
+	if (suppliedM && (pMechanism->pParameter == NULL_PTR ||
+	                  pMechanism->ulParameterLen != PQCTODAY_ML_KEM_M_LEN))
+	{
+		ERROR_MSG("C_EncapsulateKey: CKM_ML_KEM parameter must be m, %u bytes (got %lu)",
+			PQCTODAY_ML_KEM_M_LEN, (unsigned long)pMechanism->ulParameterLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
 	// Get the session
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -425,7 +442,9 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	// Perform encapsulation
 	ByteString ciphertext;
 	ByteString sharedSecret;
-	if (!((OSSLMLKEM*)mlkem)->encapsulate(publicKey, ciphertext, sharedSecret))
+	ByteString m;
+	if (suppliedM) m = ByteString((const unsigned char*)pMechanism->pParameter, pMechanism->ulParameterLen);
+	if (!((OSSLMLKEM*)mlkem)->encapsulate(publicKey, ciphertext, sharedSecret, suppliedM ? &m : NULL))
 	{
 		mlkem->recyclePublicKey(publicKey);
 		CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
@@ -720,6 +739,15 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	{
 		ERROR_MSG("C_DecapsulateKey: unsupported mechanism %lu", pMechanism->mechanism);
 		return CKR_MECHANISM_INVALID;
+	}
+
+	// Decapsulation draws no randomness, so CKM_ML_KEM's optional m
+	// (vendor_mechanisms.h, shape 1) has no meaning here: any parameter is
+	// refused (v3.3 ml-kem.md: CKM_ML_KEM "has no parameters").
+	if (pMechanism->pParameter != NULL_PTR || pMechanism->ulParameterLen != 0)
+	{
+		ERROR_MSG("C_DecapsulateKey: CKM_ML_KEM takes no parameter");
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	// Get the session

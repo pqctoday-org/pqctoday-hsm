@@ -49,7 +49,8 @@
 // Per FIPS 203 §6.1 and PKCS#11 v3.2 §5.20.
 bool OSSLMLKEM::encapsulate(PublicKey* publicKey,
                              ByteString& ciphertext,
-                             ByteString& sharedSecret)
+                             ByteString& sharedSecret,
+                             const ByteString* m)
 {
 	if (!publicKey->isOfType(OSSLMLKEMPublicKey::type))
 	{
@@ -72,7 +73,16 @@ bool OSSLMLKEM::encapsulate(PublicKey* publicKey,
 		return false;
 	}
 
-	if (EVP_PKEY_encapsulate_init(ctx, NULL) != 1)
+	// Caller-supplied m (shape 1, vendor_mechanisms.h): FIPS 203 Alg 17
+	// Encaps_internal(ek, m) via OpenSSL's "ikme" instead of Alg 20's draw.
+	OSSL_PARAM ikme[2];
+	if (m != NULL)
+	{
+		ikme[0] = OSSL_PARAM_construct_octet_string(OSSL_KEM_PARAM_IKME,
+			(void*)m->const_byte_str(), m->size());
+		ikme[1] = OSSL_PARAM_construct_end();
+	}
+	if (EVP_PKEY_encapsulate_init(ctx, m != NULL ? ikme : NULL) != 1)
 	{
 		ERROR_MSG("EVP_PKEY_encapsulate_init failed (0x%08X)", ERR_get_error());
 		EVP_PKEY_CTX_free(ctx);
