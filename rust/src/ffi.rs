@@ -8660,6 +8660,22 @@ fn supplied_log_field(
     }
 }
 
+/// Owner decision D7 (plan rev 10): the generic CKM_HASH_ML_DSA /
+/// CKM_HASH_SLH_DSA take PH(M), whose length the HashML-DSA / HashSLH-DSA
+/// "Key and Data Length" tables fix to the digest length of `hash`. Any
+/// other length is CKR_DATA_LEN_RANGE (v3.3 function_return_values.md:
+/// "input data ... has a bad length"), on C_Sign and C_Verify alike.
+fn generic_phm_len_ok(hash: u32, phm: &[u8]) -> Result<(), u32> {
+    let want = match hash {
+        CKM_SHA224 | CKM_SHA3_224 | CKM_SHA512_224 => 28,
+        CKM_SHA256 | CKM_SHA3_256 | CKM_SHA512_256 => 32,
+        CKM_SHA384 | CKM_SHA3_384 => 48,
+        CKM_SHA512 | CKM_SHA3_512 => 64,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+    if phm.len() == want { Ok(()) } else { Err(CKR_DATA_LEN_RANGE) }
+}
+
 /// Record the optional test inputs of the operation an Init call is starting
 /// — or their absence, so nothing from an earlier operation on the session
 /// is ever read (see state::SIGN_SUPPLIED).
@@ -9384,6 +9400,7 @@ fn C_Sign_impl(
             // longer carry it.
             CKM_HASH_ML_DSA => {
                 match (GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied(), rnd32) {
+                    (Some(hash), _) if generic_phm_len_ok(hash, msg).is_err() => generic_phm_len_ok(hash, msg).map(|_| Vec::new()),
                     (Some(hash), Some(rnd)) => {
                         crate::crypto::handlers::sign_ml_dsa_phm_external_rnd(ps, &sk_bytes, msg, &ctx_bytes, hash, rnd)
                     }
@@ -9393,6 +9410,7 @@ fn C_Sign_impl(
             }
             CKM_HASH_SLH_DSA => {
                 match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
+                    Some(hash) if generic_phm_len_ok(hash, msg).is_err() => generic_phm_len_ok(hash, msg).map(|_| Vec::new()),
                     Some(hash) => match supplied.random.as_deref() {
                         Some(addrnd) => crate::crypto::handlers::sign_slh_dsa_phm_external_rnd(
                             ps, hash, &sk_bytes, msg, &ctx_bytes, addrnd,
@@ -9824,13 +9842,15 @@ fn C_Verify_impl(
             // Remediation R37 (phase 8): see C_Sign's identical comment.
             CKM_HASH_ML_DSA => {
                 match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
-                    Some(hash) => verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash),
+                    Some(hash) => generic_phm_len_ok(hash, msg)
+                        .and_then(|_| verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash)),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
             CKM_HASH_SLH_DSA => {
                 match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
-                    Some(hash) => verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes),
+                    Some(hash) => generic_phm_len_ok(hash, msg)
+                        .and_then(|_| verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes)),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }

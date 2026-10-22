@@ -940,7 +940,7 @@ fn d5_sha512_t_generic_prehash_oid_and_sabotage() {
         let mut bad = phm.clone();
         bad[0] ^= 1;
         assert_eq!(verify(session, CKM_HASH_ML_DSA, &det, hdp, &bad, &g), CKR_SIGNATURE_INVALID);
-        assert_eq!(sign(session, CKM_HASH_ML_DSA, &det, hd, &phm[1..]).unwrap_err(), CKR_FUNCTION_FAILED, "PH(M) of the wrong length");
+
         // SLH-DSA
         let g = sign(session, CKM_HASH_SLH_DSA, &det, hs, &phm).expect(alg);
         let want = sign(session, CKM_SLH_DSA, &ext_ctx(CKH_DETERMINISTIC_REQUIRED, &[], &[], 1), hs, &m_prime(last)).unwrap();
@@ -949,5 +949,40 @@ fn d5_sha512_t_generic_prehash_oid_and_sabotage() {
         assert_ne!(g, wrong, "SLH-DSA {alg}: the OID matters");
         assert_eq!(verify(session, CKM_HASH_SLH_DSA, &det, hsp, &phm, &g), CKR_OK);
         assert_eq!(verify(session, CKM_HASH_SLH_DSA, &det, hsp, &bad, &g), CKR_SIGNATURE_INVALID);
+    }
+}
+
+/// Owner decision D7: a PH(M) whose length is not the digest length of
+/// `hash` is CKR_DATA_LEN_RANGE on C_Sign and C_Verify of the generic
+/// CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA (v3.3 "Key and Data Length" tables),
+/// for every family and several hashes including SHA-512/224. With or
+/// without a supplied rnd / addrnd.
+#[test]
+fn d7_wrong_phm_length_is_data_len_range() {
+    let _guard = test_lock::acquire();
+    let session = setup();
+    let doc = fixture();
+    let ((dsk, dpk, dps), (ssk, spk, sps)) = keys(&doc);
+    let hd = private_key(session, CKK_ML_DSA, dps, &dsk, false);
+    let hdp = public_key(session, CKK_ML_DSA, dps, &dpk, CKA_VERIFY);
+    let hs = private_key(session, CKK_SLH_DSA, sps, &ssk, false);
+    let hsp = public_key(session, CKK_SLH_DSA, sps, &spk, CKA_VERIFY);
+    for (alg, digest) in [("SHA2-512/224", CKM_SHA512_224), ("SHA2-256", CKM_SHA256), ("SHA3-512", CKM_SHA3_512)] {
+        let phm = ph(alg, b"m");
+        let std = ext_hash_ctx(0, &[], digest, &[], 0);
+        for (generic, hk, hp, rlen) in [(CKM_HASH_ML_DSA, hd, hdp, 32usize), (CKM_HASH_SLH_DSA, hs, hsp, 16)] {
+            let good = sign(session, generic, &std, hk, &phm).expect(alg);
+            let rnd = vec![5u8; rlen];
+            let with_rnd = ext_hash_ctx(0, &[], digest, &rnd, 0);
+            for bad in [&phm[..phm.len() - 1], &[phm.clone(), vec![0]].concat()[..], &[0u8; 64][..]] {
+                if bad.len() == phm.len() {
+                    continue;
+                }
+                assert_eq!(sign(session, generic, &std, hk, bad).unwrap_err(), CKR_DATA_LEN_RANGE, "{alg} 0x{generic:x} sign len {}", bad.len());
+                assert_eq!(sign(session, generic, &with_rnd, hk, bad).unwrap_err(), CKR_DATA_LEN_RANGE, "{alg} sign+rnd len {}", bad.len());
+                assert_eq!(verify(session, generic, &std, hp, bad, &good), CKR_DATA_LEN_RANGE, "{alg} 0x{generic:x} verify len {}", bad.len());
+            }
+            assert_eq!(verify(session, generic, &std, hp, &phm, &good), CKR_OK, "{alg}");
+        }
     }
 }
