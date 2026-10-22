@@ -79,6 +79,10 @@ pub mod wasm_fhe_kat;
 // entry points (gap-closure plan 2026-09-25, findings E11-E17).
 #[cfg(test)]
 mod acvp_nist_vectors_tests;
+// Optional test inputs (ACVP explicit-randomness model, plan 2026-10-21 rev 9):
+// NIST vectors for every in-scope group, faults, sabotage, interop.
+#[cfg(test)]
+mod acvp_optional_input_tests;
 // Published-vector replay for the CKM_HPKE SHAKE256 / pure ML-KEM /
 // seed-format-key additions (2026-10-01).
 #[cfg(test)]

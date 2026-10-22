@@ -812,6 +812,10 @@ pub fn ph_from_digest_mech_ml_dsa(hash: u32) -> Option<fips204::Ph> {
         crate::constants::CKM_SHA3_256 => Some(fips204::Ph::SHA3_256),
         crate::constants::CKM_SHA3_384 => Some(fips204::Ph::SHA3_384),
         crate::constants::CKM_SHA3_512 => Some(fips204::Ph::SHA3_512),
+        // Owner decision D5 (plan rev 10): the generic pre-hash `hash` may be
+        // SHA-512/224 or SHA-512/256 (v3.3 draft: any digest mechanism).
+        crate::constants::CKM_SHA512_224 => Some(fips204::Ph::SHA512_224),
+        crate::constants::CKM_SHA512_256 => Some(fips204::Ph::SHA512_256),
         _ => None,
     }
 }
@@ -827,6 +831,10 @@ pub fn ph_from_digest_mech_slh_dsa(hash: u32) -> Option<fips205::Ph> {
         crate::constants::CKM_SHA3_256 => Some(fips205::Ph::SHA3_256),
         crate::constants::CKM_SHA3_384 => Some(fips205::Ph::SHA3_384),
         crate::constants::CKM_SHA3_512 => Some(fips205::Ph::SHA3_512),
+        // Owner decision D5 (plan rev 10): the generic pre-hash `hash` may be
+        // SHA-512/224 or SHA-512/256 (v3.3 draft: any digest mechanism).
+        crate::constants::CKM_SHA512_224 => Some(fips205::Ph::SHA512_224),
+        crate::constants::CKM_SHA512_256 => Some(fips205::Ph::SHA512_256),
         _ => None,
     }
 }
@@ -2149,6 +2157,80 @@ pub fn sign_slh_dsa(
     }
 }
 
+/// [`sign_slh_dsa_phm`] with the caller's `addrnd` (n bytes, checked at
+/// C_SignInit): the generic `CKM_HASH_SLH_DSA` under the ACVP
+/// explicit-randomness model (plan M3) — FIPS 205 Alg 23 with opt_rand =
+/// addrnd instead of a drawn value.
+pub fn sign_slh_dsa_phm_external_rnd(
+    ps: u32,
+    hash: u32,
+    sk_bytes: &[u8],
+    phm: &[u8],
+    ctx: &[u8],
+    addrnd: &[u8],
+) -> Result<Vec<u8>, u32> {
+    macro_rules! with {
+        ($ps:ty) => {{
+            use fips205::traits::Signer;
+            let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            // Unchecked decode, as in slh_dsa_sign_phm!.
+            let sk = <$ps>::from_bytes_unchecked(sk_arr);
+            let ph = ph_from_digest_mech_slh_dsa(hash).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            sk.try_hash_sign_with_rng_phm(&mut FixedRng::new(addrnd), phm, ctx, &ph, true)
+                .map_err(|_| CKR_FUNCTION_FAILED)
+                .map(|s| Into::<Vec<u8>>::into(s))
+        }};
+    }
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => with!(fips205::slh_dsa_sha2_128s::PrivateKey),
+        CKP_SLH_DSA_SHAKE_128S => with!(fips205::slh_dsa_shake_128s::PrivateKey),
+        CKP_SLH_DSA_SHA2_128F => with!(fips205::slh_dsa_sha2_128f::PrivateKey),
+        CKP_SLH_DSA_SHAKE_128F => with!(fips205::slh_dsa_shake_128f::PrivateKey),
+        CKP_SLH_DSA_SHA2_192S => with!(fips205::slh_dsa_sha2_192s::PrivateKey),
+        CKP_SLH_DSA_SHAKE_192S => with!(fips205::slh_dsa_shake_192s::PrivateKey),
+        CKP_SLH_DSA_SHA2_192F => with!(fips205::slh_dsa_sha2_192f::PrivateKey),
+        CKP_SLH_DSA_SHAKE_192F => with!(fips205::slh_dsa_shake_192f::PrivateKey),
+        CKP_SLH_DSA_SHA2_256S => with!(fips205::slh_dsa_sha2_256s::PrivateKey),
+        CKP_SLH_DSA_SHAKE_256S => with!(fips205::slh_dsa_shake_256s::PrivateKey),
+        CKP_SLH_DSA_SHA2_256F => with!(fips205::slh_dsa_sha2_256f::PrivateKey),
+        CKP_SLH_DSA_SHAKE_256F => with!(fips205::slh_dsa_shake_256f::PrivateKey),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// [`sign_ml_dsa_phm`] with the caller's 32-byte `rnd` (plan M3): the
+/// generic `CKM_HASH_ML_DSA` under the ACVP explicit-randomness model.
+pub fn sign_ml_dsa_phm_external_rnd(
+    ps: u32,
+    sk_bytes: &[u8],
+    phm: &[u8],
+    ctx: &[u8],
+    hash: u32,
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    use fips204::traits::{KeyGen, Signer};
+    let ph = ph_from_digest_mech_ml_dsa(hash).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    macro_rules! with {
+        ($variant:path) => {{
+            type Sk = <$variant as KeyGen>::PrivateKey;
+            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            sk.try_hash_sign_with_rng_phm(&mut FixedRng::new(&rnd), phm, ctx, &ph)
+                .map_err(|_| CKR_FUNCTION_FAILED)
+                .map(|s| Into::<Vec<u8>>::into(s))
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => with!(fips204::ml_dsa_44::KG),
+        CKP_ML_DSA_65 | 0 => with!(fips204::ml_dsa_65::KG),
+        CKP_ML_DSA_87 => with!(fips204::ml_dsa_87::KG),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 /// Remediation R37 (phase 8), PKCS#11 v3.2 §6.69.6: sign an ALREADY-HASHED
 /// PHM directly, for the bare generic `CKM_HASH_SLH_DSA` mechanism -- twin
 /// of [`sign_slh_dsa`], which hashes a raw message. `hash` is the caller's
@@ -2642,8 +2724,9 @@ pub fn validate_ec_public_point(curve: u32, point: &[u8]) -> Result<(), u32> {
     }
 }
 
-/// (field bytes, order bits) for the curves CKM_PQCTODAY_ECDSA_EXPLICIT_K
-/// supports. `None` for any other curve — including 0, the "curve unknown"
+/// (field bytes, order bits) for the curves on which CKM_ECDSA takes a
+/// supplied k (shape 1 of the ACVP explicit-randomness model; the rules of the
+/// retired CKM_PQCTODAY_ECDSA_EXPLICIT_K). `None` for any other curve — including 0, the "curve unknown"
 /// value C_CreateObject leaves for an undecodable CKA_EC_PARAMS, which is
 /// deliberately not guessed to be P-256 here.
 fn explicit_k_curve(curve: u32) -> Option<(usize, usize)> {
@@ -2677,7 +2760,8 @@ fn bits2int_field(input: &[u8], order_bits: usize, field_len: usize) -> Vec<u8> 
     out
 }
 
-/// CKM_PQCTODAY_ECDSA_EXPLICIT_K's parameter check, run at C_SignInit so a
+/// CKM_ECDSA's supplied-k check (shape 1; formerly CKM_PQCTODAY_ECDSA_
+/// EXPLICIT_K's parameter check), run at C_SignInit so a
 /// bad k is CKR_MECHANISM_PARAM_INVALID there (§5.13.1) rather than a failure
 /// at C_Sign: k must be exactly the order's byte length and 1 <= k < n.
 /// A key on a curve the mechanism does not cover is refused with one of the

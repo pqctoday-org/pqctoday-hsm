@@ -1,10 +1,12 @@
 /*****************************************************************************
  AcvpEcdsaExplicitKTests.h
 
- CKM_PQCTODAY_ECDSA_EXPLICIT_K (vendor; a deliberate key-recovery teaching
- primitive — SECURITY.md) through the real PKCS#11 ABI: NIST ACVP ECDSA
- SigGen byte-matches, parameter and key refusals, sabotage controls, and the
- mechanism's advertisement. See AcvpEcdsaExplicitKTests.cpp.
+ CKM_ECDSA with its optional parameter k (a test input outside PKCS#11 and a
+ deliberate key-recovery teaching primitive — SECURITY.md) through the real
+ PKCS#11 ABI: NIST ACVP ECDSA SigGen byte-matches, parameter and key
+ refusals, sabotage controls, absent-k standard behaviour, no sensitivity
+ guard (D0 a), and the retirement of vendor mechanism 0x80000015. See
+ AcvpEcdsaExplicitKTests.cpp.
  *****************************************************************************/
 
 #ifndef _SOFTHSM_V2_ACVPECDSAEXPLICITKTESTS_H
@@ -20,19 +22,23 @@ class AcvpEcdsaExplicitKTests : public TestsBase
 	CPPUNIT_TEST(testSigGenMatchesNist);
 	CPPUNIT_TEST(testSabotageIsDetected);
 	CPPUNIT_TEST(testRefusals);
-	CPPUNIT_TEST(testAdvertisedSignOnly);
+	CPPUNIT_TEST(testAbsentKIsStandard);
+	CPPUNIT_TEST(testNoSensitivityGuard);
+	CPPUNIT_TEST(testRetiredVendorMechanism);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
 	void testSigGenMatchesNist();
 	void testSabotageIsDetected();
 	void testRefusals();
-	void testAdvertisedSignOnly();
+	void testAbsentKIsStandard();
+	void testNoSensitivityGuard();
+	void testRetiredVendorMechanism();
 
 protected:
 	void openSession(CK_SESSION_HANDLE& hSession);
 	CK_OBJECT_HANDLE importPrivate(CK_SESSION_HANDLE hSession, const std::vector<unsigned char>& oid,
-	                               const std::vector<unsigned char>& d);
+	                               const std::vector<unsigned char>& d, bool sensitive = false);
 	CK_OBJECT_HANDLE importPublic(CK_SESSION_HANDLE hSession, const std::vector<unsigned char>& oid,
 	                              const std::vector<unsigned char>& qx, const std::vector<unsigned char>& qy);
 	CK_RV signInit(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, const std::vector<unsigned char>* k);

@@ -1193,7 +1193,10 @@ fn derive_template_is_applied_then_checked() {
     }
 
     // An applied CKA_TOKEN=TRUE needs a R/W session like a requested one.
-    let (_w, tok) = flat(&[(CKA_TOKEN, vec![1u8])]);
+    // Named, not a temporary: flat() keeps pointers to the values, and the
+    // engine reads them only when the base key is created below.
+    let token_true = vec![(CKA_TOKEN, vec![1u8])];
+    let (_w, tok) = flat(&token_true);
     let b = create(&[
         (CKA_CLASS, ulong(CKO_SECRET_KEY)),
         (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),

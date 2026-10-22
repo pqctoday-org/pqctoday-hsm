@@ -1,9 +1,13 @@
 /*****************************************************************************
  AcvpEcdsaExplicitKTests.cpp
 
- CKM_PQCTODAY_ECDSA_EXPLICIT_K — ECDSA with a caller-supplied nonce k, a
- deliberate key-recovery teaching primitive (SECURITY.md). Same checks as the
- Rust engine's ffi::ecdsa_explicit_k_ffi_tests.
+ CKM_ECDSA with its optional parameter k (shape 1 of the optional caller-
+ supplied randomness model, vendor_mechanisms.h): ECDSA with a caller-chosen
+ nonce, a test input outside PKCS#11 and a deliberate key-recovery teaching
+ primitive (SECURITY.md). Replaces the retired vendor mechanism
+ CKM_PQCTODAY_ECDSA_EXPLICIT_K (0x80000015), which is now refused and no
+ longer advertised (testRetiredVendorMechanism). Same checks as the Rust
+ engine's explicit-k FFI tests.
 
  Vectors: tests/acvp/ecdsa_siggen_explicit_k_test.json — NIST ACVP-Server
  @975de31e ECDSA-SigGen-FIPS186-5, 40 cases over (P-256, SHA2-256),
@@ -60,7 +64,8 @@ void AcvpEcdsaExplicitKTests::openSession(CK_SESSION_HANDLE& hSession)
 
 CK_OBJECT_HANDLE AcvpEcdsaExplicitKTests::importPrivate(CK_SESSION_HANDLE hSession,
                                                         const std::vector<unsigned char>& oid,
-                                                        const std::vector<unsigned char>& d)
+                                                        const std::vector<unsigned char>& d,
+                                                        bool sensitive)
 {
 	CK_OBJECT_CLASS cls = CKO_PRIVATE_KEY;
 	CK_KEY_TYPE kt = CKK_EC;
@@ -71,6 +76,7 @@ CK_OBJECT_HANDLE AcvpEcdsaExplicitKTests::importPrivate(CK_SESSION_HANDLE hSessi
 		{ CKA_KEY_TYPE, &kt, sizeof(kt) },
 		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
 		{ CKA_SIGN, &bTrue, sizeof(bTrue) },
+		{ CKA_SENSITIVE, sensitive ? &bTrue : &bFalse, sizeof(bTrue) },
 		{ CKA_EC_PARAMS, o.data(), (CK_ULONG)o.size() },
 		{ CKA_VALUE, v.data(), (CK_ULONG)v.size() },
 	};
@@ -116,8 +122,7 @@ CK_RV AcvpEcdsaExplicitKTests::signInit(CK_SESSION_HANDLE hSession, CK_OBJECT_HA
                                         const std::vector<unsigned char>* k)
 {
 	std::vector<unsigned char> kv = k ? *k : std::vector<unsigned char>();
-	CK_MECHANISM m = { CKM_PQCTODAY_ECDSA_EXPLICIT_K,
-	                   k ? kv.data() : NULL_PTR, (CK_ULONG)(k ? kv.size() : 0) };
+	CK_MECHANISM m = { CKM_ECDSA, k ? kv.data() : NULL_PTR, (CK_ULONG)(k ? kv.size() : 0) };
 	return CRYPTOKI_F_PTR( C_SignInit(hSession, &m, hKey) );
 }
 
@@ -164,7 +169,7 @@ void AcvpEcdsaExplicitKTests::testSigGenMatchesNist()
 			if (rv != CKR_OK) { f.check(false, id + ": sign rv=" + acvpkat::rvHex(rv)); continue; }
 			f.check(sig == want, id + ": (r, s) differs from NIST");
 
-			// Ordinary ECDSA: CKM_ECDSA verifies it.
+			// Ordinary ECDSA: CKM_ECDSA (no parameter) verifies it.
 			CK_MECHANISM m = { CKM_ECDSA, NULL_PTR, 0 };
 			rv = CRYPTOKI_F_PTR( C_VerifyInit(hSession, &m, hPub) );
 			if (rv == CKR_OK)
@@ -173,7 +178,7 @@ void AcvpEcdsaExplicitKTests::testSigGenMatchesNist()
 			f.check(rv == CKR_OK, id + ": CKM_ECDSA verify rv=" + acvpkat::rvHex(rv));
 		}
 	}
-	f.assertNone("ECDSA explicit-k SigGen");
+	f.assertNone("ECDSA SigGen, CKM_ECDSA + k");
 	// Reachability: every case ran, including the truncation group.
 	CPPUNIT_ASSERT_EQUAL((size_t)40, ran);
 	CPPUNIT_ASSERT_EQUAL((size_t)4, groups.size());
@@ -224,8 +229,7 @@ void AcvpEcdsaExplicitKTests::testRefusals()
 	CK_OBJECT_HANDLE hPriv = importPrivate(hSession, OID_P256, acvpkat::hex(D_P256));
 	std::vector<unsigned char> good = acvpkat::hex(K_P256);
 
-	// No parameter, k = 0, k = n, k > n, and wrong lengths.
-	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, signInit(hSession, hPriv, NULL));
+	// k = 0, k = n, k > n, and wrong lengths.
 	std::vector<unsigned char> zero(32, 0), n = acvpkat::hex(N_P256), ff(32, 0xff);
 	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, signInit(hSession, hPriv, &zero));
 	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, signInit(hSession, hPriv, &n));
@@ -234,6 +238,9 @@ void AcvpEcdsaExplicitKTests::testRefusals()
 	longK.insert(longK.begin(), 0x00);
 	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, signInit(hSession, hPriv, &shortK));
 	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, signInit(hSession, hPriv, &longK));
+	// A length with a NULL pointer is a malformed parameter, not "absent".
+	CK_MECHANISM nullK = { CKM_ECDSA, NULL_PTR, 32 };
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, CRYPTOKI_F_PTR( C_SignInit(hSession, &nullK, hPriv) ));
 	// n - 1 is the largest legal k.
 	std::vector<unsigned char> nMinus1(n);
 	nMinus1.back() -= 1;
@@ -248,28 +255,103 @@ void AcvpEcdsaExplicitKTests::testRefusals()
 	CK_OBJECT_HANDLE hK256 = importPrivate(hSession, OID_K256, acvpkat::hex(D_P256));
 	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_KEY_TYPE_INCONSISTENT, signInit(hSession, hK256, &good));
 
-	// Sign only, single-part. The verify refusal uses a real P-256 verify key
-	// (vector group 0's Q), so the mechanism is the only thing wrong.
+	// k is a signing input only: verification refuses a parameter (new
+	// behaviour). The key is a real P-256 verify key (vector group 0's Q), so
+	// the parameter is the only thing wrong.
 	nlohmann::json doc = acvpkat::load("ecdsa_siggen_explicit_k_test.json");
 	CK_OBJECT_HANDLE hPub = importPublic(hSession, OID_P256, acvpkat::hexField(doc["testGroups"][0], "qx"),
 	                                     acvpkat::hexField(doc["testGroups"][0], "qy"));
-	CK_MECHANISM m = { CKM_PQCTODAY_ECDSA_EXPLICIT_K, good.data(), (CK_ULONG)good.size() };
-	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_INVALID, CRYPTOKI_F_PTR( C_VerifyInit(hSession, &m, hPub) ));
-	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_INVALID, CRYPTOKI_F_PTR( C_MessageSignInit(hSession, &m, hPriv) ));
+	CK_MECHANISM m = { CKM_ECDSA, good.data(), (CK_ULONG)good.size() };
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, CRYPTOKI_F_PTR( C_VerifyInit(hSession, &m, hPub) ));
+	std::vector<unsigned char> dummySig(64, 1);
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID,
+		CRYPTOKI_F_PTR( C_VerifySignatureInit(hSession, &m, hPub, dummySig.data(), (CK_ULONG)dummySig.size()) ));
+	// Message-based signing would reuse the one k: refused.
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_PARAM_INVALID, CRYPTOKI_F_PTR( C_MessageSignInit(hSession, &m, hPriv) ));
+	// With k the operation is single-part (one k, one signature).
 	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, signInit(hSession, hPriv, &good));
-	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_SignUpdate(hSession, good.data(), (CK_ULONG)good.size()) ) != CKR_OK);
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OPERATION_NOT_INITIALIZED,
+		CRYPTOKI_F_PTR( C_SignUpdate(hSession, good.data(), (CK_ULONG)good.size()) ));
 }
 
-void AcvpEcdsaExplicitKTests::testAdvertisedSignOnly()
+void AcvpEcdsaExplicitKTests::testAbsentKIsStandard()
 {
+	// Shape 1, absent input: CKM_ECDSA without a parameter (NULL/0, or a
+	// pointer with length 0) is the standard randomised ECDSA, unchanged:
+	// two signatures of one digest differ and both verify.
+	CK_SESSION_HANDLE hSession;
+	openSession(hSession);
+	nlohmann::json doc = acvpkat::load("ecdsa_siggen_explicit_k_test.json");
+	const auto& g = doc["testGroups"][0];
+	CK_OBJECT_HANDLE hPriv = importPrivate(hSession, OID_P256, acvpkat::hexField(g, "d"));
+	CK_OBJECT_HANDLE hPub = importPublic(hSession, OID_P256, acvpkat::hexField(g, "qx"), acvpkat::hexField(g, "qy"));
+	std::vector<unsigned char> digest = acvpkat::hexField(g["tests"][0], "digest");
+	unsigned char empty[1] = { 0 };
+	std::vector<unsigned char> sigs[2];
+	for (int i = 0; i < 2; i++)
+	{
+		CK_MECHANISM m = { CKM_ECDSA, i == 0 ? NULL_PTR : empty, 0 };
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_SignInit(hSession, &m, hPriv) ));
+		sigs[i].assign(64, 0);
+		CK_ULONG len = 64;
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_Sign(hSession, digest.data(), (CK_ULONG)digest.size(),
+		                                                          sigs[i].data(), &len) ));
+		CPPUNIT_ASSERT_EQUAL((CK_ULONG)64, len);
+		CK_MECHANISM v = { CKM_ECDSA, i == 0 ? NULL_PTR : empty, 0 };
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifyInit(hSession, &v, hPub) ));
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_Verify(hSession, digest.data(), (CK_ULONG)digest.size(),
+		                                                            sigs[i].data(), 64) ));
+	}
+	CPPUNIT_ASSERT(sigs[0] != sigs[1]);
+	// Multi-part stays available without k.
+	CK_MECHANISM m = { CKM_ECDSA, NULL_PTR, 0 };
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_SignInit(hSession, &m, hPriv) ));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_SignUpdate(hSession, digest.data(), (CK_ULONG)digest.size()) ));
+	CRYPTOKI_F_PTR( C_SignInit(hSession, NULL_PTR, CK_INVALID_HANDLE) );
+}
+
+void AcvpEcdsaExplicitKTests::testNoSensitivityGuard()
+{
+	// Owner decision D0 (a): no guard. A chosen k works on a CKA_SENSITIVE
+	// key exactly as on a non-sensitive one. Pinned so a guard cannot be
+	// added by accident.
+	CK_SESSION_HANDLE hSession;
+	openSession(hSession);
+	nlohmann::json doc = acvpkat::load("ecdsa_siggen_explicit_k_test.json");
+	const auto& g = doc["testGroups"][0];
+	const auto& t = g["tests"][0];
+	std::vector<unsigned char> want = acvpkat::hexField(t, "r");
+	std::vector<unsigned char> s = acvpkat::hexField(t, "s");
+	want.insert(want.end(), s.begin(), s.end());
+	for (int sensitive = 0; sensitive < 2; sensitive++)
+	{
+		CK_OBJECT_HANDLE h = importPrivate(hSession, OID_P256, acvpkat::hexField(g, "d"), sensitive != 0);
+		std::vector<unsigned char> digest = acvpkat::hexField(t, "digest"), sig;
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, sign(hSession, h, acvpkat::hexField(t, "k"), digest, sig));
+		CPPUNIT_ASSERT(sig == want);
+	}
+}
+
+void AcvpEcdsaExplicitKTests::testRetiredVendorMechanism()
+{
+	// 0x80000015 (was CKM_PQCTODAY_ECDSA_EXPLICIT_K) is retired: refused and
+	// no longer advertised. The number stays allocated, never reused.
+	const CK_MECHANISM_TYPE retired = 0x80000015UL;
 	CK_SESSION_HANDLE hSession;
 	openSession(hSession);
 	CK_MECHANISM_INFO info;
-	CK_RV rv = CRYPTOKI_F_PTR( C_GetMechanismInfo(m_initializedTokenSlotID, CKM_PQCTODAY_ECDSA_EXPLICIT_K, &info) );
-	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, rv);
-	CPPUNIT_ASSERT_EQUAL((CK_ULONG)256, info.ulMinKeySize);
-	CPPUNIT_ASSERT_EQUAL((CK_ULONG)521, info.ulMaxKeySize);
-	CPPUNIT_ASSERT(info.flags & CKF_SIGN);
-	CPPUNIT_ASSERT(!(info.flags & CKF_VERIFY));
-	CPPUNIT_ASSERT(!(info.flags & CKF_MESSAGE_SIGN));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_INVALID,
+		CRYPTOKI_F_PTR( C_GetMechanismInfo(m_initializedTokenSlotID, retired, &info) ));
+	CK_ULONG count = 0;
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_GetMechanismList(m_initializedTokenSlotID, NULL_PTR, &count) ));
+	std::vector<CK_MECHANISM_TYPE> list(count);
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_GetMechanismList(m_initializedTokenSlotID, list.data(), &count) ));
+	CPPUNIT_ASSERT(std::find(list.begin(), list.begin() + count, retired) == list.begin() + count);
+	CPPUNIT_ASSERT(std::find(list.begin(), list.begin() + count, (CK_MECHANISM_TYPE)CKM_ECDSA) != list.begin() + count);
+
+	CK_OBJECT_HANDLE hPriv = importPrivate(hSession, OID_P256, acvpkat::hex(D_P256));
+	std::vector<unsigned char> good = acvpkat::hex(K_P256);
+	CK_MECHANISM m = { retired, good.data(), (CK_ULONG)good.size() };
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_INVALID, CRYPTOKI_F_PTR( C_SignInit(hSession, &m, hPriv) ));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_MECHANISM_INVALID, CRYPTOKI_F_PTR( C_MessageSignInit(hSession, &m, hPriv) ));
 }

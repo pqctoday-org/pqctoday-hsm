@@ -1191,12 +1191,38 @@ fn oaep_for(p: &OaepParams) -> rsa::Oaep {
 /// RSA OAEP encrypt — accepts both X.509 SPKI and PKCS#1 RSAPublicKey
 /// DER for the public-key bytes.
 pub(crate) fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+    rsa_oaep_encrypt_with_seed(pub_der, plaintext, params, None)
+}
+
+/// [`rsa_oaep_encrypt`] with the caller's OAEP seed (RFC 8017 §7.1.1 step
+/// 2.d, hLen bytes) instead of a drawn one — the composite-KEM RSA half under
+/// the ACVP explicit-randomness model (plan D4). The `rsa` crate draws the
+/// seed as one hLen-byte fill from the RNG it is given, so a fixed source
+/// holding exactly the seed reproduces RSAES-OAEP-ENCRYPT with that seed.
+/// A seed of any other length is CKR_MECHANISM_PARAM_INVALID.
+pub(crate) fn rsa_oaep_encrypt_with_seed(
+    pub_der: &[u8],
+    plaintext: &[u8],
+    params: &OaepParams,
+    seed: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
     let public_key = rsa_public_key_from_any_der(pub_der)?;
     let padding = oaep_for(params);
-    let mut rng = rand::rngs::OsRng;
-    public_key
-        .encrypt(&mut rng, padding, plaintext)
-        .map_err(|_| CKR_FUNCTION_FAILED)
+    match seed {
+        None => public_key.encrypt(&mut rand::rngs::OsRng, padding, plaintext),
+        Some(s) => {
+            let h_len = match params.hash.unwrap_or(OaepHash::Sha256) {
+                OaepHash::Sha256 => 32,
+                OaepHash::Sha384 => 48,
+                OaepHash::Sha512 => 64,
+            };
+            if s.len() != h_len {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            public_key.encrypt(&mut crate::crypto::handlers::FixedRng::new(s), padding, plaintext)
+        }
+    }
+    .map_err(|_| CKR_FUNCTION_FAILED)
 }
 
 /// RSA OAEP decrypt — accepts both PKCS#8 PrivateKeyInfo and PKCS#1

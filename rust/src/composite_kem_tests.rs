@@ -780,7 +780,12 @@ fn v6_derived_negative_vectors() {
 }
 
 /// CKM_COMP_KEM "has no parameters" (comp_kem.md) → a parameter is
-/// CKR_MECHANISM_PARAM_INVALID on both calls. Wrong key types →
+/// CKR_MECHANISM_PARAM_INVALID on C_DecapsulateKey. On C_EncapsulateKey the
+/// one parameter accepted is the optional shape-1 test input of the exact
+/// composite length (ACVP explicit-randomness plan D4; see
+/// `supplied_random_*` below): the 8-byte parameter here is still refused,
+/// now as a wrong length — the assertion's code is unchanged, its reason
+/// changed deliberately (plan revision 9). Wrong key types →
 /// CKR_KEY_TYPE_INCONSISTENT (v3.2 §5.18.8 / §5.18.9): a plain ML-KEM key
 /// under CKM_COMP_KEM, a composite key under CKM_ML_KEM, and the composite
 /// public key passed to C_DecapsulateKey is refused for lacking
@@ -794,7 +799,10 @@ fn v6_parameter_and_key_type_refusals() {
     let (_, hp) = import_public(v.p.ckp, &v.ek);
     let param = [0u8; 8];
     assert_eq!(decapsulate_with(CKM_COMP_KEM, &param, hk, &v.c).0, CKR_MECHANISM_PARAM_INVALID);
-    assert_eq!(encapsulate_with(CKM_COMP_KEM, &param, hp, 4096).0, CKR_MECHANISM_PARAM_INVALID);
+    assert_eq!(encapsulate_with(CKM_COMP_KEM, &param, hp, 4096).0, CKR_MECHANISM_PARAM_INVALID, "wrong length");
+    let exact = vec![0x11u8; crate::native::composite_kem::supplied_random_len(v.p)];
+    assert_eq!(encapsulate_with(CKM_COMP_KEM, &exact, hp, 4096).0, CKR_OK, "the exact shape-1 length");
+    assert_eq!(decapsulate_with(CKM_COMP_KEM, &exact, hk, &v.c).0, CKR_MECHANISM_PARAM_INVALID, "never on decapsulation");
     // pParameter NULL but ulParameterLen non-zero.
     let mut m: [usize; 3] = [CKM_COMP_KEM as usize, 0, 4];
     let mut ct = v.c.clone();
@@ -812,4 +820,117 @@ fn v6_parameter_and_key_type_refusals() {
     assert_eq!(encapsulate_with(CKM_ML_KEM, &[], hp, 4096).0, CKR_KEY_TYPE_INCONSISTENT, "composite key, CKM_ML_KEM");
     assert_eq!(decapsulate(hp, &v.c).0, CKR_KEY_FUNCTION_NOT_PERMITTED, "public key cannot decapsulate");
     destroy(&[hk, hp, mp, mk]);
+}
+
+// ── Optional test input (ACVP explicit-randomness plan, D4, shape 1) ──────
+
+/// A valid supplied value for `p`: m, then the traditional half's values
+/// (an ECDH scalar must be 1 <= d < n, so a small one is used).
+fn supplied(p: &CompositeKemParams, salt: u8) -> Vec<u8> {
+    let n = crate::native::composite_kem::supplied_random_len(p);
+    let mut r: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(salt)).collect();
+    if let KemClassical::Ecdh { .. } = p.classical {
+        for b in &mut r[32..] {
+            *b = 0;
+        }
+        *r.last_mut().unwrap() = 7 + salt;
+    }
+    r
+}
+
+/// Self-consistency for every supported set (the drafts' vectors carry no
+/// randomness, so nothing byte-exact exists to compare with — P0 report §6):
+/// the same value gives the same (ct, ss); the ciphertext decapsulates
+/// normally to that ss; its ML-KEM half is exactly CKM_ML_KEM's
+/// encapsulation of the component ek under the same m; a change to m moves
+/// only the ML-KEM half and a change to the traditional values only the
+/// traditional half; absent, encapsulation stays randomised.
+#[test]
+fn supplied_random_is_self_consistent_for_every_set() {
+    let _guard = test_lock::acquire();
+    setup();
+    let mut n = 0;
+    for v in supported() {
+        let name = v.p.name;
+        let (_, hk) = import_private(v.p.ckp, &v.dk, vec![]);
+        let (_, hp) = import_public(v.p.ckp, &v.ek);
+        let r = supplied(v.p, 0);
+        assert_eq!(r.len(), match v.p.classical {
+            KemClassical::RsaOaep { .. } => 96,
+            KemClassical::X25519 => 64,
+            KemClassical::X448 => 88,
+            KemClassical::Ecdh { curve: EcCurve::P256 | EcCurve::BrainpoolP256r1 } => 64,
+            KemClassical::Ecdh { curve: EcCurve::P384 | EcCurve::BrainpoolP384r1 } => 80,
+            KemClassical::Ecdh { curve: EcCurve::P521 } => 98,
+        }, "{name}: P0 report §6 length");
+        let (rv, ct1, hs1) = encapsulate_with(CKM_COMP_KEM, &r, hp, 4096);
+        assert_eq!(rv, CKR_OK, "{name}");
+        let (_, ct2, hs2) = encapsulate_with(CKM_COMP_KEM, &r, hp, 4096);
+        let ss = value(hs1);
+        assert_eq!((&ct1, &ss), (&ct2, &value(hs2)), "{name}: reproducible");
+        let (rv, hd) = decapsulate(hk, &ct1);
+        assert_eq!((rv, value(hd)), (CKR_OK, ss.clone()), "{name}: decapsulates normally");
+
+        // ML-KEM half = CKM_ML_KEM Encaps_internal(ek, m).
+        let ml_ct_len = v.p.ml_kem_ciphertext_len();
+        let (ml_ek, _) = Layout::from(CompositeParams::Kem(v.p)).split_public(&v.ek).unwrap();
+        let (rv, h_ml) = create(vec![
+            (CKA_CLASS, ulong(CKO_PUBLIC_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_ML_KEM)),
+            (CKA_PARAMETER_SET, ulong(v.p.ml_kem)),
+            (CKA_ENCAPSULATE, vec![1]),
+            (CKA_TOKEN, vec![0]),
+            (CKA_VALUE, ml_ek.to_vec()),
+        ]);
+        assert_eq!(rv, CKR_OK);
+        let (rv, ml_ct, h_mls) = encapsulate_with(CKM_ML_KEM, &r[..32], h_ml, 4096);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(ml_ct, ct1[..ml_ct_len], "{name}: ML-KEM half");
+
+        // Each half moves with its own value only.
+        let mut r_m = r.clone();
+        r_m[0] ^= 1;
+        let (_, ct_m, h3) = encapsulate_with(CKM_COMP_KEM, &r_m, hp, 4096);
+        assert_ne!(ct_m[..ml_ct_len], ct1[..ml_ct_len], "{name}");
+        assert_eq!(ct_m[ml_ct_len..], ct1[ml_ct_len..], "{name}: traditional half unchanged");
+        let r_t = supplied(v.p, 1);
+        let mut r_t2 = r.clone();
+        r_t2[32..].copy_from_slice(&r_t[32..]);
+        let (_, ct_t, h4) = encapsulate_with(CKM_COMP_KEM, &r_t2, hp, 4096);
+        assert_eq!(ct_t[..ml_ct_len], ct1[..ml_ct_len], "{name}: ML-KEM half unchanged");
+        assert_ne!(ct_t[ml_ct_len..], ct1[ml_ct_len..], "{name}");
+
+        // Absent: randomised, as before.
+        let (_, a, h5) = encapsulate_with(CKM_COMP_KEM, &[], hp, 4096);
+        let (_, b, h6) = encapsulate_with(CKM_COMP_KEM, &[], hp, 4096);
+        assert_ne!(a, b, "{name}");
+        destroy(&[hk, hp, hs1, hs2, hd, h_ml, h_mls, h3, h4, h5, h6]);
+        n += 1;
+    }
+    assert!(n >= 8, "{n} sets");
+}
+
+/// Wrong lengths and invalid ECDH scalars are refused before any work, with
+/// CKR_MECHANISM_PARAM_INVALID.
+#[test]
+fn supplied_random_refusals() {
+    let _guard = test_lock::acquire();
+    setup();
+    for v in supported() {
+        let name = v.p.name;
+        let (_, hp) = import_public(v.p.ckp, &v.ek);
+        let r = supplied(v.p, 0);
+        for bad in [&r[..r.len() - 1], &[r.clone(), vec![0]].concat()[..], &r[..32]] {
+            assert_eq!(encapsulate_with(CKM_COMP_KEM, bad, hp, 4096).0, CKR_MECHANISM_PARAM_INVALID, "{name}: {} bytes", bad.len());
+        }
+        if let KemClassical::Ecdh { .. } = v.p.classical {
+            let mut zero = r.clone();
+            zero[32..].iter_mut().for_each(|b| *b = 0);
+            assert_eq!(encapsulate_with(CKM_COMP_KEM, &zero, hp, 4096).0, CKR_MECHANISM_PARAM_INVALID, "{name}: d = 0");
+            let mut big = r.clone();
+            big[32..].iter_mut().for_each(|b| *b = 0xff);
+            assert_eq!(encapsulate_with(CKM_COMP_KEM, &big, hp, 4096).0, CKR_MECHANISM_PARAM_INVALID, "{name}: d >= n");
+        }
+        destroy(&[hp]);
+    }
 }

@@ -433,6 +433,21 @@ lazy_static! {
     /// The C_VerifyUpdate twin of COMP_SIG_SIGN_PREHASH.
     pub static ref COMP_SIG_VERIFY_PREHASH: Sharded<HashMap<u32, crate::native::composite_sig::PreHasher>> = Sharded::new();
     pub static ref FIND_STATE: Sharded<HashMap<u32, FindCtx>> = Sharded::new();
+    /// Optional test inputs of the active sign operation (ACVP
+    /// explicit-randomness plan, model M1–M4; a test interface OUTSIDE the
+    /// PKCS#11 standard): the value the operation would otherwise draw
+    /// (ECDSA k, ML-DSA rnd, SLH-DSA addrnd, a composite's concatenated
+    /// values) and the internal message encoding. Written by EVERY
+    /// C_SignInit — inserted when the caller supplied something, removed
+    /// when not — so a leftover entry from an earlier operation is never
+    /// read; removed again when C_Sign finishes, on session close and on
+    /// finalize. Kept beside SIGN_STATE's 4-tuple for the reason
+    /// GENERIC_HASH_STATE is.
+    pub static ref SIGN_SUPPLIED: Sharded<HashMap<u32, SuppliedInput>> = Sharded::new();
+    /// The verify twin of SIGN_SUPPLIED (internal encoding only: a verify
+    /// operation never takes a random value). Written by every C_VerifyInit,
+    /// and by C_VerifySignature/Final from the operation's own context.
+    pub static ref VERIFY_SUPPLIED: Sharded<HashMap<u32, SuppliedInput>> = Sharded::new();
     /// Persistent ACVP deterministic RNG — created once in C_Initialize, advances
     /// across all operations, cleared in C_Finalize. Uses IETF ChaCha20 (RFC 8439)
     /// to match the C++ OpenSSL EVP_chacha20 implementation.
@@ -688,6 +703,20 @@ impl MsgAeadCtx {
     }
 }
 
+/// See SIGN_SUPPLIED. `random` is wiped when dropped.
+#[derive(Clone, Default, Debug)]
+pub struct SuppliedInput {
+    pub random: Option<zeroize::Zeroizing<Vec<u8>>>,
+    /// `messageEncoding` = internal (FIPS 204 / FIPS 205 internal interface).
+    pub internal: bool,
+}
+
+impl SuppliedInput {
+    pub fn is_empty(&self) -> bool {
+        self.random.is_none() && !self.internal
+    }
+}
+
 #[derive(Clone)]
 pub struct VerifySigCtx {
     pub mech_type: u32,
@@ -699,6 +728,8 @@ pub struct VerifySigCtx {
     /// `CKM_COMP_SIG` only: the streaming PH(M) that C_VerifySignatureUpdate
     /// feeds instead of `msg_acc` (see COMP_SIG_SIGN_PREHASH).
     pub comp_prehash: Option<crate::native::composite_sig::PreHasher>,
+    /// The internal message encoding was requested (see VERIFY_SUPPLIED).
+    pub supplied: SuppliedInput,
 }
 
 /// Set PKCS#11 v3.2 mandatory object-management attribute defaults on a key before it

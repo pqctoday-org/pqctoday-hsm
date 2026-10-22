@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Optional test inputs for randomised operations, both engines (ACVP explicit-randomness model).** The value an
+  operation would draw at random may be supplied by the caller; absent, behaviour is unchanged. `CKM_ML_KEM`
+  encapsulation takes m and `CKM_ECDSA` signing takes k as the mechanism parameter; ML-DSA, SLH-DSA, their pre-hash
+  variants and `CKM_ML_DSA_EXTERNAL_MU` take rnd/addrnd in an extended signing structure, which for `CKM_SLH_DSA`
+  can also select the FIPS 205 internal interface; composite ML-KEM and ML-DSA (Rust engine) take both components'
+  random values. Outside the PKCS#11 standard, for education and testing; see SECURITY.md. Every in-scope NIST ACVP
+  group (ML-KEM encapsulation, ML-DSA and SLH-DSA hedged, pre-hash and internal) now byte-matches in both engines.
+- The generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA` accept `CKM_SHA512_224` and `CKM_SHA512_256` as their hash,
+  as the PKCS#11 v3.3 working draft allows.
+
+### Changed
+
+- Decapsulation (`CKM_ML_KEM`) and ECDSA verification now refuse a mechanism parameter, and a signing-context
+  structure of any size other than the standard or extended one is refused instead of being read as absent.
+- C++ `C_VerifySignature` returns `CKR_SIGNATURE_LEN_RANGE` for a wrong-length SLH-DSA signature, as `C_Verify` does.
+- A pre-hashed message of the wrong length on the generic and hash-specific ML-DSA / SLH-DSA pre-hash mechanisms returns
+  `CKR_DATA_LEN_RANGE` in both engines (previously `CKR_FUNCTION_FAILED` in the Rust engine).
+- The generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA` are single-part only in both engines, as PKCS#11 v3.3 states: the C++
+  engine no longer accepts a multi-part `C_VerifySignatureUpdate`/`Final` on them (`CKR_OPERATION_NOT_INITIALIZED`).
+
+### Removed
+
+- `CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`) is retired in both engines: refused, no longer advertised, and the
+  codepoint is never re-used. ECDSA with a supplied k is now `CKM_ECDSA` with k as its parameter.
+
 ### Changed
 
 - **Licence: AGPL-3.0-only for the code written by PQC Today, LLC, with a commercial licence on request.** `LICENSE` is

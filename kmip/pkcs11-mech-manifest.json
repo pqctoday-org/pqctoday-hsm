@@ -20,7 +20,6 @@
     "0x80000012": {"symbol": "CKM_PQCTODAY_SPLIT_KEY",                    "operation": "split_join",  "algorithm": "KMIP 3.0 §11.54 Split Key, all four methods — authority §1.4.2"},
     "0x80000013": {"symbol": "CKM_HPKE_KEM_KEY_PAIR_GEN",                 "operation": "keygen",      "algorithm": "HPKE (RFC 9180) KEM key pairs, classical DHKEM and PQ/T hybrid — authority §1.4"},
     "0x80000014": {"symbol": "CKM_HPKE",                                  "operation": "encap_decap", "algorithm": "Full HPKE (KEM + RFC 9180 §5.1 KeySchedule) — authority §1.4"},
-    "0x80000015": {"symbol": "CKM_PQCTODAY_ECDSA_EXPLICIT_K",             "operation": "sign",        "algorithm": "ECDSA P-256/384/521 with caller-supplied k (key-recovery teaching primitive, see SECURITY.md) — authority §1.4"},
     "0x80000016": {"symbol": "CKM_PQCTODAY_ISSUE_FUNCTION_CERTIFICATE",   "operation": "internal",    "algorithm": "Constrained ML-DSA-65 function-certificate issuance by a device issuer (Rust engine: the replication layer, compiled by the default native `fhe-custody` feature or `educational-replication`; engine-internal, only in function keys' CKA_ALLOWED_MECHANISMS, never advertised or caller-reachable) — authority §1.4 (pqctoday-priv 7c497c34, main 62044042)"},
     "0x80000017": {"symbol": "CKM_PQCTODAY_SIGN_KEY_ATTESTATION",         "operation": "internal",    "algorithm": "Constrained ML-DSA-65 key-attestation evidence signing (Rust engine: the replication layer, compiled by the default native `fhe-custody` feature or `educational-replication`; engine-internal, only in function keys' CKA_ALLOWED_MECHANISMS, never advertised or caller-reachable) — authority §1.4 (pqctoday-priv 7c497c34, main 62044042)"},
     "0x80000018": {"symbol": "CKM_PQCTODAY_FHE_KEY_GEN",                  "operation": "keygen",      "algorithm": "FHE seed generation, C_GenerateKey (Rust engine, default native build: CKKS; TFHE parameter set 1 only with `educational-fhe`). Listed by C_GetMechanismList and answered by C_GetMechanismInfo (32/32 bytes, CKF_GENERATE) once the replication profile is selected (owner decision F19, plan D02387 WP-A3) — authority §1.4.5 (priv b80c856b)"},
@@ -58,7 +57,8 @@
     "0x4034": {"symbol": "CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN", "collides_with": "CKM_XMSS_KEY_PAIR_GEN",   "replaced_by": "0x0F CKM_ML_KEM_KEY_PAIR_GEN"},
     "0x4035": {"symbol": "CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN", "collides_with": "CKM_XMSSMT_KEY_PAIR_GEN", "replaced_by": "0x1C CKM_ML_DSA_KEY_PAIR_GEN"},
     "0x4036": {"symbol": "CKM_PQCTODAY_ML_DSA_SIGN_VERIFY",  "collides_with": "CKM_XMSS",                "replaced_by": "0x1D CKM_ML_DSA"},
-    "0x4037": {"symbol": "CKM_PQCTODAY_ML_KEM_ENCAPSULATE",  "collides_with": "CKM_XMSSMT",              "replaced_by": "0x17 CKM_ML_KEM"}
+    "0x4037": {"symbol": "CKM_PQCTODAY_ML_KEM_ENCAPSULATE",  "collides_with": "CKM_XMSSMT",              "replaced_by": "0x17 CKM_ML_KEM"},
+    "0x80000015": {"symbol": "CKM_PQCTODAY_ECDSA_EXPLICIT_K", "retired": "2026-10-22", "replaced_by": "0x1041 CKM_ECDSA with k as its optional parameter (optional-input model, SECURITY.md); codepoint reserved, never re-used"}
   },
   "provisional_v0_5_x": {
     "_note": "0x4040–0x404F codepoints reserved by P0-ALGO-SURFACE. NOT shipping. K5 caveat: this range also violates the CKM_VENDOR_DEFINED (0x80000000) rule — these MUST be re-allocated at 0x80000000 | n in the authority file before any of them ship. Kept here only as a historical reservation record.",
