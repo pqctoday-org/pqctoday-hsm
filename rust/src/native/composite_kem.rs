@@ -209,9 +209,15 @@ pub fn encapsulate(session: u32, p: &'static CompositeKemParams, pk: &[u8]) -> R
     let (mut ct, mlkem_ss) = crate::crypto::handlers::ml_kem_encaps(p.ml_kem, ek, &m)?;
     let mlkem_ss = Zeroizing::new(mlkem_ss);
     let (trad_ct, trad_ss) = trad_encaps(layout.trad, trad_pk)?;
+    // §3.4 wants fixed-length combiner inputs and §4.3 a fixed ciphertext
+    // length; the FFI copies `ct` into a buffer sized from the table. A
+    // hard check, not a debug assertion: a component that ever returned
+    // another length must fail here, before the combiner runs.
+    if !p.ciphertext_size().admits(ct.len() + trad_ct.len()) {
+        return Err(CKR_FUNCTION_FAILED);
+    }
     let ss = combine(session, p, &mlkem_ss, &trad_ss, &trad_ct, trad_pk)?;
     ct.extend_from_slice(&trad_ct);
-    debug_assert!(p.ciphertext_size().admits(ct.len()));
     Ok((ct, ss))
 }
 

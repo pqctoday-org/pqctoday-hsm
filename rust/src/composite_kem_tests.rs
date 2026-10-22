@@ -642,6 +642,52 @@ fn kat_decapsulate_all_supported_vectors() {
     assert_eq!(n, 10);
 }
 
+/// composite-kem-23 §10.5 leniency at import: an EC `tradSK` carrying the
+/// RFC 5915 publicKey field imports when the point is the scalar's own
+/// public key (taken from the vector's `ek`), is stored in the drafts'
+/// canonical form (the vector's `dk`) and decapsulates to `k`; the point of
+/// a different key is CKR_ATTRIBUTE_VALUE_INVALID, like any invalid half.
+#[test]
+fn import_accepts_ec_private_key_with_matching_public_key_field() {
+    let _guard = test_lock::acquire();
+    setup();
+    let mut n = 0;
+    for v in supported() {
+        let KemClassical::Ecdh { .. } = v.p.classical else { continue };
+        let name = v.p.name;
+        let layout = Layout::from(CompositeParams::Kem(v.p));
+        let (seed, trad_sk) = layout.split_private(&v.dk).unwrap();
+        let (_, trad_pk) = layout.split_public(&v.ek).unwrap();
+        let with_point = |point: &[u8]| {
+            let (_, start, len) = tlv(trad_sk, 0);
+            let mut bits = vec![0u8];
+            bits.extend_from_slice(point);
+            let mut body = trad_sk[start..start + len].to_vec();
+            body.extend_from_slice(&composite_key::der_tlv(0xa1, &composite_key::der_tlv(0x03, &bits)));
+            let mut dk = seed.to_vec();
+            dk.extend_from_slice(&composite_key::der_tlv(0x30, &body));
+            dk
+        };
+
+        let (rv, hk) = import_private(v.p.ckp, &with_point(trad_pk), vec![]);
+        assert_eq!(rv, CKR_OK, "{name}: matching publicKey field accepted");
+        assert_eq!(value(hk), v.dk, "{name}: stored without the field");
+        let (rv, hs) = decapsulate(hk, &v.c);
+        assert_eq!(rv, CKR_OK, "{name}: decapsulate");
+        assert_eq!(value(hs), v.k, "{name}: k");
+        destroy(&[hk, hs]);
+
+        let (other_pk, _) = composite_key::trad_generate(layout.trad).unwrap();
+        assert_eq!(
+            import_private(v.p.ckp, &with_point(&other_pk), vec![]).0,
+            CKR_ATTRIBUTE_VALUE_INVALID,
+            "{name}: another key's point refused"
+        );
+        n += 1;
+    }
+    assert_eq!(n, 4, "the P-256, P-384 (x2) and P-521 ECDH sets");
+}
+
 // ── V6: negative vectors derived from the good ones ─────────────────────
 
 /// Derived failures per vector, each expected outcome from draft-23:

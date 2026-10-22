@@ -5799,7 +5799,11 @@ fn C_EncapsulateKey_impl(
                 Ok(r) => r,
                 Err(rv) => return rv,
             };
-            debug_assert_eq!(ct.len(), ct_len as usize);
+            // Never write past the caller's buffer, which was checked against
+            // ct_len only.
+            if ct.len() != ct_len as usize {
+                return CKR_FUNCTION_FAILED;
+            }
             std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct.len());
             *pul_ciphertext_len = ct.len() as u32;
             *ph_key = match comp_kem_secret_object(_h_session, h_key, _p_template, _ul_attribute_count, &ss, false) {
@@ -8827,8 +8831,10 @@ fn C_Sign_impl(
             return rv;
         }
 
+        // The private key material (for a composite key, mlSeed ‖ tradSK) is
+        // wiped when this copy drops.
         let sk_bytes = match get_object_value(hkey) {
-            Some(v) => v,
+            Some(v) => zeroize::Zeroizing::new(v),
             None => return CKR_ARGUMENTS_BAD,
         };
         let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);

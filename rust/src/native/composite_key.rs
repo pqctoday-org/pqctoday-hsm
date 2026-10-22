@@ -18,7 +18,8 @@
 //! DER `RSAPrivateKey` (RFC 8017 A.1.1/A.1.2, version 0, no
 //! otherPrimeInfos); EC public key the uncompressed X9.62 point `04 ‖ X ‖ Y`
 //! and private key DER `ECPrivateKey` (RFC 5915) with the named-curve OID and
-//! without the publicKey field; X25519 / X448 / Ed25519 / Ed448 raw RFC 7748
+//! without the publicKey field (an import that carries a matching one is
+//! normalised, see `canonical_trad_private`); X25519 / X448 / Ed25519 / Ed448 raw RFC 7748
 //! / RFC 8032 bytes.
 //!
 //! This module holds the parts both families share: splitting and
@@ -241,16 +242,30 @@ pub fn spki(oid: &str, public_key: &[u8]) -> Vec<u8> {
 /// field the drafts forbid left out (composite-kem-23 §4 "*ECDH*",
 /// composite-sigs-19 §4 "*ECDSA*"). `d` is the field-width big-endian scalar.
 pub fn ec_private_key_der(curve: EcCurve, d: &[u8]) -> Vec<u8> {
-    let mut body = vec![0x02, 0x01, 0x01];
-    body.extend_from_slice(&der_tlv(0x04, d));
+    // The intermediate buffers hold the scalar: wiped on drop. The caller
+    // owns (and wraps) the returned encoding.
+    let mut body = Zeroizing::new(vec![0x02, 0x01, 0x01]);
+    body.extend_from_slice(&Zeroizing::new(der_tlv(0x04, d)));
     body.extend_from_slice(&der_tlv(0xa0, &der_tlv(0x06, &oid_body(curve.oid()))));
     der_tlv(0x30, &body)
 }
 
 /// The scalar inside a [`ec_private_key_der`] encoding. Anything else — a
 /// different curve, a publicKey field, a wrong-width scalar, trailing bytes —
-/// is refused: the drafts allow exactly one encoding.
+/// is refused: the drafts allow exactly one encoding, and it is the only one
+/// the engine stores (an import carrying the publicKey field is normalised
+/// by [`canonical_trad_private`] first).
 pub fn ec_private_key_scalar(curve: EcCurve, der: &[u8]) -> Option<&[u8]> {
+    match ec_private_key_parse(curve, der)? {
+        (d, None) => Some(d),
+        (_, Some(_)) => None,
+    }
+}
+
+/// [`ec_private_key_scalar`] that also admits RFC 5915's optional
+/// `publicKey [1] BIT STRING` after the parameters: `(d, publicKey)`. The
+/// BIT STRING must have no unused bits. Nothing else is relaxed.
+fn ec_private_key_parse(curve: EcCurve, der: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
     let (tag, body, rest) = der_take(der)?;
     if tag != 0x30 || !rest.is_empty() {
         return None;
@@ -264,11 +279,70 @@ pub fn ec_private_key_scalar(curve: EcCurve, der: &[u8]) -> Option<&[u8]> {
         return None;
     }
     let (tag, params, rest) = der_take(body)?;
-    if tag != 0xa0 || !rest.is_empty() {
+    if tag != 0xa0 {
         return None;
     }
-    let (tag, oid, rest) = der_take(params)?;
-    (tag == 0x06 && rest.is_empty() && oid == oid_body(curve.oid()).as_slice()).then_some(d)
+    let (tag, oid, params_rest) = der_take(params)?;
+    if tag != 0x06 || !params_rest.is_empty() || oid != oid_body(curve.oid()).as_slice() {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some((d, None));
+    }
+    let (tag, public, rest) = der_take(rest)?;
+    if tag != 0xa1 || !rest.is_empty() {
+        return None;
+    }
+    let (tag, bits, rest) = der_take(public)?;
+    if tag != 0x03 || !rest.is_empty() {
+        return None;
+    }
+    match bits.split_first() {
+        Some((0, point)) if !point.is_empty() => Some((d, Some(point))),
+        _ => None,
+    }
+}
+
+/// Import-time leniency for `tradSK`. composite-kem-23 §4 and
+/// composite-sigs-19 §4 forbid the ECPrivateKey publicKey field ("in the
+/// interest of having a single unique encoding", composite-kem-23 §10.4.2),
+/// but composite-kem-23 §10.5 / composite-sigs-19 §10.6 encourage
+/// implementations "to be lenient when parsing the key material of the
+/// legacy algorithm". So an imported EC `tradSK` that carries the field is
+/// accepted ONLY if the embedded point is the public key of the scalar, and
+/// is then re-encoded without it — the engine stores and computes over the
+/// one encoding the drafts define.
+///
+/// `Ok(None)`: already canonical, or not an EC half (nothing to do).
+/// `Ok(Some(der))`: the canonical re-encoding. `Err(CKR_ATTRIBUTE_VALUE_
+/// INVALID)`: an embedded point that is not on the curve or is not the
+/// scalar's public key — the code every other invalid half gets.
+pub fn canonical_trad_private(trad: TradKey, sk: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, CkRv> {
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    const BAD: CkRv = CKR_ATTRIBUTE_VALUE_INVALID;
+    let TradKey::Ec(curve) = trad else {
+        return Ok(None);
+    };
+    let Some((d, Some(embedded))) = ec_private_key_parse(curve, sk) else {
+        return Ok(None);
+    };
+    macro_rules! same_point {
+        ($c:ident) => {{
+            let derived = $c::SecretKey::from_slice(d).map_err(|_| BAD)?.public_key();
+            let given = $c::PublicKey::from_sec1_bytes(embedded).map_err(|_| BAD)?;
+            given.to_encoded_point(false) == derived.to_encoded_point(false)
+        }};
+    }
+    let same = match curve {
+        EcCurve::P256 => same_point!(p256),
+        EcCurve::P384 => same_point!(p384),
+        EcCurve::P521 => same_point!(p521),
+        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+    };
+    if !same {
+        return Err(BAD);
+    }
+    Ok(Some(Zeroizing::new(ec_private_key_der(curve, d))))
 }
 
 // ── Traditional halves ─────────────────────────────────────────────────────
@@ -382,7 +456,8 @@ pub fn trad_generate(trad: TradKey) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkR
         ($c:ident, $curve:expr) => {{
             let sk = $c::SecretKey::random(&mut rng);
             let pk = sk.public_key().to_encoded_point(false).as_bytes().to_vec();
-            (pk, Zeroizing::new(ec_private_key_der($curve, &sk.to_bytes())))
+            let d = Zeroizing::new(sk.to_bytes().to_vec());
+            (pk, Zeroizing::new(ec_private_key_der($curve, &d)))
         }};
     }
     Ok(match trad {
@@ -417,7 +492,7 @@ pub fn trad_generate(trad: TradKey) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkR
         TradKey::X25519 => {
             let sk = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
             let pk = x25519_dalek::PublicKey::from(&sk).as_bytes().to_vec();
-            (pk, Zeroizing::new(sk.to_bytes().to_vec()))
+            (pk, Zeroizing::new(Zeroizing::new(sk.to_bytes()).to_vec()))
         }
         TradKey::X448 => {
             let mut k = Zeroizing::new([0u8; 56]);
@@ -427,7 +502,7 @@ pub fn trad_generate(trad: TradKey) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkR
         }
         TradKey::Ed25519 => {
             let sk = ed25519_dalek::SigningKey::generate(&mut rng);
-            (sk.verifying_key().to_bytes().to_vec(), Zeroizing::new(sk.to_bytes().to_vec()))
+            (sk.verifying_key().to_bytes().to_vec(), Zeroizing::new(Zeroizing::new(sk.to_bytes()).to_vec()))
         }
         TradKey::Ed448 => {
             // Same RNG plumbing as native::keygen::generate_ed448_keypair.
@@ -588,6 +663,9 @@ pub fn check_imported_key(class: Option<u32>, attrs: &mut Attributes) -> Result<
     }
     let ckp = get_object_attr_u32_from(attrs, CKA_PARAMETER_SET).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let layout = supported_layout(key_type, ckp, CKR_ATTRIBUTE_VALUE_INVALID)?;
+    if class == Some(CKO_PRIVATE_KEY) {
+        normalise_imported_private(&layout, attrs)?;
+    }
     let value = attrs.get(&CKA_VALUE).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let pk = match class {
         Some(CKO_PRIVATE_KEY) => public_from_private(&layout, value)?,
@@ -602,6 +680,27 @@ pub fn check_imported_key(class: Option<u32>, attrs: &mut Attributes) -> Result<
         }
     }
     attrs.insert(CKA_PUBLIC_KEY_INFO, info);
+    Ok(())
+}
+
+/// Replace an imported private CKA_VALUE whose `tradSK` carries the
+/// ECPrivateKey publicKey field with its canonical form (see
+/// [`canonical_trad_private`]). The original bytes are wiped.
+fn normalise_imported_private(layout: &Layout, attrs: &mut Attributes) -> Result<(), CkRv> {
+    let Some(value) = attrs.get(&CKA_VALUE) else {
+        return Ok(());
+    };
+    if value.len() <= layout.seed_len {
+        return Ok(());
+    }
+    let (seed, trad_sk) = value.split_at(layout.seed_len);
+    if let Some(canonical) = canonical_trad_private(layout.trad, trad_sk)? {
+        let mut fixed = seed.to_vec();
+        fixed.extend_from_slice(&canonical);
+        if let Some(old) = attrs.insert(CKA_VALUE, fixed) {
+            drop(Zeroizing::new(old));
+        }
+    }
     Ok(())
 }
 
@@ -636,5 +735,55 @@ mod tests {
             trailing.push(0);
             assert_eq!(ec_private_key_scalar(curve, &trailing), None, "trailing byte");
         }
+    }
+
+    /// RFC 5915 with the optional publicKey field: `der` plus `[1] BIT STRING`.
+    fn with_public_key(der: &[u8], point: &[u8]) -> Vec<u8> {
+        let (_, body, _) = der_take(der).unwrap();
+        let mut bits = vec![0u8];
+        bits.extend_from_slice(point);
+        let mut body = body.to_vec();
+        body.extend_from_slice(&der_tlv(0xa1, &der_tlv(0x03, &bits)));
+        der_tlv(0x30, &body)
+    }
+
+    /// composite-kem-23 §10.5 / composite-sigs-19 §10.6 leniency: an
+    /// ECPrivateKey carrying the publicKey field is accepted only when the
+    /// point is the scalar's public key, and comes back canonical.
+    #[test]
+    fn ec_private_key_with_public_key_field() {
+        for curve in [EcCurve::P256, EcCurve::P384, EcCurve::P521] {
+            let (pk, sk) = trad_generate(TradKey::Ec(curve)).unwrap();
+            let (other_pk, _) = trad_generate(TradKey::Ec(curve)).unwrap();
+            assert_eq!(canonical_trad_private(TradKey::Ec(curve), &sk), Ok(None), "canonical already");
+
+            let lenient = with_public_key(&sk, &pk);
+            assert_eq!(ec_private_key_scalar(curve, &lenient), None, "the strict parser still refuses it");
+            let canon = canonical_trad_private(TradKey::Ec(curve), &lenient).unwrap().expect("re-encoded");
+            assert_eq!(canon.as_slice(), sk.as_slice(), "{curve:?}: the field is dropped");
+
+            // The point of another key, a point off the curve, a truncated
+            // BIT STRING: refused like any other invalid half.
+            let wrong = with_public_key(&sk, &other_pk);
+            assert_eq!(canonical_trad_private(TradKey::Ec(curve), &wrong), Err(CKR_ATTRIBUTE_VALUE_INVALID));
+            let mut off = pk.clone();
+            *off.last_mut().unwrap() ^= 1;
+            let off_curve = with_public_key(&sk, &off);
+            assert_eq!(canonical_trad_private(TradKey::Ec(curve), &off_curve), Err(CKR_ATTRIBUTE_VALUE_INVALID));
+            assert_eq!(
+                canonical_trad_private(TradKey::Ec(curve), &with_public_key(&sk, &pk[..pk.len() - 1])),
+                Err(CKR_ATTRIBUTE_VALUE_INVALID)
+            );
+            // A non-zero unused-bits count is malformed, not lenient.
+            let mut bad_bits = lenient.clone();
+            let i = bad_bits.len() - pk.len() - 1;
+            assert_eq!(bad_bits[i], 0);
+            bad_bits[i] = 1;
+            assert_eq!(canonical_trad_private(TradKey::Ec(curve), &bad_bits), Ok(None));
+            assert_eq!(ec_private_key_scalar(curve, &bad_bits), None);
+        }
+        // Non-EC halves are untouched.
+        let (_, sk) = trad_generate(TradKey::X25519).unwrap();
+        assert_eq!(canonical_trad_private(TradKey::X25519, &sk), Ok(None));
     }
 }
