@@ -588,8 +588,8 @@ mod tests {
         // Guard against the sweep silently finding nothing (e.g. if the
         // codepoint range moved), which would make the loop below vacuous.
         assert!(
-            composites.len() >= 7,
-            "expected at least the 7 implemented composite profiles, found {}",
+            composites.len() == 30,
+            "expected the 18 composite signature + 12 composite KEM variants, found {}",
             composites.len()
         );
 
@@ -604,12 +604,16 @@ mod tests {
     /// are refused.
     #[test]
     fn known_algorithm_names_rejects_composites_with_no_variant() {
+        // (ML-DSA-87-Ed448, ML-DSA-87-ECDSA-P521 and ML-DSA-87-RSA4096-PSS
+        // were in this list until 2026-10-21, when the remaining 10 LAMPS
+        // composite-signature sets got variants; they are accepted now.)
         for bad in [
-            "ML-DSA-44-Ed448", "ML-DSA-65-ED448", "ML-DSA-87-Ed448",
-            "ML-DSA-87-ECDSA-P521", "ML-DSA-65-ECDSA-P521",
-            "ML-DSA-87-RSA4096-PSS", "ML-DSA-65-RSA4096-PSS",
+            "ML-DSA-44-Ed448", "ML-DSA-65-ED448",
+            "ML-DSA-65-ECDSA-P521", "ML-DSA-44-RSA4096-PSS",
             "ML-DSA-87-Ed25519", "ML-DSA-87-RSA2048-PSS", "ML-DSA-44-ECDSA-P384",
             "ML-DSA-65-RSA2048-PSS", "ML-DSA-44-RSA3072-PSS",
+            // Composite-KEM pairings no LAMPS set defines.
+            "ML-KEM-768-X448", "ML-KEM-1024-X25519", "ML-KEM-512-X25519", "ML-KEM-768-ECDH-P521",
         ] {
             assert!(!is_known_algorithm_name(bad), "should reject {bad}");
             assert!(!is_composite_algorithm_name(bad), "not a composite: {bad}");

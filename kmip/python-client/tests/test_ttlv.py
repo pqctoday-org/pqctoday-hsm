@@ -390,6 +390,33 @@ _ENUM_ALLOWLIST: dict[str, dict[str, str]] = {
         "ML-DSA-44-RSA2048-PSS": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
         "ML-DSA-65-ECDSA-P256": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
         "ML-DSA-87-ECDSA-P384": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-44-Ed25519": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-44-ECDSA-P256": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-RSA3072-PSS": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-Ed25519": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-ECDSA-P384": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-44-RSA2048-PKCS15": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-RSA3072-PKCS15": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-RSA4096-PSS": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-RSA4096-PKCS15": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-ECDSA-brainpoolP256r1": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-87-ECDSA-brainpoolP384r1": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-87-Ed448": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-87-RSA3072-PSS": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-87-RSA4096-PSS": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-87-ECDSA-P521": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-RSA2048": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-RSA3072": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-RSA4096": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-X25519": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-ECDH-P256": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-ECDH-P384": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-768-ECDH-brainpoolP256r1": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-1024-RSA3072": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-1024-ECDH-P384": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-1024-ECDH-brainpoolP384r1": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-1024-X448": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
+        "ML-KEM-1024-ECDH-P521": "LAMPS composite ML-KEM, vendor-extension range, not an OASIS codepoint",
         "SecP256r1MLKEM768": (
             "casing alias for the spec's own 'SECP256R1MLKEM768' (all-caps) — matches "
             "the Rust engine's naming instead"
@@ -503,3 +530,27 @@ def test_allowlist_is_not_vacuous():
     base_algos = [(m["name"], int(m["value"], 16)) for m in _BASE_JSON["enums"]["Cryptographic Algorithm"]]
     assert _find_match("DES3", base_algos) is None, "DES3 unexpectedly matches the spec by name — probe assumption invalid"
     assert "DES3" not in without_des3, "probe removal failed"
+
+
+# ── composite algorithm values match the Rust source of truth (2026-10-21) ──
+#
+# The 30 LAMPS composites (18 ML-DSA + 12 ML-KEM, PKCS#11 v3.3 working draft)
+# are vendor-extension CryptographicAlgorithm values. Read the name and the
+# value of every composite variant straight out of kmip/src/kmip30/algos.rs
+# (KmipAlgorithm::spec_name / to_wire_value) and require this client's table
+# to carry exactly those - so a renumbering or a new set on the Rust side
+# fails here instead of silently encoding the wrong value.
+def test_composite_codepoints_match_algos_rs():
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[2] / "src" / "kmip30" / "algos.rs").read_text(encoding="utf-8")
+    impl = src[src.index("impl KmipAlgorithm {"):]
+    wire = dict(re.findall(r"^\s+(Composite\w+)\s*=>\s*(0x[0-9a-fA-F]+),", impl[: impl.index("pub const fn from_wire_value")], re.M))
+    names = dict(re.findall(r'^\s+(Composite\w+)\s*=>\s*"([^"]+)",', impl[impl.index("pub const fn spec_name"):], re.M))
+    assert len(wire) == 30 and wire.keys() == names.keys(), (len(wire), len(names))
+    table = _SPEC_EXTRACT_PATCHES["CryptographicAlgorithm"]
+    for variant, name in names.items():
+        assert table.get(name) == int(wire[variant], 16), (variant, name)
+    composite_names = {n for n in table if n.startswith(("ML-DSA-", "ML-KEM-")) and n.count("-") > 2}
+    assert composite_names == set(names.values())

@@ -2308,7 +2308,7 @@ mod tests {
             assert!(is_composite_algorithm_name(&upper), "should detect {upper}");
         }
         // Tails and level pairings no variant implements are not composites.
-        for name in ["ML-DSA-87-Ed448", "ML-DSA-87-ECDSA-P521", "ML-DSA-87-RSA4096-PSS", "ML-DSA-87-Ed25519"] {
+        for name in ["ML-DSA-65-Ed448", "ML-DSA-65-ECDSA-P521", "ML-DSA-44-RSA4096-PSS", "ML-DSA-87-Ed25519", "ML-KEM-768-X448", "ML-KEM-512-X25519"] {
             assert!(!is_composite_algorithm_name(name), "no variant: {name}");
         }
         // Ordinary qualified names, and unrelated identifiers that merely

@@ -146,8 +146,6 @@ kmip/src/ops/catalyst.rs
 kmip/src/ops/cert_projection.rs
 kmip/src/ops/certify.rs
 kmip/src/ops/chameleon.rs
-kmip/src/ops/composite_kem.rs
-kmip/src/ops/composite_sig.rs
 kmip/src/ops/create.rs
 kmip/src/ops/create_key_pair.rs
 kmip/src/ops/decapsulate.rs

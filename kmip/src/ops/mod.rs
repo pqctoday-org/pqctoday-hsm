@@ -49,7 +49,6 @@ pub mod attribute_mutate;
 pub mod cert_projection;
 pub mod catalyst;
 pub mod chameleon;
-pub mod composite_kem;
 pub mod composite_sig;
 pub mod create;
 pub mod create_key_pair;

@@ -67,6 +67,7 @@ pub fn encapsulate(
     // Classic McEliece.
     if !is_ml_kem(obj.algorithm)
         && !obj.algorithm.is_hybrid_kem()
+        && !obj.algorithm.is_composite_kem()
         && !is_classical_kem(obj.algorithm)
         && !is_frodokem(obj.algorithm)
         && !is_classic_mceliece(obj.algorithm)
@@ -77,7 +78,7 @@ pub fn encapsulate(
             "Encapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Encapsulate requires an ML-KEM, hybrid KEM, classical ECDH/X25519/X448, FrodoKEM, or Classic McEliece key; {:?} is not", obj.algorithm),
+                format!("Encapsulate requires an ML-KEM, composite ML-KEM, hybrid KEM, classical ECDH/X25519/X448, FrodoKEM, or Classic McEliece key; {:?} is not", obj.algorithm),
             ),
         ));
     }
@@ -206,6 +207,21 @@ pub fn encapsulate(
             )
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
+            // LAMPS composite ML-KEM: `CKM_COMP_KEM` draws its own ML-KEM
+            // randomness and traditional secret (draft-ietf-lamps-pq-
+            // composite-kem-23 §3.2); the deterministic-coins interface is
+            // ML-KEM's (FIPS 203 `Encaps_internal`) and has no composite form.
+            if obj.algorithm.is_composite_kem() && coins.is_some() {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Encapsulate",
+                    KmipError::failed(
+                        ResultReason::BadCryptographicParameters,
+                        "Encapsulate: deterministic coins (InputKeyMaterial) are an ML-KEM-only interface; composite ML-KEM has no equivalent",
+                    ),
+                ));
+            }
             let native_mech = if is_classical_kem(obj.algorithm) {
                 if coins.is_some() {
                     return Err(fail_err(

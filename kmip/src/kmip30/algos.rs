@@ -29,6 +29,7 @@
 //! the mapping is `(algorithm, op) → mech`, not just `algorithm → mech`.
 
 use super::attrs::UsageMask;
+pub use softhsmrustv3::native::composite::{CompositeFamily, CompositeParams};
 
 /// PKCS#11 mechanism ID (CK_MECHANISM_TYPE on the wire). Conceptually a
 /// `CK_ULONG`; we model it as `u32` because every codepoint we ship fits.
@@ -108,6 +109,9 @@ pub mod recommended_curve {
 
 pub use softhsmrustv3::constants::{
     CKM_HSS, CKM_HSS_KEY_PAIR_GEN, CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM,
+    // PKCS#11 v3.3 working draft composites (TC header at commit 9ef73f9,
+    // `comp_sig.md` / `comp_kem.md`).
+    CKM_COMP_KEM, CKM_COMP_KEM_KEY_PAIR_GEN, CKM_COMP_SIG, CKM_COMP_SIG_KEY_PAIR_GEN,
     CKM_XMSS, CKM_XMSS_KEY_PAIR_GEN,
     CKM_ML_KEM_KEY_PAIR_GEN, CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
     // BSI TR-02102-1 recommended KEMs (vendor mechanisms — see
@@ -424,17 +428,15 @@ pub enum KmipAlgorithm {
     // (they're an X.509 AlgorithmIdentifier OID, not a KMIP enum value the
     // spec assigns) — same §11.12 vendor-extension convention as the PQC
     // KEM block above, continuing the free range after `Hss` (0x80000065).
-    // Each variant's `to_pkcs11_mech` is intentionally `None` for every
-    // `PkcsOp` (see below): a composite signature is never produced by ONE
-    // engine mechanism call the way `CKM_ECDSA_SHA256` is — it's two
-    // independent single-algorithm signs assembled by the kmip crate (see
-    // `ops/composite_sig.rs`), mirroring how `is_hybrid_kem` already
-    // documents "no single PKCS#11 mechanism" for the K6 hybrid KEMs.
-    // OID values ported verbatim from the hub's own
-    // `certBuilder.ts::COMPOSITE_PROFILE_MLDSA*` constants (already used in
-    // this monorepo, cross-checked against `pkcs11-provider/src/
-    // composite.c`'s independent implementation of the same draft) — not
-    // retyped from the draft text.
+    // Each variant is ONE engine object (`CKK_COMP_SIG`, PKCS#11 v3.3
+    // working draft `comp_sig.md`) driven by the engine's own mechanisms:
+    // `CKM_COMP_SIG_KEY_PAIR_GEN` for CreateKeyPair and `CKM_COMP_SIG` for
+    // Sign/SignatureVerify/Certify (see `to_pkcs11_mech`). The OID, label
+    // and component parameters are NOT kept here: each variant names its
+    // `CKP_COMP_SIG_*` set (`composite_ckp`) and every per-set fact comes
+    // from the engine's one table, `softhsmrustv3::native::composite`
+    // (`composite_params`). The OIDs in the doc comments below are that
+    // table's, quoted for the reader.
     /// id-MLDSA44-RSA2048-PSS-SHA256 — OID `1.3.6.1.5.5.7.6.37`.
     CompositeMlDsa44Rsa2048PssSha256, // 0x80000066 (spec-convention vendor extension, §11.12)
     /// id-MLDSA65-ECDSA-P256-SHA512 — OID `1.3.6.1.5.5.7.6.45`.
@@ -474,6 +476,73 @@ pub enum KmipAlgorithm {
     ClassicMcEliece6688128F,  // 0x80000072 (vendor/extension — non-standard)
     ClassicMcEliece6960119F,  // 0x80000073 (vendor/extension — non-standard)
     ClassicMcEliece8192128F,  // 0x80000074 (vendor/extension — non-standard)
+
+    // ── LAMPS composite signatures, the remaining 10 of the 18 sets
+    // (draft-ietf-lamps-pq-composite-sigs-19 §6; PKCS#11 v3.3 working draft
+    // `CKP_COMP_SIG_*`) ─────────────────────────────────────────────────
+    // KMIP 3.0 defines no composite algorithm at all, so these continue the
+    // §11.12 `8XXXXXXX` Extensions range after `ClassicMcEliece8192128F`
+    // (0x80000074), in `CKP_COMP_SIG_*` order. The two brainpool sets are
+    // declared now and reach `CKR_PARAMETER_SET_NOT_SUPPORTED` in the engine
+    // until its table marks them supported; nothing here changes then.
+    /// id-MLDSA44-RSA2048-PKCS15-SHA256 — OID `1.3.6.1.5.5.7.6.38`.
+    CompositeMlDsa44Rsa2048Pkcs15Sha256, // 0x80000075 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-RSA3072-PKCS15-SHA512 — OID `1.3.6.1.5.5.7.6.42`.
+    CompositeMlDsa65Rsa3072Pkcs15Sha512, // 0x80000076 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-RSA4096-PSS-SHA512 — OID `1.3.6.1.5.5.7.6.43`.
+    CompositeMlDsa65Rsa4096PssSha512, // 0x80000077 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-RSA4096-PKCS15-SHA512 — OID `1.3.6.1.5.5.7.6.44`.
+    CompositeMlDsa65Rsa4096Pkcs15Sha512, // 0x80000078 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-ECDSA-brainpoolP256r1-SHA512 — OID `1.3.6.1.5.5.7.6.47`.
+    CompositeMlDsa65EcdsaBrainpoolP256r1Sha512, // 0x80000079 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA87-ECDSA-brainpoolP384r1-SHA512 — OID `1.3.6.1.5.5.7.6.50`.
+    CompositeMlDsa87EcdsaBrainpoolP384r1Sha512, // 0x8000007a (spec-convention vendor extension, §11.12)
+    /// id-MLDSA87-Ed448-SHAKE256 — OID `1.3.6.1.5.5.7.6.51`.
+    CompositeMlDsa87Ed448Shake256, // 0x8000007b (spec-convention vendor extension, §11.12)
+    /// id-MLDSA87-RSA3072-PSS-SHA512 — OID `1.3.6.1.5.5.7.6.52`.
+    CompositeMlDsa87Rsa3072PssSha512, // 0x8000007c (spec-convention vendor extension, §11.12)
+    /// id-MLDSA87-RSA4096-PSS-SHA512 — OID `1.3.6.1.5.5.7.6.53`.
+    CompositeMlDsa87Rsa4096PssSha512, // 0x8000007d (spec-convention vendor extension, §11.12)
+    /// id-MLDSA87-ECDSA-P521-SHA512 — OID `1.3.6.1.5.5.7.6.54`.
+    CompositeMlDsa87EcdsaP521Sha512, // 0x8000007e (spec-convention vendor extension, §11.12)
+
+    // ── LAMPS composite ML-KEM (draft-ietf-lamps-pq-composite-kem-23 §6;
+    // PKCS#11 v3.3 working draft `CKP_COMP_KEM_*`) ─────────────────────
+    // All 12 sets, in `CKP_COMP_KEM_*` order, continuing the Extensions range
+    // after the composite signatures. Each is ONE `CKK_COMP_KEM` engine
+    // object: CreateKeyPair → `CKM_COMP_KEM_KEY_PAIR_GEN`,
+    // Encapsulate/Decapsulate → `CKM_COMP_KEM` with the draft §3.4 combiner
+    // `SHA3-256(mlkemSS ‖ tradSS ‖ tradCT ‖ tradPK ‖ Label)`.
+    //
+    // NOT the TLS hybrid groups above (`X25519MlKem768`, `SecP256r1MlKem768`,
+    // `SecP384r1MlKem1024`): those concatenate the two secrets
+    // (draft-ietf-tls-ecdhe-mlkem) and are never certified as a composite KEM.
+    // `ML-KEM-768-X25519` and `X25519MLKEM768` share components and derive
+    // different secrets from the same inputs.
+    /// id-MLKEM768-RSA2048-SHA3-256 — OID `1.3.6.1.5.5.7.6.55`.
+    CompositeMlKem768Rsa2048, // 0x8000007f (spec-convention vendor extension, §11.12)
+    /// id-MLKEM768-RSA3072-SHA3-256 — OID `1.3.6.1.5.5.7.6.56`.
+    CompositeMlKem768Rsa3072, // 0x80000080 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM768-RSA4096-SHA3-256 — OID `1.3.6.1.5.5.7.6.57`.
+    CompositeMlKem768Rsa4096, // 0x80000081 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM768-X25519-SHA3-256 — OID `1.3.6.1.5.5.7.6.58`.
+    CompositeMlKem768X25519, // 0x80000082 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM768-ECDH-P256-SHA3-256 — OID `1.3.6.1.5.5.7.6.59`.
+    CompositeMlKem768EcdhP256, // 0x80000083 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM768-ECDH-P384-SHA3-256 — OID `1.3.6.1.5.5.7.6.60`.
+    CompositeMlKem768EcdhP384, // 0x80000084 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM768-ECDH-brainpoolP256r1-SHA3-256 — OID `1.3.6.1.5.5.7.6.61`.
+    CompositeMlKem768EcdhBrainpoolP256r1, // 0x80000085 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM1024-RSA3072-SHA3-256 — OID `1.3.6.1.5.5.7.6.62`.
+    CompositeMlKem1024Rsa3072, // 0x80000086 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM1024-ECDH-P384-SHA3-256 — OID `1.3.6.1.5.5.7.6.63`.
+    CompositeMlKem1024EcdhP384, // 0x80000087 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM1024-ECDH-brainpoolP384r1-SHA3-256 — OID `1.3.6.1.5.5.7.6.64`.
+    CompositeMlKem1024EcdhBrainpoolP384r1, // 0x80000088 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM1024-X448-SHA3-256 — OID `1.3.6.1.5.5.7.6.65`.
+    CompositeMlKem1024X448, // 0x80000089 (spec-convention vendor extension, §11.12)
+    /// id-MLKEM1024-ECDH-P521-SHA3-256 — OID `1.3.6.1.5.5.7.6.66`.
+    CompositeMlKem1024EcdhP521, // 0x8000008a (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {
@@ -562,6 +631,28 @@ impl KmipAlgorithm {
             ClassicMcEliece6688128F  => 0x80000072,
             ClassicMcEliece6960119F  => 0x80000073,
             ClassicMcEliece8192128F  => 0x80000074,
+            CompositeMlDsa44Rsa2048Pkcs15Sha256 => 0x80000075,
+            CompositeMlDsa65Rsa3072Pkcs15Sha512 => 0x80000076,
+            CompositeMlDsa65Rsa4096PssSha512 => 0x80000077,
+            CompositeMlDsa65Rsa4096Pkcs15Sha512 => 0x80000078,
+            CompositeMlDsa65EcdsaBrainpoolP256r1Sha512 => 0x80000079,
+            CompositeMlDsa87EcdsaBrainpoolP384r1Sha512 => 0x8000007a,
+            CompositeMlDsa87Ed448Shake256 => 0x8000007b,
+            CompositeMlDsa87Rsa3072PssSha512 => 0x8000007c,
+            CompositeMlDsa87Rsa4096PssSha512 => 0x8000007d,
+            CompositeMlDsa87EcdsaP521Sha512 => 0x8000007e,
+            CompositeMlKem768Rsa2048 => 0x8000007f,
+            CompositeMlKem768Rsa3072 => 0x80000080,
+            CompositeMlKem768Rsa4096 => 0x80000081,
+            CompositeMlKem768X25519 => 0x80000082,
+            CompositeMlKem768EcdhP256 => 0x80000083,
+            CompositeMlKem768EcdhP384 => 0x80000084,
+            CompositeMlKem768EcdhBrainpoolP256r1 => 0x80000085,
+            CompositeMlKem1024Rsa3072 => 0x80000086,
+            CompositeMlKem1024EcdhP384 => 0x80000087,
+            CompositeMlKem1024EcdhBrainpoolP384r1 => 0x80000088,
+            CompositeMlKem1024X448 => 0x80000089,
+            CompositeMlKem1024EcdhP521 => 0x8000008a,
         }
     }
 
@@ -653,26 +744,112 @@ impl KmipAlgorithm {
             0x80000072 => ClassicMcEliece6688128F,
             0x80000073 => ClassicMcEliece6960119F,
             0x80000074 => ClassicMcEliece8192128F,
+            0x80000075 => CompositeMlDsa44Rsa2048Pkcs15Sha256,
+            0x80000076 => CompositeMlDsa65Rsa3072Pkcs15Sha512,
+            0x80000077 => CompositeMlDsa65Rsa4096PssSha512,
+            0x80000078 => CompositeMlDsa65Rsa4096Pkcs15Sha512,
+            0x80000079 => CompositeMlDsa65EcdsaBrainpoolP256r1Sha512,
+            0x8000007a => CompositeMlDsa87EcdsaBrainpoolP384r1Sha512,
+            0x8000007b => CompositeMlDsa87Ed448Shake256,
+            0x8000007c => CompositeMlDsa87Rsa3072PssSha512,
+            0x8000007d => CompositeMlDsa87Rsa4096PssSha512,
+            0x8000007e => CompositeMlDsa87EcdsaP521Sha512,
+            0x8000007f => CompositeMlKem768Rsa2048,
+            0x80000080 => CompositeMlKem768Rsa3072,
+            0x80000081 => CompositeMlKem768Rsa4096,
+            0x80000082 => CompositeMlKem768X25519,
+            0x80000083 => CompositeMlKem768EcdhP256,
+            0x80000084 => CompositeMlKem768EcdhP384,
+            0x80000085 => CompositeMlKem768EcdhBrainpoolP256r1,
+            0x80000086 => CompositeMlKem1024Rsa3072,
+            0x80000087 => CompositeMlKem1024EcdhP384,
+            0x80000088 => CompositeMlKem1024EcdhBrainpoolP384r1,
+            0x80000089 => CompositeMlKem1024X448,
+            0x8000008a => CompositeMlKem1024EcdhP521,
             _ => return None,
         })
     }
 
-    /// `true` for a LAMPS draft-19 composite-signature algorithm — two
-    /// independent component signatures over the same message
-    /// representative, never one engine mechanism call (see
-    /// `ops/composite_sig.rs`).
+    /// `true` for a LAMPS composite-signature algorithm
+    /// (draft-ietf-lamps-pq-composite-sigs-19): one `CKK_COMP_SIG` engine
+    /// object, signed and verified with `CKM_COMP_SIG`.
     pub const fn is_composite_sig(self) -> bool {
-        matches!(
-            self,
-            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256
-                | KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512
-                | KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512
-                | KmipAlgorithm::CompositeMlDsa44Ed25519Sha512
-                | KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256
-                | KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512
-                | KmipAlgorithm::CompositeMlDsa65Ed25519Sha512
-                | KmipAlgorithm::CompositeMlDsa65EcdsaP384Sha512
-        )
+        matches!(self.composite_ckp(), Some((CompositeFamily::Sig, _)))
+    }
+
+    /// `true` for a LAMPS composite-KEM algorithm
+    /// (draft-ietf-lamps-pq-composite-kem-23): one `CKK_COMP_KEM` engine
+    /// object, encapsulated and decapsulated with `CKM_COMP_KEM`. Never a TLS
+    /// hybrid group (see [`Self::is_hybrid_kem`]).
+    pub const fn is_composite_kem(self) -> bool {
+        matches!(self.composite_ckp(), Some((CompositeFamily::Kem, _)))
+    }
+
+    /// The composite family and `CKP_COMP_SIG_*` / `CKP_COMP_KEM_*` value
+    /// (PKCS#11 v3.3 working draft, TC header at commit 9ef73f9, via
+    /// `softhsmrustv3::constants`) of a composite algorithm; `None` for every
+    /// other algorithm. The one place a KMIP variant is tied to an engine
+    /// parameter set; everything else about the set is in
+    /// [`Self::composite_params`].
+    pub const fn composite_ckp(self) -> Option<(CompositeFamily, u32)> {
+        use softhsmrustv3::constants as c;
+        use CompositeFamily::{Kem, Sig};
+        use KmipAlgorithm::*;
+        Some(match self {
+            CompositeMlDsa44Rsa2048PssSha256 => (Sig, c::CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256),
+            CompositeMlDsa44Rsa2048Pkcs15Sha256 => (Sig, c::CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256),
+            CompositeMlDsa44Ed25519Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA44_ED25519_SHA512),
+            CompositeMlDsa44EcdsaP256Sha256 => (Sig, c::CKP_COMP_SIG_MLDSA44_ECDSA_P256_SHA256),
+            CompositeMlDsa65Rsa3072PssSha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_RSA3072_PSS_SHA512),
+            CompositeMlDsa65Rsa3072Pkcs15Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_RSA3072_PKCS15_SHA512),
+            CompositeMlDsa65Rsa4096PssSha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_RSA4096_PSS_SHA512),
+            CompositeMlDsa65Rsa4096Pkcs15Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_RSA4096_PKCS15_SHA512),
+            CompositeMlDsa65EcdsaP256Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512),
+            CompositeMlDsa65EcdsaP384Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_ECDSA_P384_SHA512),
+            CompositeMlDsa65EcdsaBrainpoolP256r1Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_ECDSA_BRAINPOOLP256R1_SHA512),
+            CompositeMlDsa65Ed25519Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA65_ED25519_SHA512),
+            CompositeMlDsa87EcdsaP384Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA87_ECDSA_P384_SHA512),
+            CompositeMlDsa87EcdsaBrainpoolP384r1Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA87_ECDSA_BRAINPOOLP384R1_SHA512),
+            CompositeMlDsa87Ed448Shake256 => (Sig, c::CKP_COMP_SIG_MLDSA87_ED448_SHAKE256),
+            CompositeMlDsa87Rsa3072PssSha512 => (Sig, c::CKP_COMP_SIG_MLDSA87_RSA3072_PSS_SHA512),
+            CompositeMlDsa87Rsa4096PssSha512 => (Sig, c::CKP_COMP_SIG_MLDSA87_RSA4096_PSS_SHA512),
+            CompositeMlDsa87EcdsaP521Sha512 => (Sig, c::CKP_COMP_SIG_MLDSA87_ECDSA_P521_SHA512),
+            CompositeMlKem768Rsa2048 => (Kem, c::CKP_COMP_KEM_MLKEM768_RSA2048),
+            CompositeMlKem768Rsa3072 => (Kem, c::CKP_COMP_KEM_MLKEM768_RSA3072),
+            CompositeMlKem768Rsa4096 => (Kem, c::CKP_COMP_KEM_MLKEM768_RSA4096),
+            CompositeMlKem768X25519 => (Kem, c::CKP_COMP_KEM_MLKEM768_X25519),
+            CompositeMlKem768EcdhP256 => (Kem, c::CKP_COMP_KEM_MLKEM768_ECDH_P256),
+            CompositeMlKem768EcdhP384 => (Kem, c::CKP_COMP_KEM_MLKEM768_ECDH_P384),
+            CompositeMlKem768EcdhBrainpoolP256r1 => (Kem, c::CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1),
+            CompositeMlKem1024Rsa3072 => (Kem, c::CKP_COMP_KEM_MLKEM1024_RSA3072),
+            CompositeMlKem1024EcdhP384 => (Kem, c::CKP_COMP_KEM_MLKEM1024_ECDH_P384),
+            CompositeMlKem1024EcdhBrainpoolP384r1 => (Kem, c::CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1),
+            CompositeMlKem1024X448 => (Kem, c::CKP_COMP_KEM_MLKEM1024_X448),
+            CompositeMlKem1024EcdhP521 => (Kem, c::CKP_COMP_KEM_MLKEM1024_ECDH_P521),
+            _ => return None,
+        })
+    }
+
+    /// The engine's parameter-set row for a composite algorithm (OID, label,
+    /// components, sizes, whether the engine supports the set yet) —
+    /// `softhsmrustv3::native::composite`, the single table.
+    pub fn composite_params(self) -> Option<CompositeParams> {
+        let (family, ckp) = self.composite_ckp()?;
+        softhsmrustv3::native::composite::params_by_ckp(family, ckp)
+    }
+
+    /// The composite algorithm whose engine row carries this dotted OID.
+    pub fn composite_from_oid(oid: &str) -> Option<KmipAlgorithm> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|a| a.composite_params().is_some_and(|p| p.oid() == oid))
+    }
+
+    /// The PKCS#11 key type of a composite algorithm's engine object
+    /// (`CKK_COMP_SIG` / `CKK_COMP_KEM`).
+    pub fn composite_key_type(self) -> Option<u32> {
+        self.composite_ckp().map(|(f, _)| f.key_type())
     }
 
     /// Every variant, in declaration order — the single list callers sweep
@@ -717,17 +894,38 @@ impl KmipAlgorithm {
             ClassicMcEliece348864, ClassicMcEliece348864F,
             ClassicMcEliece460896, ClassicMcEliece460896F,
             ClassicMcEliece6688128F, ClassicMcEliece6960119F, ClassicMcEliece8192128F,
+            CompositeMlDsa44Rsa2048Pkcs15Sha256,
+            CompositeMlDsa65Rsa3072Pkcs15Sha512,
+            CompositeMlDsa65Rsa4096PssSha512,
+            CompositeMlDsa65Rsa4096Pkcs15Sha512,
+            CompositeMlDsa65EcdsaBrainpoolP256r1Sha512,
+            CompositeMlDsa87EcdsaBrainpoolP384r1Sha512,
+            CompositeMlDsa87Ed448Shake256,
+            CompositeMlDsa87Rsa3072PssSha512,
+            CompositeMlDsa87Rsa4096PssSha512,
+            CompositeMlDsa87EcdsaP521Sha512,
+            CompositeMlKem768Rsa2048,
+            CompositeMlKem768Rsa3072,
+            CompositeMlKem768Rsa4096,
+            CompositeMlKem768X25519,
+            CompositeMlKem768EcdhP256,
+            CompositeMlKem768EcdhP384,
+            CompositeMlKem768EcdhBrainpoolP256r1,
+            CompositeMlKem1024Rsa3072,
+            CompositeMlKem1024EcdhP384,
+            CompositeMlKem1024EcdhBrainpoolP384r1,
+            CompositeMlKem1024X448,
+            CompositeMlKem1024EcdhP521,
         ]
     };
 
-    /// `true` for every composite algorithm — one KMIP object carrying a PQ
-    /// and a traditional component under one composite OID. Today that is
-    /// the LAMPS composite signatures; a composite-KEM family joins here
-    /// when its variants exist, and every name-based caller
-    /// ([`Self::composite_from_spec_name`]) then picks it up with no further
-    /// edit.
+    /// `true` for every composite algorithm — one KMIP object and one
+    /// engine object carrying a PQ and a traditional component under one
+    /// composite OID: the 18 LAMPS composite signatures and the 12 LAMPS
+    /// composite KEMs. Every name-based caller
+    /// ([`Self::composite_from_spec_name`]) derives from this.
     pub const fn is_composite(self) -> bool {
-        self.is_composite_sig()
+        self.composite_ckp().is_some()
     }
 
     /// The composite variant whose [`Self::spec_name`] is `name`, compared
@@ -765,8 +963,9 @@ impl KmipAlgorithm {
 
     /// `true` if this algorithm is one of the NIST FIPS PQC standards
     /// (FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA) — or a
-    /// composite signature built on one. A composite is quantum-safe via
-    /// its ML-DSA half exactly the way a hybrid KEM is via its ML-KEM half
+    /// composite signature or KEM built on one. A composite is quantum-safe
+    /// via its ML-DSA / ML-KEM half exactly the way a hybrid KEM is via its
+    /// ML-KEM half
     /// (`quantum_safe_with_length`'s existing "secure while EITHER
     /// component holds" rule) — this is what makes composite ML-DSA+RSA/
     /// ECDSA a PQC-migration primitive at all, not a classical one.
@@ -782,15 +981,7 @@ impl KmipAlgorithm {
                 | SlhDsaShake128s | SlhDsaShake128f
                 | SlhDsaShake192s | SlhDsaShake192f
                 | SlhDsaShake256s | SlhDsaShake256f
-                | CompositeMlDsa44Rsa2048PssSha256
-                | CompositeMlDsa65EcdsaP256Sha512
-                | CompositeMlDsa87EcdsaP384Sha512
-                | CompositeMlDsa44Ed25519Sha512
-                | CompositeMlDsa44EcdsaP256Sha256
-                | CompositeMlDsa65Rsa3072PssSha512
-                | CompositeMlDsa65Ed25519Sha512
-                | CompositeMlDsa65EcdsaP384Sha512
-        )
+        ) || self.is_composite()
     }
 
     /// Length-aware quantum-safety classification for the playground's
@@ -839,7 +1030,8 @@ impl KmipAlgorithm {
             | ClassicMcEliece348864 | ClassicMcEliece348864F
             | ClassicMcEliece460896 | ClassicMcEliece460896F
             | ClassicMcEliece6688128F | ClassicMcEliece6960119F | ClassicMcEliece8192128F => true,
-            // Composites: secure while the ML-DSA half holds (see `is_pqc`).
+            // Composites: secure while the ML-DSA / ML-KEM half holds (see
+            // `is_pqc`).
             CompositeMlDsa44Rsa2048PssSha256
             | CompositeMlDsa65EcdsaP256Sha512
             | CompositeMlDsa87EcdsaP384Sha512
@@ -847,7 +1039,29 @@ impl KmipAlgorithm {
             | CompositeMlDsa44EcdsaP256Sha256
             | CompositeMlDsa65Rsa3072PssSha512
             | CompositeMlDsa65Ed25519Sha512
-            | CompositeMlDsa65EcdsaP384Sha512 => true,
+            | CompositeMlDsa65EcdsaP384Sha512
+            | CompositeMlDsa44Rsa2048Pkcs15Sha256
+            | CompositeMlDsa65Rsa3072Pkcs15Sha512
+            | CompositeMlDsa65Rsa4096PssSha512
+            | CompositeMlDsa65Rsa4096Pkcs15Sha512
+            | CompositeMlDsa65EcdsaBrainpoolP256r1Sha512
+            | CompositeMlDsa87EcdsaBrainpoolP384r1Sha512
+            | CompositeMlDsa87Ed448Shake256
+            | CompositeMlDsa87Rsa3072PssSha512
+            | CompositeMlDsa87Rsa4096PssSha512
+            | CompositeMlDsa87EcdsaP521Sha512
+            | CompositeMlKem768Rsa2048
+            | CompositeMlKem768Rsa3072
+            | CompositeMlKem768Rsa4096
+            | CompositeMlKem768X25519
+            | CompositeMlKem768EcdhP256
+            | CompositeMlKem768EcdhP384
+            | CompositeMlKem768EcdhBrainpoolP256r1
+            | CompositeMlKem1024Rsa3072
+            | CompositeMlKem1024EcdhP384
+            | CompositeMlKem1024EcdhBrainpoolP384r1
+            | CompositeMlKem1024X448
+            | CompositeMlKem1024EcdhP521 => true,
         }
     }
 
@@ -973,6 +1187,14 @@ impl KmipAlgorithm {
             // ── HSS/LMS (RFC 8554) ────────────────────────────────────────
             (Hss, KeyGen) => Some(CKM_HSS_KEY_PAIR_GEN),
             (Hss, SignVerify) => Some(CKM_HSS),
+
+            // ── LAMPS composites (PKCS#11 v3.3 working draft) ────────────
+            // One engine object per key; the parameter set rides as
+            // CKA_PARAMETER_SET (`composite_ckp`), like ML-DSA / ML-KEM.
+            (a, KeyGen) if a.is_composite_sig() => Some(CKM_COMP_SIG_KEY_PAIR_GEN),
+            (a, SignVerify) if a.is_composite_sig() => Some(CKM_COMP_SIG),
+            (a, KeyGen) if a.is_composite_kem() => Some(CKM_COMP_KEM_KEY_PAIR_GEN),
+            (a, Encrypt | Decrypt) if a.is_composite_kem() => Some(CKM_COMP_KEM),
 
             // Any other (algorithm, op) pair is undefined.
             _ => None,
@@ -1211,6 +1433,31 @@ impl KmipAlgorithm {
             ClassicMcEliece6688128F  => "Classic-McEliece-6688128f",
             ClassicMcEliece6960119F  => "Classic-McEliece-6960119f",
             ClassicMcEliece8192128F  => "Classic-McEliece-8192128f",
+            // The remaining composite signatures and the composite KEMs, in
+            // the same shape: ML level, traditional component, no hash (the
+            // hash is fixed per set by the draft).
+            CompositeMlDsa44Rsa2048Pkcs15Sha256 => "ML-DSA-44-RSA2048-PKCS15",
+            CompositeMlDsa65Rsa3072Pkcs15Sha512 => "ML-DSA-65-RSA3072-PKCS15",
+            CompositeMlDsa65Rsa4096PssSha512 => "ML-DSA-65-RSA4096-PSS",
+            CompositeMlDsa65Rsa4096Pkcs15Sha512 => "ML-DSA-65-RSA4096-PKCS15",
+            CompositeMlDsa65EcdsaBrainpoolP256r1Sha512 => "ML-DSA-65-ECDSA-brainpoolP256r1",
+            CompositeMlDsa87EcdsaBrainpoolP384r1Sha512 => "ML-DSA-87-ECDSA-brainpoolP384r1",
+            CompositeMlDsa87Ed448Shake256 => "ML-DSA-87-Ed448",
+            CompositeMlDsa87Rsa3072PssSha512 => "ML-DSA-87-RSA3072-PSS",
+            CompositeMlDsa87Rsa4096PssSha512 => "ML-DSA-87-RSA4096-PSS",
+            CompositeMlDsa87EcdsaP521Sha512 => "ML-DSA-87-ECDSA-P521",
+            CompositeMlKem768Rsa2048 => "ML-KEM-768-RSA2048",
+            CompositeMlKem768Rsa3072 => "ML-KEM-768-RSA3072",
+            CompositeMlKem768Rsa4096 => "ML-KEM-768-RSA4096",
+            CompositeMlKem768X25519 => "ML-KEM-768-X25519",
+            CompositeMlKem768EcdhP256 => "ML-KEM-768-ECDH-P256",
+            CompositeMlKem768EcdhP384 => "ML-KEM-768-ECDH-P384",
+            CompositeMlKem768EcdhBrainpoolP256r1 => "ML-KEM-768-ECDH-brainpoolP256r1",
+            CompositeMlKem1024Rsa3072 => "ML-KEM-1024-RSA3072",
+            CompositeMlKem1024EcdhP384 => "ML-KEM-1024-ECDH-P384",
+            CompositeMlKem1024EcdhBrainpoolP384r1 => "ML-KEM-1024-ECDH-brainpoolP384r1",
+            CompositeMlKem1024X448 => "ML-KEM-1024-X448",
+            CompositeMlKem1024EcdhP521 => "ML-KEM-1024-ECDH-P521",
         }
     }
 }
@@ -1284,7 +1531,7 @@ mod tests {
     #[test]
     fn composite_from_spec_name_resolves_exactly_the_composites() {
         let composites: Vec<_> = all_algos().iter().copied().filter(|a| a.is_composite()).collect();
-        assert_eq!(composites.len(), 8, "8 composite signature variants today");
+        assert_eq!(composites.len(), 30, "18 composite signature + 12 composite KEM variants");
         for &a in &composites {
             assert_eq!(KmipAlgorithm::composite_from_spec_name(a.spec_name()), Some(a));
             let upper = a.spec_name().to_ascii_uppercase();
@@ -1293,9 +1540,93 @@ mod tests {
         for &a in all_algos().iter().filter(|a| !a.is_composite()) {
             assert_eq!(KmipAlgorithm::composite_from_spec_name(a.spec_name()), None, "{}", a.spec_name());
         }
-        for bogus in ["ML-DSA-44-Ed448", "ML-DSA-87-ECDSA-P521", "ML-DSA-87-RSA4096-PSS", "ML-DSA-87-Ed25519", ""] {
+        // Names with no LAMPS set behind them (the draft pairs Ed448 only with
+        // ML-DSA-87 and X448 only with ML-KEM-1024), and the TLS hybrid
+        // groups, which are not composites.
+        for bogus in [
+            "ML-DSA-44-Ed448", "ML-DSA-87-Ed25519", "ML-DSA-44-RSA4096-PSS", "ML-KEM-768-X448",
+            "ML-KEM-1024-X25519", "ML-KEM-512-X25519", "X25519MLKEM768", "SecP384r1MLKEM1024", "",
+        ] {
             assert_eq!(KmipAlgorithm::composite_from_spec_name(bogus), None, "{bogus}");
         }
+    }
+
+    /// Every composite variant names exactly one row of the engine's table,
+    /// the 30 variants cover all 30 rows (18 + 12) exactly once, and the
+    /// variant's own name is the row's: `spec_name` is the draft name with
+    /// `id-`, the hash suffix and the ML hyphenation changed — checked here
+    /// against the row's `name` so the two cannot drift.
+    #[test]
+    fn composites_cover_the_engine_table_exactly_once() {
+        use softhsmrustv3::native::composite::{COMPOSITE_KEM_SETS, COMPOSITE_SIG_SETS};
+        let mut sig_rows = std::collections::BTreeSet::new();
+        let mut kem_rows = std::collections::BTreeSet::new();
+        for &a in all_algos().iter().filter(|a| a.is_composite()) {
+            let p = a.composite_params().unwrap_or_else(|| panic!("{} has no engine row", a.spec_name()));
+            assert_eq!(KmipAlgorithm::composite_from_oid(p.oid()), Some(a), "{}", a.spec_name());
+            assert!(a.is_composite_sig() != a.is_composite_kem(), "{}", a.spec_name());
+            assert!(!a.is_hybrid_kem(), "{}", a.spec_name());
+            let (row_name, fresh) = match p {
+                CompositeParams::Sig(r) => (r.name, sig_rows.insert(r.ckp)),
+                CompositeParams::Kem(r) => (r.name, kem_rows.insert(r.ckp)),
+            };
+            assert!(fresh, "{} shares a row", a.spec_name());
+            // id-MLDSA65-ECDSA-P256-SHA512 → ML-DSA-65-ECDSA-P256;
+            // id-MLKEM768-X25519-SHA3-256 → ML-KEM-768-X25519.
+            let mut parts: Vec<&str> = row_name.trim_start_matches("id-").split('-').collect();
+            parts.pop();
+            if parts.last() == Some(&"SHA3") {
+                parts.pop();
+            }
+            let ml = parts[0].replacen("MLDSA", "ML-DSA-", 1).replacen("MLKEM", "ML-KEM-", 1);
+            let expected = std::iter::once(ml.as_str()).chain(parts[1..].iter().copied()).collect::<Vec<_>>().join("-");
+            assert_eq!(a.spec_name(), expected, "{row_name}");
+        }
+        assert_eq!(sig_rows.len(), COMPOSITE_SIG_SETS.len());
+        assert_eq!(kem_rows.len(), COMPOSITE_KEM_SETS.len());
+        assert_eq!(KmipAlgorithm::composite_from_oid("1.3.6.1.5.5.7.6.67"), None);
+    }
+
+    /// The composite operations map onto the engine's v3.3 mechanisms and
+    /// nothing else: no Encrypt for a signature set, no SignVerify for a KEM.
+    #[test]
+    fn composite_mechanisms_are_the_v33_ones() {
+        use softhsmrustv3::constants as c;
+        for &a in all_algos().iter().filter(|a| a.is_composite()) {
+            if a.is_composite_sig() {
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::KeyGen), Some(c::CKM_COMP_SIG_KEY_PAIR_GEN));
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::SignVerify), Some(c::CKM_COMP_SIG));
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::Encrypt), None);
+                assert_eq!(a.composite_key_type(), Some(c::CKK_COMP_SIG));
+            } else {
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::KeyGen), Some(c::CKM_COMP_KEM_KEY_PAIR_GEN));
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::Encrypt), Some(c::CKM_COMP_KEM));
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::Decrypt), Some(c::CKM_COMP_KEM));
+                assert_eq!(a.to_pkcs11_mech(PkcsOp::SignVerify), None);
+                assert_eq!(a.composite_key_type(), Some(c::CKK_COMP_KEM));
+            }
+            assert_eq!(a.to_pkcs11_mech(PkcsOp::Mac), None);
+        }
+        // The TLS hybrid groups keep their own (engine-composed) path.
+        for a in [KmipAlgorithm::X25519MlKem768, KmipAlgorithm::SecP256r1MlKem768, KmipAlgorithm::SecP384r1MlKem1024] {
+            assert!(!a.is_composite(), "{}", a.spec_name());
+            assert_eq!(a.to_pkcs11_mech(PkcsOp::Encrypt), None);
+        }
+    }
+
+    /// The vendor values: KMIP 3.0 defines no composite algorithm, so all 30
+    /// sit in the §11.12 Extensions range, the 22 added for the v3.3 work
+    /// contiguously after Classic McEliece (0x80000075..=0x8000008a).
+    #[test]
+    fn composite_wire_values_are_extensions() {
+        for &a in all_algos().iter().filter(|a| a.is_composite()) {
+            assert!(a.to_wire_value() >= 0x8000_0000, "{}", a.spec_name());
+        }
+        assert_eq!(KmipAlgorithm::CompositeMlDsa44Rsa2048Pkcs15Sha256.to_wire_value(), 0x8000_0075);
+        assert_eq!(KmipAlgorithm::CompositeMlDsa87EcdsaP521Sha512.to_wire_value(), 0x8000_007e);
+        assert_eq!(KmipAlgorithm::CompositeMlKem768Rsa2048.to_wire_value(), 0x8000_007f);
+        assert_eq!(KmipAlgorithm::CompositeMlKem1024EcdhP521.to_wire_value(), 0x8000_008a);
+        assert_eq!(KmipAlgorithm::from_wire_value(0x8000_008b), None);
     }
 
     #[test]

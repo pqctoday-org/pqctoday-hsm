@@ -210,13 +210,45 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
         "FrodoKEM-1344-AES":        0x80000063,
         "FrodoKEM-1344-SHAKE":      0x80000064,
         "Classic-McEliece-6688128": 0x00000034,
-        # LAMPS composite signatures (draft-ietf-lamps-pq-composite-sigs-19,
-        # 2026-07-10) — vendor-extension range per KMIP 3.0 §11.12, right
-        # after Hss's 0x80000065. kmip/src/kmip30/algos.rs is the source of
-        # truth for these values; keep in sync with codepointTable.ts's copy.
-        "ML-DSA-44-RSA2048-PSS":    0x80000066,
-        "ML-DSA-65-ECDSA-P256":     0x80000067,
-        "ML-DSA-87-ECDSA-P384":     0x80000068,
+        # LAMPS composites — KMIP 3.0 defines no composite algorithm, so
+        # every one is a vendor-extension value (§11.12 8XXXXXXX range).
+        # kmip/src/kmip30/algos.rs is the source of truth for these values
+        # (KmipAlgorithm::spec_name / to_wire_value); keep in sync with
+        # codepointTable.ts's copy. The 18 composite ML-DSA sets
+        # (draft-ietf-lamps-pq-composite-sigs-19): the first 8 since
+        # 2026-07-10/08-18, the other 10 since 2026-10-21.
+        "ML-DSA-44-RSA2048-PSS":            0x80000066,
+        "ML-DSA-65-ECDSA-P256":             0x80000067,
+        "ML-DSA-87-ECDSA-P384":             0x80000068,
+        "ML-DSA-44-Ed25519":                0x80000069,
+        "ML-DSA-44-ECDSA-P256":             0x8000006A,
+        "ML-DSA-65-RSA3072-PSS":            0x8000006B,
+        "ML-DSA-65-Ed25519":                0x8000006C,
+        "ML-DSA-65-ECDSA-P384":             0x8000006D,
+        "ML-DSA-44-RSA2048-PKCS15":         0x80000075,
+        "ML-DSA-65-RSA3072-PKCS15":         0x80000076,
+        "ML-DSA-65-RSA4096-PSS":            0x80000077,
+        "ML-DSA-65-RSA4096-PKCS15":         0x80000078,
+        "ML-DSA-65-ECDSA-brainpoolP256r1":  0x80000079,
+        "ML-DSA-87-ECDSA-brainpoolP384r1":  0x8000007A,
+        "ML-DSA-87-Ed448":                  0x8000007B,
+        "ML-DSA-87-RSA3072-PSS":            0x8000007C,
+        "ML-DSA-87-RSA4096-PSS":            0x8000007D,
+        "ML-DSA-87-ECDSA-P521":             0x8000007E,
+        # The 12 composite ML-KEM sets (draft-ietf-lamps-pq-composite-kem-23,
+        # 2026-10-21). Not the TLS hybrid groups (X25519MLKEM768 etc.).
+        "ML-KEM-768-RSA2048":               0x8000007F,
+        "ML-KEM-768-RSA3072":               0x80000080,
+        "ML-KEM-768-RSA4096":               0x80000081,
+        "ML-KEM-768-X25519":                0x80000082,
+        "ML-KEM-768-ECDH-P256":             0x80000083,
+        "ML-KEM-768-ECDH-P384":             0x80000084,
+        "ML-KEM-768-ECDH-brainpoolP256r1":  0x80000085,
+        "ML-KEM-1024-RSA3072":              0x80000086,
+        "ML-KEM-1024-ECDH-P384":            0x80000087,
+        "ML-KEM-1024-ECDH-brainpoolP384r1": 0x80000088,
+        "ML-KEM-1024-X448":                 0x80000089,
+        "ML-KEM-1024-ECDH-P521":            0x8000008A,
         # Published CSD02 hybrid KEM (§11.12) - spec's own member is
         # "SECP256R1MLKEM768" (all-caps); ours is "SecP256r1MLKEM768"
         # (matching the Rust engine's own naming) - real casing alias.

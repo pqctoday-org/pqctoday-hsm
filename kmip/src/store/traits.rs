@@ -122,6 +122,12 @@ pub struct ObjectRecord {
     /// Both handles stay in the engine, so `Get` refuses the private key via
     /// the existing `CKA_SENSITIVE` gate — hybrid material never reaches this
     /// layer. `#[serde(default)]` keeps pre-existing sqlite blobs readable.
+    ///
+    /// TLS hybrid groups ONLY (`KmipAlgorithm::is_hybrid_kem`). A LAMPS
+    /// composite key (signature or KEM, PKCS#11 v3.3 working draft) is ONE
+    /// engine object under `pkcs11_cka_id` and never sets this field; the
+    /// earlier two-handle composite-signature form is gone (owner decision
+    /// D4, 2026-10-21: switch fully, drop the old form).
     #[serde(default)]
     pub pkcs11_cka_id_secondary: Option<Vec<u8>>,
 
