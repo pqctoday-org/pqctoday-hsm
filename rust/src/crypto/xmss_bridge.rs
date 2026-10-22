@@ -112,10 +112,17 @@ pub fn xmss_keygen(xmss_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
     }
 }
 
+/// XMSS sign. An exhausted key (no one-time key left, read from the parsed
+/// key's own leaf index) is CKR_KEY_EXHAUSTED, the code the v3.3 working draft
+/// defines for it and lists for C_SignInit / C_Sign / C_SignFinal (TC commit
+/// bc561df, function_return_values.md); it was CKR_FUNCTION_FAILED.
 pub fn xmss_sign(xmss_param: u32, priv_key: &[u8], msg: &[u8]) -> Result<(Vec<u8>, Vec<u8>), u32> {
     macro_rules! dispatch {
         ($t:ty) => {{
             let mut sk = SigningKey::<$t>::try_from(priv_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+            if xmss_keys_remaining(xmss_param, priv_key) == 0 {
+                return Err(CKR_KEY_EXHAUSTED);
+            }
             let sig = sk.sign_detached(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok((sig.as_ref().to_vec(), sk.as_ref().to_vec()))
         }};
@@ -321,9 +328,13 @@ pub fn xmssmt_sign(
     priv_key: &[u8],
     msg: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), u32> {
+    // An exhausted key is CKR_KEY_EXHAUSTED, as for xmss_sign.
     macro_rules! dispatch {
         ($t:ty) => {{
             let mut sk = SigningKey::<$t>::try_from(priv_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+            if xmssmt_keys_remaining(xmssmt_param, priv_key) == 0 {
+                return Err(CKR_KEY_EXHAUSTED);
+            }
             let sig = sk.sign_detached(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok((sig.as_ref().to_vec(), sk.as_ref().to_vec()))
         }};

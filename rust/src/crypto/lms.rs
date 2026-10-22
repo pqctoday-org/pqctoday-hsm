@@ -69,6 +69,21 @@ pub fn ckp_to_lmots_algo(param: u32) -> Option<LmotsAlgorithm> {
     }
 }
 
+/// The hash family (0 SHA-256/N32, 1 SHA-256/N24, 2 SHAKE256/N32,
+/// 3 SHAKE256/N24) of an LMS and an LM-OTS type, `None` if unknown. Every
+/// level of an HSS key uses one family (`hss_keygen` dispatches on the top
+/// level's), so a parameter list mixing families is not a valid scheme.
+pub fn lms_family(lms_param: u32) -> Option<u32> {
+    lms_param_height(lms_param)?;
+    Some((lms_param - 0x05) / 5)
+}
+
+/// See [`lms_family`].
+pub fn lmots_family(lmots_param: u32) -> Option<u32> {
+    ckp_to_lmots_algo(lmots_param)?;
+    Some((lmots_param - 0x01) / 4)
+}
+
 /// Return the number of leaf nodes (2^H) for a given CKP_LMS_* param set.
 pub fn lms_param_max_leaves(lms_param: u32) -> Option<u64> {
     let h = lms_param_height(lms_param)? as u32;

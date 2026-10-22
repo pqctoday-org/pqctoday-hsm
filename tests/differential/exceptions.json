@@ -280,6 +280,15 @@
       "unobservable": "CKD_* values appear only inside derive parameters, which no scenario enumerates"
     },
     {
+      "id": "LEGAL-V33-DRAFT-EXTERNAL-MU-MULTI-PART",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "DELIBERATE DEVIATION from the PKCS#11 v3.3 working draft, recorded 2026-10-21 (v3.2 to v3.3 delta audit, item P2). The draft makes CKM_ML_DSA_EXTERNAL_MU single-part only for C_Sign, C_Verify and C_VerifySignature. BOTH engines accept it multi-part (C_SignUpdate/C_SignFinal and the verify counterparts buffer the parts and process the whole 64-byte mu once), because OpenSSL's provider interface drives every ML-DSA signature through EVP_DigestSign, i.e. C_SignInit/C_SignUpdate/C_SignFinal, never a single C_Sign (docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md, 'The vendor mechanism needed multi-part support after all'). The input is still exactly 64 bytes in total (CKR_DATA_LEN_RANGE otherwise), so the signature computed is the one the single-part call would compute. The two engines agree, so no divergence is expected; this entry exists so the deviation is written down where the other adjudications live, not to absorb a diff.",
+      "citation": "PKCS#11 v3.3 working draft, OASIS PKCS 11 TC commit 9ef73f9 (https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251), working/doc/spec/ml_dsa.md, 'ExternalMu-ML-DSA Signature': 'a mechanism for single-part signatures and verification', and its 'ExternalMu ML-DSA: Key and Data Length' table footnote 1, 'Single-part operations only' (TC commit 6fa1270). v3.2 OS has no CKM_ML_DSA_EXTERNAL_MU at all; it is a v3.3 identifier the engines use under the v3.2-baseline / v3.3-fills-gaps rule. The v3.3 markdown has no section numbers, so the file name is the citation.",
+      "unobservable": "no differential scenario drives CKM_ML_DSA_EXTERNAL_MU through C_SignUpdate or C_VerifyUpdate, and both engines take the same multi-part path"
+    },
+    {
       "id": "LEGAL-USAGE-FLAG-DEFAULT-RECOVER",
       "status": "legal",
       "path": "*.CKA_SIGN_RECOVER.*|*.CKA_VERIFY_RECOVER.*",
@@ -350,6 +359,14 @@
       "path": "*.CKA_HSS_KEYS_REMAINING.*",
       "justification": "Same materialisation convention, but recorded separately because what C++ materialises here is odd enough that a future reader should see it rather than have it folded into a family entry. CKA_HSS_KEYS_REMAINING is an HSS attribute (Table 270), and C++ returns it on XMSS and XMSS-MT keys — on the PUBLIC half as well as the private — with the value 0. Zero would mean 'no one-time signatures left' on a key that has just been generated. Nothing reads it: the harness performs XMSS signing successfully in the same run, and neither engine consults this attribute to decide whether a key is exhausted. So it is a cosmetic artefact of C++ materialising its whole class table, not a capability claim. UPDATED 2026-10-21: the Rust engine now sets 0x61c on XMSS and XMSS-MT PRIVATE keys only, with the real count (min(one-time keys remaining, 2^32-1), 1024 for a fresh XMSS-SHA2_10_256 key), and decrements it per signature, as the v3.3 working draft's CKA_KEYS_REMAINING; the public half still has none. The divergence remains (C++ 0 on both halves, Rust the count on the private half and absent on the public) and Rust's answer is the accurate one. Flagged for a C++-side follow-up rather than adjudicated away: the attribute should not be on an XMSS key at all, and certainly not on a public one.",
       "citation": "PKCS#11 v3.2 defines only CKA_HSS_KEYS_REMAINING (0x0000061c, pkcs11t.h:641) and Table 270 scopes it to HSS private keys. The v3.3 draft deprecates the name in favour of CKA_KEYS_REMAINING — that rename is NOT in v3.2 and this harness targets v3.2, so the attribute probed here is the correct spelling for this specification version. The Rust engine's XMSS/XMSS-MT value follows the v3.3 working draft (TC commit 9ef73f9, working/doc/spec/xmss_and_xmss-mt.md private key tables: CKA_KEYS_REMAINING, \"The minimum of ... 1) The number of one-time private keys remaining; 2) 2^32-1\"), the gap-fill rule in CLAUDE.md; v3.2 Table 270 is silent on XMSS."
+    },
+    {
+      "id": "LEGAL-HSS-KEYS-REMAINING-PRIVATE-KEY-ONLY",
+      "status": "legal",
+      "scenario": "create.generate_key_pair.hss",
+      "path": "gen.pub.CKA_HSS_KEYS_REMAINING.*",
+      "justification": "ADDED 2026-10-21 (v3.2 to v3.3 delta audit, item P8b). The remaining-signatures count belongs to the HSS PRIVATE key. The Rust engine now keeps it there only, at CK_ULONG width with the 2^32-1 cap, so C_GetAttributeValue of 0x61c on an HSS public key returns CKR_ATTRIBUTE_TYPE_INVALID. The C++ engine still materialises it on the public half (8 bytes, the full-tree count) as part of its whole-class attribute table. Nothing reads it there: neither engine consults the public half to decide whether a key is exhausted. Rust's answer is the one the attribute tables support; C++ is out of scope for this change.",
+      "citation": "PKCS#11 v3.2 defines CKA_HSS_KEYS_REMAINING for the HSS private key only (see LEGAL-XMSS-STATE-REPRESENTATION). The v3.3 working draft keeps that split: OASIS PKCS 11 TC commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/doc/spec/hss.md lines 42-46 (table 'HSS Public Key Object Attributes': CKA_HSS_LEVELS, CKA_HSS_LMS_TYPE, CKA_HSS_LMOTS_TYPE, CKA_VALUE, no remaining count) and line 85 (CKA_KEYS_REMAINING in 'HSS Private Key Object Attributes'). v3.2 section 5.2 (C_GetAttributeValue): an attribute that is not valid for the object returns CKR_ATTRIBUTE_TYPE_INVALID."
     },
     {
       "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ENCAPSULATE-TEMPLATE",

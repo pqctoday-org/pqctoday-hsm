@@ -683,8 +683,14 @@ ck_struct!(
 });
 
 ck_struct!(
-    /// `CK_HSS_KEY_PAIR_GEN_PARAMS` (v3.2 §6.14) — `CK_HSS_LEVELS ulLevels`
-    /// followed by two eight-element `CK_LMS_TYPE`/`CK_LMOTS_TYPE` arrays.
+    /// `CK_HSS_KEY_PAIR_GEN_PARAMS` — an ENGINE (vendor) extension, not an
+    /// OASIS structure: v3.2 §6.14 says CKM_HSS_KEY_PAIR_GEN "does not have a
+    /// parameter" and takes the scheme from the private template's
+    /// CKA_HSS_LEVELS / CKA_HSS_LMS_TYPES / CKA_HSS_LMOTS_TYPES, and the v3.3
+    /// TC deleted the never-used types this shape mirrors (#140, commit
+    /// 32b5b7f). Kept because existing callers send it; the template wins
+    /// (ffi::hss_keygen_scheme). `CK_ULONG ulLevels` followed by two
+    /// eight-element CK_ULONG arrays (LMS types, LM-OTS types).
     /// Declared element by element rather than as one `Bytes(...)` blob so
     /// that `LMS_0 + i` is a real field index and the per-element offsets
     /// come from the ABI like every other field here.

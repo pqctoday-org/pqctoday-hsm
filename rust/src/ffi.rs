@@ -2456,6 +2456,97 @@ mod ec_extra_bits_tests {
     }
 }
 
+/// The HSS scheme `(levels, LMS types, LM-OTS types)` for
+/// `CKM_HSS_KEY_PAIR_GEN`.
+///
+/// The specification route (v3.2 §6.14 key pair generation; unchanged in the
+/// v3.3 draft's hss.md): "This mechanism does not have a parameter. The
+/// mechanism generates HSS public/private key pairs for the scheme specified
+/// by the CKA_HSS_LEVELS, CKA_HSS_LMS_TYPES, and CKA_HSS_LMOTS_TYPES
+/// attributes of the template for the private key." These are read first.
+///
+/// The engine also keeps its older `CK_HSS_KEY_PAIR_GEN_PARAMS` mechanism
+/// parameter (`ck_param::hss_key_pair_gen`), which existing callers use (the
+/// in-browser HSM's stateful-signature helpers, the JS test helpers). It is a
+/// vendor extension: OASIS never specified a parameter for this mechanism,
+/// and the v3.3 TC deleted the matching dead types (#140, commit 32b5b7f).
+///
+/// Precedence: template attributes, else the mechanism parameter, else the
+/// single-level default (H5 / W4, SHA-256). When both are given they must
+/// describe the same scheme, else CKR_TEMPLATE_INCONSISTENT.
+///
+/// Template checks: the three attributes come together (one or two alone is
+/// CKR_TEMPLATE_INCOMPLETE); CKA_HSS_LEVELS is a CK_ULONG in 1..=8 and each
+/// list holds exactly that many CK_ULONGs ("This number must match the
+/// CKA_HSS_LEVELS attribute value", else CKR_TEMPLATE_INCONSISTENT); every
+/// type must be a known LMS / LM-OTS type of one hash family
+/// (CKR_ATTRIBUTE_VALUE_INVALID).
+unsafe fn hss_keygen_scheme(
+    p_mechanism: *const u8,
+    prv_template: *mut u8,
+    prv_count: u32,
+) -> Result<(usize, Vec<u32>, Vec<u32>), u32> {
+    let from_param = match ck_param::mech(p_mechanism)
+        .opt_params(&ck_param::hss_key_pair_gen::LAYOUT, ck_param::hss_key_pair_gen::FIELD_COUNT)
+    {
+        Ok(None) => None,
+        Err(_) => return Err(CKR_MECHANISM_PARAM_INVALID),
+        Ok(Some(r)) => {
+            let levels = r.ulong(ck_param::hss_key_pair_gen::UL_LEVELS);
+            if levels == 0 || levels > 8 {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            let lms: Vec<u32> = (0..levels).map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMS_0 + i)).collect();
+            let lmots: Vec<u32> = (0..levels).map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMOTS_0 + i)).collect();
+            Some((levels, lms, lmots))
+        }
+    };
+
+    let get = |t| crate::crypto::handlers::get_attr_bytes_present(prv_template, prv_count, t);
+    let from_template = match (get(CKA_HSS_LEVELS), get(CKA_HSS_LMS_TYPES), get(CKA_HSS_LMOTS_TYPES)) {
+        (None, None, None) => None,
+        (Some(l), Some(lms), Some(lmots)) => {
+            let word = ck_param::WORD;
+            let ulongs = |b: &[u8]| -> Result<Vec<u32>, u32> {
+                b.chunks_exact(word)
+                    .map(|c| {
+                        let mut v = [0u8; 8];
+                        v[..word].copy_from_slice(c);
+                        u32::try_from(u64::from_le_bytes(v)).map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)
+                    })
+                    .collect()
+            };
+            if l.len() != word {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            let levels = ulongs(&l)?[0] as usize;
+            if levels == 0 || levels > 8 {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            if lms.len() != levels * word || lmots.len() != levels * word {
+                return Err(CKR_TEMPLATE_INCONSISTENT);
+            }
+            let (lms, lmots) = (ulongs(&lms)?, ulongs(&lmots)?);
+            let family = crate::crypto::lms::lms_family(lms[0]).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+            let same = |f: Option<u32>| f == Some(family);
+            if !lms.iter().all(|p| same(crate::crypto::lms::lms_family(*p)))
+                || !lmots.iter().all(|p| same(crate::crypto::lms::lmots_family(*p)))
+            {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            Some((levels, lms, lmots))
+        }
+        _ => return Err(CKR_TEMPLATE_INCOMPLETE),
+    };
+
+    match (from_template, from_param) {
+        (Some(t), Some(p)) if t != p => Err(CKR_TEMPLATE_INCONSISTENT),
+        (Some(t), _) => Ok(t),
+        (None, Some(p)) => Ok(p),
+        (None, None) => Ok((1, vec![CKP_LMS_SHA256_M32_H5], vec![CKP_LMOTS_SHA256_N32_W4])),
+    }
+}
+
 /// K0B replication gate, pre-generation half. `Ok(None)`: the template names
 /// no replication attribute. `Ok(Some(policy_id))`: a validated request to
 /// bind the new key to an enrolled policy (educational-replication only).
@@ -2536,6 +2627,16 @@ fn generate_key_pair_with_replication_gate(
         )
     } {
         return CKR_ATTRIBUTE_READ_ONLY;
+    }
+    for (t, n) in [
+        (p_public_key_template, ul_public_key_attribute_count),
+        (p_private_key_template, ul_private_key_attribute_count),
+    ] {
+        // Template attributes well formed and not nested (key_objects.md
+        // "Template Attributes"); absorb_template_attrs cannot refuse.
+        if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(t, n) } {
+            return rv;
+        }
     }
     let binding = match unsafe { replication_gate_pre(p_private_key_template, ul_private_key_attribute_count) } {
         Ok(b) => b,
@@ -4138,33 +4239,19 @@ fn C_GenerateKeyPair_impl(
             }
 
             // ── HSS keygen (PKCS#11 v3.2 §6.14 CKM_HSS_KEY_PAIR_GEN) ─────────
-            // Single-level LMS: use levels=1 in CK_HSS_KEY_PAIR_GEN_PARAMS.
+            // The scheme comes from the private template's CKA_HSS_LEVELS /
+            // CKA_HSS_LMS_TYPES / CKA_HSS_LMOTS_TYPES, as the specification
+            // says, or from the engine's legacy mechanism parameter; see
+            // hss_keygen_scheme for the precedence.
             CKM_HSS_KEY_PAIR_GEN => {
-                // CK_HSS_KEY_PAIR_GEN_PARAMS (optional): ulLevels + ulLmsParamSet[8]
-                // + ulLmotsParamSet[8], all CK_ULONG → 17 words at native width
-                // (68 B wasm32, 136 B native). Absent params ⇒ a single-level LMS
-                // with the default SHA-256 parameter set (PKCS#11 v3.2 §6.14).
-                let (levels, lms_params, lmots_params): (usize, Vec<u32>, Vec<u32>) =
-                    match ck_param::mech(p_mechanism).opt_params(
-                        &ck_param::hss_key_pair_gen::LAYOUT,
-                        ck_param::hss_key_pair_gen::FIELD_COUNT,
-                    ) {
-                        Ok(None) => (1, vec![CKP_LMS_SHA256_M32_H5], vec![CKP_LMOTS_SHA256_N32_W4]),
-                        Err(_) => return CKR_MECHANISM_PARAM_INVALID,
-                        Ok(Some(r)) => {
-                            let levels = r.ulong(ck_param::hss_key_pair_gen::UL_LEVELS);
-                            if levels == 0 || levels > 8 {
-                                return CKR_MECHANISM_PARAM_INVALID;
-                            }
-                            let lms: Vec<u32> = (0..levels)
-                                .map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMS_0 + i))
-                                .collect();
-                            let lmots: Vec<u32> = (0..levels)
-                                .map(|i| r.ulong32(ck_param::hss_key_pair_gen::LMOTS_0 + i))
-                                .collect();
-                            (levels, lms, lmots)
-                        }
-                    };
+                let (levels, lms_params, lmots_params) = match hss_keygen_scheme(
+                    p_mechanism,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                ) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                };
 
                 let (pub_bytes, priv_bytes) =
                     match crate::crypto::lms::hss_keygen(levels, &lms_params, &lmots_params) {
@@ -4207,16 +4294,19 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
                 store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut prv_attrs, CKA_SIGN, true);
-                // Total HSS capacity = ∏(2^H_i) for each level, capped at u32::MAX per PKCS#11 v3.2 §6.14.
-                let mut total_sigs: u64 = 1u64;
-                for &p in &lms_params {
-                    if let Some(leaves) = crate::crypto::lms::lms_param_max_leaves(p) {
-                        total_sigs = total_sigs.saturating_mul(leaves);
-                    }
-                }
-                let total_sigs = total_sigs.min(u32::MAX as u64) as u32;
-                store_ulong(&mut pub_attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
-                store_ulong(&mut prv_attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
+                // CKA_KEYS_REMAINING (hss.md private key table): "The minimum
+                // of … the number of one-time private keys remaining [and]
+                // 2^32-1", total capacity ∏(2^H_i). Private key only — the
+                // public key table does not list it, and nothing decremented
+                // the public copy this used to carry. Stored at CK_ULONG
+                // width with 2^32-1 a real count (keys_remaining_attr_bytes),
+                // not store_ulong, which turns 0xFFFF_FFFF into
+                // CK_UNAVAILABLE_INFORMATION on a 64-bit CK_ULONG.
+                let total_sigs = crate::native::hbs::hss_capacity(&lms_params);
+                prv_attrs.insert(
+                    CKA_KEYS_REMAINING,
+                    crate::crypto::xmss_bridge::keys_remaining_attr_bytes(total_sigs),
+                );
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
@@ -4238,6 +4328,30 @@ fn C_GenerateKeyPair_impl(
                 if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
                     return rv;
                 }
+                // The scheme attributes are engine truth once the key exists:
+                // the ones the mechanism contributes to the public key
+                // (hss.md, "contributes … CKA_HSS_LEVELS, CKA_HSS_LMS_TYPE,
+                // CKA_HSS_LMOTS_TYPE"), and the private key's full per-level
+                // lists, stored in CK_ULONG form whichever route chose the
+                // scheme. A public template that names one with another value
+                // asks for a key this generation did not make.
+                let w = |v: u32| (v as usize).to_le_bytes().to_vec();
+                let contributed = [
+                    (CKA_HSS_LEVELS, w(levels as u32)),
+                    (CKA_HSS_LMS_TYPE, w(lms_params[0])),
+                    (CKA_HSS_LMOTS_TYPE, w(lmots_params[0])),
+                ];
+                for (t, v) in &contributed {
+                    if let Some(given) = find_template_entry(p_public_key_template, ul_public_key_attribute_count, *t) {
+                        if &given != v {
+                            return CKR_TEMPLATE_INCONSISTENT;
+                        }
+                    }
+                    pub_attrs.insert(*t, v.clone());
+                    prv_attrs.insert(*t, v.clone());
+                }
+                prv_attrs.insert(CKA_HSS_LMS_TYPES, lms_params.iter().flat_map(|p| w(*p)).collect());
+                prv_attrs.insert(CKA_HSS_LMOTS_TYPES, lmots_params.iter().flat_map(|p| w(*p)).collect());
                 match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
                     Ok((hp, hk)) => {
                         *ph_public_key = hp;
@@ -4795,6 +4909,11 @@ pub fn C_GenerateKey(
         Ok(b) => b,
         Err(rv) => return rv,
     };
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_count) } {
+        return rv;
+    }
     let rv = C_GenerateKey_impl(_h_session, p_mechanism, p_template, ul_count, ph_key);
     if rv != CKR_OK {
         return rv;
@@ -5158,14 +5277,12 @@ unsafe fn hpke_read_derived_key_template(p: *const u8) -> Option<(*const u8, Vec
     if !p_template.is_null() && count > 0 && count <= 65536 {
         let ptr = p_template as *const usize;
         for i in 0..count {
-            let t = *ptr.add(i * 3) as u32;
+            let t = crate::crypto::handlers::canonical_attr_type(*ptr.add(i * 3) as u32);
             let val_ptr = *ptr.add(i * 3 + 1) as *const u8;
             let val_len = *ptr.add(i * 3 + 2);
-            let bytes = if !val_ptr.is_null() && val_len > 0 {
-                std::slice::from_raw_parts(val_ptr, val_len).to_vec()
-            } else {
-                Vec::new()
-            };
+            // A template attribute is deep-copied, never stored as the
+            // caller's pointers (key_objects.md "Template Attributes").
+            let bytes = crate::crypto::handlers::template_entry_value(t, val_ptr, val_len).ok()?;
             out.push((t, bytes));
         }
     }
@@ -5208,6 +5325,60 @@ fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attribut
         }
         None => true,
     }
+}
+
+/// CKA_DECAPSULATE_TEMPLATE / CKA_UNWRAP_TEMPLATE: the template is APPLIED to
+/// the key being created, then checked against the caller's template.
+///
+/// Both have the same SHALL text, v3.2 §5.18.4 for unwrap and v3.3
+/// key_management_functions.md for decapsulate: the attribute holds "an
+/// attribute set that will be added to attributes of the key to be
+/// [unwrapped / decapsulated]. If the attributes do not conflict with the
+/// user supplied attribute template, in 'pTemplate', then the [operation]
+/// will proceed … If any attribute conflict occurs … the function SHALL
+/// return CKR_TEMPLATE_INCONSISTENT", and the private/secret key tables add
+/// "Any user supplied template is applied after this template as if the
+/// object has already been created". The engine only compared, so an
+/// attribute the caller left out failed against the engine default instead of
+/// being added.
+///
+/// `attrs` is the new key's FULLY resolved attribute set (defaults, the
+/// caller's template, engine truth). For each entry of the key's template:
+///
+/// * the caller's template names it, or it is engine truth the caller cannot
+///   set either (key material, the server-managed set, CKA_VALUE_LEN): the
+///   resolved value must equal it — a conflict is CKR_TEMPLATE_INCONSISTENT,
+///   so engine truth is never overwritten;
+/// * otherwise it is added.
+///
+/// An absent attribute adds nothing; an unparseable stored template fails
+/// closed. Called after every other attribute is final and before the object
+/// exists, so a refusal creates nothing.
+unsafe fn apply_key_template(
+    h_key: u32,
+    template_attr: u32,
+    user_template: *mut u8,
+    user_count: u32,
+    attrs: &mut Attributes,
+) -> Result<(), u32> {
+    let blob = match crate::state::with_object(h_key, |a| a.get(&template_attr).cloned()).flatten() {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let entries = crate::crypto::handlers::parse_flat_attr_array(&blob).ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+    for (t, v) in entries {
+        let compare_only = find_template_entry(user_template, user_count, t).is_some()
+            || crate::crypto::handlers::template_attr_is_skipped(t)
+            || t == CKA_VALUE_LEN;
+        if compare_only {
+            if attrs.get(&t) != Some(&v) {
+                return Err(CKR_TEMPLATE_INCONSISTENT);
+            }
+        } else {
+            attrs.insert(t, v);
+        }
+    }
+    Ok(())
 }
 
 /// `CKM_COMP_KEM` (PKCS#11 v3.3 working draft, comp_kem.md): "It has no
@@ -5276,13 +5447,10 @@ unsafe fn comp_kem_secret_object(
         &mut ss_attrs,
         find_template_entry(template, count, CKA_CHECK_VALUE).as_deref(),
     )?;
-    let (template_attr, refused) = if decapsulate {
-        (CKA_DECAPSULATE_TEMPLATE, CKR_TEMPLATE_INCONSISTENT)
-    } else {
-        (CKA_ENCAPSULATE_TEMPLATE, CKR_KEY_HANDLE_INVALID)
-    };
-    if !kem_template_permits(h_kem_key, template_attr, &ss_attrs) {
-        return Err(refused);
+    if decapsulate {
+        apply_key_template(h_kem_key, CKA_DECAPSULATE_TEMPLATE, template, count, &mut ss_attrs)?;
+    } else if !kem_template_permits(h_kem_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+        return Err(CKR_KEY_HANDLE_INVALID);
     }
     ffi_alloc(h_session, ss_attrs)
 }
@@ -5362,6 +5530,12 @@ fn C_EncapsulateKey_impl(
     use ml_kem::KemCore;
 
     nonnull!(p_mechanism, ph_key, pul_ciphertext_len);
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(_p_template, _ul_attribute_count) } {
+        return rv;
+    }
+
     // E10 (2026-09-25) — §5.7.1 / §5.18.8 CKR_SESSION_READ_ONLY: the new key
     // is a token object when the template says CKA_TOKEN = CK_TRUE, which a
     // read-only session may not create (the same S7 gate C_GenerateKey,
@@ -6020,6 +6194,11 @@ fn C_DecapsulateKey_impl(
     require_session!(_h_session);
 
     nonnull!(p_mechanism, p_ciphertext, ph_key);
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(_p_template, _ul_attribute_count) } {
+        return rv;
+    }
     // E10 (2026-09-25) — §5.7.1 / §5.18.9 CKR_SESSION_READ_ONLY for a
     // CKA_TOKEN = CK_TRUE template in a read-only session (see
     // C_EncapsulateKey_impl).
@@ -6211,8 +6390,8 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
-            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
-                return CKR_TEMPLATE_INCONSISTENT;
+            if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                return rv;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
                 Ok(h) => h,
@@ -6377,8 +6556,8 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
-            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
-                return CKR_TEMPLATE_INCONSISTENT;
+            if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                return rv;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
                 Ok(h) => h,
@@ -6533,8 +6712,8 @@ fn C_DecapsulateKey_impl(
                 ) {
                     return rv;
                 }
-                if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
-                    return CKR_TEMPLATE_INCONSISTENT;
+                if let Err(rv) = apply_key_template(h_private_key, CKA_DECAPSULATE_TEMPLATE, _p_template, _ul_attribute_count, &mut ss_attrs) {
+                    return rv;
                 }
                 *ph_key = match ffi_alloc(_h_session, ss_attrs) {
                     Ok(h) => h,
@@ -6645,10 +6824,11 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         let mut had_missing = false;
         let mut had_sensitive = false;
         let mut had_small = false;
+        let mut had_inconsistent = false;
         unsafe {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as *mut u8;
                 let val_len_ptr = tmpl_ptr.add((i * 3 + 2) as usize); // *mut usize (native width)
                 // Block CKA_VALUE / CKA_SEED (raw secret material — see
@@ -6697,6 +6877,22 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                     had_sensitive = true;
                     continue;
                 }
+                // A template attribute is returned as a CK_ATTRIBUTE[] with the
+                // v3.3 retrieval protocol (key_objects.md "Template
+                // Attributes"), never as the engine's stored blob — which
+                // is what this loop handed out before, already wrong under
+                // v3.2's CK_ATTRIBUTE_PTR data type.
+                if crate::crypto::handlers::attr_is_attribute_array(attr_type) {
+                    if let Some(stored) = obj_attrs.get(&attr_type) {
+                        use crate::crypto::handlers::{fill_template_attribute, TemplateFill};
+                        match fill_template_attribute(stored, val_ptr, val_len_ptr) {
+                            TemplateFill::Ok => {}
+                            TemplateFill::TooSmall => had_small = true,
+                            TemplateFill::Inconsistent => had_inconsistent = true,
+                        }
+                        continue;
+                    }
+                }
                 if let Some(val) = obj_attrs.get(&attr_type) {
                     if val_ptr.is_null() {
                         *val_len_ptr = val.len();
@@ -6720,8 +6916,14 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         }
         // §5.7.5 precedence — sensitive/unextractable first, then invalid type,
         // then buffer-too-small.
+        // A template attribute whose inner array does not describe the
+        // stored template is CKR_TEMPLATE_INCONSISTENT ("MUST be returned",
+        // key_objects.md "Template Attributes"), ranked after the
+        // sensitivity class and before the plain §5.7.5 codes.
         if had_sensitive {
             CKR_ATTRIBUTE_SENSITIVE
+        } else if had_inconsistent {
+            CKR_TEMPLATE_INCONSISTENT
         } else if had_missing {
             CKR_ATTRIBUTE_TYPE_INVALID
         } else if had_small {
@@ -7779,26 +7981,23 @@ pub fn C_CreateObject(
         let tmpl_ptr = p_template as *mut usize;
         let mut new_attrs = HashMap::new();
         for i in 0..count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+            // The published v3.2 header's KEM template values name the same
+            // attributes (canonical_attr_type).
+            let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if !val_ptr.is_null() && val_len > 0 {
                 // S2 — an ATTRIBUTE-array attribute (CKA_WRAP_TEMPLATE and
                 // friends) has a CK_ATTRIBUTE[] as its value, whose inner
                 // pValue pointers die with this call. Flatten it into a
-                // self-contained blob; every other attribute is copied
+                // self-contained blob (a nested template is
+                // CKR_TEMPLATE_INCONSISTENT); every other attribute is copied
                 // verbatim as before. Same treatment absorb_template_attrs
                 // applies on the keygen paths, so a wrapping key created
                 // either way carries the same stored form.
-                let v = if crate::crypto::handlers::attr_is_attribute_array(attr_type) {
-                    match crate::crypto::handlers::flatten_attr_array(val_ptr, val_len as usize) {
-                        Some(flat) => flat,
-                        None => return CKR_ATTRIBUTE_VALUE_INVALID,
-                    }
-                } else {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    v
+                let v = match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
                 };
                 new_attrs.insert(attr_type, v);
             }
@@ -8951,7 +9150,12 @@ fn C_Sign_impl(
                 if !ctx_bytes.is_empty() {
                     Err(CKR_MECHANISM_PARAM_INVALID)
                 } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
-                    Err(CKR_ARGUMENTS_BAD)
+                    // ml_dsa.md (PKCS#11 v3.3 working draft), "ExternalMu
+                    // ML-DSA: Key and Data Length": the input is exactly 64
+                    // bytes. A wrong data length is CKR_DATA_LEN_RANGE, the
+                    // code the v3.2 §5.13.2 C_Sign / §5.15.2 C_Verify lists
+                    // carry for it (was CKR_ARGUMENTS_BAD).
+                    Err(CKR_DATA_LEN_RANGE)
                 } else if deterministic {
                     sign_ml_dsa_external_mu(ps, &sk_bytes, msg, [0u8; 32])
                 } else {
@@ -9329,7 +9533,12 @@ fn C_Verify_impl(
                 if !ctx_bytes.is_empty() {
                     Err(CKR_MECHANISM_PARAM_INVALID)
                 } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
-                    Err(CKR_ARGUMENTS_BAD)
+                    // ml_dsa.md (PKCS#11 v3.3 working draft), "ExternalMu
+                    // ML-DSA: Key and Data Length": the input is exactly 64
+                    // bytes. A wrong data length is CKR_DATA_LEN_RANGE, the
+                    // code the v3.2 §5.13.2 C_Sign / §5.15.2 C_Verify lists
+                    // carry for it (was CKR_ARGUMENTS_BAD).
+                    Err(CKR_DATA_LEN_RANGE)
                 } else {
                     verify_ml_dsa_external_mu(ps, &pk_bytes, msg, sig_bytes)
                 }
@@ -9869,19 +10078,30 @@ pub fn C_VerifySignature(h_session: u32, p_data: *mut u8, ul_data_len: u32) -> u
     }
 }
 
+/// The single-part rule for C_VerifySignatureUpdate / C_VerifySignatureFinal:
+/// a mechanism that is single-part only ends the operation with
+/// CKR_OPERATION_NOT_INITIALIZED, the answer C_VerifyUpdate's
+/// multipart_op_mech gives. The multi-part set is C_VerifyUpdate's
+/// (sign_mech_supports_multipart, so CKM_COMP_SIG_EXTERNAL_HASH, raw
+/// RSA/ECDSA and the GENERIC CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA — the v3.3
+/// ml_dsa.md HashML-DSA table gives them a "C_VerifySignature ^1^", single
+/// part only — are refused), plus the stateful HSS / XMSS / XMSS^MT, whose
+/// only multi-part verification is exactly this interface (hss.md). These
+/// used to buffer every mechanism except CKM_COMP_SIG_EXTERNAL_HASH.
+fn verify_signature_single_part_gate(h_session: u32) -> Option<u32> {
+    let mech = VERIFY_SIG_STATE.shard(h_session).get(&h_session).map(|c| c.mech_type)?;
+    if sign_mech_supports_multipart(mech) || stateful_sign_mech(mech) {
+        return None;
+    }
+    VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
+    Some(CKR_OPERATION_NOT_INITIALIZED)
+}
+
 #[wasm_bindgen(js_name = _C_VerifySignatureUpdate)]
 pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
-    // CKM_COMP_SIG_EXTERNAL_HASH is single-part only (comp_sig.md, table
-    // footnote 1): the same answer as C_VerifyUpdate's multipart_op_mech —
-    // the operation ends, CKR_OPERATION_NOT_INITIALIZED.
-    let external_hash = VERIFY_SIG_STATE
-        .shard(h_session)
-        .get(&h_session)
-        .is_some_and(|c| c.mech_type == CKM_COMP_SIG_EXTERNAL_HASH);
-    if external_hash {
-        VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
-        return CKR_OPERATION_NOT_INITIALIZED;
+    if let Some(rv) = verify_signature_single_part_gate(h_session) {
+        return rv;
     }
     let mut ok = false;
     VERIFY_SIG_STATE.with(|s| {
@@ -9914,6 +10134,9 @@ pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32
 #[wasm_bindgen(js_name = _C_VerifySignatureFinal)]
 pub fn C_VerifySignatureFinal(h_session: u32) -> u32 {
     require_init!();
+    if let Some(rv) = verify_signature_single_part_gate(h_session) {
+        return rv;
+    }
     let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
         // CKM_COMP_SIG: the streamed PH(M) is verified as the external-hash
@@ -11743,7 +11966,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_MD5 => DigestCtx::Md5(md5::Md5::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
-            CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
+            CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(h_session, p_mechanism) {
                 Ok(h) => DigestCtx::MuGen(h),
                 Err(rv) => return rv,
             },
@@ -11756,16 +11979,69 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
     CKR_OK
 }
 
+/// `tr = H(pk, 64)` (FIPS 204 Algorithm 6 line 6 / Algorithm 7 line 6) for
+/// `CKM_ML_DSA_EXTERNAL_MU_GEN` given a key handle. PKCS#11 v3.3 working
+/// draft, ml_dsa.md (`CK_MU_GEN_PARAMS.hKey`, "public or private"; the
+/// mechanism takes "a key handle or a precomputed TR of the public key").
+///
+/// * The handle is resolved like any other key an operation uses
+///   (`check_key_for_mech_as`'s rules): absent, or a private object the
+///   session may not see (§4.4, `can_access_object`), is
+///   CKR_KEY_HANDLE_INVALID — so no object's value can be hashed without the
+///   login that would be needed to use it. An object that is not a key at all
+///   is CKR_KEY_HANDLE_INVALID too (v3.2 §5.1.6: "the specified handle is a
+///   valid handle for an object which is not a key").
+/// * Only an ML-DSA public or private key is accepted; any other key
+///   (including a composite signature key, whose value is mldsaPK ‖ tradPK)
+///   is CKR_KEY_TYPE_INCONSISTENT, the code the engine returns for a key of
+///   the wrong type for a mechanism (`mech_key_types`).
+/// * Public key: `pk` is its `CKA_VALUE` (pkEncode, v3.2 Table 280).
+/// * Private key: `pk` is re-derived from the private key
+///   ([`crate::crypto::handlers::ml_dsa_public_from_private`]); only that
+///   public value is hashed, never private material. Hashing the private
+///   `CKA_VALUE` (what this function did before) gave a µ no signature could
+///   ever verify against.
+fn mu_gen_tr_from_key(h_session: u32, h_key: u32) -> Result<[u8; 64], u32> {
+    use sha3::digest::Update;
+    let attrs = crate::state::with_object(h_key, |a| a.clone()).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    if !crate::state::can_access_object(h_session, &attrs) {
+        return Err(CKR_KEY_HANDLE_INVALID);
+    }
+    let class = get_object_attr_u32_from(&attrs, CKA_CLASS);
+    if !matches!(class, Some(CKO_PUBLIC_KEY) | Some(CKO_PRIVATE_KEY) | Some(CKO_SECRET_KEY)) {
+        return Err(CKR_KEY_HANDLE_INVALID);
+    }
+    if get_object_attr_u32_from(&attrs, CKA_KEY_TYPE) != Some(CKK_ML_DSA) || class == Some(CKO_SECRET_KEY) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    // `attrs` is the non-secret snapshot; the value is read on its own and
+    // wiped when this copy drops.
+    let value = zeroize::Zeroizing::new(crate::state::get_object_value(h_key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?);
+    let pk = if class == Some(CKO_PUBLIC_KEY) {
+        value.to_vec()
+    } else {
+        let ps = match crate::state::get_object_param_set_from(&attrs) {
+            0 => get_object_attr_u32_from(&attrs, CKA_PARAMETER_SET).unwrap_or(0),
+            ps => ps,
+        };
+        crate::crypto::handlers::ml_dsa_public_from_private(ps, &value).ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+    };
+    let mut hasher = sha3::Shake256::default();
+    Update::update(&mut hasher, &pk);
+    let mut reader = sha3::digest::ExtendableOutput::finalize_xof(hasher);
+    let mut tr = [0u8; 64];
+    sha3::digest::XofReader::read(&mut reader, &mut tr);
+    Ok(tr)
+}
+
 /// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU: parse
-/// `CK_MU_GEN_PARAMS`, resolve `tr` (either the caller's own
-/// precomputed 64 bytes, or `SHAKE256(pk, 64)` from a public-key handle's
-/// `CKA_VALUE` — PKCS#11 v3.2 Table 280's `pk_encode` IS the raw
-/// `CKA_VALUE` bytes, no re-encoding needed), and seed a fresh SHAKE256
-/// with `tr || 0x00 || len(ctx) || ctx` (FIPS 204 Eq. 2's own prefix) —
-/// the caller's message follows via the normal C_DigestUpdate/C_Digest
-/// path from here on, this function has no more FIPS 204 awareness past
-/// this point.
-unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u32> {
+/// `CK_MU_GEN_PARAMS`, resolve `tr` (either the caller's own precomputed 64
+/// bytes, or `H(pk, 64)` from a key handle — see [`mu_gen_tr_from_key`]), and
+/// seed a fresh SHAKE256 with `tr || 0x00 || len(ctx) || ctx` (FIPS 204 Eq. 2's
+/// own prefix) — the caller's message follows via the normal
+/// C_DigestUpdate/C_Digest path from here on, this function has no more FIPS
+/// 204 awareness past this point.
+unsafe fn init_mu_gen_digest(h_session: u32, p_mechanism: *const u8) -> Result<sha3::Shake256, u32> {
     use sha3::digest::Update;
     let r = ck_param::mech(p_mechanism)
         .params(&ck_param::mu_gen_params::LAYOUT, ck_param::mu_gen_params::FIELD_COUNT)
@@ -11782,13 +12058,7 @@ unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u
     let tr: [u8; 64] = if have_tr {
         tr_buf.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?
     } else {
-        let pk = crate::state::get_key_material(h_key).ok_or(CKR_KEY_HANDLE_INVALID)?;
-        let mut hasher = sha3::Shake256::default();
-        Update::update(&mut hasher, &pk);
-        let mut reader = sha3::digest::ExtendableOutput::finalize_xof(hasher);
-        let mut tr = [0u8; 64];
-        sha3::digest::XofReader::read(&mut reader, &mut tr);
-        tr
+        mu_gen_tr_from_key(h_session, h_key)?
     };
 
     let ctx_len = r.ulong(ck_param::mu_gen_params::UL_CTX_LEN);
@@ -12046,7 +12316,7 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
         if !p_template.is_null() && ul_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as usize;
                 // R3 (2026-10-02) — §5.7.7: "an exact byte-for-byte match
@@ -12060,10 +12330,12 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
                 } else if val_ptr.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 } else {
-                    match_attrs.push((
-                        attr_type,
-                        std::slice::from_raw_parts(val_ptr, val_len).to_vec(),
-                    ));
+                    // A template attribute matches in its stored (flattened)
+                    // form; the caller's raw CK_ATTRIBUTE structs never could.
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len) {
+                        Ok(v) => match_attrs.push((attr_type, v)),
+                        Err(rv) => return rv,
+                    }
                 }
             }
         }
@@ -12802,6 +13074,11 @@ pub fn C_DeriveKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_attribute_count) } {
+        return rv;
+    }
     // FHE P2 (P0B §5.2): CKM_PQCTODAY_FHE_DERIVE_PUBLIC, cfg pqc_ckks_custody (default
     // native `fhe-custody`, or `educational-ckks`; TFHE kinds also need educational-fhe).
     #[cfg(pqc_ckks_custody)]
@@ -12865,13 +13142,16 @@ pub fn C_DeriveKey(
             let mut attrs = std::collections::HashMap::new();
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 if !val_ptr.is_null() && val_len > 0 {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    attrs.insert(attr_type, v);
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                        Ok(v) => {
+                            attrs.insert(attr_type, v);
+                        }
+                        Err(rv) => return rv,
+                    }
                 }
             }
 
@@ -14778,6 +15058,11 @@ pub fn C_UnwrapKey(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_attribute_count) } {
+        return rv;
+    }
     // §5.18.4 — pWrappedKey is the input ciphertext and phKey the required
     // out-param; neither may be NULL.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
@@ -15007,7 +15292,7 @@ pub fn C_UnwrapKey(
         if !p_template.is_null() && ul_attribute_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 // Skip CKA_VALUE — it comes from the unwrap operation
@@ -15015,9 +15300,14 @@ pub fn C_UnwrapKey(
                     continue;
                 }
                 if !val_ptr.is_null() && val_len > 0 {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    attrs.insert(attr_type, v);
+                    // Template attributes deep-copied (check_template_arrays
+                    // already refused a malformed or nested one).
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                        Ok(v) => {
+                            attrs.insert(attr_type, v);
+                        }
+                        Err(rv) => return rv,
+                    }
                 }
             }
         }
@@ -15129,17 +15419,15 @@ pub fn C_UnwrapKey(
         // the C++ engine's C_UnwrapKey path (SoftHSM_keygen.cpp §C_UnwrapKey).
         crate::state::compute_kcv(&mut attrs);
 
-        // S2 (2026-08-13) — §5.18.3's CKA_UNWRAP_TEMPLATE twin: the
-        // unwrapping key may constrain the attribute set of the key it
-        // produces. Evaluated against the FULLY resolved attributes (template
-        // ‖ engine defaults), so a caller cannot evade the constraint by
-        // simply omitting the attribute. A contradiction is
-        // CKR_TEMPLATE_INCONSISTENT, and no object is created.
-        let kek_attrs = OBJECTS.with(|o| o.borrow().get(&h_unwrapping_key).cloned());
-        if let Some(kek_attrs) = kek_attrs {
-            if !crate::state::key_template_permits(&kek_attrs, CKA_UNWRAP_TEMPLATE, &attrs) {
-                return CKR_TEMPLATE_INCONSISTENT;
-            }
+        // S2 (2026-08-13) — §5.18.4's CKA_UNWRAP_TEMPLATE: the unwrapping
+        // key's template is ADDED to the FULLY resolved attributes (template
+        // ‖ engine defaults) and checked against the caller's template, so a
+        // caller cannot evade it by omitting the attribute (it is applied) or
+        // by contradicting it (CKR_TEMPLATE_INCONSISTENT, no object). See
+        // apply_key_template; it used to be compare-only, which refused an
+        // omitted attribute instead of applying it.
+        if let Err(rv) = apply_key_template(h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+            return rv;
         }
 
         // An SLH-DSA private key whose PK.root disagrees with its seeds is
@@ -15340,6 +15628,11 @@ pub fn C_UnwrapKeyAuthenticated(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_attribute_count) } {
+        return rv;
+    }
     // Same required-pointer surface as C_UnwrapKey.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
     unsafe {
@@ -15438,16 +15731,21 @@ pub fn C_UnwrapKeyAuthenticated(
         if !p_template.is_null() && ul_attribute_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 if attr_type == CKA_VALUE {
                     continue;
                 }
                 if !val_ptr.is_null() && val_len > 0 {
-                    let mut v = vec![0u8; val_len as usize];
-                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-                    attrs.insert(attr_type, v);
+                    // Template attributes deep-copied (check_template_arrays
+                    // already refused a malformed or nested one).
+                    match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                        Ok(v) => {
+                            attrs.insert(attr_type, v);
+                        }
+                        Err(rv) => return rv,
+                    }
                 }
             }
         }
@@ -15562,6 +15860,12 @@ pub fn C_UnwrapKeyAuthenticated(
         // object-creation path per §5.18.7.
         crate::state::compute_kcv(&mut attrs);
 
+        // The unwrapping key's CKA_UNWRAP_TEMPLATE, as in C_UnwrapKey (this
+        // path never consulted it, so the restriction did not hold here).
+        if let Err(rv) = apply_key_template(h_unwrapping_key, CKA_UNWRAP_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+            return rv;
+        }
+
         // Same SLH-DSA PK.root check as C_UnwrapKey.
         if check_imported_slh_dsa_private(&attrs).is_err() {
             return CKR_WRAPPED_KEY_INVALID;
@@ -15598,7 +15902,8 @@ pub fn C_UnwrapKeyAuthenticated(
 /// so the accumulator can buffer the streamed parts and Final delegates to the
 /// one-shot handler over the concatenation. Still single-part only: raw
 /// CKM_RSA_PKCS / CKM_ECDSA (caller supplies the digest), the pre-hash ML-DSA /
-/// SLH-DSA / EdDSA-ph variants, and the stateful HSS/XMSS mechanisms.
+/// SLH-DSA / EdDSA-ph variants. The stateful HSS/XMSS mechanisms are
+/// multi-part for signing only ([`stateful_sign_mech`]).
 fn sign_mech_supports_multipart(mech: u32) -> bool {
     matches!(
         mech,
@@ -15684,9 +15989,27 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
         || is_prehash_slh_dsa(mech)
 }
 
+/// The stateful hash-based signature mechanisms. The v3.3 working draft
+/// allows them multi-part for SIGNING (TC commit 3f7d0dd, #69: the C_Sign
+/// "single-part only" footnote removed from hss.md and
+/// xmss_and_xmss-mt.md), while verification stays single-part on C_Verify and
+/// multi-part only through C_VerifySignature* (hss.md: "Verification is only
+/// for single part verifications or multipart verifications when the
+/// C_VerifySignatureInit interface is used").
+///
+/// Multi-part signing buffers the parts and signs once at C_SignFinal, which
+/// goes through the one-shot C_Sign: the leaf is consumed there and only
+/// once the output buffer is known to be large enough (the same
+/// buffer-before-consume rule C_Sign applies to a single-part call), so a
+/// size query or CKR_BUFFER_TOO_SMALL never spends a one-time key.
+fn stateful_sign_mech(mech: u32) -> bool {
+    matches!(mech, CKM_HSS | CKM_XMSS | CKM_XMSSMT)
+}
+
 /// Shared §5.13.3/§5.15.3 gate for the four Update/Final entry points:
 /// resolve the active op's mechanism and tear the op down if it is
-/// single-part-only.
+/// single-part-only (`signing` selects the sign-side rule for the stateful
+/// mechanisms, see [`stateful_sign_mech`]).
 ///
 /// Return code for the single-part-only case, pinned from the spec
 /// (https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf): the §5.13.3 C_SignUpdate and
@@ -15701,12 +16024,13 @@ fn multipart_op_mech(
     h_session: u32,
     op_state: &crate::state::Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>>,
     acc: &crate::state::Sharded<HashMap<u32, Vec<u8>>>,
+    signing: bool,
 ) -> Result<u32, u32> {
     let mech = match op_state.with(|s| s.shard(h_session).get(&h_session).map(|st| st.0)) {
         Some(m) => m,
         None => return Err(CKR_OPERATION_NOT_INITIALIZED),
     };
-    if !sign_mech_supports_multipart(mech) {
+    if !(sign_mech_supports_multipart(mech) || (signing && stateful_sign_mech(mech))) {
         op_state.with(|s| s.shard(h_session).remove(&h_session));
         acc.with(|s| s.shard(h_session).remove(&h_session));
         return Err(CKR_OPERATION_NOT_INITIALIZED);
@@ -15798,7 +16122,7 @@ pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC, true) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -15827,7 +16151,7 @@ fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mu
     // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(pul_signature_len);
-    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC, true) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -15868,7 +16192,7 @@ pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC, false) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -15894,7 +16218,7 @@ fn C_VerifyFinal_impl(h_session: u32, p_signature: *mut u8, ul_signature_len: u3
     // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(p_signature);
-    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC, false) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -16979,8 +17303,13 @@ pub fn C_SetPIN(
                 let (cur_salt, cur_hash) = match (&token.user_pin_salt, &token.user_pin_hash) {
                     (Some(s), Some(h)) => (*s, *h),
                     // No user PIN exists yet (C_InitPIN never ran) — there is
-                    // nothing to verify the old PIN against.
-                    _ => return CKR_USER_PIN_NOT_INITIALIZED,
+                    // nothing to verify the old PIN against, so the old PIN
+                    // cannot be correct. CKR_PIN_INCORRECT, which C_SetPIN's
+                    // return list carries: CKR_USER_PIN_NOT_INITIALIZED "can
+                    // only be returned by C_Login and C_LoginUser" (v3.3
+                    // function_return_values.md, TC commit d816a38) and is
+                    // not in the v3.2 §5.6.7 C_SetPIN list either.
+                    _ => return CKR_PIN_INCORRECT,
                 };
                 if hash_pin(old_pin, &cur_salt) != cur_hash {
                     return CKR_PIN_INCORRECT;
@@ -17200,6 +17529,11 @@ pub fn C_CopyObject(
         // K0B §8: replication attributes are never caller-supplied here.
         return CKR_ATTRIBUTE_READ_ONLY;
     }
+    // A template attribute in the new key's template must be well formed
+    // and not nested (key_objects.md "Template Attributes").
+    if let Err(rv) = unsafe { crate::crypto::handlers::check_template_arrays(p_template, ul_count) } {
+        return rv;
+    }
     nonnull!(ph_new_object);
     if p_template.is_null() && ul_count > 0 {
         return CKR_ARGUMENTS_BAD;
@@ -17211,16 +17545,16 @@ pub fn C_CopyObject(
         let tmpl_ptr = p_template as *mut usize;
         let mut template = Attributes::new();
         for i in 0..ul_count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+            let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if val_ptr.is_null() && val_len > 0 {
                 return CKR_ATTRIBUTE_VALUE_INVALID;
             }
-            let mut v = vec![0u8; val_len as usize];
-            if val_len > 0 {
-                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-            }
+            let v = match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
             template.insert(attr_type, v);
         }
         match copy_object_from_attrs(h_session, h_object, template) {
@@ -17342,16 +17676,20 @@ pub fn C_SetAttributeValue(
     unsafe {
         let tmpl_ptr = p_template as *mut usize;
         for i in 0..ul_count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+            let attr_type = crate::crypto::handlers::canonical_attr_type(*tmpl_ptr.add((i * 3) as usize) as u32);
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if val_ptr.is_null() && val_len > 0 {
                 return CKR_ATTRIBUTE_VALUE_INVALID;
             }
-            let mut v = vec![0u8; val_len as usize];
-            if val_len > 0 {
-                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
-            }
+            // v3.3 key_objects.md "Template Attributes": a template attribute
+            // received "via C_SetAttributeValue" MUST be deep-copied. This
+            // path copied the caller's CK_ATTRIBUTE structs verbatim, i.e.
+            // stored pointers into caller memory.
+            let v = match crate::crypto::handlers::template_entry_value(attr_type, val_ptr, val_len as usize) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
             updates.push((attr_type, v));
         }
     }
@@ -20766,8 +21104,10 @@ mod object_mgmt_ffi_tests {
             );
         });
 
-        // Public session, user PIN never initialized → CKR_USER_PIN_NOT_INITIALIZED.
-        assert_eq!(pin_call(PIN_SESSION_RW, "anything", "new-pin-1"), CKR_USER_PIN_NOT_INITIALIZED);
+        // Public session, user PIN never initialized → CKR_PIN_INCORRECT (the
+        // only-from-C_Login code CKR_USER_PIN_NOT_INITIALIZED is not in the
+        // C_SetPIN list; v3.3 function_return_values.md).
+        assert_eq!(pin_call(PIN_SESSION_RW, "anything", "new-pin-1"), CKR_PIN_INCORRECT);
 
         // R/O session refused outright (checked before PIN verification).
         assert_eq!(pin_call(PIN_SESSION_RO, "so-pin-77", "so-pin-88"), CKR_SESSION_READ_ONLY);
@@ -24674,8 +25014,10 @@ mod multipart_sign_verify_ffi_tests {
         // 0x1 = CKM_RSA_PKCS (raw, digest-less — value from pkcs11t.h; the
         // constant is not defined in constants.rs).
         const CKM_RSA_PKCS_RAW: u32 = 0x0000_0001;
-        // Genuinely single-part: raw RSA/ECDSA (caller supplies the digest) and
-        // the stateful HSS/XMSS schemes. Pure ML-DSA / SLH-DSA / EdDSA are NOT
+        // Genuinely single-part: raw RSA/ECDSA (caller supplies the digest) and,
+        // for VERIFY only, the stateful HSS/XMSS schemes (the v3.3 draft made
+        // their signing multi-part; see stateful_sign_mech and
+        // pkcs11_v33_audit_tests). Pure ML-DSA / SLH-DSA / EdDSA are NOT
         // listed — they gained multi-part buffering (sign_mech_supports_multipart).
         //
         // Each mechanism gets a key of its OWN type: the init now checks
@@ -24700,22 +25042,24 @@ mod multipart_sign_verify_ffi_tests {
                 o.borrow_mut().insert(TYPED_KEY, attrs);
             });
             const HMAC_KEY: u32 = TYPED_KEY;
-            // SignUpdate path.
-            assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
-            assert_eq!(
-                s_update(SESSION, &data),
-                CKR_OPERATION_NOT_INITIALIZED,
-                "SignUpdate mech 0x{mech:x}"
-            );
-            // The op was terminated — a new Init is not CKR_OPERATION_ACTIVE.
-            assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "re-init 0x{mech:x}");
-            // SignFinal path terminates too.
-            assert_eq!(
-                C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
-                CKR_OPERATION_NOT_INITIALIZED,
-                "SignFinal mech 0x{mech:x}"
-            );
-            assert!(!SIGN_STATE.shard(SESSION).contains_key(&SESSION));
+            if !stateful_sign_mech(mech) {
+                // SignUpdate path.
+                assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
+                assert_eq!(
+                    s_update(SESSION, &data),
+                    CKR_OPERATION_NOT_INITIALIZED,
+                    "SignUpdate mech 0x{mech:x}"
+                );
+                // The op was terminated — a new Init is not CKR_OPERATION_ACTIVE.
+                assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "re-init 0x{mech:x}");
+                // SignFinal path terminates too.
+                assert_eq!(
+                    C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
+                    CKR_OPERATION_NOT_INITIALIZED,
+                    "SignFinal mech 0x{mech:x}"
+                );
+                assert!(!SIGN_STATE.shard(SESSION).contains_key(&SESSION));
+            }
 
             // Verify side.
             assert_eq!(verify_init(SESSION, mech, HMAC_KEY), CKR_OK);
@@ -28122,6 +28466,12 @@ mod composite_sig_tests;
 #[cfg(test)]
 #[path = "xmss_keys_remaining_tests.rs"]
 mod xmss_keys_remaining_tests;
+
+/// PKCS#11 v3.2 → v3.3 working-draft delta-audit gaps (2026-10-21) — see the
+/// module's own docs.
+#[cfg(test)]
+#[path = "pkcs11_v33_audit_tests.rs"]
+mod pkcs11_v33_audit_tests;
 
 /// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
 /// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.

@@ -1579,6 +1579,15 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
         // modify-after-creation footnote, and a client that could raise it
         // would be inviting the engine to reuse an exhausted key.
         CKA_HSS_KEYS_REMAINING,
+        // The HSS scheme (hss.md key tables; none carries the
+        // modify-after-creation footnote): the remaining-signature count is
+        // computed from CKA_HSS_LMS_TYPES (native::hbs::sign_commit), so a
+        // rewritable list would let a caller restate the key's capacity.
+        CKA_HSS_LEVELS,
+        CKA_HSS_LMS_TYPE,
+        CKA_HSS_LMOTS_TYPE,
+        CKA_HSS_LMS_TYPES,
+        CKA_HSS_LMOTS_TYPES,
     ];
     if READ_ONLY.contains(&attr_type) {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
