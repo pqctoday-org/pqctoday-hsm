@@ -18,7 +18,17 @@ Used by:
 - `tests/pqc_interop_engine.rs` — drives the engine against `pqc-interop/`'s vectors,
   extracted from the OASIS 1452-transcript PQC interop set (see that row below).
 - `src/ops/validate.rs` (`external_composite_vectors_verify`, a `#[cfg(test)]` unit test in
-  the lib crate, not an integration test) — drives `composite-sigs/`'s vectors.
+  the lib crate, not an integration test) — drives `composite-sigs/`'s vectors through
+  `verify_with_spki` → the engine's `CKM_COMP_SIG`.
+- `tests/composite_v33_e2e.rs` — the LAMPS composite vectors through the KMIP op handlers
+  (`Register` / `Decapsulate` / `SignatureVerify` / `Sign` / `Validate`): the engine's
+  committed copies of the upstream LAMPS files, `../rust/kat/pkcs11-v33/composite-kem/` and
+  `composite-sig/` (not duplicated here; provenance, upstream commits and sha256 in
+  `../rust/kat/pkcs11-v33/PROVENANCE.md`) — decapsulation known answers for all 12
+  composite ML-KEM sets, verification known answers (`s`, `sWithContext`) for all 18
+  composite ML-DSA sets, every `x5c` certificate parsed and validated — plus
+  `composite-sigs/`'s 4 raw vectors (incl. the high-S `.49`) through `SignatureVerify`. The brainpool
+  sets run when the engine is built with its default-on `brainpool` feature and are skipped without it.
 - `compliance/profiles/*` — references vector files for profile-driven conformance runs.
 
 ## `tests/acvp_roundtrip.rs` — what it actually covers
@@ -64,7 +74,7 @@ deterministic, so it's a genuine byte-exact KAT.
 | `aes/aes-cmac-acvp.json` | engine exposes no AES-CMAC primitive |
 | `sha/hkdf-acvp.json` | engine exposes no HKDF primitive |
 | `ecdsa/ed448-acvp.json` | engine has no Ed448 implementation (only Ed25519) |
-| `ml-dsa/composite-sigs-acvp.json` | self-pinned JOSE composite fixture (not ACVP `testGroups`); no engine composite-signature entry point |
+| `ml-dsa/composite-sigs-acvp.json` | self-pinned JOSE composite fixture (not ACVP `testGroups`); the engine's composite entry point (`CKM_COMP_SIG`, PKCS#11 v3.3 working draft) is exercised with the LAMPS vectors instead — `tests/composite_v33_e2e.rs` |
 
 **Known corpus defect:** the `sha/kmac-acvp.json` KMAC256 vector declares `macLen=512` but its
 `mac` field is only 63 bytes (truncated one byte + zero-padded). KMAC output length is

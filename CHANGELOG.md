@@ -48,7 +48,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   brainpool ECDSA and ECDH files and the draft authors' vectors and reference code. They add about 320 KB to the
   browser bundle (+9.8%), so they sit behind the cargo feature `brainpool`, on by default;
   `rust/build-wasm-bundle.sh --no-brainpool` leaves them out. brainpoolP512r1 and the twisted curves are still
-  refused with `CKR_CURVE_NOT_SUPPORTED`. KMIP does not offer brainpool keys yet.
+  refused with `CKR_CURVE_NOT_SUPPORTED`. KMIP does not offer plain brainpool EC keys yet; its composite sets include the brainpool ones.
+- **KMIP: composite ML-KEM and all 18 composite ML-DSA sets, one engine key each.** KMIP 3.0 defines no composite
+  algorithm, so these are vendor-extension `CryptographicAlgorithm` values (§11.12 `8XXXXXXX` range): the 10 further
+  composite ML-DSA sets at `0x80000075`–`0x8000007E` (next to the 8 at `0x80000066`–`0x8000006D`) and the 12
+  composite ML-KEM sets at `0x8000007F`–`0x8000008A`, named like `ML-DSA-87-ECDSA-P521` and `ML-KEM-768-X25519`
+  (the Python client knows all 30).
+  - A composite key is now one engine object (the v3.3 working-draft key above), not an ML-DSA key and a classical key
+    tied together: `CreateKeyPair` uses the engine's composite key-pair generation, `Sign` / `SignatureVerify` work
+    on composite keys (they refused them before), `Encapsulate` / `Decapsulate` use the draft's combiner, and `Get`
+    of a composite public key returns its X.509 SubjectPublicKeyInfo. Composite keys made with the old two-key form
+    are no longer read; nobody used them, and the test data was regenerated.
+  - `Certify` issues composite-KEM certificates for composite-KEM keys only. It used to label a TLS hybrid key
+    (`X25519MLKEM768`) as composite ML-KEM-768 + X25519, but those keys combine their secrets by plain
+    concatenation, so anyone following the certificate would have derived a different key; such requests are now
+    refused.
+  - Composite keys of every supported set can be replicated in the educational replication build; the copy signs or
+    decapsulates like the original.
+  - The `hybrid-migration-window` policies gain an opt-in for composite key establishment
+    (`x-pqctoday-composite-kem=required`, or `x-pqctoday-assurance=high` for ML-KEM-1024 + ECDH-P384), in the
+    single file and in a new `hybrid-migration-window-key-establishment` module.
+  - Checked through KMIP against the draft authors' test vectors (decapsulation for all 12 sets, verification for all
+    18, and their certificates).
 - **Rust engine: XMSS and XMSS^MT private keys report `CKA_KEYS_REMAINING`.** The v3.3 working draft gives these
   keys the standard remaining-signatures attribute already used by HSS. It is set at key generation, goes down with
   every signature, and is capped at 2^32-1 for trees larger than that.
