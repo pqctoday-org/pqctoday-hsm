@@ -375,10 +375,10 @@ PINNED = {
     "CKM_HPKE_KEM_KEY_PAIR_GEN": (0x80000013, "vendor"),
     "CKM_HPKE": (0x80000014, "vendor"),
     "CKK_HPKE_KEM": (0x80000003, "vendor"),
-    # ECDSA with a caller-supplied nonce k — a deliberate key-recovery
-    # teaching primitive (SECURITY.md). Next free mechanism codepoint after
-    # CKM_HPKE in the priv allocation ledger.
-    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": (0x80000015, "vendor"),
+    # 0x80000015 (CKM_PQCTODAY_ECDSA_EXPLICIT_K) RETIRED 2026-10-22: ECDSA takes
+    # k as the optional CKM_ECDSA parameter instead (optional-input model, see
+    # SECURITY.md). The codepoint stays reserved and is never re-used
+    # (kmip/pkcs11-mech-manifest.json `retired`).
     # K0B key hierarchy / replication (docs/proposals/pqctoday-key-replication-
     # interface-1.0.md §4). Reserved by the private authority, landed in pqctoday-priv main by PR #147 (merge 62044042; commits 7c497c34, 5165c313; formerly 36340f93/f2e5cfa). The
     # two mechanisms are engine-internal (function-key allowlists only) and
@@ -871,7 +871,6 @@ VENDOR_PRESENCE = {
     "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": "both",
     "CKM_HPKE_KEM_KEY_PAIR_GEN": "both",
     "CKM_HPKE": "both",
-    "CKM_PQCTODAY_ECDSA_EXPLICIT_K": "both",
 
     # Engine-internal storage. These never cross the PKCS#11 boundary — the
     # Rust engine labels them so in its own source ("Private attribute: stores

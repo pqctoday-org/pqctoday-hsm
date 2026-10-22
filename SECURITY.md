@@ -127,35 +127,48 @@ Cross-Origin-Opener-Policy: same-origin
 4. Use `Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'` to prevent code injection
 5. Zeroize keys via `C_DestroyObject` when no longer needed (the Rust module zeroizes `CKA_VALUE` on destroy)
 
-## Deliberate key-recovery primitive: `CKM_PQCTODAY_ECDSA_EXPLICIT_K`
+## Optional test inputs for randomised operations (outside the PKCS#11 standard)
 
-Both engines ship a vendor mechanism, `CKM_PQCTODAY_ECDSA_EXPLICIT_K`
-(`0x80000015`), that signs ECDSA with a nonce **k chosen by the caller**. It is
-there to teach one lesson: an ECDSA nonce that leaks, or is reused, gives away
-the private key. From a single signature (r, s) over a digest z, anyone who
-knows k computes
+Some NIST ACVP tests hand the module the value it would otherwise draw at
+random, then check for one exact answer. Both engines therefore accept that
+value as an **optional extra input** on the operations below. If the caller
+leaves it out, the engine draws the value itself exactly as the standard says,
+so a caller using only standard PKCS#11 sees no difference. These inputs are
+not defined by PKCS#11 v3.2 or the v3.3 working draft; FIPS 203, 204 and 205
+reserve such interfaces for testing, and a validated module would keep them out
+of its approved mode. Like the rest of this module, they are for education and
+development only (see recommendation 1 above).
 
-    d = r⁻¹ · (s·k − z) mod n
+| Mechanism | Operation | Optional input |
+|---|---|---|
+| `CKM_ML_KEM` | `C_EncapsulateKey` | the mechanism parameter is m (32 bytes) |
+| `CKM_ECDSA` | `C_Sign` | the mechanism parameter is k (curve-order length, 1 ≤ k < n) |
+| `CKM_ML_DSA`, `CKM_HASH_ML_DSA*`, `CKM_ML_DSA_EXTERNAL_MU` | sign | rnd (32 bytes), in the extended signing structure |
+| `CKM_SLH_DSA`, `CKM_HASH_SLH_DSA*` | sign | addrnd (n bytes), in the extended signing structure |
+| `CKM_SLH_DSA` | sign, verify | `messageEncoding = internal`: the message is used as given (FIPS 205 slh_sign/slh_verify_internal) |
+| `CKM_COMP_KEM`, `CKM_COMP_SIG` (Rust engine) | encapsulate, sign | the random values of both components, concatenated |
 
-A caller who can use this mechanism on a key can therefore always recover that
-key. Treat it as equivalent to being able to export the key.
+The extended signing structures (`CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT`,
+`CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT`, `vendor_mechanisms.h`) are the
+standard structures followed by `pRandom`, `ulRandomLen` and `messageEncoding`;
+the engine recognises them by their exact size. A supplied value with
+`CKH_DETERMINISTIC_REQUIRED`, a wrong length, or a parameter on decapsulation
+or verification is refused with `CKR_MECHANISM_PARAM_INVALID` at `Init`.
+Whenever a supplied value is used, the operation log records `test_input=`.
 
-- **What it takes:** the same input as `CKM_ECDSA` (the caller's digest). The
-  mechanism parameter is k itself, big-endian, exactly the curve order's byte
-  length, with 1 ≤ k < n. Anything else is `CKR_MECHANISM_PARAM_INVALID` at
-  `C_SignInit`.
-- **Scope:** sign only, single-part, P-256 / P-384 / P-521. Its signatures are
-  ordinary ECDSA and verify under `CKM_ECDSA`. It is present and advertised in
-  every build, native and WASM, as an education feature, not a test-only one.
-- **Evidence:** NIST ACVP ECDSA SigGen (FIPS 186-5) vectors, which are random-k
-  and so reproducible only when k is an input, byte-match in both engines
-  (`tests/acvp/ecdsa_siggen_explicit_k_test.json`).
-- **Turning it off:**
-  - *Per key, both engines:* set `CKA_ALLOWED_MECHANISMS` on the key without
-    this mechanism in it.
-  - *Whole token, C++ engine:* `slots.mechanisms = -CKM_PQCTODAY_ECDSA_EXPLICIT_K`
-    in `softhsm2.conf`.
-  - The Rust engine has no token-wide switch.
+**ECDSA k recovers the key.** From one signature (r, s) over a digest z made
+with a known k, anyone computes d = r⁻¹ · (s·k − z) mod n. A caller who can
+supply k for a key can therefore always recover that key; treat it as
+equivalent to being able to export the key. Signatures made this way are
+ordinary ECDSA and verify normally. Likewise, a chosen ML-DSA or SLH-DSA random
+value removes the protection hedged signing gives against side-channel and
+fault attacks.
+
+There is no switch or per-key guard: the inputs are available in every build,
+on every key (owner decision, 21 October 2026), because the module as a whole
+is an educational tool. The former vendor mechanism
+`CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`) is **retired**: both engines
+refuse it and no longer advertise it, and the codepoint is never re-used.
 
 ## Disclosure Policy
 
