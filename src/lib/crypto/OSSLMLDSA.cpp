@@ -364,6 +364,9 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	{
 		signData = dataToSign.const_byte_str();
 		signDataLen = dataToSign.size();
+		// Internal message encoding (extended sign context): the caller's
+		// data IS M' (FIPS 204 Alg 7 Sign_internal), signed as given.
+		if (mldsaParams && mldsaParams->internalEncoding) useRawEncoding = true;
 	}
 
 	// Pre-size the output buffer to the maximum signature length
@@ -389,7 +392,9 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	// Set OpenSSL signature parameters (context, hedging, encoding mode)
 	if (mldsaParams)
 	{
-		OSSL_PARAM osslParams[4];  // max: DETERMINISTIC + one-of{MESSAGE_ENCODING,MU} + terminator
+		// max: DETERMINISTIC + CONTEXT_STRING + one-of{MESSAGE_ENCODING,MU}
+		// + TEST_ENTROPY + terminator
+		OSSL_PARAM osslParams[6];
 		int nParams = 0;
 		int deterministic = 0;
 		int msgEncoding = 1;  // 1 = pure message (default)
@@ -426,6 +431,16 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 		{
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_MU, &mu);
+		}
+
+		// Caller-supplied rnd (extended sign context; FIPS 204 Alg 7's rnd
+		// instead of a fresh draw). Validated at C_SignInit: 32 bytes, and
+		// never with CKH_DETERMINISTIC_REQUIRED.
+		if (mldsaParams->randomLen > 0)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_octet_string(
+				OSSL_SIGNATURE_PARAM_TEST_ENTROPY,
+				(void*)mldsaParams->random, mldsaParams->randomLen);
 		}
 
 		if (nParams > 0)
@@ -547,6 +562,8 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	{
 		verifyData = originalData.const_byte_str();
 		verifyDataLen = originalData.size();
+		// Internal message encoding: M' as given (FIPS 204 Alg 8).
+		if (mldsaParams && mldsaParams->internalEncoding) useRawEncoding = true;
 	}
 
 	EVP_MD_CTX* ctx = EVP_MD_CTX_new();

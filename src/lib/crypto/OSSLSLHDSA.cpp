@@ -380,9 +380,14 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	// HashSLH-DSA signature verified. Hence: message-encoding 0 (OpenSSL
 	// 3.5+ OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, "raw") and NO context
 	// param, because the context is already inside M'.
+	//
+	// Internal message encoding (extended sign context): the caller's data IS
+	// M (FIPS 205 Alg 19 slh_sign_internal) -- the same raw encoding, no
+	// context (validated empty at C_SignInit).
 	const bool preEncoded = slhdsaParams &&
-	                        (slhdsaParams->preHash || slhdsaParams->phmInput);
-	OSSL_PARAM osslParams[4];
+	                        (slhdsaParams->preHash || slhdsaParams->phmInput ||
+	                         slhdsaParams->internalEncoding);
+	OSSL_PARAM osslParams[5];  // CONTEXT_STRING, MESSAGE_ENCODING, DETERMINISTIC, TEST_ENTROPY, end
 	int nParams = 0;
 	int deterministic = 0;
 	int msgEncoding = 0;
@@ -404,6 +409,15 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 			deterministic = 1;
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_DETERMINISTIC, &deterministic);
+		}
+		// Caller-supplied addrnd (FIPS 205 Alg 19's opt_rand instead of a
+		// fresh draw). Validated at C_SignInit: exactly n bytes for the key,
+		// never with CKH_DETERMINISTIC_REQUIRED.
+		if (slhdsaParams->randomLen > 0)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_octet_string(
+				OSSL_SIGNATURE_PARAM_TEST_ENTROPY,
+				(void*)slhdsaParams->random, slhdsaParams->randomLen);
 		}
 	}
 	osslParams[nParams] = OSSL_PARAM_construct_end();
@@ -519,8 +533,10 @@ bool OSSLSLHDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	// EVP_DigestVerifyInit_ex so slh_dsa_digest_signverify_init receives them.
 	// Pre-hash: verifyData is the complete M' -- raw message encoding, no
 	// context param (see sign()'s comment; FIPS 205 §10.3 Algorithm 25).
+	// Internal message encoding: M as given (FIPS 205 Alg 20), same raw path.
 	const bool preEncoded = slhdsaParams &&
-	                        (slhdsaParams->preHash || slhdsaParams->phmInput);
+	                        (slhdsaParams->preHash || slhdsaParams->phmInput ||
+	                         slhdsaParams->internalEncoding);
 	OSSL_PARAM osslParams[3];
 	int nParams = 0;
 	int msgEncoding = 0;

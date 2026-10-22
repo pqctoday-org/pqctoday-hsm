@@ -144,7 +144,8 @@ struct AsymMech
 		HASH_SLHDSA_SHA3_512,// CKM_HASH_SLH_DSA_SHA3_512
 		HASH_SLHDSA_SHAKE128,// CKM_HASH_SLH_DSA_SHAKE128
 		HASH_SLHDSA_SHAKE256,// CKM_HASH_SLH_DSA_SHAKE256
-		ECDSA_EXPLICIT_K     // CKM_PQCTODAY_ECDSA_EXPLICIT_K (vendor; param = k)
+		ECDSA_EXPLICIT_K     // CKM_ECDSA with its optional parameter k (shape 1,
+		                     // vendor_mechanisms.h); engine-internal only
 	};
 };
 
@@ -200,6 +201,11 @@ struct MLDSA_SIGN_PARAMS
 	HashAlgo::Type hashAlg;      // hash algorithm (when preHash or phmInput)
 	size_t contextLen;           // 0-255
 	unsigned char context[255];  // FIPS 204 max context length
+	// Optional test inputs from the extended parameter form
+	// (CK_PQCTODAY_*SIGN_ADDITIONAL_CONTEXT_EXT, vendor_mechanisms.h).
+	bool internalEncoding;       // messageEncoding = internal: M' as given
+	size_t randomLen;            // 0 = absent (draw rnd as usual), else 32
+	unsigned char random[32];    // caller-supplied rnd (FIPS 204 Alg 7)
 };
 
 // EdDSA sign/verify parameters (PKCS#11 v3.2 §6.3.14 Table 73 / RFC 8032).
@@ -237,6 +243,11 @@ struct SLHDSA_SIGN_PARAMS
 	HashAlgo::Type hashAlg;      // hash algorithm (when preHash or phmInput)
 	size_t contextLen;           // 0-255
 	unsigned char context[255];  // FIPS 205 max context length
+	// Optional test inputs from the extended parameter form
+	// (CK_PQCTODAY_*SIGN_ADDITIONAL_CONTEXT_EXT, vendor_mechanisms.h).
+	bool internalEncoding;       // messageEncoding = internal: M as given
+	size_t randomLen;            // 0 = absent, else n for the key's set
+	unsigned char random[32];    // caller-supplied addrnd (FIPS 205 Alg 19)
 };
 
 class AsymmetricAlgorithm

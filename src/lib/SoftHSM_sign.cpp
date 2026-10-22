@@ -530,7 +530,190 @@ static CK_RV parseEdDSAParams(CK_MECHANISM_PTR pMechanism, EDDSA_SIGN_PARAMS& ou
 }
 #endif
 
-static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAMS& out)
+// Where a parsed sign context will be used. The extended parameter form
+// (vendor_mechanisms.h, "Optional caller-supplied randomness") has rules that
+// depend on it: a random value is a signing input only, and message-based
+// signing refuses the extended form altogether.
+enum SignCtxUse { SIGNCTX_SIGN, SIGNCTX_VERIFY, SIGNCTX_MESSAGE };
+
+// The fields of CK_SIGN_ADDITIONAL_CONTEXT / CK_HASH_SIGN_ADDITIONAL_CONTEXT
+// or their extended forms, read from the caller's buffer.
+struct SignCtxFields
+{
+	CK_HEDGE_TYPE hedgeVariant;
+	CK_BYTE_PTR pContext;
+	CK_ULONG ulContextLen;
+	CK_MECHANISM_TYPE hash;      // hash form only
+	bool extended;
+	CK_BYTE_PTR pRandom;
+	CK_ULONG ulRandomLen;
+	CK_ULONG messageEncoding;
+};
+
+// The one place that decides "standard or extended form" (plan M3): by
+// ulParameterLen alone, exactly the standard size or exactly the extended
+// size for this ABI (sizeof tracks wasm32 vs LP64). Anything else is
+// CKR_MECHANISM_PARAM_INVALID. `hashForm` selects the CK_HASH_* layout.
+static CK_RV readSignContext(CK_MECHANISM_PTR pMechanism, bool hashForm, SignCtxFields& f)
+{
+	memset(&f, 0, sizeof(f));
+	const CK_ULONG len = pMechanism->ulParameterLen;
+	if (!hashForm)
+	{
+		if (len == sizeof(CK_SIGN_ADDITIONAL_CONTEXT))
+		{
+			const CK_SIGN_ADDITIONAL_CONTEXT* c = (const CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
+			f.hedgeVariant = c->hedgeVariant;
+			f.pContext = c->pContext;
+			f.ulContextLen = c->ulContextLen;
+			return CKR_OK;
+		}
+		if (len == sizeof(CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT))
+		{
+			const CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT* c =
+				(const CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT*)pMechanism->pParameter;
+			f.hedgeVariant = c->hedgeVariant;
+			f.pContext = c->pContext;
+			f.ulContextLen = c->ulContextLen;
+			f.extended = true;
+			f.pRandom = c->pRandom;
+			f.ulRandomLen = c->ulRandomLen;
+			f.messageEncoding = c->messageEncoding;
+			return CKR_OK;
+		}
+		ERROR_MSG("Invalid sign context parameter size (%lu; expected %lu or %lu)",
+			(unsigned long)len, (unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT),
+			(unsigned long)sizeof(CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT));
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (len == sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
+	{
+		const CK_HASH_SIGN_ADDITIONAL_CONTEXT* c = (const CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
+		f.hedgeVariant = c->hedgeVariant;
+		f.pContext = c->pContext;
+		f.ulContextLen = c->ulContextLen;
+		f.hash = c->hash;
+		return CKR_OK;
+	}
+	if (len == sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT))
+	{
+		const CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT* c =
+			(const CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT*)pMechanism->pParameter;
+		f.hedgeVariant = c->hedgeVariant;
+		f.pContext = c->pContext;
+		f.ulContextLen = c->ulContextLen;
+		f.hash = c->hash;
+		f.extended = true;
+		f.pRandom = c->pRandom;
+		f.ulRandomLen = c->ulRandomLen;
+		f.messageEncoding = c->messageEncoding;
+		return CKR_OK;
+	}
+	ERROR_MSG("Invalid hash sign context parameter size (%lu; expected %lu or %lu)",
+		(unsigned long)len, (unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT),
+		(unsigned long)sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT));
+	return CKR_MECHANISM_PARAM_INVALID;
+}
+
+// True when a CK_MECHANISM carries the extended sign-context form (used by
+// message-based signing, which refuses it, and by the operation log).
+static bool takesSignContext(CK_MECHANISM_TYPE mech)
+{
+	switch (mech)
+	{
+		case CKM_ML_DSA: case CKM_ML_DSA_EXTERNAL_MU: case CKM_HASH_ML_DSA:
+		case CKM_HASH_ML_DSA_SHA224: case CKM_HASH_ML_DSA_SHA256:
+		case CKM_HASH_ML_DSA_SHA384: case CKM_HASH_ML_DSA_SHA512:
+		case CKM_HASH_ML_DSA_SHA3_224: case CKM_HASH_ML_DSA_SHA3_256:
+		case CKM_HASH_ML_DSA_SHA3_384: case CKM_HASH_ML_DSA_SHA3_512:
+		case CKM_HASH_ML_DSA_SHAKE128: case CKM_HASH_ML_DSA_SHAKE256:
+		case CKM_SLH_DSA: case CKM_HASH_SLH_DSA:
+		case CKM_HASH_SLH_DSA_SHA224: case CKM_HASH_SLH_DSA_SHA256:
+		case CKM_HASH_SLH_DSA_SHA384: case CKM_HASH_SLH_DSA_SHA512:
+		case CKM_HASH_SLH_DSA_SHA3_224: case CKM_HASH_SLH_DSA_SHA3_256:
+		case CKM_HASH_SLH_DSA_SHA3_384: case CKM_HASH_SLH_DSA_SHA3_512:
+		case CKM_HASH_SLH_DSA_SHAKE128: case CKM_HASH_SLH_DSA_SHAKE256:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool isExtendedSignContext(CK_MECHANISM_PTR pMechanism)
+{
+	if (pMechanism == NULL_PTR || pMechanism->pParameter == NULL_PTR) return false;
+	if (!takesSignContext(pMechanism->mechanism)) return false;
+	return pMechanism->ulParameterLen == sizeof(CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT) ||
+	       pMechanism->ulParameterLen == sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT);
+}
+
+// The extension's own rules (plan M3), common to ML-DSA and SLH-DSA. On
+// success copies the random value into `random`/`randomLen` and sets
+// `internal`. `maxRandom` bounds the copy; the exact length is checked by
+// the caller (32 for ML-DSA here, n for SLH-DSA once the key is known).
+static CK_RV applySignContextExtension(CK_MECHANISM_PTR pMechanism, const SignCtxFields& f,
+                                       SignCtxUse use, unsigned char* random, size_t maxRandom,
+                                       size_t& randomLen, bool& internal)
+{
+	randomLen = 0;
+	internal = false;
+	if (!f.extended) return CKR_OK;
+	if (use == SIGNCTX_MESSAGE)
+	{
+		ERROR_MSG("Message-based signing does not take the extended sign context");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (f.messageEncoding != PQCTODAY_MESSAGE_ENCODING_STANDARD &&
+	    f.messageEncoding != PQCTODAY_MESSAGE_ENCODING_INTERNAL)
+	{
+		ERROR_MSG("Unknown messageEncoding %lu", (unsigned long)f.messageEncoding);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (f.messageEncoding == PQCTODAY_MESSAGE_ENCODING_INTERNAL)
+	{
+		// FIPS 204 Sign/Verify_internal and FIPS 205 slh_sign/slh_verify_
+		// _internal have no context and no pre-hash: pure mechanisms only.
+		if (pMechanism->mechanism != CKM_ML_DSA && pMechanism->mechanism != CKM_SLH_DSA)
+		{
+			ERROR_MSG("Internal message encoding needs CKM_ML_DSA or CKM_SLH_DSA");
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		if (f.ulContextLen != 0)
+		{
+			ERROR_MSG("Internal message encoding takes no context");
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		internal = true;
+	}
+	if (f.ulRandomLen == 0) return CKR_OK;
+	if (f.pRandom == NULL_PTR)
+	{
+		ERROR_MSG("pRandom is NULL with non-zero ulRandomLen");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (use != SIGNCTX_SIGN)
+	{
+		ERROR_MSG("A random value is a signing input; verification refuses it");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (f.hedgeVariant != CKH_HEDGE_PREFERRED && f.hedgeVariant != CKH_HEDGE_REQUIRED)
+	{
+		ERROR_MSG("A supplied random value contradicts hedgeVariant %lu",
+			(unsigned long)f.hedgeVariant);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (f.ulRandomLen > maxRandom)
+	{
+		ERROR_MSG("Supplied random value too long (%lu)", (unsigned long)f.ulRandomLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	memcpy(random, f.pRandom, f.ulRandomLen);
+	randomLen = f.ulRandomLen;
+	return CKR_OK;
+}
+
+static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAMS& out,
+                                   SignCtxUse use)
 {
 	memset(&out, 0, sizeof(out));
 	out.hashAlg = HashAlgo::Unknown;
@@ -541,129 +724,85 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 		return CKR_OK;
 	}
 
-	// Only CKM_HASH_ML_DSA (generic) uses CK_HASH_SIGN_ADDITIONAL_CONTEXT (16 bytes).
-	// The specific CKM_HASH_ML_DSA_SHA256 etc. use CK_SIGN_ADDITIONAL_CONTEXT (12 bytes)
+	// Only CKM_HASH_ML_DSA (generic) uses CK_HASH_SIGN_ADDITIONAL_CONTEXT.
+	// The specific CKM_HASH_ML_DSA_SHA256 etc. use CK_SIGN_ADDITIONAL_CONTEXT
 	// — the hash algorithm is implicit in the mechanism constant.
 	bool isHashMech = (pMechanism->mechanism == CKM_HASH_ML_DSA);
 
-	if (!isHashMech)
+	SignCtxFields f;
+	CK_RV rv = readSignContext(pMechanism, isHashMech, f);
+	if (rv != CKR_OK) return rv;
+
+	switch (f.hedgeVariant)
 	{
-		// CK_SIGN_ADDITIONAL_CONTEXT (12 bytes on 32-bit, may vary)
-		if (pMechanism->ulParameterLen != sizeof(CK_SIGN_ADDITIONAL_CONTEXT))
-		{
-			ERROR_MSG("Invalid ML-DSA parameter size (%lu, expected %lu)",
-				pMechanism->ulParameterLen, (unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT));
+		case CKH_HEDGE_PREFERRED:
+			out.deterministic = false;
+			out.hedgeRequired = false;
+			break;
+		case CKH_HEDGE_REQUIRED:
+			out.deterministic = false;
+			out.hedgeRequired = true;
+			break;
+		case CKH_DETERMINISTIC_REQUIRED:
+			out.deterministic = true;
+			out.hedgeRequired = false;
+			break;
+		default:
+			ERROR_MSG("Invalid hedge variant %lu", f.hedgeVariant);
 			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		CK_SIGN_ADDITIONAL_CONTEXT* ctx =
-			(CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
-
-		switch (ctx->hedgeVariant)
-		{
-			case CKH_HEDGE_PREFERRED:
-				out.deterministic = false;
-				out.hedgeRequired = false;
-				break;
-			case CKH_HEDGE_REQUIRED:
-				out.deterministic = false;
-				out.hedgeRequired = true;
-				break;
-			case CKH_DETERMINISTIC_REQUIRED:
-				out.deterministic = true;
-				out.hedgeRequired = false;
-				break;
-			default:
-				ERROR_MSG("Invalid hedge variant %lu", ctx->hedgeVariant);
-				return CKR_MECHANISM_PARAM_INVALID;
-		}
-
-		if (ctx->ulContextLen > 255)
-		{
-			ERROR_MSG("ML-DSA context string too long (%lu, max 255)", ctx->ulContextLen);
-			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		out.contextLen = ctx->ulContextLen;
-		if (ctx->ulContextLen > 0)
-		{
-			if (ctx->pContext == NULL_PTR)
-			{
-				ERROR_MSG("ML-DSA context pointer is NULL with non-zero length");
-				return CKR_MECHANISM_PARAM_INVALID;
-			}
-			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
-		}
-		out.preHash = false;
 	}
-	else
+
+	if (f.ulContextLen > 255)
 	{
-		// CK_HASH_SIGN_ADDITIONAL_CONTEXT (16 bytes on 32-bit, may vary)
-		if (pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
-		{
-			ERROR_MSG("Invalid HashML-DSA parameter size (%lu, expected %lu)",
-				pMechanism->ulParameterLen,
-				(unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		CK_HASH_SIGN_ADDITIONAL_CONTEXT* ctx =
-			(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
-
-		switch (ctx->hedgeVariant)
-		{
-			case CKH_HEDGE_PREFERRED:
-				out.deterministic = false;
-				out.hedgeRequired = false;
-				break;
-			case CKH_HEDGE_REQUIRED:
-				out.deterministic = false;
-				out.hedgeRequired = true;
-				break;
-			case CKH_DETERMINISTIC_REQUIRED:
-				out.deterministic = true;
-				out.hedgeRequired = false;
-				break;
-			default:
-				ERROR_MSG("Invalid hedge variant %lu", ctx->hedgeVariant);
-				return CKR_MECHANISM_PARAM_INVALID;
-		}
-
-		if (ctx->ulContextLen > 255)
-		{
-			ERROR_MSG("ML-DSA context string too long (%lu)", ctx->ulContextLen);
-			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		out.contextLen = ctx->ulContextLen;
-		if (ctx->ulContextLen > 0)
-		{
-			if (ctx->pContext == NULL_PTR) return CKR_MECHANISM_PARAM_INVALID;
-			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
-		}
-		// Remediation R37 (phase 8): this branch (CK_HASH_SIGN_ADDITIONAL_
-		// CONTEXT) fires ONLY for the bare generic CKM_HASH_ML_DSA
-		// (isHashMech, above) -- §6.67.6, caller supplies an already-hashed
-		// PHM. phmInput, NOT preHash: preHash means "hash the message on
-		// token" (§6.67.7's ten CKM_HASH_ML_DSA_<hash> mechanisms, which
-		// reach this function via the OTHER branch and set preHash=true
-		// themselves, in the HASH_MLDSA_CASE macro). Was wrongly preHash=
-		// true here before R37 -- caused OSSLMLDSA::sign()/verify() to hash
-		// the caller's PHM a second time (live-confirmed via
-		// generic-hash-mldsa-probe before this fix).
-		out.phmInput = true;
+		ERROR_MSG("ML-DSA context string too long (%lu, max 255)", f.ulContextLen);
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
+	out.contextLen = f.ulContextLen;
+	if (f.ulContextLen > 0)
+	{
+		if (f.pContext == NULL_PTR)
+		{
+			ERROR_MSG("ML-DSA context pointer is NULL with non-zero length");
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		memcpy(out.context, f.pContext, f.ulContextLen);
+	}
+
+	rv = applySignContextExtension(pMechanism, f, use, out.random, sizeof(out.random),
+	                               out.randomLen, out.internalEncoding);
+	if (rv != CKR_OK) return rv;
+	if (out.randomLen != 0 && out.randomLen != PQCTODAY_ML_DSA_RND_LEN)
+	{
+		ERROR_MSG("ML-DSA rnd must be %u bytes (got %zu)", PQCTODAY_ML_DSA_RND_LEN, out.randomLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	// Remediation R37 (phase 8): the CK_HASH_SIGN_ADDITIONAL_CONTEXT form
+	// fires ONLY for the bare generic CKM_HASH_ML_DSA (isHashMech, above) --
+	// §6.67.6, caller supplies an already-hashed PHM. phmInput, NOT preHash:
+	// preHash means "hash the message on token" (§6.67.7's ten
+	// CKM_HASH_ML_DSA_<hash> mechanisms, which reach this function via the
+	// other form and set preHash=true themselves, in the HASH_MLDSA_CASE
+	// macro). Was wrongly preHash=true here before R37 -- caused
+	// OSSLMLDSA::sign()/verify() to hash the caller's PHM a second time.
+	out.preHash = false;
+	if (isHashMech) out.phmInput = true;
 	return CKR_OK;
 }
 
-// Parse CK_SIGN_ADDITIONAL_CONTEXT or CK_HASH_SIGN_ADDITIONAL_CONTEXT → SLHDSA_SIGN_PARAMS
-// SLH-DSA is always probabilistic; hedgeVariant is accepted but ignored.
+// Parse CK_SIGN_ADDITIONAL_CONTEXT or CK_HASH_SIGN_ADDITIONAL_CONTEXT (or
+// their extended forms) → SLHDSA_SIGN_PARAMS. hedgeVariant
+// CKH_DETERMINISTIC_REQUIRED selects the deterministic variant (FIPS 205
+// §10); other values are accepted and mean hedged.
 //
 // Parameter struct selection (PKCS#11 v3.2):
 //   CKM_HASH_SLH_DSA (generic)  → CK_HASH_SIGN_ADDITIONAL_CONTEXT (includes hash field)
 //   CKM_HASH_SLH_DSA_SHA256 etc → CK_SIGN_ADDITIONAL_CONTEXT (hash is implied by mechanism)
-//
-// When isHashMech is false (all 10 typed CKM_HASH_SLH_DSA_* variants), callers MUST supply
-// CK_SIGN_ADDITIONAL_CONTEXT, NOT CK_HASH_SIGN_ADDITIONAL_CONTEXT.  Passing the larger
-// struct to a typed variant returns CKR_ARGUMENTS_BAD with an "Invalid SLH-DSA parameter
-// size" error.
-static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PARAMS& out)
+// Any size other than the expected standard or extended one is
+// CKR_MECHANISM_PARAM_INVALID. The supplied addrnd's exact length (n for the
+// key's parameter set) is checked once the key is loaded.
+static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PARAMS& out,
+                                    SignCtxUse use)
 {
 	memset(&out, 0, sizeof(out));
 	out.hashAlg = HashAlgo::Unknown;
@@ -676,74 +815,78 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 
 	bool isHashMech = (pMechanism->mechanism == CKM_HASH_SLH_DSA);
 
-	if (!isHashMech)
+	SignCtxFields f;
+	CK_RV rv = readSignContext(pMechanism, isHashMech, f);
+	if (rv != CKR_OK) return rv;
+
+	// Honor deterministic mode (FIPS 205 §10); other hedgeVariants accepted but ignored
+	out.deterministic = (f.hedgeVariant == CKH_DETERMINISTIC_REQUIRED);
+
+	if (f.ulContextLen > 255)
 	{
-		// CK_SIGN_ADDITIONAL_CONTEXT: hedgeVariant (ignored for SLH-DSA) + context
-		if (pMechanism->ulParameterLen != sizeof(CK_SIGN_ADDITIONAL_CONTEXT))
+		ERROR_MSG("SLH-DSA context string too long (%lu, max 255)", f.ulContextLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	out.contextLen = f.ulContextLen;
+	if (f.ulContextLen > 0)
+	{
+		if (f.pContext == NULL_PTR)
 		{
-			ERROR_MSG("Invalid SLH-DSA parameter size (%lu, expected %lu)",
-				pMechanism->ulParameterLen,
-				(unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT));
+			ERROR_MSG("SLH-DSA context pointer is NULL with non-zero length");
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
-		CK_SIGN_ADDITIONAL_CONTEXT* ctx =
-			(CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
+		memcpy(out.context, f.pContext, f.ulContextLen);
+	}
 
-		// Honor deterministic mode (FIPS 205 §10); other hedgeVariants accepted but ignored
-		out.deterministic = (ctx->hedgeVariant == CKH_DETERMINISTIC_REQUIRED);
+	rv = applySignContextExtension(pMechanism, f, use, out.random, sizeof(out.random),
+	                               out.randomLen, out.internalEncoding);
+	if (rv != CKR_OK) return rv;
 
-		if (ctx->ulContextLen > 255)
-		{
-			ERROR_MSG("SLH-DSA context string too long (%lu, max 255)",
-				ctx->ulContextLen);
-			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		out.contextLen = ctx->ulContextLen;
-		if (ctx->ulContextLen > 0)
-		{
-			if (ctx->pContext == NULL_PTR)
-			{
-				ERROR_MSG("SLH-DSA context pointer is NULL with non-zero length");
-				return CKR_MECHANISM_PARAM_INVALID;
-			}
-			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
-		}
-		out.preHash = false;
+	out.preHash = false;
+	// Remediation R37 (phase 8): see parseMLDSASignContext's identical note --
+	// the hash form fires only for the bare generic CKM_HASH_SLH_DSA (§6.69.6,
+	// PHM input); phmInput, not preHash. The hash algorithm is set by the
+	// caller after this function returns.
+	if (isHashMech) out.phmInput = true;
+	return CKR_OK;
+}
+
+// FIPS 205 Table 2: n = security strength / 8 (16, 24 or 32). A supplied
+// addrnd must be exactly n bytes for the key's parameter set.
+static bool slhdsaRandomLenMatches(const SLHDSA_SIGN_PARAMS& p, unsigned long bitLength)
+{
+	return p.randomLen == 0 || p.randomLen == (size_t)(bitLength / 8);
+}
+
+// Operation-log tag for a successful init/encapsulate whose mechanism carried
+// a caller-supplied test input (plan M4 "Visible use"): "random",
+// "internal" or "random+internal"; NULL when nothing was supplied. Reads the
+// caller's (already validated) parameter.
+static const char* testInputTag(CK_MECHANISM_PTR pMechanism)
+{
+	if (pMechanism == NULL_PTR) return NULL;
+	if ((pMechanism->mechanism == CKM_ECDSA || pMechanism->mechanism == CKM_ML_KEM) &&
+	    pMechanism->ulParameterLen > 0)
+		return "random";
+	if (!isExtendedSignContext(pMechanism)) return NULL;
+	CK_ULONG randomLen, enc;
+	if (pMechanism->ulParameterLen == sizeof(CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT))
+	{
+		const CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT* c =
+			(const CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT*)pMechanism->pParameter;
+		randomLen = c->ulRandomLen;
+		enc = c->messageEncoding;
 	}
 	else
 	{
-		// CK_HASH_SIGN_ADDITIONAL_CONTEXT: hedgeVariant + context + hash
-		if (pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
-		{
-			ERROR_MSG("Invalid HashSLH-DSA parameter size (%lu, expected %lu)",
-				pMechanism->ulParameterLen,
-				(unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		CK_HASH_SIGN_ADDITIONAL_CONTEXT* ctx =
-			(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
-
-		// Honor deterministic mode (FIPS 205 §10)
-		out.deterministic = (ctx->hedgeVariant == CKH_DETERMINISTIC_REQUIRED);
-
-		if (ctx->ulContextLen > 255)
-		{
-			ERROR_MSG("SLH-DSA context string too long (%lu)", ctx->ulContextLen);
-			return CKR_MECHANISM_PARAM_INVALID;
-		}
-		out.contextLen = ctx->ulContextLen;
-		if (ctx->ulContextLen > 0)
-		{
-			if (ctx->pContext == NULL_PTR) return CKR_MECHANISM_PARAM_INVALID;
-			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
-		}
-		// Remediation R37 (phase 8): see parseMLDSASignContext's identical
-		// note -- this branch fires only for the bare generic
-		// CKM_HASH_SLH_DSA (§6.69.6, PHM input); phmInput, not preHash.
-		out.phmInput = true;
-		// hash algorithm is set by the caller after this function returns
+		const CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT* c =
+			(const CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT*)pMechanism->pParameter;
+		randomLen = c->ulRandomLen;
+		enc = c->messageEncoding;
 	}
-	return CKR_OK;
+	const bool internal = (enc == PQCTODAY_MESSAGE_ENCODING_INTERNAL);
+	if (randomLen > 0) return internal ? "random+internal" : "random";
+	return internal ? "internal" : NULL;
 }
 
 // AsymmetricAlgorithm version of C_SignInit
@@ -786,6 +929,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 #endif
 	bool isMLDSA = false;
 	bool isSLHDSA = false;
+	bool ecdsaEmptyParam = false;
 	switch(pMechanism->mechanism) {
 		case CKM_RSA_PKCS:
 			mechanism = AsymMech::RSA_PKCS;
@@ -1117,9 +1261,31 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			break;
 #ifdef WITH_ECC
 		case CKM_ECDSA:
+			// Shape 1 (vendor_mechanisms.h, "Optional caller-supplied
+			// randomness"): an optional parameter IS the nonce k. Absent
+			// (ulParameterLen 0) = standard randomised ECDSA, unchanged. k's
+			// length and range (1 <= k < n) depend on the key, so
+			// checkSignParameters checks them once the key is loaded, below.
+			// With k: single-part only (one k, one signature).
+			if (pMechanism->ulParameterLen > 0)
+			{
+				if (pMechanism->pParameter == NULL_PTR)
+				{
+					ERROR_MSG("CKM_ECDSA: NULL pParameter with non-zero length");
+					return CKR_MECHANISM_PARAM_INVALID;
+				}
+				mechanism = AsymMech::ECDSA_EXPLICIT_K;
+				bAllowMultiPartOp = false;
+				isECDSA = true;
+				param = pMechanism->pParameter;
+				paramLen = pMechanism->ulParameterLen;
+				break;
+			}
 			mechanism = AsymMech::ECDSA;
 			bAllowMultiPartOp = true;
 			isECDSA = true;
+			// A non-NULL pointer with length 0 is "absent", not a parameter.
+			if (pMechanism->pParameter != NULL_PTR) ecdsaEmptyParam = true;
 			break;
 		case CKM_ECDSA_SHA1:
 			mechanism = AsymMech::ECDSA_SHA1;
@@ -1166,23 +1332,6 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			bAllowMultiPartOp = true;
 			isECDSA = true;
 			break;
-		case CKM_PQCTODAY_ECDSA_EXPLICIT_K:
-			// Vendor, deliberate key-recovery primitive (SECURITY.md).
-			// pParameter IS k; it is required, and its length and range
-			// (1 <= k < n) depend on the key, so they are checked by
-			// checkSignParameters once the key is loaded, below. Single-part
-			// only, like CKM_ECDSA's digest input.
-			if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen == 0)
-			{
-				ERROR_MSG("CKM_PQCTODAY_ECDSA_EXPLICIT_K requires k as its parameter");
-				return CKR_MECHANISM_PARAM_INVALID;
-			}
-			mechanism = AsymMech::ECDSA_EXPLICIT_K;
-			bAllowMultiPartOp = false;
-			isECDSA = true;
-			param = pMechanism->pParameter;
-			paramLen = pMechanism->ulParameterLen;
-			break;
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
@@ -1217,7 +1366,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			mechanism = AsymMech::MLDSA;
 			bAllowMultiPartOp = true;
 			isMLDSA = true;
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_SIGN);
 			if (rv2 != CKR_OK) return rv2;
 			param = &mldsaSignParam;
 			paramLen = sizeof(mldsaSignParam);
@@ -1226,7 +1375,8 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		case CKM_HASH_ML_DSA:
 		{
 			if (pMechanism->pParameter == NULL_PTR ||
-			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
+			    (pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT) &&
+			     pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT)))
 			{
 				ERROR_MSG("CKM_HASH_ML_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
 				return CKR_MECHANISM_PARAM_INVALID;
@@ -1240,7 +1390,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			// (the provider never routes to the bare generic mechanism).
 			bAllowMultiPartOp = false;
 			isMLDSA = true;
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_SIGN);
 			if (rv2 != CKR_OK) return rv2;
 			// For generic CKM_HASH_ML_DSA, hash comes from param struct
 			CK_HASH_SIGN_ADDITIONAL_CONTEXT* hctx =
@@ -1269,7 +1419,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			mechanism = AsymMech::MECH_ENUM; \
 			bAllowMultiPartOp = true; \
 			isMLDSA = true; \
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam); \
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_SIGN); \
 			if (rv2 != CKR_OK) return rv2; \
 			mldsaSignParam.preHash = true; \
 			mldsaSignParam.hashAlg = HashAlgo::HASH_ALGO; \
@@ -1307,7 +1457,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			mechanism = AsymMech::MLDSA_EXTERNAL_MU;
 			bAllowMultiPartOp = true;
 			isMLDSA = true;
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_SIGN);
 			if (rv2 != CKR_OK) return rv2;
 			if (mldsaSignParam.contextLen > 0)
 			{
@@ -1324,7 +1474,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			// for context string (FIPS 205 §9.2) and deterministic mode (FIPS 205 §10).
 			if (pMechanism->pParameter != NULL_PTR)
 			{
-				CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
+				CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam, SIGNCTX_SIGN);
 				if (rv2 != CKR_OK) return rv2;
 				param = &slhdsaSignParam;
 				paramLen = sizeof(slhdsaSignParam);
@@ -1336,7 +1486,8 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		case CKM_HASH_SLH_DSA:
 		{
 			if (pMechanism->pParameter == NULL_PTR ||
-			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
+			    (pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT) &&
+			     pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT)))
 			{
 				ERROR_MSG("CKM_HASH_SLH_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
 				return CKR_MECHANISM_PARAM_INVALID;
@@ -1346,7 +1497,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			// identical comment above -- genuinely single-part.
 			bAllowMultiPartOp = false;
 			isSLHDSA = true;
-			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
+			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam, SIGNCTX_SIGN);
 			if (rv2 != CKR_OK) return rv2;
 			CK_HASH_SIGN_ADDITIONAL_CONTEXT* hctx =
 				(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -1375,7 +1526,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			mechanism = AsymMech::MECH_ENUM; \
 			bAllowMultiPartOp = true; \
 			isSLHDSA = true; \
-			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam); \
+			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam, SIGNCTX_SIGN); \
 			if (rv2 != CKR_OK) return rv2; \
 			slhdsaSignParam.preHash = true; \
 			slhdsaSignParam.hashAlg = HashAlgo::HASH_ALGO; \
@@ -1399,7 +1550,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 	}
 
 	// Reject unexpected parameters for parameterless mechanisms
-	if (param == NULL && pMechanism->pParameter != NULL_PTR)
+	if (param == NULL && pMechanism->pParameter != NULL_PTR && !ecdsaEmptyParam)
 	{
 		ERROR_MSG("Mechanism does not accept parameters");
 		return CKR_MECHANISM_PARAM_INVALID;
@@ -1511,6 +1662,19 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			CryptoFactory::i()->recycleAsymmetricAlgorithm(asymCrypto);
 			return CKR_GENERAL_ERROR;
 		}
+
+		// A supplied addrnd must be exactly n bytes for this key (FIPS 205
+		// Table 2) -- checked here, at init, because n is the key's.
+		if (!slhdsaRandomLenMatches(slhdsaSignParam,
+		        ((SLHDSAPrivateKey*)privateKey)->getBitLength()))
+		{
+			ERROR_MSG("SLH-DSA addrnd must be n = %lu bytes (got %zu)",
+				((SLHDSAPrivateKey*)privateKey)->getBitLength() / 8,
+				slhdsaSignParam.randomLen);
+			asymCrypto->recyclePrivateKey(privateKey);
+			CryptoFactory::i()->recycleAsymmetricAlgorithm(asymCrypto);
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
 	}
 	else
 	{
@@ -1521,7 +1685,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		return CKR_MECHANISM_INVALID;
 	}
 
-	// Key-dependent parameter checks (CKM_PQCTODAY_ECDSA_EXPLICIT_K's k).
+	// Key-dependent parameter checks (CKM_ECDSA's optional k).
 	const SignParamCheck::Type chk =
 		asymCrypto->checkSignParameters(privateKey, mechanism, param, paramLen);
 	if (chk != SignParamCheck::OK)
@@ -1639,14 +1803,20 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 	// `sess` is the join key: C_Sign / C_SignFinal cannot cheaply recover the
 	// CK_MECHANISM_TYPE (the session stores the internal AsymMech::Type), so a
 	// consumer pairs the init record with the operation records by session.
+	// test_input= appears only when a caller-supplied test input was accepted
+	// (plan M4, "Visible use"): random, internal or random+internal.
 	if (logging)
-		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s rv=%s rv_id=0x%08lx dur=%llu",
+	{
+		const char* tag = (rv == CKR_OK) ? testInputTag(pMechanism) : NULL;
+		std::string extra = tag ? std::string(" test_input=") + tag : std::string();
+		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s%s rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism->mechanism),
 		            (unsigned long)pMechanism->mechanism,
-		            keyFields.c_str(),
+		            keyFields.c_str(), extra.c_str(),
 		            OpLog::rvName(rv), (unsigned long)rv,
 		            (unsigned long long)dur);
+	}
 	if (ring)
 		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGNINIT, alg, rv, 0, dur));
 
@@ -2566,6 +2736,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 #endif
 	bool isMLDSA = false;
 	bool isSLHDSA = false;
+	bool ecdsaEmptyParam = false;
 	switch(pMechanism->mechanism) {
 		case CKM_RSA_PKCS:
 			mechanism = AsymMech::RSA_PKCS;
@@ -2895,9 +3066,18 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			break;
 #ifdef WITH_ECC
 		case CKM_ECDSA:
+			// Shape 1's k is a signing input only (vendor_mechanisms.h):
+			// verification draws no randomness and refuses a parameter.
+			// ulParameterLen 0 with a non-NULL pointer is "absent".
+			if (pMechanism->ulParameterLen > 0)
+			{
+				ERROR_MSG("CKM_ECDSA verification takes no parameter");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
 			mechanism = AsymMech::ECDSA;
 			bAllowMultiPartOp = true;
 			isECDSA = true;
+			if (pMechanism->pParameter != NULL_PTR) ecdsaEmptyParam = true;
 			break;
 		case CKM_ECDSA_SHA1:
 			mechanism = AsymMech::ECDSA_SHA1;
@@ -2978,7 +3158,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			mechanism = AsymMech::MLDSA;
 			bAllowMultiPartOp = true;
 			isMLDSA = true;
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_VERIFY);
 			if (rv2 != CKR_OK) return rv2;
 			param = &mldsaSignParam;
 			paramLen = sizeof(mldsaSignParam);
@@ -2987,7 +3167,8 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 		case CKM_HASH_ML_DSA:
 		{
 			if (pMechanism->pParameter == NULL_PTR ||
-			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
+			    (pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT) &&
+			     pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT)))
 			{
 				ERROR_MSG("CKM_HASH_ML_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
 				return CKR_MECHANISM_PARAM_INVALID;
@@ -2997,7 +3178,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			// AsymSignInit case's identical comment.
 			bAllowMultiPartOp = false;
 			isMLDSA = true;
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_VERIFY);
 			if (rv2 != CKR_OK) return rv2;
 			CK_HASH_SIGN_ADDITIONAL_CONTEXT* hctx =
 				(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -3025,7 +3206,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			mechanism = AsymMech::MECH_ENUM; \
 			bAllowMultiPartOp = true; \
 			isMLDSA = true; \
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam); \
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_VERIFY); \
 			if (rv2 != CKR_OK) return rv2; \
 			mldsaSignParam.preHash = true; \
 			mldsaSignParam.hashAlg = HashAlgo::HASH_ALGO; \
@@ -3063,7 +3244,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			mechanism = AsymMech::MLDSA_EXTERNAL_MU;
 			bAllowMultiPartOp = true;
 			isMLDSA = true;
-			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam, SIGNCTX_VERIFY);
 			if (rv2 != CKR_OK) return rv2;
 			if (mldsaSignParam.contextLen > 0)
 			{
@@ -3080,7 +3261,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			// for context string (FIPS 205 §9.2) and deterministic mode (FIPS 205 §10).
 			if (pMechanism->pParameter != NULL_PTR)
 			{
-				CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
+				CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam, SIGNCTX_VERIFY);
 				if (rv2 != CKR_OK) return rv2;
 				param = &slhdsaSignParam;
 				paramLen = sizeof(slhdsaSignParam);
@@ -3092,7 +3273,8 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 		case CKM_HASH_SLH_DSA:
 		{
 			if (pMechanism->pParameter == NULL_PTR ||
-			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
+			    (pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT) &&
+			     pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_HASH_SIGN_ADDITIONAL_CONTEXT_EXT)))
 			{
 				ERROR_MSG("CKM_HASH_SLH_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
 				return CKR_MECHANISM_PARAM_INVALID;
@@ -3102,7 +3284,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			// identical comment above -- genuinely single-part.
 			bAllowMultiPartOp = false;
 			isSLHDSA = true;
-			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
+			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam, SIGNCTX_VERIFY);
 			if (rv2 != CKR_OK) return rv2;
 			CK_HASH_SIGN_ADDITIONAL_CONTEXT* hctx =
 				(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -3131,7 +3313,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			mechanism = AsymMech::MECH_ENUM; \
 			bAllowMultiPartOp = true; \
 			isSLHDSA = true; \
-			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam); \
+			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam, SIGNCTX_VERIFY); \
 			if (rv2 != CKR_OK) return rv2; \
 			slhdsaSignParam.preHash = true; \
 			slhdsaSignParam.hashAlg = HashAlgo::HASH_ALGO; \
@@ -3155,7 +3337,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	}
 
 	// Reject unexpected parameters for parameterless mechanisms
-	if (param == NULL && pMechanism->pParameter != NULL_PTR)
+	if (param == NULL && pMechanism->pParameter != NULL_PTR && !ecdsaEmptyParam)
 	{
 		ERROR_MSG("Mechanism does not accept parameters");
 		return CKR_MECHANISM_PARAM_INVALID;
@@ -3788,7 +3970,7 @@ static CK_RV applyPerMessageParam(Session* session,
 		fakeMech.mechanism = CKM_ML_DSA;
 		fakeMech.pParameter = pParameter;
 		fakeMech.ulParameterLen = ulParameterLen;
-		CK_RV rv2 = parseMLDSASignContext(&fakeMech, mldsaParam);
+		CK_RV rv2 = parseMLDSASignContext(&fakeMech, mldsaParam, SIGNCTX_MESSAGE);
 		if (rv2 != CKR_OK) return rv2;
 
 		// Preserve preHash / phmInput / hashAlg set by the init mechanism.
@@ -3819,7 +4001,7 @@ static CK_RV applyPerMessageParam(Session* session,
 		fakeMech.mechanism = CKM_SLH_DSA;
 		fakeMech.pParameter = pParameter;
 		fakeMech.ulParameterLen = ulParameterLen;
-		CK_RV rv2 = parseSLHDSASignContext(&fakeMech, slhdsaParam);
+		CK_RV rv2 = parseSLHDSASignContext(&fakeMech, slhdsaParam, SIGNCTX_MESSAGE);
 		if (rv2 != CKR_OK) return rv2;
 
 		// Preserve preHash / phmInput / hashAlg -- see the ML-DSA branch's
@@ -3835,6 +4017,14 @@ static CK_RV applyPerMessageParam(Session* session,
 			return CKR_HOST_MEMORY;
 	}
 	return CKR_OK;
+}
+
+// Message-based signing and verification refuse the optional test inputs
+// (CKM_ECDSA's k, the extended ML-DSA / SLH-DSA sign context).
+static bool refusesMessageTestInput(CK_MECHANISM_PTR pMechanism)
+{
+	if (pMechanism->mechanism == CKM_ECDSA) return pMechanism->ulParameterLen > 0;
+	return isExtendedSignContext(pMechanism);
 }
 
 // Rebuild the per-message crypto context. See the declaration in SoftHSM.h
@@ -3875,9 +4065,11 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_SIGN);
 
-	// CKM_PQCTODAY_ECDSA_EXPLICIT_K carries no CKF_MESSAGE_SIGN: a message
-	// operation would sign every message under the one k fixed at init.
-	if (pMechanism->mechanism == CKM_PQCTODAY_ECDSA_EXPLICIT_K) return CKR_MECHANISM_INVALID;
+	// Caller-supplied test inputs (vendor_mechanisms.h) are single-operation
+	// only: a message operation would sign every message under the one k or
+	// rnd fixed at init. CKM_ECDSA with k, and the extended sign context, are
+	// refused here.
+	if (refusesMessageTestInput(pMechanism)) return CKR_MECHANISM_PARAM_INVALID;
 
 	// Reuse the existing sign inits; they validate the key, mechanism, and
 	// session. The dispatch mirrors C_SignInit's: a MAC mechanism must go to
@@ -4038,6 +4230,9 @@ CK_RV SoftHSM::C_MessageVerifyInit(CK_SESSION_HANDLE hSession,
 	// per-family cancel semantics (and the initialisation and session-handle
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_VERIFY);
+
+	// See C_MessageSignInit: no caller-supplied test inputs on message ops.
+	if (refusesMessageTestInput(pMechanism)) return CKR_MECHANISM_PARAM_INVALID;
 
 	// MAC dispatch — see C_MessageSignInit for why this is not AsymVerifyInit
 	// unconditionally.

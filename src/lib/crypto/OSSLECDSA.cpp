@@ -98,12 +98,14 @@ static unsigned char* rawSigToDer(const unsigned char* raw, size_t orderLen, siz
 	return der;
 }
 
-// ── CKM_PQCTODAY_ECDSA_EXPLICIT_K ───────────────────────────────────────────
-// ECDSA with the caller's nonce k: a deliberate key-recovery primitive for
-// teaching (SECURITY.md). OpenSSL 3.x has no public API that signs with a
-// supplied k, so FIPS 186-5 §6.4.1 steps 3-9 are done here directly with the
-// (non-deprecated) BN / EC_GROUP / EC_POINT API, k supplied instead of
-// generated. Only P-256 / P-384 / P-521.
+// ── CKM_ECDSA with a caller-supplied nonce k (shape 1, vendor_mechanisms.h) ─
+// A test input outside PKCS#11 (FIPS 186-5 ACVP SigGen needs k as an input);
+// anyone who knows k and one signature recovers the private key, which is
+// why the HSM is an education tool (SECURITY.md). OpenSSL 3.x has no public
+// API that signs with a supplied k, so FIPS 186-5 §6.4.1 steps 3-9 are done
+// here directly with the (non-deprecated) BN / EC_GROUP / EC_POINT API, k
+// supplied instead of generated. Only P-256 / P-384 / P-521. Replaces the
+// retired vendor mechanism 0x80000015.
 
 // The key's group, when it is one this mechanism covers. `tooSmall` reports a
 // known curve below the advertised 256-bit minimum (P-224).
