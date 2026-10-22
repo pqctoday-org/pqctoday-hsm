@@ -54,7 +54,7 @@ pub const CKA_ID: u32 = 0x0000_0102;
 /// then gated individually here. `param_set` is what the caller asked for
 /// (0 when the mechanism has none), so a failed keygen still records the
 /// right algorithm in the ring.
-fn emit_generate_key_pair(
+pub(super) fn emit_generate_key_pair(
     session: u32,
     mechanism: u32,
     param_set: u32,

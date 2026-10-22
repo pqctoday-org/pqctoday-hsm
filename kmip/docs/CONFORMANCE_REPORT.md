@@ -99,7 +99,7 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Asynchronous processing | ✅ **real** — job store + background executor | Poll/Cancel/Process/Query Asynchronous Requests all genuinely implemented (Phase 4) |
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
 | Split Key / Join Split Key (§6.1.12/§6.1.33) | ✅ **real** — restored 2026-08-18 after a 5-day whitelist-bug regression that failed every key while `Query` kept advertising it | §4.5 below |
-| Composite signature profiles (LAMPS draft-19 §6/§10.4) | ✅ **8/8 implemented** (`.37`/`.39`/`.40`/`.41`/`.45`/`.46`/`.48`/`.49`) | §4.6 below |
+| LAMPS composites (vendor extensions — KMIP 3.0 defines none) | ✅ **composite ML-DSA 16/18, composite ML-KEM 10/12** (the 4 brainpool sets wait for the engine); one engine object per key (PKCS#11 v3.3 working draft) | §4.6 below |
 | Baseline Server profile (§5.1.2, CSD02 draft) | ✅ **all 13 conditions met**, item 8 fully closed 2026-09-07 including §4.6 Certificate Attributes (**G2**); the §6.2 conformance clause carries the accepted, documented DSA storage-only deviation (**G4**) — advertised in `Query Profiles` (**G5**) | §5.1.4, §8 below |
 | Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
 | Basic Authentication Suite (Profiles §3.1) | ✅ **met under `--tls-profile basic`**, and the conformance replay now runs under it. The DEFAULT `permissive` posture still does not satisfy §3.1.2 (**G3**) | §8 below |
@@ -432,71 +432,74 @@ sits in front of. Full kmip lib suite: 688/688 at the fix commit;
 890 passed / 0 failed / 15 ignored across the full test-binary set,
 re-verified at current HEAD (`5a107b2`).
 
-### 4.6 Composite signature profiles (LAMPS draft-ietf-lamps-pq-composite-sigs-19 §6): 8/8 implemented
+### 4.6 LAMPS composites: vendor extensions over KMIP 3.0 (updated 2026-10-21)
 
-Not part of the OASIS KMIP corpus — draft-19 is an IETF LAMPS document,
-not folded into KMIP 3.0 CSD02 — so, like §4.3–§4.5, this is proven by
-this repo's own tests rather than corpus replay. The engine implements
-every composite-signature profile the draft defines a concrete OID for,
-at vendor codepoints `0x80000066`–`0x8000006d`
-(`kmip/src/kmip30/algos.rs`, KMIP 3.0 §11.12 spec-convention vendor
-extension range):
+**KMIP 3.0 defines no composite algorithm.** CSD02's Cryptographic
+Algorithm enumeration (§11.12 Table 552) stops at the two TLS hybrid
+groups `X25519MLKEM768` (0x5c) and `SECP256R1MLKEM768` (0x5d); the LAMPS
+composite signatures (draft-ietf-lamps-pq-composite-sigs-19) and composite
+KEMs (draft-ietf-lamps-pq-composite-kem-23) have no KMIP codepoint and are
+not in the OASIS corpus. Every composite here is therefore a **vendor
+extension** in the spec's own `8XXXXXXX` Extensions range, and nothing in
+this section is a KMIP 3.0 conformance claim — it is proven by this
+repository's own tests and the draft authors' vectors, not by corpus
+replay.
 
-| §6 profile | OID (`1.3.6.1.5.5.7.6.N`) | §10.4 recommended | Added |
+| Family | Vendor values | Sets | Supported |
 |---|---|---|---|
-| `id-MLDSA44-RSA2048-PSS-SHA256` | .37 | no | pre-0.24.0 |
-| `id-MLDSA44-Ed25519-SHA512` | .39 | yes | 0.24.0 (2026-08-18) |
-| `id-MLDSA44-ECDSA-P256-SHA256` | .40 | yes | 0.24.0 (2026-08-18) |
-| `id-MLDSA65-RSA3072-PSS-SHA512` | .41 | yes | 0.24.0 (2026-08-18) |
-| `id-MLDSA65-ECDSA-P256-SHA512` | .45 | yes | pre-0.24.0 |
-| `id-MLDSA65-ECDSA-P384-SHA512` | **.46** | no | **`5a107b2` (2026-08-18, unreleased)** |
-| `id-MLDSA65-Ed25519-SHA512` | .48 | yes | 0.24.0 (2026-08-18) |
-| `id-MLDSA87-ECDSA-P384-SHA512` | .49 | yes | pre-0.24.0 |
+| Composite ML-DSA (draft-19 §6) | `0x80000066`–`0x8000006D` (8 sets, since 2026-07/08), `0x80000075`–`0x8000007E` (10 sets, 2026-10-21) | 18, OIDs `1.3.6.1.5.5.7.6.37`–`.54` | 18 (brainpool behind the engine's default-on `brainpool` feature) |
+| Composite ML-KEM (draft-23 §6) | `0x8000007F`–`0x8000008A` (2026-10-21) | 12, OIDs `1.3.6.1.5.5.7.6.55`–`.66` | 12 (brainpool behind the engine's default-on `brainpool` feature) |
 
-Together, .39/.40/.41/.45/.48/.49 are "every profile
-draft-ietf-lamps-pq-composite-sigs §10.4 recommends" (CHANGELOG
-0.24.0); .37 and .46 are the two the draft defines but §10.4 does not
-single out. .46 (ML-DSA-65 + P-384 — a mismatched-tier pairing, unlike
-the matched-tier .45/.49 pairs) was the one profile still unimplemented
-after 0.24.0, and was closed in the same commit as the Register/Import
-tightening below (§4.7); see `kmip/src/ops/composite_sig.rs`'s own doc
-comment on `MLDSA65_ECDSA_P384_SHA512` for why it had likely been
-skipped originally.
+The names are `KmipAlgorithm::spec_name()` (`ML-DSA-65-ECDSA-P256`,
+`ML-KEM-768-X25519`, …), the values `to_wire_value()`
+(`kmip/src/kmip30/algos.rs`); the Python client's table is checked against
+that file (`test_composite_codepoints_match_algos_rs`). Each variant names
+one `CKP_COMP_*` parameter set, and every per-set fact (OID, label,
+components, whether supported) comes from the engine's one table,
+`rust/src/native/composite.rs`. The brainpool sets are supported when the engine is built with its
+`brainpool` feature (the default); without it they are refused with
+`CKR_PARAMETER_SET_NOT_SUPPORTED`, and KMIP needs no change either way.
 
-**Evidence.** Two independent checks per profile, both real rather than
-a self-round-trip:
+**Key model.** A composite key is ONE engine object — `CKK_COMP_SIG` /
+`CKK_COMP_KEM`, PKCS#11 v3.3 working draft (the engine reports Cryptoki
+3.2.0). `CreateKeyPair` → `CKM_COMP_SIG_KEY_PAIR_GEN` /
+`CKM_COMP_KEM_KEY_PAIR_GEN`; `Sign` / `SignatureVerify` / `Certify` /
+`Validate` → `CKM_COMP_SIG`; `Encapsulate` / `Decapsulate` →
+`CKM_COMP_KEM` (shared secret as an engine handle); `Get` of a composite
+public key returns its X.509 SubjectPublicKeyInfo. The earlier form — an
+ML-DSA key and a classical key tied by a secondary `CKA_ID`, signed and
+verified in this crate — was removed (owner decision, 2026-10-21); the TLS
+hybrid groups keep their two-key form, which is a different construction.
 
-- **Issuance + both-halves-independent-verify**, one test per profile
-  in `kmip/src/ops/certify.rs`:
-  `bootstrap_composite_mldsa44_rsa2048_pss_ca_both_halves_verify`,
-  `bootstrap_composite_mldsa65_ecdsa_p256_ca_both_halves_verify`,
-  `bootstrap_composite_mldsa87_ecdsa_p384_ca_both_halves_verify`,
-  `bootstrap_composite_mldsa44_ed25519_ca_both_halves_verify`,
-  `bootstrap_composite_mldsa44_ecdsa_p256_ca_both_halves_verify`,
-  `bootstrap_composite_mldsa65_rsa3072_pss_ca_both_halves_verify`,
-  `bootstrap_composite_mldsa65_ed25519_ca_both_halves_verify`, and
-  `bootstrap_composite_mldsa65_ecdsa_p384_ca_both_halves_verify` (.46) —
-  each generates real ML-DSA and classical key material through the
-  engine, issues a composite CA certificate, and verifies both halves
-  independently.
-- **External KAT cross-check**, `external_composite_vectors_verify` in
-  `kmip/src/ops/validate.rs`, against the shared fixture
-  `kmip/kat/composite-sigs/external-composite-vectors.json` — vectors
-  produced outside this codebase (shared with the hub's own
-  implementation), so agreement is evidence toward interoperability
-  rather than a self-round-trip. `composite_sig.rs`'s own tests assert
-  `.45`/`.46`/`.49` are present in that fixture and checked here.
-- CHANGELOG 0.24.0 additionally records that every profile issued
-  through this engine was cross-verified against **the hub's
-  independent TypeScript implementation** — every composite defect
-  found during this work surfaced from two implementations
-  disagreeing, never from one testing itself.
+**Composite KEM vs the TLS hybrid groups.** `Certify` issues a
+composite-KEM certificate only for a `CKK_COMP_KEM` key, whose secret is the
+draft §3.4 combiner `SHA3-256(mlkemSS ‖ tradSS ‖ tradCT ‖ tradPK ‖
+Label)`. Until 2026-10-21 it labelled a TLS `X25519MLKEM768` key as
+`id-MLKEM768-X25519-SHA3-256`, although that key's secret is the plain
+concatenation `mlkemSS ‖ x25519SS`: a relying party following the
+certificate would derive a different key. Such requests are now refused
+with `OperationNotSupported`.
 
-**Self-verified vs corpus-proven, stated plainly:** unlike §2/§4's
-OASIS figures, none of this is checked against an OASIS transcript —
-there is none to check against for this surface. The KAT fixture and
-the hub cross-check are the closest analogue this codebase has to
-independent proof here.
+**Evidence** (all self-run; the vectors are the draft authors'):
+
+- `tests/composite_v33_e2e.rs` — through the KMIP op handlers: the LAMPS
+  decapsulation known answers for the 10 supported KEM sets and
+  verification known answers (`s`, `sWithContext`) for the 16 supported
+  signature sets, every `x5c` certificate validated, the 4 raw vectors of
+  `kat/composite-sigs/external-composite-vectors.json` (incl. the high-S
+  `.49`); `CreateKeyPair` + `Sign`/`SignatureVerify` and
+  `Encapsulate`/`Decapsulate` for every supported set; and the two
+  combiners on one key and one ciphertext, which give different secrets
+  (the composite secret being the §3.4 hash of the TLS one).
+- `kmip/src/ops/certify.rs` — a composite CA of every supported
+  signature set (root validated, tampered root refused, and its ML-DSA half
+  checked against an M′ built independently of the engine,
+  `ops/composite_sig.rs`); a composite-KEM leaf of every supported set
+  certified under its own OID; the TLS hybrid refusal for all three groups.
+- `kmip/src/ops/validate.rs` — `external_composite_vectors_verify` (the
+  certificate and raw vectors through `verify_with_spki` → `CKM_COMP_SIG`).
+- `rust/tests/replication_k4.rs` — composite keys of every supported set
+  replicated, the replica signing or decapsulating for the original.
 
 ### 4.7 Register / Import: non-canonical certificate DER rejected at accept time
 

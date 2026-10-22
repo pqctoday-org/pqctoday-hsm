@@ -242,21 +242,11 @@ pub(crate) fn validate_chain(session: Option<u32>, ders: &[Vec<u8>], at: OffsetD
                 let tbs_bytes: &[u8] = c.tbs_certificate.as_ref();
                 let sig_bytes: &[u8] = c.signature_value.data.as_ref();
 
-                // LAMPS composite signatures (draft-19) need two
-                // independent component verifications, not one —
-                // `verify_with_spki`'s single-algorithm OID table has no
-                // entry for a composite OID and would otherwise (safely,
-                // just less usefully) degrade every composite chain to
-                // `Unknown`. Checked by OID before falling through to the
-                // ordinary single-algorithm path below, exactly the way
-                // `signature_alg_and_mech`/`profile_for` are checked
-                // first on the issuance side (`certify.rs::resolve_ca`).
-                let verdict = match super::composite_sig::profile_for_oid(&sig_alg.oid.to_string()) {
-                    Some(profile) => super::composite_sig::verify_composite_signature(
-                        session, profile, &issuer_spki, tbs_bytes, sig_bytes,
-                    ),
-                    None => verify_with_spki(session, &issuer_spki, &sig_alg, tbs_bytes, sig_bytes),
-                };
+                // LAMPS composite signatures go through the same engine-backed
+                // verifier as every other algorithm: `verify_with_spki` maps a
+                // composite OID to the engine's `CKM_COMP_SIG` on a transient
+                // `CKK_COMP_SIG` key (PKCS#11 v3.3 working draft).
+                let verdict = verify_with_spki(session, &issuer_spki, &sig_alg, tbs_bytes, sig_bytes);
 
                 match verdict {
                     Ok(SpkiVerdict::Valid) => {
@@ -505,18 +495,19 @@ mod tests {
             let tc = v["tcId"].as_str().unwrap();
             let expect = v["expect"].as_str().unwrap();
             let oid = v["oid"].as_str().unwrap();
-            // The fixture is shared with the hub, which implements more
-            // profiles than this engine. Skip what we do not implement rather
-            // than forcing a new KmipAlgorithm variant just to consume a vector.
-            let Some(profile) = super::super::composite_sig::profile_for_oid(oid) else {
-                eprintln!("[external-vector] skipped {tc}: engine has no profile for {oid}");
-                continue;
-            };
+            // Every OID in the fixture names an engine set this engine
+            // supports; a missing one is a failure, not a skip.
+            KmipAlgorithm::composite_from_oid(oid)
+                .and_then(|a| a.composite_params())
+                .filter(|p| p.supported())
+                .unwrap_or_else(|| panic!("{tc}: no supported engine set for {oid}"));
             let pk = hex::decode(v["pk_hex"].as_str().unwrap()).unwrap();
             let sig = hex::decode(v["sig_hex"].as_str().unwrap()).unwrap();
 
             // Wrap the raw composite public key in an SPKI carrying the
-            // composite OID — the same shape a certificate would present.
+            // composite OID — the same shape a certificate would present —
+            // and verify through the production path (`verify_with_spki` →
+            // the engine's CKM_COMP_SIG), as Validate does.
             let spki = spki::SubjectPublicKeyInfoOwned {
                 algorithm: spki::AlgorithmIdentifierOwned {
                     oid: oid.parse().unwrap(),
@@ -524,8 +515,16 @@ mod tests {
                 },
                 subject_public_key: der::asn1::BitString::from_bytes(&pk).unwrap(),
             };
-            let verdict = super::super::composite_sig::verify_composite_signature(
-                session, profile, &spki, msg, &sig,
+            let sig_alg = spki::AlgorithmIdentifierOwned { oid: oid.parse().unwrap(), parameters: None };
+            let verdict = verify_with_spki(session, &spki, &sig_alg, msg, &sig);
+            // Negative control on the same path: one flipped bit in the
+            // traditional half must not verify.
+            let mut bad = sig.clone();
+            *bad.last_mut().unwrap() ^= 0x01;
+            assert_ne!(
+                verify_with_spki(session, &spki, &sig_alg, msg, &bad).ok(),
+                Some(super::super::spki_verify::SpkiVerdict::Valid),
+                "{tc}: a tampered signature must not verify"
             );
             match expect {
                 "verifies" => {
@@ -803,35 +802,32 @@ mod tests {
     }
 
     /// A self-signed LAMPS composite (ML-DSA-65 + ECDSA-P256) chain of
-    /// one must validate — the real end-to-end proof for
-    /// `verify_composite_signature`, mirroring
-    /// `self_signed_ml_dsa_chain_is_valid` above but with the two-engine-
-    /// keypair composite CA setup `certify.rs`'s own composite bootstrap
-    /// tests use. Then: flip one byte anywhere in the composite signature
-    /// (ML-DSA half OR classical tail, doesn't matter which) and confirm
-    /// it flips to `Invalid`, never a false `Valid`.
+    /// one must validate: a single `CKK_COMP_SIG` engine key generated with
+    /// `CKM_COMP_SIG_KEY_PAIR_GEN`, its root minted by the production
+    /// `bootstrap_ca_certificate` (`CKM_COMP_SIG` over the TBS), verified
+    /// by `validate_chain` (`verify_with_spki` → `CKM_COMP_SIG`). Then: flip
+    /// one byte of the composite signature and confirm it flips to
+    /// `Invalid`, never a false `Valid`.
     #[test]
     fn self_signed_composite_chain_is_valid_and_tamper_detected() {
+        use softhsmrustv3::constants as c;
         use softhsmrustv3::native;
 
         let (deps, _g) = deps_with_session();
         let session = deps.engine_session.unwrap();
-        let profile = &super::super::composite_sig::MLDSA65_ECDSA_P256_SHA512;
-        let mldsa_cka_id = b"validate-composite-mldsa".to_vec();
-        let classical_cka_id = b"validate-composite-classical".to_vec();
-        native::generate_ml_dsa_keypair(session, profile.mldsa_param_set, &mldsa_cka_id, "validate-composite-mldsa")
-            .expect("ML-DSA half keygen");
-        native::generate_ecdsa_keypair(session, native::EccCurve::P256, &classical_cka_id, "validate-composite-classical")
-            .expect("classical half keygen");
+        let algo = KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512;
+        let (_, ckp) = algo.composite_ckp().unwrap();
+        let cka_id = b"validate-composite".to_vec();
+        native::composite_ops::generate_keypair(session, c::CKK_COMP_SIG, ckp, &cka_id, "validate-composite")
+            .expect("composite keygen");
         deps.store
             .put(ObjectRecord {
                 uid: "urn:composite-root-priv".into(),
                 object_type: ObjectType::PrivateKey,
-                algorithm: KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+                algorithm: algo,
                 usage_mask: UsageMask::SIGN,
                 state: State::Active,
-                pkcs11_cka_id: mldsa_cka_id,
-                pkcs11_cka_id_secondary: Some(classical_cka_id),
+                pkcs11_cka_id: cka_id,
                 ..ObjectRecord::default()
             })
             .unwrap();
@@ -844,7 +840,7 @@ mod tests {
         assert_eq!(
             validate_chain(deps.engine_session, &[cert_der.clone()], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
-            "a self-signed composite chain must validate — both components verify independently"
+            "a self-signed composite chain must validate"
         );
 
         let mut tampered = cert_der;

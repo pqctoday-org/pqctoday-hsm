@@ -6,9 +6,9 @@
 //! ## Scope: validation only (WP-C9)
 //!
 //! §9.8 defines no KMIP issuance concept — Catalyst is "one cert, two
-//! independent signatures," not a new key type (unlike
-//! `composite_sig.rs`/`composite_kem.rs`, this module has no
-//! `CreateKeyPair`/`Certify` counterpart).
+//! independent signatures," not a new key type (unlike the LAMPS
+//! composites, which are engine key types with `CreateKeyPair`/`Certify`
+//! support, this module has no such counterpart).
 //!
 //! ## Reference: `certBuilder.ts::buildAltSigCert`
 //!

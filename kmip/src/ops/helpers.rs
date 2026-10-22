@@ -323,15 +323,40 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         ClassicMcEliece6960119F => "Classic-McEliece-6960119f",
         ClassicMcEliece8192128F => "Classic-McEliece-8192128f",
         Hss => "HSS",
-        // Matches `KmipAlgorithm::spec_name()`'s strings exactly.
-        CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
-        CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
-        CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
-        CompositeMlDsa44Ed25519Sha512 => "ML-DSA-44-Ed25519",
-        CompositeMlDsa44EcdsaP256Sha256 => "ML-DSA-44-ECDSA-P256",
-        CompositeMlDsa65Rsa3072PssSha512 => "ML-DSA-65-RSA3072-PSS",
-        CompositeMlDsa65Ed25519Sha512 => "ML-DSA-65-Ed25519",
-        CompositeMlDsa65EcdsaP384Sha512 => "ML-DSA-65-ECDSA-P384",
+        // The 30 LAMPS composites: the policy-facing name IS
+        // `KmipAlgorithm::spec_name()` (the one name table, which
+        // `KmipAlgorithm::composite_from_spec_name` and the policy linter
+        // derive from).
+        CompositeMlDsa44Rsa2048PssSha256
+        | CompositeMlDsa65EcdsaP256Sha512
+        | CompositeMlDsa87EcdsaP384Sha512
+        | CompositeMlDsa44Ed25519Sha512
+        | CompositeMlDsa44EcdsaP256Sha256
+        | CompositeMlDsa65Rsa3072PssSha512
+        | CompositeMlDsa65Ed25519Sha512
+        | CompositeMlDsa65EcdsaP384Sha512
+        | CompositeMlDsa44Rsa2048Pkcs15Sha256
+        | CompositeMlDsa65Rsa3072Pkcs15Sha512
+        | CompositeMlDsa65Rsa4096PssSha512
+        | CompositeMlDsa65Rsa4096Pkcs15Sha512
+        | CompositeMlDsa65EcdsaBrainpoolP256r1Sha512
+        | CompositeMlDsa87EcdsaBrainpoolP384r1Sha512
+        | CompositeMlDsa87Ed448Shake256
+        | CompositeMlDsa87Rsa3072PssSha512
+        | CompositeMlDsa87Rsa4096PssSha512
+        | CompositeMlDsa87EcdsaP521Sha512
+        | CompositeMlKem768Rsa2048
+        | CompositeMlKem768Rsa3072
+        | CompositeMlKem768Rsa4096
+        | CompositeMlKem768X25519
+        | CompositeMlKem768EcdhP256
+        | CompositeMlKem768EcdhP384
+        | CompositeMlKem768EcdhBrainpoolP256r1
+        | CompositeMlKem1024Rsa3072
+        | CompositeMlKem1024EcdhP384
+        | CompositeMlKem1024EcdhBrainpoolP384r1
+        | CompositeMlKem1024X448
+        | CompositeMlKem1024EcdhP521 => a.spec_name(),
     }
     .into()
 }
@@ -774,9 +799,13 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
 /// String / Random) via `native::sign_pqc` instead of the classical
 /// RSA-PSS-salt bridge.
 pub fn is_pqc_sign_mech(mech: u32) -> bool {
-    use softhsmrustv3::constants::{CKM_ML_DSA, CKM_SLH_DSA};
+    use softhsmrustv3::constants::{CKM_COMP_SIG, CKM_COMP_SIG_EXTERNAL_HASH, CKM_ML_DSA, CKM_SLH_DSA};
     mech == CKM_ML_DSA
         || mech == CKM_SLH_DSA
+        // Composite ML-DSA takes the context string and Deterministic flag
+        // the same way; the engine refuses Internal / External Mu / Random.
+        || mech == CKM_COMP_SIG
+        || mech == CKM_COMP_SIG_EXTERNAL_HASH
         || softhsmrustv3::crypto::is_prehash_ml_dsa(mech)
         || softhsmrustv3::crypto::is_prehash_slh_dsa(mech)
 }
@@ -896,6 +925,13 @@ pub fn native_sign_mech_with_params(
         // the hash family is fixed by the key's own LMS parameter set
         // (CKA_LMS_PARAM_SET), not by CryptographicParameters.
         Hss => c::CKM_HSS,
+        // LAMPS composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md):
+        // PH and the traditional hash are fixed by the set (engine table),
+        // so a Hashing Algorithm / Padding Method in the
+        // CryptographicParameters does not apply and is ignored, as KMIP
+        // 3.0 §11 treats fields irrelevant to the operation (see
+        // `pss_salt_from_cp`).
+        a if a.is_composite_sig() => c::CKM_COMP_SIG,
         other => {
             return Err(KmipError::failed(
                 crate::error::ResultReason::OperationNotSupported,
@@ -1051,6 +1087,8 @@ pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
             | ClassicMcEliece6960119 | ClassicMcEliece6960119F
             | ClassicMcEliece8192128 | ClassicMcEliece8192128F =>
             Some(c::CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
+        // LAMPS composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md).
+        a if a.is_composite_kem() => Some(c::CKM_COMP_KEM),
         _ => None,
     }
 }

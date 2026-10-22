@@ -190,18 +190,13 @@ impl KmipPlayground {
             None => return error_json("no engine session"),
         };
 
-        // LAMPS composite signatures (draft-19, WP-C7) — a genuinely
-        // different keygen shape (two engine keys, one KMIP object; see
-        // create_key_pair.rs's own composite branch), resolved and
-        // generated in its own path, separate from the single-algorithm
-        // match below.
+        // LAMPS composite signatures (PKCS#11 v3.3 working draft): ONE
+        // CKK_COMP_SIG engine key pair (`CKM_COMP_SIG_KEY_PAIR_GEN`), signed
+        // with `CKM_COMP_SIG` by the production bootstrap below.
         // Names are `KmipAlgorithm::spec_name()` values, resolved through
         // `KmipAlgorithm::composite_from_spec_name` (a sweep of
-        // `KmipAlgorithm::ALL`). This used to be a hand-written string match:
-        // omitting a name was not a compile error, the profile simply never
-        // resolved and the caller silently fell through to the
-        // single-algorithm path below — which is how `ML-DSA-65-ECDSA-P384`
-        // went missing. Deriving it makes every composite variant resolve.
+        // `KmipAlgorithm::ALL`), so every composite variant resolves; a
+        // composite KEM resolves too and is refused (a KEM key cannot sign).
         let composite_algo = KmipAlgorithm::composite_from_spec_name(algorithm);
 
         self.demo_ca_counter += 1;
@@ -210,34 +205,20 @@ impl KmipPlayground {
         let cert_uid = format!("urn:demo-ca-cert-{n}");
 
         if let Some(algo) = composite_algo {
-            let profile = pqctoday_kmip::ops::composite_sig::profile_for(algo)
-                .expect("every composite_algo match arm has a profile");
-            let mldsa_cka_id = format!("demo-ca-{n}-mldsa").into_bytes();
-            let classical_cka_id = format!("demo-ca-{n}-classical").into_bytes();
-            if let Err(rv) = native::generate_ml_dsa_keypair(
-                session, profile.mldsa_param_set, &mldsa_cka_id, "demo-ca-composite",
-            ) {
-                return error_json(&format!("composite CA ML-DSA keygen failed: CK_RV=0x{rv:08x}"));
+            if !algo.is_composite_sig() {
+                return error_json(&format!(
+                    "'{algorithm}' is a composite KEM; a CA key must be a signature algorithm"
+                ));
             }
-            // Dispatch on the profile's explicit draft §6 family. This matched
-            // on `classical_ec_field_width` until 2026-08-18, where `None` meant
-            // RSA and the size was hard-coded to 2048 — so an Ed25519 profile
-            // (.39/.48) would have generated an RSA key, and .41's 3072 would
-            // have been silently downgraded. Same defect as
-            // `kmip/src/ops/create_key_pair.rs`, in a second copy of the
-            // dispatch that lives in this crate.
-            use pqctoday_kmip::ops::composite_sig::CompositeClassical;
-            let classical_result = match profile.classical {
-                CompositeClassical::Ecdsa { field_width: 32 } => native::generate_ecdsa_keypair(session, EccCurve::P256, &classical_cka_id, "demo-ca-composite"),
-                CompositeClassical::Ecdsa { field_width: 48 } => native::generate_ecdsa_keypair(session, EccCurve::P384, &classical_cka_id, "demo-ca-composite"),
-                CompositeClassical::RsaPss { modulus_bits } => native::generate_rsa_keypair(session, modulus_bits, &classical_cka_id, "demo-ca-composite"),
-                CompositeClassical::Ed25519 => native::generate_ed25519_keypair(session, &classical_cka_id, "demo-ca-composite"),
-                CompositeClassical::Ecdsa { field_width: other } => {
-                    return error_json(&format!("composite CA: no profile uses a {other}-byte EC field width"))
-                }
+            let (key_type, ckp) = match (algo.composite_key_type(), algo.composite_ckp()) {
+                (Some(t), Some((_, ckp))) => (t, ckp),
+                _ => return error_json("composite variant without an engine set"),
             };
-            if let Err(rv) = classical_result {
-                return error_json(&format!("composite CA classical keygen failed: CK_RV=0x{rv:08x}"));
+            let cka_id = format!("demo-ca-{n}").into_bytes();
+            // A brainpool set reports CKR_PARAMETER_SET_NOT_SUPPORTED until
+            // the engine table marks it supported.
+            if let Err(rv) = native::composite_ops::generate_keypair(session, key_type, ckp, &cka_id, "demo-ca-composite") {
+                return error_json(&format!("composite CA keygen failed: CK_RV=0x{rv:08x}"));
             }
             if let Err(e) = self.deps.store.put(ObjectRecord {
                 uid: priv_uid.clone(),
@@ -245,8 +226,7 @@ impl KmipPlayground {
                 algorithm: algo,
                 usage_mask: UsageMask::SIGN,
                 state: State::Active,
-                pkcs11_cka_id: mldsa_cka_id,
-                pkcs11_cka_id_secondary: Some(classical_cka_id),
+                pkcs11_cka_id: cka_id,
                 ..ObjectRecord::default()
             }) {
                 return error_json(&format!("store composite CA PrivateKey record failed: {e}"));
@@ -281,7 +261,7 @@ impl KmipPlayground {
             other => {
                 let composites: Vec<&str> = KmipAlgorithm::ALL
                     .iter()
-                    .filter(|a| a.is_composite())
+                    .filter(|a| a.is_composite_sig())
                     .map(|a| a.spec_name())
                     .collect();
                 return error_json(&format!(
@@ -1802,14 +1782,23 @@ mod demo_ca_tests {
     /// this sweeps the same source and a future composite is covered here too.
     #[test]
     fn setup_demo_ca_resolves_every_composite_name() {
+        use softhsmrustv3::constants as c;
         let composites: Vec<KmipAlgorithm> =
             KmipAlgorithm::ALL.iter().copied().filter(|a| a.is_composite()).collect();
-        assert_eq!(composites.len(), 8, "8 composite signature variants today");
+        assert_eq!(composites.len(), 30, "18 composite signature + 12 composite KEM variants");
         let mut pg = KmipPlayground::new(None, None).unwrap_or_else(|_| panic!("playground boot"));
+        let mut minted = 0;
         for a in composites {
             let name = a.spec_name();
             let out: serde_json::Value =
                 serde_json::from_str(&pg.setup_demo_ca(name, "")).expect("setup_demo_ca returns JSON");
+            let supported = a.composite_params().map(|p| p.supported()).unwrap_or(false);
+            if a.is_composite_kem() || !supported {
+                // A KEM cannot sign; a brainpool set is refused by the engine
+                // until it is supported. Neither designates a CA.
+                assert_eq!(out["ok"], serde_json::Value::Bool(false), "{name}: {out}");
+                continue;
+            }
             assert_eq!(out["ok"], serde_json::Value::Bool(true), "{name}: {out}");
             assert_eq!(out["algorithm"], name, "{name}");
             let rec = pg
@@ -1819,8 +1808,23 @@ mod demo_ca_tests {
                 .expect("store read")
                 .expect("CA private key record");
             assert_eq!(rec.algorithm, a, "{name} stored as its composite variant");
-            assert!(rec.pkcs11_cka_id_secondary.is_some(), "{name} has a classical half");
+            assert_eq!(rec.pkcs11_cka_id_secondary, None, "{name}: one engine object, no second handle");
+            let session = pg.deps.engine_session.unwrap();
+            // The CA certificate's engine projection shares the CKA_ID; the
+            // key objects are exactly one public and one private composite key.
+            let keys: Vec<u32> = softhsmrustv3::native::find_all_by_cka_id(session, &rec.pkcs11_cka_id)
+                .unwrap()
+                .into_iter()
+                .filter(|&h| softhsmrustv3::native::get_attribute_u32(session, h, c::CKA_CLASS) != Some(c::CKO_CERTIFICATE))
+                .collect();
+            assert_eq!(keys.len(), 2, "{name}: one public + one private object");
+            for h in keys {
+                assert_eq!(softhsmrustv3::native::get_attribute_u32(session, h, c::CKA_KEY_TYPE), Some(c::CKK_COMP_SIG), "{name}");
+            }
+            minted += 1;
         }
+        assert_eq!(minted, softhsmrustv3::native::composite::COMPOSITE_SIG_SETS.iter().filter(|p| p.supported).count(), "every supported composite signature set");
+        assert!(minted >= 16);
     }
 }
 

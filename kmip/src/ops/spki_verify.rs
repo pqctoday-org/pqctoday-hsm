@@ -116,6 +116,12 @@ enum Plan {
     Ecdsa { mech: u32, sig: Vec<u8> },
     Ed25519 { mech: u32, sig: Vec<u8> },
     MlDsa { mech: u32, param_set: u32, sig: Vec<u8> },
+    /// LAMPS composite ML-DSA (draft-ietf-lamps-pq-composite-sigs-19):
+    /// `CKM_COMP_SIG` on a transient `CKK_COMP_SIG` key of this
+    /// `CKP_COMP_SIG_*` set (PKCS#11 v3.3 working draft). The signature is
+    /// the draft §4.3 `mldsaSig ‖ tradSig` as X.509 carries it, so no
+    /// reformatting.
+    Composite { ckp: u32, sig: Vec<u8> },
 }
 
 fn plan_for(sig_alg: &AlgorithmIdentifierOwned, sig: &[u8]) -> Result<Option<Plan>> {
@@ -142,7 +148,16 @@ fn plan_for(sig_alg: &AlgorithmIdentifierOwned, sig: &[u8]) -> Result<Option<Pla
             Plan::MlDsa { mech: c::CKM_ML_DSA, param_set: c::CKP_ML_DSA_87, sig: sig.to_vec() }
         }
         OID_ED25519 => Plan::Ed25519 { mech: c::CKM_EDDSA, sig: sig.to_vec() },
-        _ => return Ok(None),
+        // Composite OIDs come from the engine table, not from this file
+        // (`KmipAlgorithm::composite_from_oid`); a set the engine does not
+        // support yet (brainpool) is "unsupported", like any unknown OID.
+        other => match crate::kmip30::KmipAlgorithm::composite_from_oid(other) {
+            Some(a) if a.is_composite_sig() && a.composite_params().is_some_and(|p| p.supported()) => {
+                let (_, ckp) = a.composite_ckp().expect("composite");
+                Plan::Composite { ckp, sig: sig.to_vec() }
+            }
+            _ => return Ok(None),
+        },
     }))
 }
 
@@ -229,6 +244,27 @@ pub fn verify_with_spki(
                 TRANSIENT_LABEL,
             ),
         ),
+        Plan::Composite { ckp, sig } => {
+            // The key must be of the signature's own set: a composite SPKI
+            // under another OID is a different key type (§3.3 step 2, "not
+            // of the correct type").
+            if spki.algorithm.oid != sig_alg.oid {
+                return Ok(SpkiVerdict::Invalid);
+            }
+            (
+                softhsmrustv3::constants::CKM_COMP_SIG,
+                sig.clone(),
+                softhsmrustv3::native::composite_ops::register_key(
+                    session,
+                    softhsmrustv3::constants::CKO_PUBLIC_KEY,
+                    softhsmrustv3::constants::CKK_COMP_SIG,
+                    *ckp,
+                    spki.subject_public_key.raw_bytes(),
+                    TRANSIENT_ID,
+                    TRANSIENT_LABEL,
+                ),
+            )
+        }
         Plan::MlDsa { mech, param_set, sig } => {
             let pk_bytes = spki.subject_public_key.raw_bytes();
             (

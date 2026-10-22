@@ -513,6 +513,56 @@ pub fn register(
                 import.map_err(|rv| fail_err(deps, correlation_id, "Register",
                     super::helpers::ck_rv_to_kmip_error(rv, "Register:pqc-import")))?;
             }
+            // LAMPS composites (PKCS#11 v3.3 working draft): one
+            // CKK_COMP_SIG / CKK_COMP_KEM engine object, imported through
+            // the engine's `C_CreateObject` check (both halves derived or
+            // validated, the composite SPKI stored as CKA_PUBLIC_KEY_INFO).
+            // Raw (0x01) is the drafts' §4 serialisation — public
+            // `mlPK ‖ tradPK`, private `mlSeed ‖ tradSK`; a public key may
+            // also come as X_509 (0x05) SubjectPublicKeyInfo, whose OID
+            // must be this algorithm's (the engine table's).
+            (ObjectType::PrivateKey | ObjectType::PublicKey, alg) if alg.is_composite() => {
+                use softhsmrustv3::constants as c;
+                let is_public = req.object_type == ObjectType::PublicKey;
+                let (key_type, ckp) = match (alg.composite_key_type(), alg.composite_ckp()) {
+                    (Some(t), Some((_, ckp))) => (t, ckp),
+                    _ => unreachable!("is_composite() implies a key type and set"),
+                };
+                let owned;
+                let value: &[u8] = match (fmt, is_public) {
+                    (0x01, _) => material,
+                    (0x05, true) => {
+                        use der::Decode;
+                        let spki = spki::SubjectPublicKeyInfoOwned::from_der(material).map_err(|e| {
+                            fail_err(deps, correlation_id, "Register",
+                                KmipError::invalid_field(format!("{} PublicKey Register: X_509 SPKI DER: {e}", alg.spec_name())))
+                        })?;
+                        let want = alg.composite_params().map(|p| p.oid());
+                        if Some(spki.algorithm.oid.to_string().as_str()) != want {
+                            return Err(fail_err(deps, correlation_id, "Register",
+                                KmipError::invalid_field(format!(
+                                    "{} PublicKey Register: SPKI algorithm {} is not this set's OID",
+                                    alg.spec_name(), spki.algorithm.oid
+                                ))));
+                        }
+                        owned = spki.subject_public_key.raw_bytes().to_vec();
+                        &owned
+                    }
+                    _ => {
+                        return Err(fail_err(deps, correlation_id, "Register",
+                            KmipError::key_format_type_not_supported(format!(
+                                "{} Register: supports Raw (0x01){}, got 0x{fmt:02x}",
+                                alg.spec_name(),
+                                if is_public { " or X_509 (0x05) SubjectPublicKeyInfo" } else { "" },
+                            ))));
+                    }
+                };
+                let class = if is_public { c::CKO_PUBLIC_KEY } else { c::CKO_PRIVATE_KEY };
+                softhsmrustv3::native::composite_ops::register_key(
+                    session, class, key_type, ckp, value, &cka_id_bytes, "kmip-register-composite",
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:composite-import")))?;
+            }
             // HSS/LMS (RFC 8554) — separate from the generic PQC-family
             // block above because `native_parameter_set` deliberately has
             // no `Hss` arm: this server supports HSS Register-import but

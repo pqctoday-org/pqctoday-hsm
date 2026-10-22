@@ -209,6 +209,21 @@ pub fn get(
                 // returns the private material (2560-byte ML-DSA-44 sk),
                 // not the 1312-byte public key. (Sign uses the same
                 // class-aware helper.)
+                // A composite PUBLIC key (one CKK_COMP_SIG / CKK_COMP_KEM
+                // engine object) is returned as its X.509
+                // SubjectPublicKeyInfo — the composite OID from the engine
+                // table over `mlPK ‖ tradPK` (draft-ietf-lamps-pq-composite-
+                // sigs-19 / -kem-23 §4.1, the engine's CKA_PUBLIC_KEY_INFO)
+                // — the form a certificate or another implementation
+                // consumes. A client asking for Raw gets `mlPK ‖ tradPK`.
+                let composite_spki = obj.object_type == ObjectType::PublicKey
+                    && obj.algorithm.is_composite()
+                    && req.key_format_type != Some(KeyFormatType::Raw as u32);
+                let attr = if composite_spki {
+                    softhsmrustv3::constants::CKA_PUBLIC_KEY_INFO
+                } else {
+                    softhsmrustv3::constants::CKA_VALUE
+                };
                 let bytes = super::helpers::find_handle_for_object(
                     session,
                     &obj.pkcs11_cka_id,
@@ -216,13 +231,7 @@ pub fn get(
                 )
                 .ok()
                 .flatten()
-                .and_then(|h| {
-                    softhsmrustv3::native::get_attribute(
-                        session,
-                        h,
-                        softhsmrustv3::constants::CKA_VALUE,
-                    )
-                });
+                .and_then(|h| softhsmrustv3::native::get_attribute(session, h, attr));
                 // K15 — audit the engine read after it happened
                 // (only when a value actually came back; the API
                 // surfaces sensitive/absent values as None, not a
@@ -238,6 +247,7 @@ pub fn get(
                     );
                 }
                 match bytes {
+                    Some(v) if composite_spki => (KeyFormatType::X509, v),
                     Some(v) => (KeyFormatType::Raw, v),
                     // The engine withheld the value (CKA_SENSITIVE or
                     // !CKA_EXTRACTABLE on the engine object, or no object).

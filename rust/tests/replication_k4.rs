@@ -1,6 +1,8 @@
 //! K4 acceptance — protected replication (plan R3.7; spec §10/§12; review
 //! K0B dispositions). Every positive case runs for AES-128/192/256,
-//! ML-KEM-768 and ML-DSA-65.
+//! ML-KEM-768 and ML-DSA-65; the composite ML-KEM / ML-DSA keys of every
+//! supported set (PKCS#11 v3.3 working draft) replicate in their own case at
+//! the end.
 #![cfg(pqc_replication)]
 
 mod replication_common;
@@ -996,4 +998,128 @@ fn k4_native_destroy_respects_destroyable_k0b_r2_11() {
     let (h, _) = repl::records::list(0, repl::records::ROLE_POLICY)[0].clone();
     assert_eq!(native::destroy_object(w.tokens[0].user, h), Err(CKR_ACTION_PROHIBITED));
     let _ = ps;
+}
+
+// ── Composite keys (PKCS#11 v3.3 working draft; plan B7, owner decision D6) ──
+
+/// A bound composite key pair of set `ckp` (`CKK_COMP_SIG` or
+/// `CKK_COMP_KEM`, one engine object per half); returns `(public, private)`.
+fn gen_composite(session: u32, key_type: u32, ckp: u32, policy: Option<&[u8; 48]>) -> Result<(u32, u32), u32> {
+    let sig = key_type == CKK_COMP_SIG;
+    let (mech, pub_use, prv_use) = if sig {
+        (CKM_COMP_SIG_KEY_PAIR_GEN, CKA_VERIFY, CKA_SIGN)
+    } else {
+        (CKM_COMP_KEM_KEY_PAIR_GEN, CKA_ENCAPSULATE, CKA_DECAPSULATE)
+    };
+    let pubt_attrs = vec![(CKA_TOKEN, bb(true)), (CKA_PARAMETER_SET, ul(ckp)), (pub_use, bb(true))];
+    let mut prvt_attrs = vec![
+        (CKA_TOKEN, bb(true)),
+        (CKA_SENSITIVE, bb(true)),
+        (CKA_EXTRACTABLE, bb(false)),
+        (CKA_COPYABLE, bb(false)),
+        (CKA_MODIFIABLE, bb(false)),
+        (prv_use, bb(true)),
+    ];
+    if let Some(p) = policy {
+        prvt_attrs.push((CKA_PQCTODAY_REPLICATION_POLICY_ID, p.to_vec()));
+    }
+    let (pubt, prvt) = (raw_template(&pubt_attrs), raw_template(&prvt_attrs));
+    let mut m = [mech as usize, 0, 0];
+    let (mut hp, mut hk) = (0u32, 0u32);
+    match softhsmrustv3::ffi::C_GenerateKeyPair(
+        session,
+        m.as_mut_ptr() as *mut u8,
+        pubt.as_ptr() as *mut u8,
+        pubt_attrs.len() as u32,
+        prvt.as_ptr() as *mut u8,
+        prvt_attrs.len() as u32,
+        &mut hp,
+        &mut hk,
+    ) {
+        CKR_OK => Ok((hp, hk)),
+        rv => Err(rv),
+    }
+}
+
+/// Every supported composite set replicates: a bound `CKK_COMP_SIG` /
+/// `CKK_COMP_KEM` private key is packaged on token 0 and installed on token
+/// 1, and the replica is the same key — it signs under `CKM_COMP_SIG` what
+/// the source public key verifies, or decapsulates under `CKM_COMP_KEM` what
+/// was encapsulated to the source public key. The installed object and its
+/// public partner keep the key type, the set and the composite SPKI, and the
+/// replica holds custody like every other profile. A brainpool set the
+/// engine does not support yet cannot even be generated.
+#[test]
+fn k4_composite_keys_replicate_and_work_on_the_replica() {
+    use softhsmrustv3::native::composite::{COMPOSITE_KEM_SETS, COMPOSITE_SIG_SETS};
+    let _g = lock();
+    let w = world(2);
+    let mut mechs = vec![CKM_COMP_SIG, CKM_COMP_KEM];
+    mechs.sort_unstable();
+    let ps = w.enroll_policy_everywhere(&w.policy([true, true, true], 64, mechs.clone()));
+    let pd = w.enroll_policy_everywhere(&w.policy([true, true, true], 1, mechs));
+    let sets = COMPOSITE_SIG_SETS
+        .iter()
+        .map(|p| (CKK_COMP_SIG, p.ckp, p.name, p.supported))
+        .chain(COMPOSITE_KEM_SETS.iter().map(|p| (CKK_COMP_KEM, p.ckp, p.name, p.supported)));
+    let (s, d) = (w.tokens[0].user, w.tokens[1].user);
+    let mut replicated = 0;
+    for (key_type, ckp, name, supported) in sets {
+        let made = gen_composite(s, key_type, ckp, Some(&ps));
+        if !supported {
+            assert_eq!(made, Err(CKR_PARAMETER_SET_NOT_SUPPORTED), "{name}");
+            continue;
+        }
+        let (src_pub, src) = made.unwrap_or_else(|rv| panic!("{name}: bound keygen {rv:#x}"));
+        let req = request(&w, 0, 1, Operation::LiveClone, &pd);
+        let pkg = create(&w, 0, src, &req).unwrap_or_else(|rv| panic!("{name}: create {rv:#x}"));
+        let (rep, receipt) = import(&w, 1, &pkg).unwrap_or_else(|rv| panic!("{name}: import {rv:#x}"));
+        host_verify::verify_receipt(&receipt, &pkg, &req, &trust_of(&w, 0), w.now, Profile::Educational).expect("receipt");
+
+        assert_eq!(native::get_attribute_u32(d, rep, CKA_KEY_TYPE), Some(key_type), "{name}");
+        assert_eq!(native::get_attribute_u32(d, rep, CKA_PARAMETER_SET), Some(ckp), "{name}");
+        assert_eq!(
+            native::get_attribute(d, rep, CKA_PUBLIC_KEY_INFO),
+            native::get_attribute(s, src_pub, CKA_PUBLIC_KEY_INFO),
+            "{name}: composite SPKI"
+        );
+        let b = |a| native::get_attribute_bool(d, rep, a).unwrap();
+        assert!(b(CKA_SENSITIVE) && !b(CKA_EXTRACTABLE) && !b(CKA_COPYABLE) && !b(CKA_MODIFIABLE), "{name}");
+        assert_eq!(native::get_attribute(d, rep, CKA_VALUE), None, "{name}: no private value read back");
+
+        if key_type == CKK_COMP_SIG {
+            let msg = b"signed by the composite replica";
+            let sig = native::sign(d, rep, CKM_COMP_SIG, msg).unwrap_or_else(|rv| panic!("{name}: replica sign {rv:#x}"));
+            assert_eq!(native::verify(s, src_pub, CKM_COMP_SIG, msg, &sig), Ok(true), "{name}");
+            assert_eq!(native::verify(s, src_pub, CKM_COMP_SIG, b"another message", &sig), Ok(false), "{name}");
+        } else {
+            let (ct, ss) = native::encapsulate(s, src_pub, CKM_COMP_KEM).unwrap_or_else(|rv| panic!("{name}: encaps {rv:#x}"));
+            assert_eq!(native::decapsulate(d, rep, CKM_COMP_KEM, &ct).unwrap(), ss, "{name}: replica decapsulates");
+        }
+        // The installed public partner is the same public key, usable as one.
+        let lineage = native::get_attribute(d, rep, CKA_PQCTODAY_REPLICATION_LINEAGE_ID).unwrap();
+        let partner = public_partner(w.tokens[1].slot, &lineage);
+        assert_eq!(native::get_attribute(d, partner, CKA_VALUE), native::get_attribute(s, src_pub, CKA_VALUE), "{name}");
+        replicated += 1;
+    }
+    let supported = COMPOSITE_SIG_SETS.iter().filter(|p| p.supported).count()
+        + COMPOSITE_KEM_SETS.iter().filter(|p| p.supported).count();
+    assert_eq!(replicated, supported, "every supported composite set");
+    assert!(replicated >= 26);
+}
+
+/// Eligibility stays opt-in at creation for composites too: an unbound
+/// composite key is not packaged.
+#[test]
+fn k4_unbound_composite_key_is_not_eligible() {
+    use softhsmrustv3::native::composite::COMPOSITE_SIG_SETS;
+    let _g = lock();
+    let w = world(2);
+    let mut mechs = vec![CKM_COMP_SIG, CKM_COMP_KEM];
+    mechs.sort_unstable();
+    let pd = w.enroll_policy_everywhere(&w.policy([true, true, true], 1, mechs));
+    let p = COMPOSITE_SIG_SETS.iter().find(|p| p.supported).unwrap();
+    let (_, k) = gen_composite(w.tokens[0].user, CKK_COMP_SIG, p.ckp, None).unwrap();
+    let req = request(&w, 0, 1, Operation::LiveClone, &pd);
+    assert_eq!(err(create(&w, 0, k, &req)), Err(CKR_KEY_FUNCTION_NOT_PERMITTED));
 }

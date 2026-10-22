@@ -44,6 +44,7 @@ pub fn decapsulate(
     // FrodoKEM / Classic McEliece.
     if !is_ml_kem(obj.algorithm)
         && !obj.algorithm.is_hybrid_kem()
+        && !obj.algorithm.is_composite_kem()
         && !is_classical_kem(obj.algorithm)
         && !is_frodokem(obj.algorithm)
         && !is_classic_mceliece(obj.algorithm)
@@ -54,7 +55,7 @@ pub fn decapsulate(
             "Decapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Decapsulate requires an ML-KEM, hybrid KEM, classical ECDH/X25519/X448, FrodoKEM, or Classic McEliece key; {:?} is not", obj.algorithm),
+                format!("Decapsulate requires an ML-KEM, composite ML-KEM, hybrid KEM, classical ECDH/X25519/X448, FrodoKEM, or Classic McEliece key; {:?} is not", obj.algorithm),
             ),
         ));
     }
