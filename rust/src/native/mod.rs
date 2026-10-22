@@ -72,6 +72,8 @@
 
 pub mod agree;
 pub mod composite;
+pub mod composite_kem;
+pub mod composite_key;
 pub mod derive;
 pub mod encrypt;
 pub(crate) mod hbs;
@@ -99,7 +101,7 @@ pub use sign::*;
 pub type CkRv = u32;
 
 #[cfg(test)]
-mod composite_vectors;
+pub(crate) mod composite_vectors;
 
 #[cfg(test)]
 mod parity;

@@ -20,8 +20,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-const KEM_VECTORS: &[u8] = include_bytes!("../../kat/pkcs11-v33/composite-kem/testvectors.json");
-const SIG_VECTORS: &[u8] = include_bytes!("../../kat/pkcs11-v33/composite-sig/testvectors.json");
+pub(crate) const KEM_VECTORS: &[u8] = include_bytes!("../../kat/pkcs11-v33/composite-kem/testvectors.json");
+pub(crate) const SIG_VECTORS: &[u8] = include_bytes!("../../kat/pkcs11-v33/composite-sig/testvectors.json");
 const IDENTIFIERS: &str = include_str!("../../kat/pkcs11-v33/pkcs11-v33-identifiers.json");
 
 /// sha256 of the upstream files as recorded in PROVENANCE.md.
@@ -43,7 +43,7 @@ fn sha256_hex(b: &[u8]) -> String {
 }
 
 /// Standard base64 (RFC 4648 §4, with padding), as the vector files use.
-fn b64(s: &str) -> Vec<u8> {
+pub(crate) fn b64(s: &str) -> Vec<u8> {
     fn val(c: u8) -> u32 {
         match c {
             b'A'..=b'Z' => (c - b'A') as u32,
@@ -66,7 +66,7 @@ fn b64(s: &str) -> Vec<u8> {
 }
 
 /// One DER TLV header at `i`: (tag, start of contents, length).
-fn tlv(der: &[u8], i: usize) -> (u8, usize, usize) {
+pub(crate) fn tlv(der: &[u8], i: usize) -> (u8, usize, usize) {
     let tag = der[i];
     let first = der[i + 1] as usize;
     if first < 0x80 {
@@ -77,7 +77,7 @@ fn tlv(der: &[u8], i: usize) -> (u8, usize, usize) {
     (tag, i + 2 + n, len)
 }
 
-fn oid_string(body: &[u8]) -> String {
+pub(crate) fn oid_string(body: &[u8]) -> String {
     let mut arcs = vec![(body[0] / 40) as u64, (body[0] % 40) as u64];
     let mut acc = 0u64;
     for &b in &body[1..] {

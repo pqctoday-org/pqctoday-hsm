@@ -31,8 +31,9 @@
 //! with Appendix A, including whether the draft marks the size as a maximum
 //! (`*`) rather than fixed.
 //!
-//! This module holds data only. The four brainpool rows are `supported:
-//! false` until the engine has brainpool curves.
+//! This module holds data only; the key objects are `native::composite_key`
+//! and the KEM is `native::composite_kem`. The four brainpool rows are
+//! `supported: false` until the engine has brainpool curves.
 
 use crate::constants::{
     CKK_COMP_KEM, CKK_COMP_SIG, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1,
@@ -808,6 +809,16 @@ pub fn params_by_ckp(family: CompositeFamily, ckp: u32) -> Option<CompositeParam
         CompositeFamily::Sig => sig_params(ckp).map(CompositeParams::Sig),
         CompositeFamily::Kem => kem_params(ckp).map(CompositeParams::Kem),
     }
+}
+
+/// `(ulMinKeySize, ulMaxKeySize)` of `CKM_COMP_KEM_KEY_PAIR_GEN` and
+/// `CKM_COMP_KEM`: "the supported range of Composite KEM public key[s] in
+/// bytes" (comp_kem.md), i.e. the smallest and largest `mlkemPK ‖ tradPK`
+/// over the sets this engine supports. An RSA public key's size is a maximum
+/// (Appendix A `*`), so the upper bound is that maximum.
+pub fn kem_public_key_size_range() -> (u32, u32) {
+    let sizes = COMPOSITE_KEM_SETS.iter().filter(|p| p.supported).map(|p| p.public_key_size().bytes() as u32);
+    (sizes.clone().min().unwrap_or(0), sizes.max().unwrap_or(0))
 }
 
 /// The set for a `CKA_KEY_TYPE` (`CKK_COMP_SIG` / `CKK_COMP_KEM`) and

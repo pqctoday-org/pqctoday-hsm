@@ -1656,6 +1656,19 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // ML-KEM ek: 800 B (ML-KEM-512) … 1568 B (ML-KEM-1024) — FIPS 203 Table 3.
         CKM_ML_KEM_KEY_PAIR_GEN => (800, 1568, 0x00010000),
         CKM_ML_KEM => (800, 1568, 0x10000000 | 0x20000000),
+        // Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md): "the
+        // supported range of Composite KEM public key[s] in bytes" —
+        // mlkemPK ‖ tradPK over the supported sets (native::composite).
+        // CKF_GENERATE_KEY_PAIR; CKF_ENCAPSULATE | CKF_DECAPSULATE (the
+        // chapter's "ENCS & DECS" column).
+        CKM_COMP_KEM_KEY_PAIR_GEN => {
+            let (lo, hi) = crate::native::composite::kem_public_key_size_range();
+            (lo, hi, 0x00010000)
+        }
+        CKM_COMP_KEM => {
+            let (lo, hi) = crate::native::composite::kem_public_key_size_range();
+            (lo, hi, 0x10000000 | 0x20000000)
+        }
         // FrodoKEM (BSI TR-02102-1 §2.4.1) — ek: 9616 B (FrodoKEM-640) … 21520 B
         // (FrodoKEM-1344), verified directly against `frodo-kem` v0.1.0's
         // `AlgorithmParams::encryption_key_length` (not the spec PDF, to avoid
@@ -2579,6 +2592,7 @@ fn C_GenerateKeyPair_impl(
             CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => Some(CKK_PQCTODAY_FRODOKEM),
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => Some(CKK_PQCTODAY_CLASSIC_MCELIECE),
             CKM_HPKE_KEM_KEY_PAIR_GEN => Some(CKK_HPKE_KEM),
+            CKM_COMP_KEM_KEY_PAIR_GEN => Some(CKK_COMP_KEM),
             _ => None,
         };
         if let Some(exp) = expected_kt {
@@ -2629,6 +2643,90 @@ fn C_GenerateKeyPair_impl(
                     }
                     Err(rv) => rv,
                 }
+            }
+
+            // Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md "key
+            // pair generation"; draft-ietf-lamps-pq-composite-kem-23 §3.1).
+            // One object per key: CKA_VALUE is mlkemPK ‖ tradPK / mlkemSeed ‖
+            // tradSK (native::composite_key).
+            CKM_COMP_KEM_KEY_PAIR_GEN => {
+                // comp_kem.md: "the parameter set for the pair is specified in
+                // the template for the Composite KEM public key"; the private
+                // key's CKA_PARAMETER_SET is contributed by the mechanism.
+                let ckp = match get_attr_ulong(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_PARAMETER_SET,
+                ) {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                // A private template may restate the contributed value, never
+                // contradict it (§4.1.1 rules 5/6).
+                if let Some(p) = get_attr_ulong(
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                    CKA_PARAMETER_SET,
+                ) {
+                    if p != ckp {
+                        return CKR_TEMPLATE_INCONSISTENT;
+                    }
+                }
+                // comp_kem.md's key tables define no CKA_SEED: the seed is
+                // inside CKA_VALUE. Refused rather than silently ignored
+                // (§4.1.1: an attribute not valid for the object type is
+                // CKR_ATTRIBUTE_TYPE_INVALID).
+                for (t, n) in [
+                    (p_public_key_template, ul_public_key_attribute_count),
+                    (p_private_key_template, ul_private_key_attribute_count),
+                ] {
+                    if get_attr_bytes_present(t, n, CKA_SEED).is_some() {
+                        return CKR_ATTRIBUTE_TYPE_INVALID;
+                    }
+                }
+                // An unknown value names no set, a brainpool set is not
+                // supported by this token: both CKR_PARAMETER_SET_NOT_SUPPORTED,
+                // as the CKM_ML_KEM_KEY_PAIR_GEN arm returns for an
+                // unrecognised set.
+                let layout = match crate::native::composite_key::supported_layout(
+                    CKK_COMP_KEM,
+                    ckp,
+                    CKR_PARAMETER_SET_NOT_SUPPORTED,
+                ) {
+                    Ok(l) => l,
+                    Err(rv) => return rv,
+                };
+                let (pk, sk) = match crate::native::composite_key::generate(&layout) {
+                    Ok(k) => k,
+                    Err(rv) => return rv,
+                };
+                let (mut pub_attrs, mut prv_attrs) = crate::native::composite_key::key_pair_attrs(
+                    &layout,
+                    pk,
+                    sk,
+                    CKM_COMP_KEM_KEY_PAIR_GEN,
+                );
+                absorb_template_attrs(
+                    &mut pub_attrs,
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                );
+                absorb_template_attrs(
+                    &mut prv_attrs,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                );
+                finalize_private_key_attrs(&mut prv_attrs);
+                compute_kcv(&mut pub_attrs);
+                compute_kcv(&mut prv_attrs);
+                match ffi_alloc_key_pair(_h_session, pub_attrs, prv_attrs) {
+                    Ok((hp, hk)) => {
+                        *ph_public_key = hp;
+                        *ph_private_key = hk;
+                    }
+                    Err(rv) => return rv,
+                }
+                CKR_OK
             }
 
             CKM_ML_KEM_KEY_PAIR_GEN => {
@@ -5026,6 +5124,83 @@ fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attribut
     }
 }
 
+/// `CKM_COMP_KEM` (PKCS#11 v3.3 working draft, comp_kem.md): "It has no
+/// parameters." A non-NULL pParameter or a non-zero ulParameterLen is
+/// CKR_MECHANISM_PARAM_INVALID (v3.2 §5.1.6: "Invalid parameters were
+/// supplied to the mechanism"), on both C_EncapsulateKey and C_DecapsulateKey.
+unsafe fn comp_kem_refuse_parameter(p_mechanism: *const u8) -> Result<(), u32> {
+    let m = ck_param::mech(p_mechanism);
+    if !m.p_parameter.is_null() || m.ul_parameter_len != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok(())
+}
+
+/// The `CKM_COMP_KEM` parameter set of `h_key`, which the key-type check has
+/// already shown to be a CKK_COMP_KEM key. A key without CKA_PARAMETER_SET is
+/// incomplete (the CKM_ML_KEM arms' P-10 rule); a brainpool set is
+/// CKR_PARAMETER_SET_NOT_SUPPORTED (listed for both KEM functions, v3.3
+/// key_management_functions.md).
+fn comp_kem_key_params(h_key: u32) -> Result<&'static crate::native::composite::CompositeKemParams, u32> {
+    let ckp = get_object_attr_u32(h_key, CKA_PARAMETER_SET).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let p = crate::native::composite::kem_params(ckp).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    if !p.supported {
+        return Err(CKR_PARAMETER_SET_NOT_SUPPORTED);
+    }
+    Ok(p)
+}
+
+/// The composite-KEM shared secret as a new key object — comp_kem.md: "The
+/// mechanism contributes the result as the CKA_VALUE attribute of the new
+/// key; other attributes required by the key type must be specified in the
+/// template." Built exactly as the CKM_ML_KEM arms build theirs (generic
+/// secret, extractable and non-sensitive by default, CKA_LOCAL false,
+/// CKA_VALUE_LEN engine truth, §4.11 check value, the key's
+/// CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE). The secret is fixed
+/// at 32 bytes (draft-ietf-lamps-pq-composite-kem-23 §3.4), so a caller
+/// CKA_VALUE_LEN is checked, never applied (§4.1.1 rules 5/6, see
+/// kem_check_template_value_len). Only the handle leaves the engine.
+unsafe fn comp_kem_secret_object(
+    h_session: u32,
+    h_kem_key: u32,
+    template: *mut u8,
+    count: u32,
+    ss: &[u8],
+    decapsulate: bool,
+) -> Result<u32, u32> {
+    kem_check_template_value_len(template, count, ss.len())?;
+    let mut ss_attrs = HashMap::new();
+    ss_attrs.insert(CKA_VALUE, ss.to_vec());
+    store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
+    store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+    store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
+    store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
+    store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
+    // Owner decision 2026-10-02 — C++ parity, as in the CKM_ML_KEM arms.
+    store_bool(&mut ss_attrs, CKA_PRIVATE, true);
+    store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.8 / §5.18.9
+    store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    absorb_template_attrs(&mut ss_attrs, template, count);
+    // §6.8.2 Table 103 — engine truth, written AFTER absorb.
+    store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.len() as u32);
+    // §5.18.8 / §5.18.9: unconditionally CK_FALSE for (en|de)capsulated keys.
+    store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+    crate::state::apply_check_value_policy(
+        &mut ss_attrs,
+        find_template_entry(template, count, CKA_CHECK_VALUE).as_deref(),
+    )?;
+    let (template_attr, refused) = if decapsulate {
+        (CKA_DECAPSULATE_TEMPLATE, CKR_TEMPLATE_INCONSISTENT)
+    } else {
+        (CKA_ENCAPSULATE_TEMPLATE, CKR_KEY_HANDLE_INVALID)
+    };
+    if !kem_template_permits(h_kem_key, template_attr, &ss_attrs) {
+        return Err(refused);
+    }
+    ffi_alloc(h_session, ss_attrs)
+}
+
 fn C_EncapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -5485,6 +5660,50 @@ fn C_EncapsulateKey_impl(
                 return CKR_KEY_HANDLE_INVALID;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
+            return CKR_OK;
+        }
+
+        // ── Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md) ───────
+        // draft-ietf-lamps-pq-composite-kem-23 §3.2 in native::composite_kem;
+        // the key type was checked by check_key_for_mech (mech_key_types).
+        if mech_type == CKM_COMP_KEM {
+            if let Err(rv) = comp_kem_refuse_parameter(p_mechanism) {
+                return rv;
+            }
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+            if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+                return rv;
+            }
+            let p = match comp_kem_key_params(h_key) {
+                Ok(p) => p,
+                Err(rv) => return rv,
+            };
+            // Every supported set has a fixed ciphertext length (§4.3,
+            // Appendix A): query-then-fill as for CKM_ML_KEM.
+            let ct_len = p.ciphertext_size().bytes() as u32;
+            if p_ciphertext.is_null() {
+                *pul_ciphertext_len = ct_len;
+                return CKR_OK;
+            }
+            if *pul_ciphertext_len < ct_len {
+                *pul_ciphertext_len = ct_len;
+                return CKR_BUFFER_TOO_SMALL;
+            }
+            let pk = match get_object_value(h_key) {
+                Some(v) => v,
+                None => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let (ct, ss) = match crate::native::composite_kem::encapsulate(_h_session, p, &pk) {
+                Ok(r) => r,
+                Err(rv) => return rv,
+            };
+            debug_assert_eq!(ct.len(), ct_len as usize);
+            std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct.len());
+            *pul_ciphertext_len = ct.len() as u32;
+            *ph_key = match comp_kem_secret_object(_h_session, h_key, _p_template, _ul_attribute_count, &ss, false) {
                 Ok(h) => h,
                 Err(rv) => return rv,
             };
@@ -5989,6 +6208,47 @@ fn C_DecapsulateKey_impl(
                 return CKR_TEMPLATE_INCONSISTENT;
             }
             *ph_key = match ffi_alloc(_h_session, ss_attrs) {
+                Ok(h) => h,
+                Err(rv) => return rv,
+            };
+            return CKR_OK;
+        }
+
+        // ── Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md) ───────
+        // draft-ietf-lamps-pq-composite-kem-23 §3.3 in native::composite_kem,
+        // whose doc lists the failure semantics: wrong length →
+        // CKR_WRAPPED_KEY_LEN_RANGE; tampered ML-KEM half → CKR_OK with a
+        // different secret (implicit rejection); a traditional half its
+        // component refuses → CKR_WRAPPED_KEY_INVALID.
+        if mech_type == CKM_COMP_KEM {
+            if let Err(rv) = comp_kem_refuse_parameter(p_mechanism) {
+                return rv;
+            }
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+            if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
+                return rv;
+            }
+            // §5.18.9 — CKM_COMP_KEM needs a composite-KEM private key (the
+            // public object's CKA_VALUE is not a decapsulation key).
+            if get_object_attr_u32(h_private_key, CKA_KEY_TYPE) != Some(CKK_COMP_KEM)
+                || get_object_attr_u32(h_private_key, CKA_CLASS) != Some(CKO_PRIVATE_KEY)
+            {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let p = match comp_kem_key_params(h_private_key) {
+                Ok(p) => p,
+                Err(rv) => return rv,
+            };
+            let sk = match get_object_value(h_private_key) {
+                Some(v) => zeroize::Zeroizing::new(v),
+                None => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let ct = std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize);
+            let ss = match crate::native::composite_kem::decapsulate(_h_session, p, &sk, ct) {
+                Ok(s) => s,
+                Err(rv) => return rv,
+            };
+            *ph_key = match comp_kem_secret_object(_h_session, h_private_key, _p_template, _ul_attribute_count, &ss, true) {
                 Ok(h) => h,
                 Err(rv) => return rv,
             };
@@ -6641,7 +6901,9 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         || key_type == CKK_SLH_DSA
         || key_type == CKK_HSS
         || key_type == CKK_XMSS
-        || key_type == CKK_XMSSMT;
+        || key_type == CKK_XMSSMT
+        || key_type == CKK_COMP_KEM
+        || key_type == CKK_COMP_SIG;
     if secret_only && class != CKO_SECRET_KEY {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
@@ -7241,6 +7503,12 @@ pub(crate) fn create_object_from_attrs(
     // already answer that with CKR_TEMPLATE_INCOMPLETE.
     reject_invalid_ml_kem_key_value(class, &new_attrs)?;
 
+    // PKCS#11 v3.3 working draft composite keys (CKK_COMP_KEM / CKK_COMP_SIG):
+    // split CKA_VALUE per the drafts' §4, re-derive or check both public
+    // halves, and store the composite SPKI — see the return-code list on
+    // native::composite_key::check_imported_key.
+    crate::native::composite_key::check_imported_key(class, &mut new_attrs)?;
+
     // PKCS#11 v3.2 §6.14 (and every other secret-key table): CKA_VALUE_LEN is
     // "Length in bytes of key value", defined for the key type regardless of
     // how the object came into being. The generate and unwrap paths already
@@ -7649,6 +7917,8 @@ fn mech_key_types(mech: u32) -> Option<&'static [u32]> {
         m if m == CKM_SLH_DSA || m == CKM_HASH_SLH_DSA || is_prehash_slh_dsa(m) => &[CKK_SLH_DSA],
         // §6.68 — ML-KEM; vendor KEMs carry their own vendor key types.
         CKM_ML_KEM => &[CKK_ML_KEM],
+        // Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md).
+        CKM_COMP_KEM => &[CKK_COMP_KEM],
         CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => &[CKK_PQCTODAY_FRODOKEM],
         CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => &[CKK_PQCTODAY_CLASSIC_MCELIECE],
         // §6.14 / §6.66 — stateful hash-based signatures.
@@ -27437,6 +27707,13 @@ mod cert_discovery_tests;
 #[cfg(test)]
 #[path = "mlkem_input_check_tests.rs"]
 mod mlkem_input_check_tests;
+
+/// Composite ML-KEM (PKCS#11 v3.3 working draft) through the FFI: LAMPS
+/// vector consistency, decapsulation KAT, round trips and derived negative
+/// vectors — see the module's own docs.
+#[cfg(test)]
+#[path = "composite_kem_tests.rs"]
+mod composite_kem_tests;
 
 /// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
 /// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.
