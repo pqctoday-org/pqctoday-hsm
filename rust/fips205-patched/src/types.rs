@@ -24,6 +24,11 @@ pub enum Ph {
     SHA3_384,
     /// Use SHA3-512 as the pre-hash function [PKCS#11 v3.2 CKM_HASH_SLH_DSA_SHA3_512]
     SHA3_512,
+    /// SHA-512/224 (FIPS 204 Alg 4 / FIPS 205 Alg 23 OID 2.16.840.1.101.3.4.2.5);
+    /// generic pre-hash `hash` = CKM_SHA512_224 (owner decision D5, 22 Oct 2026)
+    SHA512_224,
+    /// SHA-512/256 (OID 2.16.840.1.101.3.4.2.6); generic `hash` = CKM_SHA512_256 (D5)
+    SHA512_256,
 }
 
 

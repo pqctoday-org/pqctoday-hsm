@@ -18,10 +18,12 @@
 //! cases run with `PQC_ACVP_NIST_DIR=<dir with the five files> cargo test
 //! --release acvp_optional_input_tests::full_nist -- --ignored`.
 //!
-//! The deterministic ML-DSA internal groups also run through the standard
-//! `CKM_ML_DSA_EXTERNAL_MU` (owner decision, 22 Oct 2026, "Use the standard
-//! route"): µ = SHAKE256(tr ‖ M′, 64), tr = SHAKE256(pk, 64), FIPS 204 Alg 7
-//! line 6 — the internal encoding must agree with it byte for byte.
+//! Every ML-DSA internal group runs through the standard
+//! `CKM_ML_DSA_EXTERNAL_MU` (owner decision D6, plan rev 10): µ =
+//! SHAKE256(tr ‖ M′, 64), tr = SHAKE256(pk, 64), FIPS 204 Alg 7 line 6, with
+//! rnd in the extended struct where the group is hedged. The internal
+//! encoding is SLH-DSA only. SHA-512/224 and SHA-512/256 pre-hash cases go
+//! through the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA (decision D5).
 use crate::ck_param;
 use crate::constants::*;
 use crate::ffi::*;
@@ -234,19 +236,23 @@ fn slh_dsa_ps(name: &str) -> u32 {
 }
 
 /// (hash-specific ML-DSA mech, hash-specific SLH-DSA mech, digest mech for
-/// the generic form — None for SHAKE, which the generic form does not take).
-fn prehash_mechs(hash_alg: &str) -> (u32, u32, Option<u32>) {
+/// the generic form). SHAKE has no generic `hash` value; SHA-512/224 and
+/// SHA-512/256 have no hash-specific mechanism and go through the generic
+/// one only (owner decision D5).
+fn prehash_mechs(hash_alg: &str) -> (Option<u32>, Option<u32>, Option<u32>) {
     match hash_alg {
-        "SHA2-224" => (CKM_HASH_ML_DSA_SHA224, CKM_HASH_SLH_DSA_SHA224, Some(CKM_SHA224)),
-        "SHA2-256" => (CKM_HASH_ML_DSA_SHA256, CKM_HASH_SLH_DSA_SHA256, Some(CKM_SHA256)),
-        "SHA2-384" => (CKM_HASH_ML_DSA_SHA384, CKM_HASH_SLH_DSA_SHA384, Some(CKM_SHA384)),
-        "SHA2-512" => (CKM_HASH_ML_DSA_SHA512, CKM_HASH_SLH_DSA_SHA512, Some(CKM_SHA512)),
-        "SHA3-224" => (CKM_HASH_ML_DSA_SHA3_224, CKM_HASH_SLH_DSA_SHA3_224, Some(CKM_SHA3_224)),
-        "SHA3-256" => (CKM_HASH_ML_DSA_SHA3_256, CKM_HASH_SLH_DSA_SHA3_256, Some(CKM_SHA3_256)),
-        "SHA3-384" => (CKM_HASH_ML_DSA_SHA3_384, CKM_HASH_SLH_DSA_SHA3_384, Some(CKM_SHA3_384)),
-        "SHA3-512" => (CKM_HASH_ML_DSA_SHA3_512, CKM_HASH_SLH_DSA_SHA3_512, Some(CKM_SHA3_512)),
-        "SHAKE-128" => (CKM_HASH_ML_DSA_SHAKE128, CKM_HASH_SLH_DSA_SHAKE128, None),
-        "SHAKE-256" => (CKM_HASH_ML_DSA_SHAKE256, CKM_HASH_SLH_DSA_SHAKE256, None),
+        "SHA2-224" => (Some(CKM_HASH_ML_DSA_SHA224), Some(CKM_HASH_SLH_DSA_SHA224), Some(CKM_SHA224)),
+        "SHA2-256" => (Some(CKM_HASH_ML_DSA_SHA256), Some(CKM_HASH_SLH_DSA_SHA256), Some(CKM_SHA256)),
+        "SHA2-384" => (Some(CKM_HASH_ML_DSA_SHA384), Some(CKM_HASH_SLH_DSA_SHA384), Some(CKM_SHA384)),
+        "SHA2-512" => (Some(CKM_HASH_ML_DSA_SHA512), Some(CKM_HASH_SLH_DSA_SHA512), Some(CKM_SHA512)),
+        "SHA2-512/224" => (None, None, Some(CKM_SHA512_224)),
+        "SHA2-512/256" => (None, None, Some(CKM_SHA512_256)),
+        "SHA3-224" => (Some(CKM_HASH_ML_DSA_SHA3_224), Some(CKM_HASH_SLH_DSA_SHA3_224), Some(CKM_SHA3_224)),
+        "SHA3-256" => (Some(CKM_HASH_ML_DSA_SHA3_256), Some(CKM_HASH_SLH_DSA_SHA3_256), Some(CKM_SHA3_256)),
+        "SHA3-384" => (Some(CKM_HASH_ML_DSA_SHA3_384), Some(CKM_HASH_SLH_DSA_SHA3_384), Some(CKM_SHA3_384)),
+        "SHA3-512" => (Some(CKM_HASH_ML_DSA_SHA3_512), Some(CKM_HASH_SLH_DSA_SHA3_512), Some(CKM_SHA3_512)),
+        "SHAKE-128" => (Some(CKM_HASH_ML_DSA_SHAKE128), Some(CKM_HASH_SLH_DSA_SHAKE128), None),
+        "SHAKE-256" => (Some(CKM_HASH_ML_DSA_SHAKE256), Some(CKM_HASH_SLH_DSA_SHAKE256), None),
         _ => panic!("{hash_alg}"),
     }
 }
@@ -259,6 +265,8 @@ fn ph(hash_alg: &str, m: &[u8]) -> Vec<u8> {
         "SHA2-256" => sha2::Sha256::digest(m).to_vec(),
         "SHA2-384" => sha2::Sha384::digest(m).to_vec(),
         "SHA2-512" => sha2::Sha512::digest(m).to_vec(),
+        "SHA2-512/224" => sha2::Sha512_224::digest(m).to_vec(),
+        "SHA2-512/256" => sha2::Sha512_256::digest(m).to_vec(),
         "SHA3-224" => sha3::Sha3_224::digest(m).to_vec(),
         "SHA3-256" => sha3::Sha3_256::digest(m).to_vec(),
         "SHA3-384" => sha3::Sha3_384::digest(m).to_vec(),
@@ -323,31 +331,46 @@ fn run_sig_gen(session: u32, algo: &str, g: &serde_json::Value, t: &serde_json::
         let sig = sign(session, CKM_ML_DSA_EXTERNAL_MU, &ext_ctx(hedge, &[], &rnd, 0), hk, &mu).expect(&tag);
         assert_eq!(verify(session, CKM_ML_DSA_EXTERNAL_MU, &[], hp, &mu, &sig), CKR_OK, "{tag}: verifies");
         sig
+    } else if internal && algo == "ML-DSA" {
+        // Owner decision D6: the standard CKM_ML_DSA_EXTERNAL_MU route, µ =
+        // SHAKE256(tr ‖ M′, 64) computed here; rnd only where hedged. The
+        // internal encoding is refused for ML-DSA.
+        let m = hx(s(t, "message"));
+        assert_eq!(sign_init(session, CKM_ML_DSA, &ext_ctx(hedge, &[], &rnd, 1), hk), CKR_MECHANISM_PARAM_INVALID, "{tag}: D6");
+        let mu = mu_of(&pk, &m);
+        let param = if det { std_ctx(CKH_DETERMINISTIC_REQUIRED, &[]) } else { ext_ctx(hedge, &[], &rnd, 0) };
+        let sig = sign(session, CKM_ML_DSA_EXTERNAL_MU, &param, hk, &mu).expect(&tag);
+        assert_eq!(verify(session, CKM_ML_DSA_EXTERNAL_MU, &[], hp, &mu, &sig), CKR_OK, "{tag}: verifies");
+        sig
     } else if internal {
         let m = hx(s(t, "message"));
         let sig = sign(session, pure, &ext_ctx(hedge, &[], &rnd, 1), hk, &m).expect(&tag);
         assert_eq!(verify(session, pure, &ext_ctx(CKH_HEDGE_PREFERRED, &[], &[], 1), hp, &m, &sig), CKR_OK, "{tag}: verifies (internal)");
-        if algo == "ML-DSA" && det {
-            // The standard route agrees byte for byte (owner decision).
-            let mu = mu_of(&pk, &m);
-            let std = sign(session, CKM_ML_DSA_EXTERNAL_MU, &std_ctx(CKH_DETERMINISTIC_REQUIRED, &[]), hk, &mu).expect(&tag);
-            assert_eq!(std, sig, "{tag}: CKM_ML_DSA_EXTERNAL_MU route");
-        }
         sig
     } else if prehash {
         let m = hx(s(t, "message"));
         let (mdsa, mslh, digest) = prehash_mechs(s(t, "hashAlg"));
-        let mech = if algo == "ML-DSA" { mdsa } else { mslh };
-        let sig = sign(session, mech, &ext_ctx(hedge, &ctx, &rnd, 0), hk, &m).expect(&tag);
-        assert_eq!(verify(session, mech, &std_ctx(0, &ctx), hp, &m, &sig), CKR_OK, "{tag}: verifies");
+        let specific = if algo == "ML-DSA" { mdsa } else { mslh };
+        let mut sig = None;
+        if let Some(mech) = specific {
+            let s1 = sign(session, mech, &ext_ctx(hedge, &ctx, &rnd, 0), hk, &m).expect(&tag);
+            assert_eq!(verify(session, mech, &std_ctx(0, &ctx), hp, &m, &s1), CKR_OK, "{tag}: verifies");
+            sig = Some(s1);
+        }
         if let Some(d) = digest {
-            // The generic mechanism over PH(M), extended hash form.
+            // The generic mechanism over PH(M), extended hash form (the only
+            // route for SHA-512/224 and SHA-512/256, decision D5).
             let generic = if algo == "ML-DSA" { CKM_HASH_ML_DSA } else { CKM_HASH_SLH_DSA };
             let phm = ph(s(t, "hashAlg"), &m);
             let g2 = sign(session, generic, &ext_hash_ctx(hedge, &ctx, d, &rnd, 0), hk, &phm).expect(&tag);
-            assert_eq!(g2, sig, "{tag}: generic CKM_HASH_* route");
+            let vctx = ext_hash_ctx(0, &ctx, d, &[], 0);
+            assert_eq!(verify(session, generic, &vctx, hp, &phm, &g2), CKR_OK, "{tag}: generic verifies");
+            if let Some(s1) = &sig {
+                assert_eq!(&g2, s1, "{tag}: generic CKM_HASH_* route");
+            }
+            sig = Some(g2);
         }
-        sig
+        sig.expect("a PKCS#11 route")
     } else {
         let m = hx(s(t, "message"));
         let sig = sign(session, pure, &ext_ctx(hedge, &ctx, &rnd, 0), hk, &m).expect(&tag);
@@ -362,8 +385,8 @@ fn run_sig_gen(session: u32, algo: &str, g: &serde_json::Value, t: &serde_json::
     sig
 }
 
-/// One NIST sigVer internal case: messageEncoding = internal, and (ML-DSA)
-/// the standard CKM_ML_DSA_EXTERNAL_MU route, must give the expected result.
+/// One NIST sigVer internal case: SLH-DSA through messageEncoding =
+/// internal, ML-DSA through the standard CKM_ML_DSA_EXTERNAL_MU (D6).
 fn run_sig_ver(session: u32, algo: &str, g: &serde_json::Value, t: &serde_json::Value) {
     assert_eq!(g["signatureInterface"], "internal");
     let pk = hx(s(t, "pk"));
@@ -377,17 +400,19 @@ fn run_sig_ver(session: u32, algo: &str, g: &serde_json::Value, t: &serde_json::
     };
     let hp = public_key(session, kt, ps, &pk, CKA_VERIFY);
     let want_ok = t["testPassed"].as_bool().unwrap();
-    let rv = verify(session, mech, &ext_ctx(0, &[], &[], 1), hp, &m, &sig);
     let ok_codes = [CKR_SIGNATURE_INVALID, CKR_SIGNATURE_LEN_RANGE];
+    let rv = if algo == "ML-DSA" {
+        // Decision D6: the standard CKM_ML_DSA_EXTERNAL_MU route; the
+        // internal encoding is refused for ML-DSA verification too.
+        assert_eq!(verify_init(session, mech, &ext_ctx(0, &[], &[], 1), hp), CKR_MECHANISM_PARAM_INVALID, "{tag}: D6");
+        verify(session, CKM_ML_DSA_EXTERNAL_MU, &[], hp, &mu_of(&pk, &m), &sig)
+    } else {
+        verify(session, mech, &ext_ctx(0, &[], &[], 1), hp, &m, &sig)
+    };
     if want_ok {
         assert_eq!(rv, CKR_OK, "{tag}");
     } else {
         assert!(ok_codes.contains(&rv), "{tag}: rv 0x{rv:x} for an invalid signature ({})", t["reason"]);
-    }
-    if algo == "ML-DSA" {
-        let mu = mu_of(&pk, &m);
-        let rv2 = verify(session, CKM_ML_DSA_EXTERNAL_MU, &[], hp, &mu, &sig);
-        assert_eq!(rv2 == CKR_OK, want_ok, "{tag}: CKM_ML_DSA_EXTERNAL_MU route");
     }
 }
 
@@ -429,7 +454,7 @@ fn nist_ml_dsa_sig_gen_every_group() {
         }
         n += 1;
     }
-    assert_eq!(n, 15, "3 pure hedged + 3 pre-hash hedged + 6 internal hedged + 3 internal deterministic");
+    assert_eq!(n, 15, "3 pure hedged + 3 pre-hash hedged + 6 internal hedged + 3 internal deterministic (all internal via external-µ)");
 }
 
 #[test]
@@ -514,7 +539,6 @@ fn full_nist_body() {
     let session = setup();
     let doc = fixture();
     let mut total = 0usize;
-    let mut skipped = 0usize;
     let mut groups = 0usize;
     for f in doc["files"].as_array().unwrap() {
         let src = s(f, "source");
@@ -522,6 +546,7 @@ fn full_nist_body() {
         assert_eq!(sha256(&raw), s(f, "source_sha256"), "{src}: not the pinned upstream file");
         let up: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         let algo = if src.starts_with("ML-DSA") { "ML-DSA" } else { "SLH-DSA" };
+        let before = total;
         for g in f["testGroups"].as_array().unwrap() {
             let ug = up["testGroups"].as_array().unwrap().iter().find(|u| u["tgId"] == g["tgId"]).unwrap();
             for t in ug["tests"].as_array().unwrap() {
@@ -529,13 +554,6 @@ fn full_nist_body() {
                     let h = public_key(session, CKK_ML_KEM, ml_kem_ps(s(g, "parameterSet")), &hx(s(t, "ek")), CKA_ENCAPSULATE);
                     let (rv, c, k) = encapsulate(session, CKM_ML_KEM, &hx(s(t, "m")), h);
                     assert_eq!((rv, c, k), (CKR_OK, hx(s(t, "c")), hx(s(t, "k"))));
-                } else if src.contains("sigGen") && g["preHash"] == "preHash" && t["hashAlg"].as_str().is_some_and(|h| h.starts_with("SHA2-512/")) {
-                    // SHA-512/224 and SHA-512/256 pre-hash: no PKCS#11 v3.2
-                    // HashML-DSA / HashSLH-DSA mechanism and no generic
-                    // `hash` value the engine maps (a separate gap, outside
-                    // this plan).
-                    skipped += 1;
-                    continue;
                 } else if src.contains("sigGen") {
                     let mut tt = t.clone();
                     let sig = hx(s(t, "signature"));
@@ -549,10 +567,11 @@ fn full_nist_body() {
             }
             groups += 1;
         }
+        eprintln!("full NIST: {src}: {} groups, {} cases (cumulative {total})", f["testGroups"].as_array().unwrap().len(), total - before);
         crate::state::OBJECTS.with(|o| o.borrow_mut().clear());
     }
-    eprintln!("full NIST: {groups} groups, {total} cases run, {skipped} SHA-512/t pre-hash cases not expressible");
-    assert_eq!((groups, total + skipped), (81, 909));
+    eprintln!("full NIST: {groups} groups, {total} cases");
+    assert_eq!((groups, total), (81, 909));
 }
 
 // ── Faults, sabotage, interoperation ───────────────────────────────────────
@@ -717,6 +736,11 @@ fn refusals_are_at_init_with_mechanism_param_invalid() {
     bad(sign_init(session, CKM_HASH_ML_DSA, &ext_hash_ctx(0, &[], CKM_SHA256, &[], 1), hd), "internal + generic HashML-DSA");
     bad(sign_init(session, CKM_ML_DSA_EXTERNAL_MU, &ext_ctx(0, &[], &[], 1), hd), "internal + external-µ");
     bad(sign_init(session, CKM_ML_DSA, &ext_ctx(0, b"ctx", &[], 1), hd), "internal + context");
+    // Decision D6: no internal encoding for any ML-DSA mechanism.
+    bad(sign_init(session, CKM_ML_DSA, &ext_ctx(0, &[], &[], 1), hd), "internal + CKM_ML_DSA");
+    bad(sign_init(session, CKM_ML_DSA, &ext_ctx(CKH_DETERMINISTIC_REQUIRED, &[], &[], 1), hd), "internal deterministic + CKM_ML_DSA");
+    bad(sign_init(session, CKM_ML_DSA, &ext_ctx(0, &[], &r32, 1), hd), "internal hedged rnd + CKM_ML_DSA");
+    bad(verify_init(session, CKM_ML_DSA, &ext_ctx(0, &[], &[], 1), hdp), "verify internal + CKM_ML_DSA");
     bad(verify_init(session, CKM_SLH_DSA, &ext_ctx(0, b"c", &[], 1), hsp), "verify internal + context");
     bad(verify_init(session, CKM_HASH_SLH_DSA_SHA256, &ext_ctx(0, &[], &[], 1), hsp), "verify internal + HashSLH-DSA");
     bad(sign_init(session, CKM_ML_DSA, &ext_ctx(0, &[], &[], 2), hd), "messageEncoding 2");
@@ -810,7 +834,16 @@ fn internal_encoding_rejects_invalid_signatures() {
     let session = setup();
     let doc = fixture();
     let ((dsk, dpk, dps), (ssk, spk, sps)) = keys(&doc);
-    for (kt, ps, sk, pk, mech) in [(CKK_ML_DSA, dps, &dsk, &dpk, CKM_ML_DSA), (CKK_SLH_DSA, sps, &ssk, &spk, CKM_SLH_DSA)] {
+    // Decision D6: ML-DSA refuses the internal encoding on every Init.
+    let hdk = private_key(session, CKK_ML_DSA, dps, &dsk, false);
+    let hdp = public_key(session, CKK_ML_DSA, dps, &dpk, CKA_VERIFY);
+    let int = ext_ctx(0, &[], &[], 1);
+    assert_eq!(sign_init(session, CKM_ML_DSA, &int, hdk), CKR_MECHANISM_PARAM_INVALID);
+    assert_eq!(verify_init(session, CKM_ML_DSA, &int, hdp), CKR_MECHANISM_PARAM_INVALID);
+    let mi = mechanism(CKM_ML_DSA, &int);
+    let mut sg = vec![0u8; 2420];
+    assert_eq!(C_VerifySignatureInit(session, mi.as_ptr() as *mut u8, hdp, sg.as_mut_ptr(), sg.len() as u32), CKR_MECHANISM_PARAM_INVALID);
+    for (kt, ps, sk, pk, mech) in [(CKK_SLH_DSA, sps, &ssk, &spk, CKM_SLH_DSA)] {
         let hk = private_key(session, kt, ps, sk, false);
         let hp = public_key(session, kt, ps, pk, CKA_VERIFY);
         let m = b"M-prime as given";
@@ -821,6 +854,13 @@ fn internal_encoding_rejects_invalid_signatures() {
         t[10] ^= 1;
         assert_eq!(verify(session, mech, &internal, hp, m, &t), CKR_SIGNATURE_INVALID);
         assert_eq!(verify(session, mech, &internal, hp, m, &sig[..sig.len() - 1]), CKR_SIGNATURE_LEN_RANGE);
+        let mut short = sig[..sig.len() - 1].to_vec();
+        assert_eq!(C_VerifySignatureInit(session, mechanism(mech, &internal).as_ptr() as *mut u8, hp, short.as_mut_ptr(), short.len() as u32), CKR_OK);
+        assert_eq!(C_VerifySignature(session, m.as_ptr() as *mut u8, m.len() as u32), CKR_SIGNATURE_LEN_RANGE, "C_VerifySignature, wrong length");
+        let mut short2 = sig[..sig.len() - 1].to_vec();
+        assert_eq!(C_VerifySignatureInit(session, mechanism(mech, &[]).as_ptr() as *mut u8, hp, short2.as_mut_ptr(), short2.len() as u32), CKR_OK);
+        assert_eq!(C_VerifySignature(session, m.as_ptr() as *mut u8, m.len() as u32), CKR_SIGNATURE_LEN_RANGE, "standard C_VerifySignature, wrong length");
+        assert_eq!(verify(session, mech, &[], hp, m, &sig[..sig.len() - 1]), CKR_SIGNATURE_LEN_RANGE, "standard C_Verify, wrong length");
         assert_eq!(verify(session, mech, &internal, hp, b"another M-prime", &sig), CKR_SIGNATURE_INVALID);
         // Not an external-interface signature over the same bytes.
         assert_eq!(verify(session, mech, &[], hp, m, &sig), CKR_SIGNATURE_INVALID);
@@ -858,4 +898,56 @@ fn d0a_no_guard_sensitive_and_non_sensitive_keys() {
     assert_eq!(out[0], out[1], "same value, same signature, whatever CKA_SENSITIVE says");
     // ML-KEM m on a public key needs no sensitivity rule; ECDSA k is in
     // ffi::ecdsa_k_shape1_ffi_tests (imported with CKA_SENSITIVE unset).
+}
+
+/// Owner decision D5: the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA take
+/// hash = CKM_SHA512_224 / CKM_SHA512_256. OID correctness is checked
+/// independently: M′ = 0x01 ‖ len(ctx) ‖ ctx ‖ OID ‖ PH(M) is built here
+/// with the FIPS 204 / 205 OID (2.16.840.1.101.3.4.2.5 / .6) and signed
+/// through the standard route (ML-DSA: CKM_ML_DSA_EXTERNAL_MU over µ;
+/// SLH-DSA: the internal encoding), deterministically, and must equal the
+/// generic mechanism's deterministic signature. Sabotage: the neighbouring
+/// OID gives a different signature, and a changed PH(M) does not verify.
+#[test]
+fn d5_sha512_t_generic_prehash_oid_and_sabotage() {
+    let _guard = test_lock::acquire();
+    let session = setup();
+    let doc = fixture();
+    let ((dsk, dpk, dps), (ssk, spk, sps)) = keys(&doc);
+    let hd = private_key(session, CKK_ML_DSA, dps, &dsk, false);
+    let hdp = public_key(session, CKK_ML_DSA, dps, &dpk, CKA_VERIFY);
+    let hs = private_key(session, CKK_SLH_DSA, sps, &ssk, false);
+    let hsp = public_key(session, CKK_SLH_DSA, sps, &spk, CKA_VERIFY);
+    let msg = b"pre-hashed with SHA-512/t";
+    let ctx = b"ctx";
+    for (alg, digest, last) in [("SHA2-512/224", CKM_SHA512_224, 0x05u8), ("SHA2-512/256", CKM_SHA512_256, 0x06u8)] {
+        let phm = ph(alg, msg);
+        let m_prime = |oid_last: u8| {
+            let mut v = vec![1u8, ctx.len() as u8];
+            v.extend_from_slice(ctx);
+            v.extend_from_slice(&[0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, oid_last]);
+            v.extend_from_slice(&phm);
+            v
+        };
+        let det = ext_hash_ctx(CKH_DETERMINISTIC_REQUIRED, ctx, digest, &[], 0);
+        // ML-DSA
+        let g = sign(session, CKM_HASH_ML_DSA, &det, hd, &phm).expect(alg);
+        let want = sign(session, CKM_ML_DSA_EXTERNAL_MU, &std_ctx(CKH_DETERMINISTIC_REQUIRED, &[]), hd, &mu_of(&dpk, &m_prime(last))).unwrap();
+        assert_eq!(g, want, "ML-DSA {alg}: OID in M'");
+        let wrong = sign(session, CKM_ML_DSA_EXTERNAL_MU, &std_ctx(CKH_DETERMINISTIC_REQUIRED, &[]), hd, &mu_of(&dpk, &m_prime(last ^ 3))).unwrap();
+        assert_ne!(g, wrong, "ML-DSA {alg}: the OID matters");
+        assert_eq!(verify(session, CKM_HASH_ML_DSA, &det, hdp, &phm, &g), CKR_OK);
+        let mut bad = phm.clone();
+        bad[0] ^= 1;
+        assert_eq!(verify(session, CKM_HASH_ML_DSA, &det, hdp, &bad, &g), CKR_SIGNATURE_INVALID);
+        assert_eq!(sign(session, CKM_HASH_ML_DSA, &det, hd, &phm[1..]).unwrap_err(), CKR_FUNCTION_FAILED, "PH(M) of the wrong length");
+        // SLH-DSA
+        let g = sign(session, CKM_HASH_SLH_DSA, &det, hs, &phm).expect(alg);
+        let want = sign(session, CKM_SLH_DSA, &ext_ctx(CKH_DETERMINISTIC_REQUIRED, &[], &[], 1), hs, &m_prime(last)).unwrap();
+        assert_eq!(g, want, "SLH-DSA {alg}: OID in M'");
+        let wrong = sign(session, CKM_SLH_DSA, &ext_ctx(CKH_DETERMINISTIC_REQUIRED, &[], &[], 1), hs, &m_prime(last ^ 3)).unwrap();
+        assert_ne!(g, wrong, "SLH-DSA {alg}: the OID matters");
+        assert_eq!(verify(session, CKM_HASH_SLH_DSA, &det, hsp, &phm, &g), CKR_OK);
+        assert_eq!(verify(session, CKM_HASH_SLH_DSA, &det, hsp, &bad, &g), CKR_SIGNATURE_INVALID);
+    }
 }

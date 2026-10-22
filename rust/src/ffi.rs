@@ -8718,7 +8718,10 @@ unsafe fn remap_generic_hash_mech(
         )
         .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let hash = r.ulong32(ck_param::hash_sign_ctx::HASH);
-    if map_generic_hash_mech(mech_type, hash).is_none() {
+    // Owner decision D5 (plan rev 10): SHA-512/224 and SHA-512/256 are also
+    // legal here (v3.3 draft: `hash` is any digest mechanism; FIPS 204 / 205
+    // give their OIDs). They have no hash-specific mechanism to map onto.
+    if map_generic_hash_mech(mech_type, hash).is_none() && hash != CKM_SHA512_224 && hash != CKM_SHA512_256 {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     GENERIC_HASH_STATE.with(|s| {
@@ -9107,14 +9110,17 @@ unsafe fn parse_sign_additional_ctx(
     }
     let context = c.context.to_vec();
     // messageEncoding (plan M3, decision D3): internal signs / verifies M′
-    // as given — pure CKM_ML_DSA and CKM_SLH_DSA only, with an empty
-    // context (the internal interface has none).
+    // as given — CKM_SLH_DSA only, with an empty context (the internal
+    // interface has none). Owner decision D6 (plan rev 10, "standard
+    // first"): every ML-DSA mechanism refuses it, because the standard
+    // CKM_ML_DSA_EXTERNAL_MU already carries M′ as µ = SHAKE256(tr ‖ M′, 64);
+    // SLH-DSA has no standard route.
     let internal = match c.message_encoding {
         ck_param::MESSAGE_ENCODING_STANDARD => false,
         ck_param::MESSAGE_ENCODING_INTERNAL => true,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID),
     };
-    if internal && ((mech != CKM_ML_DSA && mech != CKM_SLH_DSA) || c.context_len != 0) {
+    if internal && (mech != CKM_SLH_DSA || c.context_len != 0) {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     // pRandom: the value the signature would otherwise draw. Not a
@@ -9395,19 +9401,6 @@ fn C_Sign_impl(
                     },
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
-            }
-            // FIPS 204 Alg 7 ML-DSA.Sign_internal on the caller's M′ (internal
-            // message encoding): rnd supplied, else {0}^32 when deterministic,
-            // else fresh.
-            CKM_ML_DSA if supplied.internal => {
-                let rnd = rnd32.unwrap_or_else(|| {
-                    let mut r = [0u8; 32];
-                    if !deterministic {
-                        rand::RngCore::fill_bytes(&mut OsRng, &mut r);
-                    }
-                    r
-                });
-                crate::crypto::handlers::sign_ml_dsa_internal(ps, &sk_bytes, msg, &[], rnd)
             }
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => match rnd32 {
                 Some(rnd) if m == CKM_ML_DSA => {
@@ -9820,8 +9813,8 @@ fn C_Verify_impl(
         let ps = get_object_param_set(hkey);
 
         // The internal message encoding (ACVP explicit-randomness plan, M3;
-        // validated at C_VerifyInit / C_VerifySignatureInit): M′ verified as
-        // given (FIPS 204 Alg 8, FIPS 205 Alg 20).
+        // validated at C_VerifyInit / C_VerifySignatureInit; SLH-DSA only,
+        // decision D6): M′ verified as given (FIPS 205 Alg 20).
         let internal = VERIFY_SUPPLIED.shard(h_session).get(&h_session).is_some_and(|s| s.internal);
 
         // Pre-hash dispatch: same logic as C_Sign
@@ -9840,9 +9833,6 @@ fn C_Verify_impl(
                     Some(hash) => verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
-            }
-            CKM_ML_DSA if internal => {
-                crate::crypto::handlers::verify_ml_dsa_internal(ps, &pk_bytes, msg, sig_bytes, &[])
             }
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 verify_ml_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)

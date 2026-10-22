@@ -812,6 +812,10 @@ pub fn ph_from_digest_mech_ml_dsa(hash: u32) -> Option<fips204::Ph> {
         crate::constants::CKM_SHA3_256 => Some(fips204::Ph::SHA3_256),
         crate::constants::CKM_SHA3_384 => Some(fips204::Ph::SHA3_384),
         crate::constants::CKM_SHA3_512 => Some(fips204::Ph::SHA3_512),
+        // Owner decision D5 (plan rev 10): the generic pre-hash `hash` may be
+        // SHA-512/224 or SHA-512/256 (v3.3 draft: any digest mechanism).
+        crate::constants::CKM_SHA512_224 => Some(fips204::Ph::SHA512_224),
+        crate::constants::CKM_SHA512_256 => Some(fips204::Ph::SHA512_256),
         _ => None,
     }
 }
@@ -827,6 +831,10 @@ pub fn ph_from_digest_mech_slh_dsa(hash: u32) -> Option<fips205::Ph> {
         crate::constants::CKM_SHA3_256 => Some(fips205::Ph::SHA3_256),
         crate::constants::CKM_SHA3_384 => Some(fips205::Ph::SHA3_384),
         crate::constants::CKM_SHA3_512 => Some(fips205::Ph::SHA3_512),
+        // Owner decision D5 (plan rev 10): the generic pre-hash `hash` may be
+        // SHA-512/224 or SHA-512/256 (v3.3 draft: any digest mechanism).
+        crate::constants::CKM_SHA512_224 => Some(fips205::Ph::SHA512_224),
+        crate::constants::CKM_SHA512_256 => Some(fips205::Ph::SHA512_256),
         _ => None,
     }
 }

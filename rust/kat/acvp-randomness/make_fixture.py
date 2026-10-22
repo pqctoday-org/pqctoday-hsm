@@ -18,8 +18,9 @@ Selection (deterministic):
 - ML-KEM encapsulation: every case of every in-scope group (cheap).
 - sigGen: per group, the case with the shortest message (mu for external-mu
   groups), ties by lowest tcId; for preHash groups only hashAlg values with a
-  hash-specific PKCS#11 v3.2 mechanism (SHA2-224/256/384/512, SHA3-*,
-  SHAKE-128/256). The expected signature is stored as its SHA-256 and length
+  PKCS#11 route (SHA2-224/256/384/512, SHA3-*, SHAKE-128/256, and — D5 —
+  SHA2-512/224 and SHA2-512/256 through the generic mechanism), plus the
+  shortest SHA2-512/224 or SHA2-512/256 case. The expected signature is stored as its SHA-256 and length
   (a byte-exact comparison; SLH-DSA signatures are up to 49,856 bytes).
 - sigVer: per group, the shortest passing and the shortest failing case, with
   the full signature (needed as input).
@@ -50,6 +51,9 @@ PREHASH_OK = {
     "SHA2-224", "SHA2-256", "SHA2-384", "SHA2-512",
     "SHA3-224", "SHA3-256", "SHA3-384", "SHA3-512",
     "SHAKE-128", "SHAKE-256",
+    # Owner decision D5 (plan rev 10): through the generic CKM_HASH_ML_DSA /
+    # CKM_HASH_SLH_DSA with hash = CKM_SHA512_224 / CKM_SHA512_256.
+    "SHA2-512/224", "SHA2-512/256",
 }
 GROUP_KEYS = ("tgId", "testType", "parameterSet", "function", "deterministic",
               "signatureInterface", "preHash", "externalMu")
@@ -89,6 +93,11 @@ def main(nist_dir, hub_dir, out):
                     cand = [t for t in tests if t["hashAlg"] in PREHASH_OK]
                 key = lambda t: (len(t.get("mu") or t.get("message") or ""), t["tcId"])
                 chosen = [min(cand, key=key)]
+                if g.get("preHash") == "preHash":
+                    # Also the shortest SHA-512/224 or SHA-512/256 case (D5).
+                    t512 = [t for t in tests if t["hashAlg"].startswith("SHA2-512/")]
+                    if t512 and min(t512, key=key) not in chosen:
+                        chosen.append(min(t512, key=key))
             else:
                 key = lambda t: (len(t.get("message") or ""), t["tcId"])
                 chosen = [min([t for t in tests if t["testPassed"]], key=key),
