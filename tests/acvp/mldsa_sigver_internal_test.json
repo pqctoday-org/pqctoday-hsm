@@ -9,7 +9,7 @@
     "source_sha256": "47cdd6314c7f746d02421ffcba89d4dbc7bb875ac49e07a029fdfc26fba55437",
     "retrieved": "2026-10-22",
     "upstream_operation": "sigVer internal-interface groups (tg 8/10/12)",
-    "local_operation": "C_VerifyInit through standard CKM_ML_DSA_EXTERNAL_MU with mu = SHAKE256(SHAKE256(pk,64) || M', 64), and through CKM_ML_DSA with messageEncoding internal; verdict-exact",
+    "local_operation": "C_VerifyInit through standard CKM_ML_DSA_EXTERNAL_MU with mu = SHAKE256(SHAKE256(pk,64) || M', 64) (owner decision D6; messageEncoding internal is refused for ML-DSA); verdict-exact",
     "transformation": "subset only; every retained group field and test field is byte-copied from the upstream file (only 'deferred' dropped)",
     "subset_policy": "One case per upstream reason per group (valid, modified message, modified signature - z / hint / commitment), shortest message.",
     "retained_fields": "group fields as upstream; tcId, testPassed, pk, sk, message, hashAlg, signature, reason",

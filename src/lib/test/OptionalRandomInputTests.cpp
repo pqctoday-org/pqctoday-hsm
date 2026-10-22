@@ -17,15 +17,16 @@
  With ACVP_OPTIONAL_INPUT_FULL_DIR pointing at the five upstream
  internalProjection files (named <ACVP-Server dir>.json, e.g.
  ML-DSA-sigGen-FIPS204.json), testFullNistSetWhenProvided runs all 909
- in-scope cases; cases whose hashAlg has no PKCS#11 mechanism (SHA2-512/224,
- SHA2-512/256: a separate, out-of-scope gap) are counted and reported.
+ in-scope cases. SHA2-512/224 and SHA2-512/256 pre-hash cases run through
+ the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA with hash = CKM_SHA512_224 /
+ CKM_SHA512_256 and data = PH(M) (owner decision D5).
 
- Routes (owner decision 22 Oct 2026, "Use the standard route"):
-   ML-DSA internal deterministic sigGen and internal sigVer run through the
-   standard CKM_ML_DSA_EXTERNAL_MU, µ = SHAKE256(SHAKE256(pk, 64) || M', 64);
-   hedged internal through CKM_ML_DSA + messageEncoding internal + rnd;
-   hedged external-µ through CKM_ML_DSA_EXTERNAL_MU + rnd;
-   SLH-DSA internal through messageEncoding internal.
+ Routes (owner decisions, plan revisions 9 and 10 / D6, "standard first"):
+   every ML-DSA internal group (deterministic and hedged, sigGen and sigVer)
+   runs through the standard CKM_ML_DSA_EXTERNAL_MU, µ = SHAKE256(
+   SHAKE256(pk, 64) || M', 64), with rnd through the extended struct for the
+   hedged groups; messageEncoding internal is refused for every ML-DSA
+   mechanism and kept for CKM_SLH_DSA only.
  *****************************************************************************/
 
 #include <config.h>
@@ -98,6 +99,32 @@ CK_MECHANISM_TYPE preHashMech(bool mldsa, const std::string& h)
 	auto it = m.find(h);
 	if (it == m.end()) return UNMAPPED;
 	return mldsa ? it->second.first : it->second.second;
+}
+
+// D5: hashAlgs reachable only through the generic CKM_HASH_ML_DSA /
+// CKM_HASH_SLH_DSA `hash` field.
+CK_MECHANISM_TYPE genericHash(const std::string& h)
+{
+	if (h == "SHA2-512/224") return CKM_SHA512_224;
+	if (h == "SHA2-512/256") return CKM_SHA512_256;
+	return UNMAPPED;
+}
+
+// PH(M) for the generic pre-hash mechanisms (caller-side hashing, independent
+// of the engine).
+Bytes digest(const std::string& h, const Bytes& m)
+{
+	const char* name = (h == "SHA2-512/224") ? "SHA512-224" : (h == "SHA2-512/256") ? "SHA512-256" : NULL;
+	CPPUNIT_ASSERT(name != NULL);
+	EVP_MD* md = EVP_MD_fetch(NULL, name, NULL);
+	CPPUNIT_ASSERT(md != NULL);
+	Bytes out(EVP_MD_get_size(md));
+	unsigned int len = 0;
+	const bool ok = EVP_Digest(m.empty() ? NULL : m.data(), m.size(), out.data(), &len, md, NULL) == 1;
+	EVP_MD_free(md);
+	CPPUNIT_ASSERT(ok);
+	out.resize(len);
+	return out;
 }
 
 Bytes shake256(const Bytes& a, const Bytes& b, size_t outLen)
@@ -210,8 +237,8 @@ CK_RV verifySignatureOnce(CK_SESSION_HANDLE h, CK_MECHANISM* m, CK_OBJECT_HANDLE
 }
 
 // One NIST sigGen case through PKCS#11. Returns the CK_RV and the signature.
-// `skipped` is set (and nothing run) when the case's hashAlg has no PKCS#11
-// pre-hash mechanism.
+// `skipped` is set (and nothing run) when the case's hashAlg has neither a
+// typed pre-hash mechanism nor a generic `hash` value (none since D5).
 CK_RV runSigGenCase(CK_SESSION_HANDLE h, bool mldsa, const nlohmann::json& g, const nlohmann::json& t,
                     Bytes& sig, bool& skipped, bool sensitive = false)
 {
@@ -226,27 +253,41 @@ CK_RV runSigGenCase(CK_SESSION_HANDLE h, bool mldsa, const nlohmann::json& g, co
 	const CK_HEDGE_TYPE hedge = det ? CKH_DETERMINISTIC_REQUIRED : CKH_HEDGE_PREFERRED;
 
 	CK_MECHANISM_TYPE mech = mldsa ? CKM_ML_DSA : CKM_SLH_DSA;
+	Bytes data = acvpkat::hexField(t, "message");
+	bool hashForm = false;
+	CK_MECHANISM_TYPE hashMech = CKM_SHA256;
 	if (preHash)
 	{
-		mech = preHashMech(mldsa, t["hashAlg"].get<std::string>());
-		if (mech == UNMAPPED) { skipped = true; return CKR_OK; }
+		const std::string ha = t["hashAlg"].get<std::string>();
+		mech = preHashMech(mldsa, ha);
+		if (mech == UNMAPPED)
+		{
+			// D5: SHA-512/224 and SHA-512/256 have no typed variant; they go
+			// through the generic mechanism's `hash` field with data = PH(M).
+			hashMech = genericHash(ha);
+			if (hashMech == UNMAPPED) { skipped = true; return CKR_OK; }
+			mech = mldsa ? CKM_HASH_ML_DSA : CKM_HASH_SLH_DSA;
+			hashForm = true;
+			data = digest(ha, data);
+		}
 	}
-	Bytes data = acvpkat::hexField(t, "message");
 	CK_ULONG enc = PQCTODAY_MESSAGE_ENCODING_STANDARD;
 	if (mldsa && extMu)
 	{
 		mech = CKM_ML_DSA_EXTERNAL_MU;
 		data = acvpkat::hexField(t, "mu");
 	}
-	else if (mldsa && internal && det)
+	else if (mldsa && internal)
 	{
-		// Standard route (owner decision): CKM_ML_DSA_EXTERNAL_MU over µ of M'.
+		// Standard route (owner decisions, rev 9 and D6): every ML-DSA internal
+		// group goes through CKM_ML_DSA_EXTERNAL_MU over µ = SHAKE256(tr || M',
+		// 64); the extension adds only rnd for the hedged groups.
 		mech = CKM_ML_DSA_EXTERNAL_MU;
 		data = mlDsaMu(acvpkat::hexField(t, "pk"), data);
 	}
 	else if (internal)
 	{
-		enc = PQCTODAY_MESSAGE_ENCODING_INTERNAL;
+		enc = PQCTODAY_MESSAGE_ENCODING_INTERNAL;  // SLH-DSA only
 	}
 
 	CK_OBJECT_HANDLE hKey;
@@ -256,7 +297,7 @@ CK_RV runSigGenCase(CK_SESSION_HANDLE h, bool mldsa, const nlohmann::json& g, co
 	// The extended form only when something in it is used: absent input stays
 	// the standard structure.
 	const bool needExt = !rnd.empty() || enc != PQCTODAY_MESSAGE_ENCODING_STANDARD;
-	SignMech sm(mech, hedge, ctx, rnd, enc, needExt);
+	SignMech sm(mech, hedge, ctx, rnd, enc, needExt, hashForm, hashMech);
 	rv = signOnce(h, sm.get(), hKey, data, sig);
 	CRYPTOKI_F_PTR( C_DestroyObject(h, hKey) );
 	return rv;
@@ -318,30 +359,34 @@ void runSigVerDoc(CK_SESSION_HANDLE h, bool mldsa, const nlohmann::json& doc, co
 			if (rv != CKR_OK) { f.check(false, id + ": import pk rv=" + acvpkat::rvHex(rv)); continue; }
 			const Bytes msg = acvpkat::hexField(t, "message");
 			const Bytes sig = acvpkat::hexField(t, "signature");
-			// messageEncoding internal, through C_VerifyInit and C_VerifySignatureInit.
+			if (mldsa)
 			{
-				SignMech sm(mldsa ? CKM_ML_DSA : CKM_SLH_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(),
-				            PQCTODAY_MESSAGE_ENCODING_INTERNAL);
+				// D6: messageEncoding internal is refused for ML-DSA; the
+				// standard route is CKM_ML_DSA_EXTERNAL_MU over µ of M'.
+				SignMech sm(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), PQCTODAY_MESSAGE_ENCODING_INTERNAL);
+				rv = CRYPTOKI_F_PTR( C_VerifyInit(h, sm.get(), hPub) );
+				f.check(rv == CKR_MECHANISM_PARAM_INVALID, id + ": ML-DSA internal encoding not refused, rv=" + acvpkat::rvHex(rv));
+				CK_MECHANISM mu = { CKM_ML_DSA_EXTERNAL_MU, NULL_PTR, 0 };
+				const Bytes muv = mlDsaMu(acvpkat::hexField(t, "pk"), msg);
+				rv = verifyOnce(h, &mu, hPub, muv, sig);
+				f.check(rv == want, id + ": EXTERNAL_MU C_Verify expected " + acvpkat::rvHex(want) +
+				        ", got " + acvpkat::rvHex(rv));
+				rv = verifySignatureOnce(h, &mu, hPub, muv, sig);
+				f.check(rv == want, id + ": EXTERNAL_MU C_VerifySignature expected " + acvpkat::rvHex(want) +
+				        ", got " + acvpkat::rvHex(rv));
+			}
+			else
+			{
+				// SLH-DSA: messageEncoding internal, through C_VerifyInit and
+				// C_VerifySignatureInit.
+				SignMech sm(CKM_SLH_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), PQCTODAY_MESSAGE_ENCODING_INTERNAL);
 				rv = verifyOnce(h, sm.get(), hPub, msg, sig);
 				f.check(rv == want, id + ": internal C_Verify expected " + acvpkat::rvHex(want) +
 				        ", got " + acvpkat::rvHex(rv));
-				// C_VerifySignature has no length precheck in this engine (it
-				// answers CKR_SIGNATURE_INVALID for a wrong-length signature on
-				// the standard path too) -- a pre-existing, separate gap, so the
-				// length cases are checked through C_Verify only.
-				if (want != CKR_SIGNATURE_LEN_RANGE)
-				{
-					rv = verifySignatureOnce(h, sm.get(), hPub, msg, sig);
-					f.check(rv == want, id + ": internal C_VerifySignature expected " + acvpkat::rvHex(want) +
-					        ", got " + acvpkat::rvHex(rv));
-				}
-			}
-			// ML-DSA: the standard route too (owner decision), CKM_ML_DSA_EXTERNAL_MU.
-			if (mldsa)
-			{
-				CK_MECHANISM mu = { CKM_ML_DSA_EXTERNAL_MU, NULL_PTR, 0 };
-				rv = verifyOnce(h, &mu, hPub, mlDsaMu(acvpkat::hexField(t, "pk"), msg), sig);
-				f.check(rv == want, id + ": EXTERNAL_MU C_Verify expected " + acvpkat::rvHex(want) +
+				// Includes the wrong-length cases: C_VerifySignature answers
+				// CKR_SIGNATURE_LEN_RANGE like C_Verify (fixed 2026-10-22).
+				rv = verifySignatureOnce(h, sm.get(), hPub, msg, sig);
+				f.check(rv == want, id + ": internal C_VerifySignature expected " + acvpkat::rvHex(want) +
 				        ", got " + acvpkat::rvHex(rv));
 			}
 			CRYPTOKI_F_PTR( C_DestroyObject(h, hPub) );
@@ -542,7 +587,7 @@ void OptionalRandomInputTests::testMlDsaSigGenMatchesNist()
 	runSigGenDoc(h, true, acvpkat::load("mldsa_siggen_optional_input_test.json"), NULL, f, groups, cases, skipped);
 	f.assertNone("ML-DSA sigGen with supplied rnd / internal interface");
 	CPPUNIT_ASSERT_EQUAL((size_t)15, groups.size());
-	CPPUNIT_ASSERT_EQUAL((size_t)30, cases);
+	CPPUNIT_ASSERT_EQUAL((size_t)36, cases);
 	CPPUNIT_ASSERT_EQUAL((size_t)0, skipped);
 }
 
@@ -570,7 +615,7 @@ void OptionalRandomInputTests::testSlhDsaSigGenMatchesNist()
 	runSigGenDoc(h, false, acvpkat::load("slhdsa_siggen_optional_input_test.json"), NULL, f, groups, cases, skipped);
 	f.assertNone("SLH-DSA sigGen with supplied addrnd / internal interface");
 	CPPUNIT_ASSERT_EQUAL((size_t)48, groups.size());
-	CPPUNIT_ASSERT_EQUAL((size_t)48, cases);
+	CPPUNIT_ASSERT_EQUAL((size_t)72, cases);
 	CPPUNIT_ASSERT_EQUAL((size_t)0, skipped);
 }
 
@@ -623,7 +668,8 @@ void OptionalRandomInputTests::testFullNistSetWhenProvided()
 	        gK.size() + gMG.size() + gMV.size() + gSG.size() + gSV.size(), total, cK, cMG, cMV, cSG, cSV, skMG, skSG);
 	f.assertNone("full in-scope NIST set");
 	CPPUNIT_ASSERT_EQUAL((size_t)81, gK.size() + gMG.size() + gMV.size() + gSG.size() + gSV.size());
-	CPPUNIT_ASSERT_EQUAL((size_t)909, total + skMG + skSG);
+	CPPUNIT_ASSERT_EQUAL((size_t)0, skMG + skSG);  // D5: SHA-512/224 and /256 now run
+	CPPUNIT_ASSERT_EQUAL((size_t)909, total);
 }
 
 void OptionalRandomInputTests::testSignContextRefusals()
@@ -666,7 +712,16 @@ void OptionalRandomInputTests::testSignContextRefusals()
 	{ SignMech s(CKM_ML_DSA, CKH_DETERMINISTIC_REQUIRED, ctx, rnd, STD); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
 	// Unknown messageEncoding.
 	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), 2); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
-	// Internal encoding: non-empty context, pre-hash and external-µ refused.
+	// D6: internal encoding is refused for every ML-DSA mechanism, with or
+	// without rnd, on sign, verify and verify-signature.
+	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), rnd, INT); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
+	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), INT); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
+	{ SignMech s(CKM_ML_DSA, CKH_DETERMINISTIC_REQUIRED, Bytes(), Bytes(), INT); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
+	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), INT);
+	  Bytes sig(2420, 0);
+	  CPPUNIT_ASSERT_EQUAL(PI, CRYPTOKI_F_PTR( C_VerifySignatureInit(h, s.get(), hMlPub, sig.data(), (CK_ULONG)sig.size()) )); }
+	{ SignMech s(CKM_ML_DSA_EXTERNAL_MU, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), INT); CPPUNIT_ASSERT_EQUAL(PI, vi(s, hMlPub)); }
+	{ SignMech s(CKM_HASH_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), INT, true, true); CPPUNIT_ASSERT_EQUAL(PI, vi(s, hMlPub)); }
 	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, ctx.empty() ? Bytes(1, 0x5a) : ctx, rnd, INT); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
 	{ SignMech s(CKM_HASH_ML_DSA_SHA256, CKH_HEDGE_PREFERRED, Bytes(), rnd, INT); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
 	{ SignMech s(CKM_HASH_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), rnd, INT, true, true); CPPUNIT_ASSERT_EQUAL(PI, si(s, hMl)); }
@@ -680,7 +735,7 @@ void OptionalRandomInputTests::testSignContextRefusals()
 	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, ctx, rnd, STD); CPPUNIT_ASSERT_EQUAL(PI, vi(s, hMlPub));
 	  Bytes sig(2420, 0);
 	  CPPUNIT_ASSERT_EQUAL(PI, CRYPTOKI_F_PTR( C_VerifySignatureInit(h, s.get(), hMlPub, sig.data(), (CK_ULONG)sig.size()) )); }
-	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), INT); CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, vi(s, hMlPub)); }
+	{ SignMech s(CKM_ML_DSA, CKH_HEDGE_PREFERRED, Bytes(), Bytes(), INT); CPPUNIT_ASSERT_EQUAL(PI, vi(s, hMlPub)); }
 	// Sizes other than standard or extended (per ABI) are refused.
 	for (CK_ULONG bad : { (CK_ULONG)(sizeof(CK_SIGN_ADDITIONAL_CONTEXT) + 1),
 	                      (CK_ULONG)(sizeof(CK_PQCTODAY_SIGN_ADDITIONAL_CONTEXT_EXT) - sizeof(CK_ULONG)),
@@ -823,7 +878,14 @@ void OptionalRandomInputTests::testSabotageAndInteroperability()
 		mPrime.insert(mPrime.end(), ctx.begin(), ctx.end());
 		mPrime.insert(mPrime.end(), msg.begin(), msg.end());
 		Bytes sig3;
-		{ SignMech s(mech, CKH_HEDGE_PREFERRED, Bytes(), acvpkat::hexField(t, mldsa ? "rnd" : "additionalRandomness"),
+		// ML-DSA through the standard CKM_ML_DSA_EXTERNAL_MU over µ of M' (D6);
+		// SLH-DSA through messageEncoding internal.
+		if (mldsa)
+		{ SignMech s(CKM_ML_DSA_EXTERNAL_MU, CKH_HEDGE_PREFERRED, Bytes(), acvpkat::hexField(t, "rnd"),
+		             PQCTODAY_MESSAGE_ENCODING_STANDARD);
+		  CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, signOnce(h, s.get(), hPrk, mlDsaMu(acvpkat::hexField(t, "pk"), mPrime), sig3)); }
+		else
+		{ SignMech s(mech, CKH_HEDGE_PREFERRED, Bytes(), acvpkat::hexField(t, "additionalRandomness"),
 		             PQCTODAY_MESSAGE_ENCODING_INTERNAL);
 		  CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, signOnce(h, s.get(), hPrk, mPrime, sig3)); }
 		CPPUNIT_ASSERT(sig3 == want);
@@ -898,7 +960,12 @@ void OptionalRandomInputTests::testOperationLogNotesSuppliedInput()
 		return x["signatureInterface"] == "internal" && !x["deterministic"].get<bool>() && !x["externalMu"].get<bool>(); }, g, t));
 	Bytes sig;
 	bool skipped = false;
-	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, runSigGenCase(h, true, g, t, sig, skipped));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, runSigGenCase(h, true, g, t, sig, skipped));  // EXTERNAL_MU + rnd
+	nlohmann::json sl = acvpkat::load("slhdsa_siggen_optional_input_test.json");
+	CPPUNIT_ASSERT(findCase(sl, [](const nlohmann::json& x) {
+		return x["signatureInterface"] == "internal" && !x["deterministic"].get<bool>() &&
+		       x["parameterSet"] == "SLH-DSA-SHAKE-128f"; }, g, t));
+	CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, runSigGenCase(h, false, g, t, sig, skipped));
 	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
 	unsetenv("SOFTHSM3_OP_LOG");
 
@@ -907,7 +974,7 @@ void OptionalRandomInputTests::testOperationLogNotesSuppliedInput()
 	ss2 << in.rdbuf();
 	unlink(path);
 	const std::string log = ss2.str();
-	size_t encWith = 0, encWithout = 0, signInternal = 0;
+	size_t encWith = 0, encWithout = 0, signInternal = 0, signRandom = 0;
 	std::istringstream lines(log);
 	for (std::string line; std::getline(lines, line);)
 	{
@@ -916,8 +983,159 @@ void OptionalRandomInputTests::testOperationLogNotesSuppliedInput()
 		if (line.find("op=C_SignInit") != std::string::npos &&
 		    line.find(" test_input=random+internal ") != std::string::npos)
 			signInternal++;
+		if (line.find("op=C_SignInit") != std::string::npos &&
+		    line.find(" test_input=random ") != std::string::npos)
+			signRandom++;
 	}
 	CPPUNIT_ASSERT_EQUAL_MESSAGE(log, (size_t)1, encWith);
 	CPPUNIT_ASSERT_EQUAL_MESSAGE(log, (size_t)1, encWithout);
 	CPPUNIT_ASSERT_EQUAL_MESSAGE(log, (size_t)1, signInternal);
+	CPPUNIT_ASSERT_EQUAL_MESSAGE(log, (size_t)1, signRandom);
+}
+
+void OptionalRandomInputTests::testGenericPreHashSha512t()
+{
+	// Owner decision D5: CKM_SHA512_224 / CKM_SHA512_256 as the `hash` of the
+	// generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA (data = PH(M)). The NIST
+	// byte-exact cases run in the sigGen suites above; this pins the OID in M'
+	// independently and the sabotage controls.
+	CK_SESSION_HANDLE h;
+	openSession(h);
+	const Bytes msg = { 'p', 'q', 'c', 't', 'o', 'd', 'a', 'y' };
+	const Bytes ctx = { 0x01, 0x02, 0x03 };
+	struct { const char* alg; CK_MECHANISM_TYPE mech; unsigned char oidLast; } hs[] = {
+		{ "SHA2-512/224", CKM_SHA512_224, 0x05 }, { "SHA2-512/256", CKM_SHA512_256, 0x06 },
+	};
+	auto mPrime = [&](unsigned char oidLast, const Bytes& ph) {
+		Bytes m = { 0x01, (unsigned char)ctx.size() };
+		m.insert(m.end(), ctx.begin(), ctx.end());
+		const Bytes oid = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, oidLast };
+		m.insert(m.end(), oid.begin(), oid.end());
+		m.insert(m.end(), ph.begin(), ph.end());
+		return m;
+	};
+	for (int alg = 0; alg < 2; alg++)
+	{
+		const bool mldsa = (alg == 0);
+		nlohmann::json doc = acvpkat::load(mldsa ? "mldsa_siggen_optional_input_test.json"
+		                                         : "slhdsa_siggen_optional_input_test.json");
+		nlohmann::json g, t;
+		CPPUNIT_ASSERT(findCase(doc, [&](const nlohmann::json& x) {
+			return x["preHash"] == "pure" && (mldsa || x["parameterSet"] == "SLH-DSA-SHAKE-128f"); }, g, t));
+		const CK_ULONG ps = mldsa ? mldsaSet(g["parameterSet"].get<std::string>()) : slhSet(g["parameterSet"].get<std::string>());
+		const CK_KEY_TYPE kt = mldsa ? CKK_ML_DSA : CKK_SLH_DSA;
+		const Bytes pk = acvpkat::hexField(t, "pk");
+		CK_OBJECT_HANDLE hPrk, hPub;
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, importKey(h, kt, true, ps, acvpkat::hexField(t, "sk"), hPrk));
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, importKey(h, kt, false, ps, pk, hPub));
+		const CK_MECHANISM_TYPE generic = mldsa ? CKM_HASH_ML_DSA : CKM_HASH_SLH_DSA;
+		for (const auto& hc : hs)
+		{
+			const std::string id = std::string(mldsa ? "ML-DSA " : "SLH-DSA ") + hc.alg;
+			const Bytes ph = digest(hc.alg, msg);
+			Bytes viaGeneric, viaMPrime, wrongOid;
+			{ SignMech s(generic, CKH_DETERMINISTIC_REQUIRED, ctx, Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false, true, hc.mech);
+			  CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signOnce(h, s.get(), hPrk, ph, viaGeneric)); }
+			// The same M' built here with the FIPS 204/205 OID for this hash:
+			// ML-DSA through standard external-µ, SLH-DSA through internal encoding.
+			auto signMPrime = [&](unsigned char oidLast, Bytes& out) {
+				const Bytes mp = mPrime(oidLast, ph);
+				if (mldsa)
+				{
+					SignMech s(CKM_ML_DSA_EXTERNAL_MU, CKH_DETERMINISTIC_REQUIRED, Bytes(), Bytes(),
+					           PQCTODAY_MESSAGE_ENCODING_STANDARD, false);
+					return signOnce(h, s.get(), hPrk, mlDsaMu(pk, mp), out);
+				}
+				SignMech s(CKM_SLH_DSA, CKH_DETERMINISTIC_REQUIRED, Bytes(), Bytes(), PQCTODAY_MESSAGE_ENCODING_INTERNAL);
+				return signOnce(h, s.get(), hPrk, mp, out);
+			};
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signMPrime(hc.oidLast, viaMPrime));
+			CPPUNIT_ASSERT_MESSAGE(id + ": M' OID differs from FIPS 204/205", viaGeneric == viaMPrime);
+			// Sabotage: the other hash's OID gives a different signature.
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signMPrime(hc.oidLast ^ 0x03, wrongOid));
+			CPPUNIT_ASSERT(wrongOid != viaGeneric);
+			// Ordinary verification under the generic mechanism; a changed PH fails.
+			SignMech v(generic, CKH_HEDGE_PREFERRED, ctx, Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false, true, hc.mech);
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifyOnce(h, v.get(), hPub, ph, viaGeneric));
+			Bytes ph2(ph);
+			ph2[0] ^= 0x01;
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_INVALID, verifyOnce(h, v.get(), hPub, ph2, viaGeneric));
+			// The two hashes are not interchangeable: verifying under the other one fails.
+			SignMech v2(generic, CKH_HEDGE_PREFERRED, ctx, Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false, true,
+			            hc.mech == CKM_SHA512_224 ? CKM_SHA512_256 : CKM_SHA512_224);
+			Bytes phOther = digest(hc.mech == CKM_SHA512_224 ? "SHA2-512/256" : "SHA2-512/224", msg);
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_INVALID, verifyOnce(h, v2.get(), hPub, phOther, viaGeneric));
+			// Hedged with a supplied random value through the extended hash form.
+			Bytes hedged;
+			{ SignMech s(generic, CKH_HEDGE_PREFERRED, ctx, Bytes(mldsa ? 32 : 16, 0x42), PQCTODAY_MESSAGE_ENCODING_STANDARD, true, true, hc.mech);
+			  CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signOnce(h, s.get(), hPrk, ph, hedged)); }
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifyOnce(h, v.get(), hPub, ph, hedged));
+		}
+		// Owner decision D7: a PH(M) whose length is not the hash's digest
+		// length is CKR_DATA_LEN_RANGE on C_Sign, C_Verify and
+		// C_VerifySignature (generic mechanism, any hash).
+		const struct { CK_MECHANISM_TYPE mech; size_t len; } d7[] = {
+			{ CKM_SHA512_224, 28 }, { CKM_SHA512_256, 32 }, { CKM_SHA256, 32 }, { CKM_SHA3_512, 64 },
+		};
+		for (const auto& c : d7)
+		{
+			const std::string id = std::string(mldsa ? "ML-DSA" : "SLH-DSA") + " D7 hash 0x" + acvpkat::rvHex(c.mech);
+			SignMech s(generic, CKH_DETERMINISTIC_REQUIRED, ctx, Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false, true, c.mech);
+			SignMech v(generic, CKH_HEDGE_PREFERRED, ctx, Bytes(), PQCTODAY_MESSAGE_ENCODING_STANDARD, false, true, c.mech);
+			Bytes good(c.len, 0x5a), sig, out;
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, signOnce(h, s.get(), hPrk, good, sig));
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifyOnce(h, v.get(), hPub, good, sig));
+			for (size_t badLen : { c.len - 1, c.len + 1 })
+			{
+				Bytes bad(badLen, 0x5a);
+				CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_DATA_LEN_RANGE, signOnce(h, s.get(), hPrk, bad, out));
+				CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_DATA_LEN_RANGE, verifyOnce(h, v.get(), hPub, bad, sig));
+				CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_DATA_LEN_RANGE, verifySignatureOnce(h, v.get(), hPub, bad, sig));
+			}
+		}
+	}
+}
+
+void OptionalRandomInputTests::testVerifySignatureLengthRange()
+{
+	// A wrong-length signature is CKR_SIGNATURE_LEN_RANGE through C_Verify,
+	// C_VerifySignature and C_VerifySignatureFinal alike (standard SLH-DSA and
+	// ML-DSA paths); a right-length tampered one is CKR_SIGNATURE_INVALID.
+	CK_SESSION_HANDLE h;
+	openSession(h);
+	for (int alg = 0; alg < 2; alg++)
+	{
+		const bool mldsa = (alg == 0);
+		nlohmann::json doc = acvpkat::load(mldsa ? "mldsa_siggen_optional_input_test.json"
+		                                         : "slhdsa_siggen_optional_input_test.json");
+		nlohmann::json g, t;
+		CPPUNIT_ASSERT(findCase(doc, [&](const nlohmann::json& x) {
+			return x["preHash"] == "pure" && (mldsa || x["parameterSet"] == "SLH-DSA-SHAKE-128f"); }, g, t));
+		const CK_ULONG ps = mldsa ? mldsaSet(g["parameterSet"].get<std::string>()) : slhSet(g["parameterSet"].get<std::string>());
+		CK_OBJECT_HANDLE hPub;
+		CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, importKey(h, mldsa ? CKK_ML_DSA : CKK_SLH_DSA, false, ps, acvpkat::hexField(t, "pk"), hPub));
+		const Bytes msg = acvpkat::hexField(t, "message"), sig = acvpkat::hexField(t, "signature");
+		SignMech v(mldsa ? CKM_ML_DSA : CKM_SLH_DSA, CKH_HEDGE_PREFERRED, acvpkat::hexField(t, "context"), Bytes(),
+		           PQCTODAY_MESSAGE_ENCODING_STANDARD, false);
+		const Bytes shortSig(sig.begin(), sig.end() - 1);
+		Bytes longSig(sig);
+		longSig.push_back(0);
+		Bytes bad(sig);
+		bad[bad.size() / 2] ^= 0x01;
+		const std::string id = mldsa ? "ML-DSA" : "SLH-DSA";
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifyOnce(h, v.get(), hPub, msg, sig));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_OK, verifySignatureOnce(h, v.get(), hPub, msg, sig));
+		for (const Bytes* s : std::vector<const Bytes*>{ &shortSig, &longSig })
+		{
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_LEN_RANGE, verifyOnce(h, v.get(), hPub, msg, *s));
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_LEN_RANGE, verifySignatureOnce(h, v.get(), hPub, msg, *s));
+			// Multi-part: C_VerifySignatureUpdate + C_VerifySignatureFinal.
+			Bytes sv(*s), mv(msg);
+			CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureInit(h, v.get(), hPub, sv.data(), (CK_ULONG)sv.size()) ));
+			CPPUNIT_ASSERT_EQUAL((CK_RV)CKR_OK, CRYPTOKI_F_PTR( C_VerifySignatureUpdate(h, acvpkat::dataPtr(mv), (CK_ULONG)mv.size()) ));
+			CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_LEN_RANGE, CRYPTOKI_F_PTR( C_VerifySignatureFinal(h) ));
+		}
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_INVALID, verifyOnce(h, v.get(), hPub, msg, bad));
+		CPPUNIT_ASSERT_EQUAL_MESSAGE(id, (CK_RV)CKR_SIGNATURE_INVALID, verifySignatureOnce(h, v.get(), hPub, msg, bad));
+	}
 }
