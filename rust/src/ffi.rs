@@ -5565,6 +5565,18 @@ fn C_EncapsulateKey_impl(
     ph_key: *mut u32,
 ) -> u32 {
     require_init!();
+    // Shape 1 (plan M2): a malformed CKM_ML_KEM m is refused before any
+    // session or key lookup, as in the C++ engine (D2 parity).
+    if !p_mechanism.is_null() {
+        let m = unsafe { ck_param::mech(p_mechanism) };
+        if m.mechanism == CKM_ML_KEM {
+            match unsafe { shape1_value(&m) } {
+                Ok(None) => {}
+                Ok(Some(v)) if v.len() == 32 => {}
+                _ => return CKR_MECHANISM_PARAM_INVALID,
+            }
+        }
+    }
     require_session!(_h_session);
     use ml_kem::KemCore;
 
@@ -6256,6 +6268,14 @@ fn C_DecapsulateKey_impl(
     ph_key: *mut u32,
 ) -> u32 {
     require_init!();
+    // Decapsulation takes no optional input (plan M2): any CKM_ML_KEM
+    // parameter is refused before any session or key lookup (C++ parity).
+    if !p_mechanism.is_null() {
+        let m = unsafe { ck_param::mech(p_mechanism) };
+        if m.mechanism == CKM_ML_KEM && (m.ul_parameter_len != 0) {
+            return CKR_MECHANISM_PARAM_INVALID;
+        }
+    }
     require_session!(_h_session);
 
     nonnull!(p_mechanism, p_ciphertext, ph_key);
@@ -10034,10 +10054,24 @@ unsafe fn requests_supplied_input(p_mechanism: *const u8) -> bool {
         return false;
     }
     let hash_form = m.mechanism == CKM_HASH_ML_DSA || m.mechanism == CKM_HASH_SLH_DSA;
-    matches!(
-        ck_param::sign_additional_ctx(&m, hash_form),
-        Ok(Some(c)) if c.random.is_some() || c.message_encoding != ck_param::MESSAGE_ENCODING_STANDARD
-    )
+    // The extended form itself is refused on the message interface, with or
+    // without inputs (C++ parity, D2).
+    matches!(ck_param::sign_additional_ctx(&m, hash_form), Ok(Some(c)) if c.form == ck_param::SignCtxForm::Extended)
+}
+
+/// A per-message parameter (C_SignMessage / C_VerifyMessage and their
+/// Begin forms) of exactly an extended signing-settings size is refused:
+/// the optional test inputs are single-operation inputs (C++ parity, D2).
+/// Any other per-message parameter keeps its existing treatment.
+fn per_message_extended_form(state: &crate::state::Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>>, h_session: u32, ul_param_len: u32) -> bool {
+    let Some(mech) = state.shard(h_session).get(&h_session).map(|s| s.0) else {
+        return false;
+    };
+    if !takes_sign_additional_ctx(mech) || ul_param_len == 0 {
+        return false;
+    }
+    let hash_form = mech == CKM_HASH_ML_DSA || mech == CKM_HASH_SLH_DSA;
+    ck_param::sign_ctx_form_at(ul_param_len as usize, hash_form, ck_param::WORD) == Some(ck_param::SignCtxForm::Extended)
 }
 
 #[wasm_bindgen(js_name = _C_SignMessage)]
@@ -10051,6 +10085,9 @@ pub fn C_SignMessage(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&SIGN_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     let saved = SIGN_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Sign(
         h_session,
@@ -10087,6 +10124,9 @@ pub fn C_MessageSignFinal(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_SignMessageBegin)]
 pub fn C_SignMessageBegin(h_session: u32, _p_param: *mut u8, _ul_param_len: u32) -> u32 {
     require_init!();
+    if per_message_extended_form(&SIGN_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -10110,6 +10150,9 @@ pub fn C_SignMessageNext(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&SIGN_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -10202,6 +10245,9 @@ pub fn C_VerifyMessage(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&VERIFY_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     let saved = VERIFY_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Verify(
         h_session,
@@ -10236,6 +10282,9 @@ pub fn C_MessageVerifyFinal(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_VerifyMessageBegin)]
 pub fn C_VerifyMessageBegin(h_session: u32, _p_param: *mut u8, _ul_param_len: u32) -> u32 {
     require_init!();
+    if per_message_extended_form(&VERIFY_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -10258,6 +10307,9 @@ pub fn C_VerifyMessageNext(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&VERIFY_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -27941,6 +27993,7 @@ pub fn C_EncapsulateKey(
         // A supplied m (shape 1, ACVP explicit-randomness plan M4) is
         // recorded as `test_input=random`, the field C_SignInit uses.
         let supplied = rv == CKR_OK
+            && !p_ciphertext.is_null()
             && (mech == CKM_ML_KEM || mech == CKM_COMP_KEM)
             && unsafe { ck_param::mech(p_mechanism).has_param() };
         crate::oplog::emit(
@@ -30735,7 +30788,7 @@ mod ecdsa_k_shape1_ffi_tests {
         assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_PARAM_INVALID);
         // Raw CKM_ECDSA stays single-part with k.
         assert_eq!(init(session, priv_h, Some(&good)), CKR_OK);
-        assert_ne!(C_SignUpdate(session, good.as_ptr() as *mut u8, 32), CKR_OK);
+        assert_eq!(C_SignUpdate(session, good.as_ptr() as *mut u8, 32), CKR_OPERATION_NOT_INITIALIZED);
     }
 
     /// k is a single-operation input: the next C_SignInit without it signs
@@ -30799,6 +30852,8 @@ mod ecdsa_k_shape1_ffi_tests {
         let session = setup();
         assert!(!SUPPORTED_MECHS.contains(&RETIRED_EXPLICIT_K));
         assert!(mechanism_info(RETIRED_EXPLICIT_K).is_none());
+        let mut info = [0usize; 3];
+        assert_eq!(C_GetMechanismInfo(0, RETIRED_EXPLICIT_K, info.as_mut_ptr() as *mut u8), CKR_MECHANISM_INVALID);
         let mut n = 0u32;
         assert_eq!(C_GetMechanismList(0, std::ptr::null_mut(), &mut n), CKR_OK);
         let mut list = vec![0u32; n as usize];

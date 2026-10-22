@@ -682,7 +682,7 @@ pub struct SignCtx<'a> {
 pub enum SignCtxErr {
     /// `ulParameterLen` is neither the standard nor the extended size.
     WrongSize,
-    /// `pRandom` NULL with a non-zero `ulRandomLen`, or the reverse.
+    /// `pRandom` NULL with a non-zero `ulRandomLen`.
     RandomPointerMismatch,
 }
 
@@ -730,10 +730,12 @@ pub unsafe fn sign_additional_ctx<'a>(m: &Mech, hash_form: bool) -> Result<Optio
             };
             let p = unsafe { r.ptr(pi) };
             let n = unsafe { r.ulong(li) };
-            if p.is_null() != (n == 0) {
+            // A length with a NULL pointer is malformed; ulRandomLen 0 is
+            // "absent" whatever the pointer (C++ parity, D2).
+            if p.is_null() && n != 0 {
                 return Err(SignCtxErr::RandomPointerMismatch);
             }
-            let random = (!p.is_null()).then(|| unsafe { r.buffer(pi, li) });
+            let random = (n != 0).then(|| unsafe { r.buffer(pi, li) });
             (random, unsafe { r.ulong(ei) })
         }
     };
@@ -1553,13 +1555,14 @@ mod tests {
         // The hash form's extended size is not a plain-form size.
         assert_eq!(unsafe { sign_additional_ctx(&m, false) }.unwrap_err(), SignCtxErr::WrongSize);
 
-        // pRandom NULL with a length, and a pointer with length 0.
+        // pRandom NULL with a length is malformed; a pointer with length 0
+        // is absent.
         let bad = build(&sign_ctx_ext::LAYOUT, &[V::U(0), V::P(core::ptr::null()), V::U(0), V::P(core::ptr::null()), V::U(32), V::U(0)]);
         let m = Mech { mechanism: 0, p_parameter: bad.as_ptr(), ul_parameter_len: bad.len() };
         assert_eq!(unsafe { sign_additional_ctx(&m, false) }.unwrap_err(), SignCtxErr::RandomPointerMismatch);
-        let bad = build(&sign_ctx_ext::LAYOUT, &[V::U(0), V::P(core::ptr::null()), V::U(0), V::P(rnd.as_ptr()), V::U(0), V::U(0)]);
-        let m = Mech { mechanism: 0, p_parameter: bad.as_ptr(), ul_parameter_len: bad.len() };
-        assert_eq!(unsafe { sign_additional_ctx(&m, false) }.unwrap_err(), SignCtxErr::RandomPointerMismatch);
+        let zero = build(&sign_ctx_ext::LAYOUT, &[V::U(0), V::P(core::ptr::null()), V::U(0), V::P(rnd.as_ptr()), V::U(0), V::U(0)]);
+        let m = Mech { mechanism: 0, p_parameter: zero.as_ptr(), ul_parameter_len: zero.len() };
+        assert!(unsafe { sign_additional_ctx(&m, false) }.unwrap().unwrap().random.is_none());
 
         // Absent is the spec default.
         let m = Mech { mechanism: 0, p_parameter: core::ptr::null(), ul_parameter_len: 0 };

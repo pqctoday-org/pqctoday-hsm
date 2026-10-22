@@ -622,6 +622,14 @@ fn ml_kem_supplied_m_interoperates_and_decapsulate_refuses_a_parameter() {
     let (_, c4, _) = encapsulate(session, CKM_ML_KEM, &[], hp);
     assert_ne!(c3, c4);
     assert_eq!(decapsulate(session, CKM_ML_KEM, &[], hk, &c3), (CKR_OK, k3));
+    // A malformed m is refused before the session is looked up (C++ parity).
+    let bad_m = [0u8; 31];
+    let bm = mechanism(CKM_ML_KEM, &bad_m);
+    let (mut l, mut hh) = (0u32, 0u32);
+    assert_eq!(
+        C_EncapsulateKey(0xdead_beef, bm.as_ptr() as *mut u8, hp, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut l, &mut hh),
+        CKR_MECHANISM_PARAM_INVALID
+    );
     // Wrong lengths, and a NULL pointer with a length.
     assert_eq!(encapsulate(session, CKM_ML_KEM, &[0u8; 31], hp).0, CKR_MECHANISM_PARAM_INVALID);
     assert_eq!(encapsulate(session, CKM_ML_KEM, &[0u8; 33], hp).0, CKR_MECHANISM_PARAM_INVALID);
@@ -724,7 +732,9 @@ fn refusals_are_at_init_with_mechanism_param_invalid() {
     let nul = pack(&ck_param::sign_ctx_ext::LAYOUT, &[0, 0, 0, 0, 32, 0]);
     bad(sign_init(session, CKM_ML_DSA, &nul, hd), "pRandom NULL, ulRandomLen 32");
     let zero = pack(&ck_param::sign_ctx_ext::LAYOUT, &[0, 0, 0, p(&r32), 0, 0]);
-    bad(sign_init(session, CKM_ML_DSA, &zero, hd), "pRandom set, ulRandomLen 0");
+    ok(sign_init(session, CKM_ML_DSA, &zero, hd), "pRandom set, ulRandomLen 0 = absent");
+    cancel(session);
+    bad(sign_init(session, CKM_ML_DSA, &ext_ctx(5, &[], &r32, 0), hd), "random + unknown hedge");
 
     // Message-based operations refuse single-operation inputs.
     let mr = mechanism(CKM_ML_DSA, &pr);
@@ -732,9 +742,21 @@ fn refusals_are_at_init_with_mechanism_param_invalid() {
     let pi = ext_ctx(0, &[], &[], 1);
     let mi = mechanism(CKM_ML_DSA, &pi);
     bad(C_MessageVerifyInit(session, mi.as_ptr() as *mut u8, hdp), "C_MessageVerifyInit + internal");
+    // The extended form itself, even without inputs, on the message
+    // interface (C++ parity, D2), and as a per-message parameter.
     let pe = ext_ctx(0, &[], &[], 0);
     let me = mechanism(CKM_ML_DSA, &pe);
-    ok(C_MessageSignInit(session, me.as_ptr() as *mut u8, hd), "C_MessageSignInit, extended form without inputs");
+    bad(C_MessageSignInit(session, me.as_ptr() as *mut u8, hd), "C_MessageSignInit, extended form");
+    bad(C_MessageVerifyInit(session, me.as_ptr() as *mut u8, hdp), "C_MessageVerifyInit, extended form");
+    let ms = mechanism(CKM_ML_DSA, &[]);
+    ok(C_MessageSignInit(session, ms.as_ptr() as *mut u8, hd), "C_MessageSignInit, standard");
+    let msg = b"m";
+    let mut sig = vec![0u8; 2420];
+    let mut sl = sig.len() as u32;
+    bad(
+        C_SignMessage(session, pe.as_ptr() as *mut u8, pe.len() as u32, msg.as_ptr() as *mut u8, 1, sig.as_mut_ptr(), &mut sl),
+        "per-message extended form",
+    );
     assert_eq!(C_MessageSignFinal(session), CKR_OK);
 }
 
