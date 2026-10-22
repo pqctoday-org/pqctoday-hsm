@@ -145,8 +145,8 @@
 
 #define CKM_ML_DSA_EXTERNAL_MU_GEN 0x0000403bUL
 
-// hKey: public/private key handle to derive tr from (CKA_VALUE ->
-// SHAKE256(pk,64)). pTR/ulTRLen: caller-precomputed 64-byte tr, used
+// hKey: ML-DSA public/private key handle to derive tr from (SHAKE256(pk,64),
+// pk re-derived from a private key; never private material). pTR/ulTRLen: caller-precomputed 64-byte tr, used
 // instead of hKey when hKey is CK_INVALID_HANDLE. Exactly one of the two
 // must be supplied. Field names match the v3.3 draft's own CK_MU_GEN_PARAMS
 // (working/doc/spec/ml_dsa.md) exactly.

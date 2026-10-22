@@ -96,7 +96,8 @@ mod tests {
     // the flag isn't silently ignored server-side), and (4) the engine's
     // real 64-byte µ length check (`sign_ml_dsa_external_mu` in
     // `rust/src/crypto/handlers.rs`) genuinely rejects a 63-byte buffer
-    // with CKR_ARGUMENTS_BAD, and Ed25519 + external_mu=true is rejected
+    // with CKR_DATA_LEN_RANGE (the C_Sign / C_Verify code for a bad input
+    // length; was CKR_ARGUMENTS_BAD), and Ed25519 + external_mu=true is rejected
     // with CKR_MECHANISM_INVALID before ever reaching the engine.
     #[test]
     #[serial]
@@ -128,7 +129,7 @@ mod tests {
         // (4) real engine-sourced length validation, not a Java/Rust-side guess
         let bad_len = verbs::sign(session, prv_h, Algorithm::MlDsa65, &mu[..63], true)
             .expect_err("a 63-byte buffer must be rejected under external-mu mode");
-        assert_eq!(bad_len.raw(), softhsmrustv3::constants::CKR_ARGUMENTS_BAD);
+        assert_eq!(bad_len.raw(), softhsmrustv3::constants::CKR_DATA_LEN_RANGE);
 
         // Ed25519 + external_mu=true is a real wire condition, not a caller-bug panic
         let (_, ed_prv) = verbs::generate_key_pair(session, Algorithm::Ed25519, b"\x06", "ext-mu-ed").expect("keygen");

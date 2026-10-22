@@ -47,6 +47,7 @@ class ErrorPathTests : public TestsBase
 	CPPUNIT_TEST(testSignMessageBufferTooSmall);
 	CPPUNIT_TEST(testMechanismParamInvalid);
 	CPPUNIT_TEST(testRipemd160AdvertisedIffDispatched);
+	CPPUNIT_TEST(testMuGenFromKeyHandle);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -55,6 +56,7 @@ public:
 	void testSignMessageBufferTooSmall();
 	void testMechanismParamInvalid();
 	void testRipemd160AdvertisedIffDispatched();
+	void testMuGenFromKeyHandle();
 
 protected:
 	CK_RV openUserSession(CK_SESSION_HANDLE& hSession);

@@ -43,7 +43,10 @@
 #include "HashAlgorithm.h"
 #include "vendor_mechanisms.h"
 #include "OSSLMuGenDigest.h"
+#include "OSSLMLDSAPublicKey.h"
+#include "OSSLMLDSAPrivateKey.h"
 #include <openssl/evp.h>
+#include <openssl/core_names.h>
 
 CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism)
 {
@@ -166,22 +169,90 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			}
 			else
 			{
+				// tr = H(pk, 64) (FIPS 204 Algorithm 7 line 6) from a key
+				// handle. PKCS#11 v3.3 working draft, ml_dsa.md:
+				// CK_MU_GEN_PARAMS.hKey is a "public or private" key, and the
+				// mechanism takes "a key handle or a precomputed TR of the
+				// public key". The handle resolves like any key an operation
+				// uses (acquireSessionTokenKey's rules); this used to hash the
+				// object's raw CKA_VALUE, which for a private key gave a µ no
+				// signature could verify, and absorbed any object's value.
+				//
+				// * unknown, or a private object the session may not read
+				//   (haveRead), or not a key at all (v3.2 §5.1.6): the handle
+				//   is CKR_KEY_HANDLE_INVALID — no value is reachable here
+				//   without the login that would be needed to use the key;
+				// * any key but an ML-DSA public or private key (a composite
+				//   signature key included): CKR_KEY_TYPE_INCONSISTENT;
+				// * public key: pk is its CKA_VALUE (pkEncode, v3.2 Table 280);
+				// * private key: pk is re-derived from the private key through
+				//   the EVP ML-DSA key (OSSL_PKEY_PARAM_PUB_KEY). Only that
+				//   public value is hashed, never private material.
+				Token* token = session->getToken();
+				if (token == NULL) return CKR_GENERAL_ERROR;
 				OSObject* osObj = (OSObject*)handleManager->getObject(muParams->hKey, session->getSlot()->getSlotID());
-				if (osObj == NULL)
+				if (osObj == NULL || !osObj->isValid())
 				{
 					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: hKey is not a valid object handle");
 					return CKR_KEY_HANDLE_INVALID;
 				}
-				ByteString pk = osObj->getByteStringValue(CKA_VALUE);
-				if (pk.size() == 0)
+				CK_BBOOL isOnToken = osObj->getBooleanValue(CKA_TOKEN, false);
+				CK_BBOOL isPrivate = osObj->getBooleanValue(CKA_PRIVATE, true);
+				if (haveRead(session->getState(), isOnToken, isPrivate) != CKR_OK)
 				{
-					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: hKey object has no CKA_VALUE");
+					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: hKey is not visible to this session");
 					return CKR_KEY_HANDLE_INVALID;
 				}
-				// tr = SHAKE256(pk, 64) — PKCS#11 v3.2 Table 280: CKA_VALUE
-				// for an ML-DSA public key IS pk_encode(rho, t1) already, so
-				// no re-encoding is needed here. One-shot, computed directly
-				// (not through the incremental digest-op set up below).
+				CK_OBJECT_CLASS keyClass = osObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED);
+				if (keyClass != CKO_PUBLIC_KEY && keyClass != CKO_PRIVATE_KEY && keyClass != CKO_SECRET_KEY)
+				{
+					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: hKey is not a key");
+					return CKR_KEY_HANDLE_INVALID;
+				}
+				if (keyClass == CKO_SECRET_KEY ||
+				    osObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_DSA)
+				{
+					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: hKey is not an ML-DSA key");
+					return CKR_KEY_TYPE_INCONSISTENT;
+				}
+
+				ByteString pk;
+				if (keyClass == CKO_PUBLIC_KEY)
+				{
+					// A public key may itself be CKA_PRIVATE, so its value is
+					// stored encrypted like any private object's.
+					OSSLMLDSAPublicKey pub;
+					if (getMLDSAPublicKey(&pub, token, osObj) != CKR_OK) return CKR_GENERAL_ERROR;
+					pk = pub.getValue();
+				}
+				else
+				{
+					OSSLMLDSAPrivateKey priv;
+					if (getMLDSAPrivateKey(&priv, token, osObj) != CKR_OK) return CKR_GENERAL_ERROR;
+					EVP_PKEY* pkey = priv.getOSSLKey();
+					size_t pkLen = 0;
+					if (pkey == NULL ||
+					    !EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, NULL, 0, &pkLen) ||
+					    pkLen == 0)
+					{
+						ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: cannot derive the public key from hKey");
+						return CKR_KEY_TYPE_INCONSISTENT;
+					}
+					pk.resize(pkLen);
+					if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, &pk[0], pkLen, &pkLen))
+					{
+						ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: cannot derive the public key from hKey");
+						return CKR_KEY_TYPE_INCONSISTENT;
+					}
+					pk.resize(pkLen);
+				}
+				if (pk.size() == 0)
+				{
+					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: hKey has no public value");
+					return CKR_KEY_TYPE_INCONSISTENT;
+				}
+				// One-shot, computed directly (not through the incremental
+				// digest-op set up below).
 				EVP_MD_CTX* trCtx = EVP_MD_CTX_new();
 				EVP_MD* shake256 = (trCtx != NULL) ? EVP_MD_fetch(NULL, "SHAKE256", NULL) : NULL;
 				bool trOk = (trCtx != NULL) && (shake256 != NULL) &&

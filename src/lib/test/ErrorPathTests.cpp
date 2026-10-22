@@ -38,6 +38,7 @@
 #include "ErrorPathTests.h"
 #include "vendor_mechanisms.h"
 #include <cppunit/extensions/HelperMacros.h>
+#include <openssl/evp.h>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -708,4 +709,158 @@ void ErrorPathTests::testRipemd160AdvertisedIffDispatched()
 	}
 
 	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
+}
+
+// SHAKE256(in, 64), computed here independently of the engine.
+static std::vector<CK_BYTE> shake256_64(const std::vector<CK_BYTE>& in)
+{
+	std::vector<CK_BYTE> out(64);
+	EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+	EVP_MD* md = EVP_MD_fetch(NULL, "SHAKE256", NULL);
+	bool ok = ctx != NULL && md != NULL &&
+		EVP_DigestInit_ex(ctx, md, NULL) &&
+		EVP_DigestUpdate(ctx, in.data(), in.size()) &&
+		EVP_DigestFinalXOF(ctx, out.data(), out.size());
+	EVP_MD_free(md);
+	EVP_MD_CTX_free(ctx);
+	if (!ok) out.clear();
+	return out;
+}
+
+// µ through CKM_ML_DSA_EXTERNAL_MU_GEN, the message fed in two parts.
+static CK_RV muGen(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, CK_BYTE_PTR pTR,
+                   CK_BYTE_PTR ctx, CK_ULONG ctxLen, const std::vector<CK_BYTE>& msg,
+                   std::vector<CK_BYTE>& mu)
+{
+	CK_MU_GEN_PARAMS params = { hKey, pTR, pTR ? 64UL : 0UL, ctx, ctxLen };
+	CK_MECHANISM m = { CKM_ML_DSA_EXTERNAL_MU_GEN, &params, sizeof(params) };
+	CK_RV rv = CRYPTOKI_F_PTR( C_DigestInit(hSession, &m) );
+	if (rv != CKR_OK) return rv;
+	std::vector<CK_BYTE> part(msg);
+	size_t half = part.size() / 2;
+	rv = CRYPTOKI_F_PTR( C_DigestUpdate(hSession, part.data(), half) );
+	if (rv != CKR_OK) return rv;
+	rv = CRYPTOKI_F_PTR( C_DigestUpdate(hSession, part.data() + half, part.size() - half) );
+	if (rv != CKR_OK) return rv;
+	mu.assign(64, 0);
+	CK_ULONG len = 64;
+	rv = CRYPTOKI_F_PTR( C_DigestFinal(hSession, mu.data(), &len) );
+	mu.resize(len);
+	return rv;
+}
+
+// CKM_ML_DSA_EXTERNAL_MU_GEN with a key handle (PKCS#11 v3.3 working draft,
+// ml_dsa.md: CK_MU_GEN_PARAMS.hKey is a "public or private" key, the
+// mechanism takes "a key handle or a precomputed TR of the public key"):
+// tr = H(pk, 64) (FIPS 204 Algorithm 7 line 6) comes from the PUBLIC key even
+// when the private handle is given. The engine used to hash the handle's raw
+// CKA_VALUE, so a private handle gave a µ no signature verified against, and
+// any object's value could be absorbed. Checked: µ from the public handle =
+// µ from the private handle = µ from a precomputed tr = an independent FIPS
+// 204 Eq. 2 computation, for all three sets; a signature over that µ with
+// CKM_ML_DSA_EXTERNAL_MU verifies as plain CKM_ML_DSA over the message; a
+// key of another type is CKR_KEY_TYPE_INCONSISTENT; a non-key, an unknown
+// handle and a private key the session may not read are
+// CKR_KEY_HANDLE_INVALID.
+void ErrorPathTests::testMuGenFromKeyHandle()
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(openUserSession(hSession) == CKR_OK);
+	std::string fails;
+
+	const std::vector<CK_BYTE> msg = { 'e', 'x', 't', 'e', 'r', 'n', 'a', 'l', '-', 'm', 'u' };
+	CK_BYTE ctx[] = { 'c', 't', 'x' };
+	const CK_ULONG sets[] = { CKP_ML_DSA_44, CKP_ML_DSA_65, CKP_ML_DSA_87 };
+	CK_OBJECT_HANDLE hDsaPuk = CK_INVALID_HANDLE, hDsaPrk = CK_INVALID_HANDLE;
+	for (CK_ULONG ps : sets)
+	{
+		char tag[48];
+		snprintf(tag, sizeof(tag), "ML-DSA set 0x%lx: ", (unsigned long)ps);
+		CPPUNIT_ASSERT(pqcKeyPair(hSession, CKM_ML_DSA_KEY_PAIR_GEN, CKK_ML_DSA, ps, hDsaPuk, hDsaPrk) == CKR_OK);
+
+		CK_ATTRIBUTE valAttr = { CKA_VALUE, NULL_PTR, 0 };
+		CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hDsaPuk, &valAttr, 1) ) == CKR_OK);
+		std::vector<CK_BYTE> pk(valAttr.ulValueLen);
+		valAttr.pValue = pk.data();
+		CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hDsaPuk, &valAttr, 1) ) == CKR_OK);
+		std::vector<CK_BYTE> tr = shake256_64(pk);
+		CPPUNIT_ASSERT(tr.size() == 64);
+
+		// FIPS 204 Eq. 2: µ = H(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M, 64).
+		std::vector<CK_BYTE> mPrime(tr);
+		mPrime.push_back(0x00);
+		mPrime.push_back((CK_BYTE)sizeof(ctx));
+		mPrime.insert(mPrime.end(), ctx, ctx + sizeof(ctx));
+		mPrime.insert(mPrime.end(), msg.begin(), msg.end());
+		std::vector<CK_BYTE> want = shake256_64(mPrime);
+
+		std::vector<CK_BYTE> muPub, muPrk, muTr;
+		expect(fails, std::string(tag) + "mu from the public handle",
+		       muGen(hSession, hDsaPuk, NULL_PTR, ctx, sizeof(ctx), msg, muPub), CKR_OK);
+		expect(fails, std::string(tag) + "mu from the private handle",
+		       muGen(hSession, hDsaPrk, NULL_PTR, ctx, sizeof(ctx), msg, muPrk), CKR_OK);
+		expect(fails, std::string(tag) + "mu from a precomputed tr",
+		       muGen(hSession, CK_INVALID_HANDLE, tr.data(), ctx, sizeof(ctx), msg, muTr), CKR_OK);
+		if (muPub != want) fails += std::string(tag) + "mu from the public handle differs from FIPS 204 Eq. 2\n";
+		if (muPrk != want) fails += std::string(tag) + "mu from the private handle differs from FIPS 204 Eq. 2\n";
+		if (muTr != want)  fails += std::string(tag) + "mu from a precomputed tr differs from FIPS 204 Eq. 2\n";
+
+		// Sign µ (empty context) with CKM_ML_DSA_EXTERNAL_MU; it must verify
+		// as a plain CKM_ML_DSA signature over the message itself.
+		std::vector<CK_BYTE> mu;
+		expect(fails, std::string(tag) + "mu (no context) from the private handle",
+		       muGen(hSession, hDsaPrk, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_OK);
+		if (mu.size() == 64)
+		{
+			CK_MECHANISM signMech = { CKM_ML_DSA_EXTERNAL_MU, NULL_PTR, 0 };
+			CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_SignInit(hSession, &signMech, hDsaPrk) ) == CKR_OK);
+			std::vector<CK_BYTE> sig(8192);
+			CK_ULONG sigLen = sig.size();
+			rv = CRYPTOKI_F_PTR( C_Sign(hSession, mu.data(), mu.size(), sig.data(), &sigLen) );
+			expect(fails, std::string(tag) + "C_Sign(CKM_ML_DSA_EXTERNAL_MU)", rv, CKR_OK);
+			if (rv == CKR_OK)
+			{
+				CK_MECHANISM verMech = { CKM_ML_DSA, NULL_PTR, 0 };
+				CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_VerifyInit(hSession, &verMech, hDsaPuk) ) == CKR_OK);
+				std::vector<CK_BYTE> m(msg);
+				expect(fails, std::string(tag) + "C_Verify(CKM_ML_DSA) of the external-mu signature",
+				       CRYPTOKI_F_PTR( C_Verify(hSession, m.data(), m.size(), sig.data(), sigLen) ), CKR_OK);
+			}
+		}
+	}
+
+	// Keys of another type, and handles that are not (visible) keys.
+	std::vector<CK_BYTE> mu;
+	CK_OBJECT_HANDLE hAes, hEcPuk, hEcPrk;
+	CPPUNIT_ASSERT(aesKey(hSession, hAes) == CKR_OK);
+	CPPUNIT_ASSERT(ecKeyPair(hSession, CK_TRUE, CK_FALSE, hEcPuk, hEcPrk) == CKR_OK);
+	expect(fails, "mu from an AES key", muGen(hSession, hAes, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_KEY_TYPE_INCONSISTENT);
+	expect(fails, "mu from an EC public key", muGen(hSession, hEcPuk, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_KEY_TYPE_INCONSISTENT);
+	expect(fails, "mu from an EC private key", muGen(hSession, hEcPrk, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_KEY_TYPE_INCONSISTENT);
+
+	CK_OBJECT_CLASS dataClass = CKO_DATA;
+	CK_BBOOL bFalse = CK_FALSE;
+	CK_BYTE dataValue[] = { 0x01, 0x02, 0x03 };
+	CK_ATTRIBUTE dataAttribs[] = {
+		{ CKA_CLASS, &dataClass, sizeof(dataClass) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+		{ CKA_VALUE, dataValue, sizeof(dataValue) },
+	};
+	CK_OBJECT_HANDLE hData = CK_INVALID_HANDLE;
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_CreateObject(hSession, dataAttribs, 4, &hData) ) == CKR_OK);
+	expect(fails, "mu from a data object", muGen(hSession, hData, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_KEY_HANDLE_INVALID);
+	expect(fails, "mu from an unknown handle", muGen(hSession, (CK_OBJECT_HANDLE)0x7fff0001UL, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_KEY_HANDLE_INVALID);
+
+	// Logged out, the private (CKA_PRIVATE) ML-DSA key is not visible; the
+	// public one still is.
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_Logout(hSession) ) == CKR_OK);
+	expect(fails, "mu from a private key without the user login",
+	       muGen(hSession, hDsaPrk, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_KEY_HANDLE_INVALID);
+	expect(fails, "mu from a public key without the user login",
+	       muGen(hSession, hDsaPuk, NULL_PTR, NULL_PTR, 0, msg, mu), CKR_OK);
+
+	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
+	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
 }

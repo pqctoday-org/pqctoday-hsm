@@ -1109,3 +1109,309 @@ fn verify_signature_one(hp: u32, params: &[usize], msg: &[u8], sig: &[u8]) -> u3
     let mut d = msg.to_vec();
     C_VerifySignature(SESSION, d.as_mut_ptr(), d.len() as u32)
 }
+
+// ── CKA_DERIVE_TEMPLATE applied ─────────────────────────────────────────────
+
+/// v3.2 pkcs11t.h `CKA_LABEL` (not in the engine's constants module).
+const CKA_LABEL: u32 = 0x0000_0003;
+
+/// C_DeriveKey with `tmpl`; returns (rv, new handle).
+fn derive_with(mech: &mut [usize; 3], h_base: u32, tmpl: &[(u32, Vec<u8>)]) -> (u32, u32) {
+    let mut w = words(tmpl);
+    let mut h = 0u32;
+    let rv = C_DeriveKey(SESSION, mech.as_mut_ptr() as *mut u8, h_base, w.as_mut_ptr() as *mut u8, tmpl.len() as u32, &mut h);
+    (rv, h)
+}
+
+/// v3.2 §5.18.5 (same text in v3.3 key_management_functions.md):
+/// CKA_DERIVE_TEMPLATE is "an attribute set that will be added to attributes
+/// of the key to be derived"; the user template is applied after it, and a
+/// conflict is CKR_TEMPLATE_INCONSISTENT. The engine used to compare only, so
+/// a caller who left an attribute out was refused instead of getting it.
+#[test]
+fn derive_template_is_applied_then_checked() {
+    let _guard = test_lock::acquire();
+    setup();
+    let label = b"from-derive-template".to_vec();
+    let restrict = vec![
+        (CKA_EXTRACTABLE, vec![0u8]),
+        (CKA_SENSITIVE, vec![1u8]),
+        (CKA_LABEL, label.clone()),
+    ];
+    let (_w, rbytes) = flat(&restrict);
+    // A non-sensitive base: the engine default for its derived keys is
+    // EXTRACTABLE=TRUE / SENSITIVE=FALSE, so the template has to be applied.
+    let base = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x5a; 32]),
+        (CKA_DERIVE, vec![1]),
+        (CKA_SENSITIVE, vec![0]),
+        (CKA_EXTRACTABLE, vec![1]),
+        (CKA_DERIVE_TEMPLATE, rbytes),
+    ])
+    .unwrap();
+    let mut m: [usize; 3] = [CKM_SHA256_KEY_DERIVATION as usize, 0, 0];
+
+    // The caller names none of the attributes: all three are added.
+    let (rv, hk) = derive_with(&mut m, base, &[]);
+    assert_eq!(rv, CKR_OK, "omitted attributes are applied, not refused");
+    assert_eq!(attr_bytes(hk, CKA_EXTRACTABLE), Some(vec![0u8]));
+    assert_eq!(attr_bytes(hk, CKA_SENSITIVE), Some(vec![1u8]));
+    assert_eq!(attr_bytes(hk, CKA_LABEL), Some(label));
+    // Server-managed values are still set after the template.
+    assert_eq!(attr_bytes(hk, CKA_LOCAL), Some(vec![0u8]));
+
+    // Agreeing with the template is fine; contradicting it is refused, and
+    // the caller's own template is not overridden.
+    assert_eq!(derive_with(&mut m, base, &[(CKA_SENSITIVE, vec![1u8])]).0, CKR_OK);
+    let mut out = 0xfeed_beefu32;
+    let weak = vec![(CKA_SENSITIVE, vec![0u8])];
+    let mut w = words(&weak);
+    assert_eq!(
+        C_DeriveKey(SESSION, m.as_mut_ptr() as *mut u8, base, w.as_mut_ptr() as *mut u8, 1, &mut out),
+        CKR_TEMPLATE_INCONSISTENT
+    );
+    assert_eq!(out, 0xfeed_beef, "a refusal publishes no handle");
+    assert_eq!(derive_with(&mut m, base, &[(CKA_LABEL, b"other".to_vec())]).0, CKR_TEMPLATE_INCONSISTENT);
+
+    // An entry naming engine truth (the 32-byte SHA-256 result's
+    // CKA_VALUE_LEN, the derived class) must agree with it, never replace it.
+    for engine_truth in [vec![(CKA_VALUE_LEN, ulong(16))], vec![(CKA_CLASS, ulong(CKO_PRIVATE_KEY))]] {
+        let (_w, tbytes) = flat(&engine_truth);
+        let b = create(&[
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+            (CKA_TOKEN, vec![0]),
+            (CKA_VALUE, vec![0x5b; 32]),
+            (CKA_DERIVE, vec![1]),
+            (CKA_DERIVE_TEMPLATE, tbytes),
+        ])
+        .unwrap();
+        assert_eq!(derive_with(&mut m, b, &[]).0, CKR_TEMPLATE_INCONSISTENT);
+    }
+
+    // An applied CKA_TOKEN=TRUE needs a R/W session like a requested one.
+    let (_w, tok) = flat(&[(CKA_TOKEN, vec![1u8])]);
+    let b = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x5c; 32]),
+        (CKA_DERIVE, vec![1]),
+        (CKA_DERIVE_TEMPLATE, tok),
+    ])
+    .unwrap();
+    SESSIONS.with(|s| {
+        s.shard(SESSION)
+            .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: false, context: 0 });
+    });
+    let ro = derive_with(&mut m, b, &[]).0;
+    setup();
+    assert_eq!(ro, CKR_SESSION_READ_ONLY);
+}
+
+/// The BIP32 derive path applies CKA_DERIVE_TEMPLATE too. It fixes the
+/// custody attributes itself (session object, private, sensitive unless
+/// extractable), so on those the template is compared, never added.
+#[test]
+fn bip32_derive_template_is_applied_then_checked() {
+    let _guard = test_lock::acquire();
+    setup();
+    const SECP256K1_OID: [u8; 7] = [0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A];
+    let label = b"bip32-from-template".to_vec();
+    let seed_with = |tmpl: Vec<(u32, Vec<u8>)>| -> u32 {
+        let (_w, bytes) = flat(&tmpl);
+        create(&[
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+            (CKA_TOKEN, vec![0]),
+            (CKA_VALUE, (0u8..16).collect()),
+            (CKA_DERIVE, vec![1]),
+            (CKA_DERIVE_TEMPLATE, bytes),
+        ])
+        .unwrap()
+    };
+    let mut m: [usize; 3] = [CKM_BIP32_MASTER_DERIVE as usize, 0, 0];
+    let curve = vec![(CKA_EC_PARAMS, SECP256K1_OID.to_vec())];
+
+    let seed = seed_with(vec![(CKA_LABEL, label.clone()), (CKA_SIGN, vec![1u8])]);
+    let (rv, hk) = derive_with(&mut m, seed, &curve);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(attr_bytes(hk, CKA_LABEL), Some(label));
+    assert_eq!(attr_bytes(hk, CKA_SIGN), Some(vec![1u8]));
+    let mut conflicting = curve.clone();
+    conflicting.push((CKA_SIGN, vec![0u8]));
+    assert_eq!(derive_with(&mut m, seed, &conflicting).0, CKR_TEMPLATE_INCONSISTENT);
+
+    // Engine-fixed custody: agreeing is fine, contradicting is refused.
+    let agree = seed_with(vec![(CKA_TOKEN, vec![0u8]), (CKA_SENSITIVE, vec![1u8])]);
+    assert_eq!(derive_with(&mut m, agree, &curve).0, CKR_OK);
+    let token = seed_with(vec![(CKA_TOKEN, vec![1u8])]);
+    assert_eq!(derive_with(&mut m, token, &curve).0, CKR_TEMPLATE_INCONSISTENT);
+    let readable = seed_with(vec![(CKA_EXTRACTABLE, vec![1u8])]);
+    assert_eq!(derive_with(&mut m, readable, &curve).0, CKR_TEMPLATE_INCONSISTENT);
+}
+
+// ── A template-added CKA_TOKEN needs a R/W session ─────────────────────────
+
+fn set_rw(rw: bool) {
+    SESSIONS.with(|s| {
+        s.shard(SESSION)
+            .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: rw, context: 0 });
+    });
+}
+
+fn destroy_if(h: u32) {
+    if h != 0 {
+        let _ = C_DestroyObject(SESSION, h);
+    }
+}
+
+/// v3.2 §5.7.1: "Only session objects can be created during a read-only
+/// session" (CKR_SESSION_READ_ONLY, `state::check_rw_for_token_object`). The
+/// caller-template gate only sees the caller's template, so a
+/// CKA_UNWRAP_TEMPLATE / CKA_DECAPSULATE_TEMPLATE / CKA_DERIVE_TEMPLATE that
+/// ADDS CKA_TOKEN=TRUE used to mint a token object from a R/O session. Every
+/// path that applies one now re-checks the final attribute set: refused R/O,
+/// created R/W.
+#[test]
+fn template_added_token_needs_a_rw_session() {
+    let _guard = test_lock::acquire();
+    setup();
+    let token = vec![(CKA_TOKEN, vec![1u8])];
+    let (_tw, tbytes) = flat(&token);
+    // No CKA_TOKEN in any caller template below: the token comes from the key.
+    let bare = vec![(CKA_CLASS, ulong(CKO_SECRET_KEY)), (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET))];
+    let bare_aes = vec![(CKA_CLASS, ulong(CKO_SECRET_KEY)), (CKA_KEY_TYPE, ulong(CKK_AES))];
+    let check = |what: &str, mut run: Box<dyn FnMut() -> (u32, u32) + '_>| {
+        set_rw(false);
+        let (rv, h) = run();
+        set_rw(true);
+        assert_eq!(rv, CKR_SESSION_READ_ONLY, "{what}: R/O session");
+        assert_eq!(h, 0, "{what}: R/O refusal creates nothing");
+        let (rv, h) = run();
+        assert_eq!(rv, CKR_OK, "{what}: R/W session");
+        assert_eq!(attr_bytes(h, CKA_TOKEN), Some(vec![1u8]), "{what}: the template's CKA_TOKEN is applied");
+        destroy_if(h);
+    };
+
+    // C_DecapsulateKey, CKM_ML_KEM.
+    let (hp, hs) = ml_kem_pair(vec![], vec![(CKA_DECAPSULATE_TEMPLATE, tbytes.clone())]);
+    let (rv, ct, _) = encapsulate(hp, &secret_template(true));
+    assert_eq!(rv, CKR_OK);
+    check("ML-KEM decapsulate", Box::new(|| decapsulate(hs, &bare, &ct)));
+
+    // C_DecapsulateKey, CKM_COMP_KEM.
+    let (rv, cp, cs) = keypair(
+        CKM_COMP_KEM_KEY_PAIR_GEN,
+        &[(CKA_PARAMETER_SET, ulong(CKP_COMP_KEM_MLKEM768_X25519)), (CKA_TOKEN, vec![0])],
+        &[(CKA_TOKEN, vec![0]), (CKA_DECAPSULATE_TEMPLATE, tbytes.clone())],
+    );
+    assert_eq!(rv, CKR_OK, "composite KEM key pair");
+    let comp = |h_key: u32, encap: bool, tmpl: &[(u32, Vec<u8>)], ct: &mut Vec<u8>| -> (u32, u32) {
+        let mut m: [usize; 3] = [CKM_COMP_KEM as usize, 0, 0];
+        let mut w = words(tmpl);
+        let mut h = 0u32;
+        let rv = if encap {
+            ct.resize(8192, 0);
+            let mut len = ct.len() as u32;
+            let rv = C_EncapsulateKey(SESSION, m.as_mut_ptr() as *mut u8, h_key, w.as_mut_ptr() as *mut u8, tmpl.len() as u32, ct.as_mut_ptr(), &mut len, &mut h);
+            ct.truncate(len as usize);
+            rv
+        } else {
+            C_DecapsulateKey(SESSION, m.as_mut_ptr() as *mut u8, h_key, w.as_mut_ptr() as *mut u8, tmpl.len() as u32, ct.as_mut_ptr(), ct.len() as u32, &mut h)
+        };
+        (rv, h)
+    };
+    let mut cct = Vec::new();
+    assert_eq!(comp(cp, true, &secret_template(true), &mut cct).0, CKR_OK);
+    check("composite KEM decapsulate", Box::new(|| comp(cs, false, &bare, &mut cct.clone())));
+
+    // C_UnwrapKey (AES key wrap) and C_UnwrapKeyAuthenticated (AES-GCM).
+    let kek = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x44; 16]),
+        (CKA_WRAP, vec![1]),
+        (CKA_UNWRAP, vec![1]),
+        (CKA_UNWRAP_TEMPLATE, tbytes.clone()),
+    ])
+    .unwrap();
+    let target = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_AES)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x55; 16]),
+        (CKA_EXTRACTABLE, vec![1]),
+    ])
+    .unwrap();
+    let mut m: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+    let mut wrapped = vec![0u8; 64];
+    let mut wlen = wrapped.len() as u32;
+    assert_eq!(C_WrapKey(SESSION, m.as_mut_ptr() as *mut u8, kek, target, wrapped.as_mut_ptr(), &mut wlen), CKR_OK);
+    wrapped.truncate(wlen as usize);
+    check(
+        "C_UnwrapKey",
+        Box::new(|| {
+            let mut m: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
+            let mut w = words(&bare_aes);
+            let mut wr = wrapped.clone();
+            let mut h = 0u32;
+            let rv = C_UnwrapKey(SESSION, m.as_mut_ptr() as *mut u8, kek, wr.as_mut_ptr(), wr.len() as u32, w.as_mut_ptr() as *mut u8, 2, &mut h);
+            (rv, h)
+        }),
+    );
+    let iv = [0x24u8; 12];
+    // CK_GCM_PARAMS { pIv, ulIvLen, ulIvBits, pAAD, ulAADLen, ulTagBits }
+    let mut gcm: [usize; 6] = [iv.as_ptr() as usize, iv.len(), 96, 0, 0, 128];
+    let mut gm: [usize; 3] = [CKM_AES_GCM as usize, gcm.as_mut_ptr() as usize, std::mem::size_of_val(&gcm)];
+    let mut gwrapped = vec![0u8; 64];
+    let mut glen = gwrapped.len() as u32;
+    assert_eq!(
+        C_WrapKeyAuthenticated(SESSION, gm.as_mut_ptr() as *mut u8, kek, target, std::ptr::null_mut(), 0, gwrapped.as_mut_ptr(), &mut glen),
+        CKR_OK
+    );
+    gwrapped.truncate(glen as usize);
+    check(
+        "C_UnwrapKeyAuthenticated",
+        Box::new(|| {
+            let mut w = words(&bare_aes);
+            let mut wr = gwrapped.clone();
+            let mut h = 0u32;
+            let rv = C_UnwrapKeyAuthenticated(
+                SESSION,
+                gm.as_mut_ptr() as *mut u8,
+                kek,
+                wr.as_mut_ptr(),
+                wr.len() as u32,
+                w.as_mut_ptr() as *mut u8,
+                2,
+                std::ptr::null_mut(),
+                0,
+                &mut h,
+            );
+            (rv, h)
+        }),
+    );
+
+    // C_DeriveKey (the common secret-key path).
+    let base = create(&[
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+        (CKA_TOKEN, vec![0]),
+        (CKA_VALUE, vec![0x5d; 32]),
+        (CKA_DERIVE, vec![1]),
+        (CKA_DERIVE_TEMPLATE, tbytes.clone()),
+    ])
+    .unwrap();
+    check(
+        "C_DeriveKey",
+        Box::new(|| {
+            let mut m: [usize; 3] = [CKM_SHA256_KEY_DERIVATION as usize, 0, 0];
+            derive_with(&mut m, base, &[])
+        }),
+    );
+}

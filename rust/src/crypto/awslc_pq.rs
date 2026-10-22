@@ -1037,11 +1037,11 @@ mod tests {
         );
         assert_eq!(
             handlers::verify_ml_dsa_external_mu(ps, &pk, &[0u8; 63], &sig),
-            Err(CKR_ARGUMENTS_BAD)
+            Err(CKR_DATA_LEN_RANGE)
         );
         assert_eq!(
             handlers::sign_ml_dsa_external_mu_hedged(ps, &sk, &[0u8; 63]),
-            Err(CKR_ARGUMENTS_BAD)
+            Err(CKR_DATA_LEN_RANGE)
         );
     }
 
