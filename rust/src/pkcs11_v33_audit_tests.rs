@@ -946,3 +946,41 @@ fn hss_keys_remaining_width_cap_and_placement() {
     sign_with(hs, CKM_HSS, None, b"two").unwrap();
     assert_eq!(read_ulong_attr(hs, CKA_KEYS_REMAINING), (CKR_OK, word, 0xFFFF_FFFF));
 }
+
+// ── XMSS / XMSS^MT exhaustion ───────────────────────────────────────────────
+
+fn stateful_pair(mech: u32, param_set: u32) -> (u32, u32) {
+    let pub_entries = vec![(CKA_TOKEN, vec![0]), (CKA_PARAMETER_SET, ulong(param_set))];
+    let prv_entries = vec![(CKA_TOKEN, vec![0])];
+    let (rv, hp, hs) = keypair(mech, &pub_entries, &prv_entries);
+    assert_eq!(rv, CKR_OK, "key pair {mech:#x}/{param_set:#x}");
+    (hp, hs)
+}
+
+/// CKR_KEY_EXHAUSTED (v3.3 function_return_values.md, listed for C_Sign) for
+/// an XMSS or XMSS^MT key with no one-time key left. It was
+/// CKR_FUNCTION_FAILED. The state is unchanged and a retry gives the same code.
+#[test]
+fn exhausted_xmss_keys_report_key_exhausted() {
+    let _guard = test_lock::acquire();
+    setup();
+    let msg = b"exhausted";
+    // XMSS-SHA2_10_256: the index is the big-endian u32 after the 4-byte OID.
+    let (hp, hs) = stateful_pair(CKM_XMSS_KEY_PAIR_GEN, CKP_XMSS_SHA2_10_256);
+    let mut st = crate::state::get_object_attr_bytes(hs, CKA_PRIV_STATEFUL_KEY_STATE).unwrap();
+    st[4..8].copy_from_slice(&1023u32.to_be_bytes());
+    crate::state::set_object_attrs_bytes_batch(hs, &[(CKA_PRIV_STATEFUL_KEY_STATE, st)]);
+    let sig = sign_with(hs, CKM_XMSS, None, msg).expect("the last one-time key signs");
+    assert_eq!(verify_with(hp, CKM_XMSS, None, msg, &sig), CKR_OK);
+    let before = crate::state::get_object_attr_bytes(hs, CKA_PRIV_STATEFUL_KEY_STATE);
+    assert_eq!(sign_with(hs, CKM_XMSS, None, msg), Err(CKR_KEY_EXHAUSTED));
+    assert_eq!(sign_with(hs, CKM_XMSS, None, msg), Err(CKR_KEY_EXHAUSTED));
+    assert_eq!(crate::state::get_object_attr_bytes(hs, CKA_PRIV_STATEFUL_KEY_STATE), before);
+
+    // XMSS^MT-SHA2_20/2_256: a 3-byte index (ceil(20/8)) after the OID.
+    let (_hp, hs) = stateful_pair(CKM_XMSSMT_KEY_PAIR_GEN, CKP_XMSSMT_SHA2_20_2_256);
+    let mut st = crate::state::get_object_attr_bytes(hs, CKA_PRIV_STATEFUL_KEY_STATE).unwrap();
+    st[4..7].copy_from_slice(&(1u32 << 20).to_be_bytes()[1..]);
+    crate::state::set_object_attrs_bytes_batch(hs, &[(CKA_PRIV_STATEFUL_KEY_STATE, st)]);
+    assert_eq!(sign_with(hs, CKM_XMSSMT, None, msg), Err(CKR_KEY_EXHAUSTED));
+}

@@ -1298,6 +1298,15 @@ pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
         c::CKR_FUNCTION_FAILED => {
             KmipError::cryptographic_failure(format!("{op}: cryptographic function failed"))
         }
+        // ── Stateful-signature key exhausted ────────────────────────
+        // CKR_KEY_EXHAUSTED (HSS, XMSS, XMSS^MT): every one-time key is
+        // used. KMIP 3.0 has no stateful-key reason; Usage Limit Exceeded
+        // (the reason Table 331 gives for an exhausted Usage Limits budget)
+        // is the closest fit, and it tells the client the key can no longer
+        // be used rather than that a cryptographic primitive failed.
+        c::CKR_KEY_EXHAUSTED => KmipError::usage_limit_exceeded(format!(
+            "{op}: stateful signature key exhausted (no one-time keys remain)"
+        )),
         // ── Sensitivity / extractability ────────────────────────────
         c::CKR_ATTRIBUTE_SENSITIVE => {
             KmipError::sensitive(format!("{op}: attribute is sensitive"))
@@ -1705,6 +1714,7 @@ mod tests {
             (c::CKR_SIGNATURE_INVALID, ResultReason::CryptographicFailure),
             (c::CKR_SIGNATURE_LEN_RANGE, ResultReason::CryptographicFailure),
             (c::CKR_FUNCTION_FAILED, ResultReason::CryptographicFailure),
+            (c::CKR_KEY_EXHAUSTED, ResultReason::UsageLimitExceeded),
             (c::CKR_ATTRIBUTE_SENSITIVE, ResultReason::Sensitive),
             (c::CKR_KEY_UNEXTRACTABLE, ResultReason::NotExtractable),
             (c::CKR_KEY_NOT_WRAPPABLE, ResultReason::NotExtractable),
