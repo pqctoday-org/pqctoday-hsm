@@ -17303,8 +17303,13 @@ pub fn C_SetPIN(
                 let (cur_salt, cur_hash) = match (&token.user_pin_salt, &token.user_pin_hash) {
                     (Some(s), Some(h)) => (*s, *h),
                     // No user PIN exists yet (C_InitPIN never ran) — there is
-                    // nothing to verify the old PIN against.
-                    _ => return CKR_USER_PIN_NOT_INITIALIZED,
+                    // nothing to verify the old PIN against, so the old PIN
+                    // cannot be correct. CKR_PIN_INCORRECT, which C_SetPIN's
+                    // return list carries: CKR_USER_PIN_NOT_INITIALIZED "can
+                    // only be returned by C_Login and C_LoginUser" (v3.3
+                    // function_return_values.md, TC commit d816a38) and is
+                    // not in the v3.2 §5.6.7 C_SetPIN list either.
+                    _ => return CKR_PIN_INCORRECT,
                 };
                 if hash_pin(old_pin, &cur_salt) != cur_hash {
                     return CKR_PIN_INCORRECT;
@@ -21099,8 +21104,10 @@ mod object_mgmt_ffi_tests {
             );
         });
 
-        // Public session, user PIN never initialized → CKR_USER_PIN_NOT_INITIALIZED.
-        assert_eq!(pin_call(PIN_SESSION_RW, "anything", "new-pin-1"), CKR_USER_PIN_NOT_INITIALIZED);
+        // Public session, user PIN never initialized → CKR_PIN_INCORRECT (the
+        // only-from-C_Login code CKR_USER_PIN_NOT_INITIALIZED is not in the
+        // C_SetPIN list; v3.3 function_return_values.md).
+        assert_eq!(pin_call(PIN_SESSION_RW, "anything", "new-pin-1"), CKR_PIN_INCORRECT);
 
         // R/O session refused outright (checked before PIN verification).
         assert_eq!(pin_call(PIN_SESSION_RO, "so-pin-77", "so-pin-88"), CKR_SESSION_READ_ONLY);
