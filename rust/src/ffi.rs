@@ -8951,7 +8951,12 @@ fn C_Sign_impl(
                 if !ctx_bytes.is_empty() {
                     Err(CKR_MECHANISM_PARAM_INVALID)
                 } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
-                    Err(CKR_ARGUMENTS_BAD)
+                    // ml_dsa.md (PKCS#11 v3.3 working draft), "ExternalMu
+                    // ML-DSA: Key and Data Length": the input is exactly 64
+                    // bytes. A wrong data length is CKR_DATA_LEN_RANGE, the
+                    // code the v3.2 §5.13.2 C_Sign / §5.15.2 C_Verify lists
+                    // carry for it (was CKR_ARGUMENTS_BAD).
+                    Err(CKR_DATA_LEN_RANGE)
                 } else if deterministic {
                     sign_ml_dsa_external_mu(ps, &sk_bytes, msg, [0u8; 32])
                 } else {
@@ -9329,7 +9334,12 @@ fn C_Verify_impl(
                 if !ctx_bytes.is_empty() {
                     Err(CKR_MECHANISM_PARAM_INVALID)
                 } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
-                    Err(CKR_ARGUMENTS_BAD)
+                    // ml_dsa.md (PKCS#11 v3.3 working draft), "ExternalMu
+                    // ML-DSA: Key and Data Length": the input is exactly 64
+                    // bytes. A wrong data length is CKR_DATA_LEN_RANGE, the
+                    // code the v3.2 §5.13.2 C_Sign / §5.15.2 C_Verify lists
+                    // carry for it (was CKR_ARGUMENTS_BAD).
+                    Err(CKR_DATA_LEN_RANGE)
                 } else {
                     verify_ml_dsa_external_mu(ps, &pk_bytes, msg, sig_bytes)
                 }
@@ -11743,7 +11753,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_MD5 => DigestCtx::Md5(md5::Md5::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
-            CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
+            CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(h_session, p_mechanism) {
                 Ok(h) => DigestCtx::MuGen(h),
                 Err(rv) => return rv,
             },
@@ -11756,16 +11766,69 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
     CKR_OK
 }
 
+/// `tr = H(pk, 64)` (FIPS 204 Algorithm 6 line 6 / Algorithm 7 line 6) for
+/// `CKM_ML_DSA_EXTERNAL_MU_GEN` given a key handle. PKCS#11 v3.3 working
+/// draft, ml_dsa.md (`CK_MU_GEN_PARAMS.hKey`, "public or private"; the
+/// mechanism takes "a key handle or a precomputed TR of the public key").
+///
+/// * The handle is resolved like any other key an operation uses
+///   (`check_key_for_mech_as`'s rules): absent, or a private object the
+///   session may not see (§4.4, `can_access_object`), is
+///   CKR_KEY_HANDLE_INVALID — so no object's value can be hashed without the
+///   login that would be needed to use it. An object that is not a key at all
+///   is CKR_KEY_HANDLE_INVALID too (v3.2 §5.1.6: "the specified handle is a
+///   valid handle for an object which is not a key").
+/// * Only an ML-DSA public or private key is accepted; any other key
+///   (including a composite signature key, whose value is mldsaPK ‖ tradPK)
+///   is CKR_KEY_TYPE_INCONSISTENT, the code the engine returns for a key of
+///   the wrong type for a mechanism (`mech_key_types`).
+/// * Public key: `pk` is its `CKA_VALUE` (pkEncode, v3.2 Table 280).
+/// * Private key: `pk` is re-derived from the private key
+///   ([`crate::crypto::handlers::ml_dsa_public_from_private`]); only that
+///   public value is hashed, never private material. Hashing the private
+///   `CKA_VALUE` (what this function did before) gave a µ no signature could
+///   ever verify against.
+fn mu_gen_tr_from_key(h_session: u32, h_key: u32) -> Result<[u8; 64], u32> {
+    use sha3::digest::Update;
+    let attrs = crate::state::with_object(h_key, |a| a.clone()).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    if !crate::state::can_access_object(h_session, &attrs) {
+        return Err(CKR_KEY_HANDLE_INVALID);
+    }
+    let class = get_object_attr_u32_from(&attrs, CKA_CLASS);
+    if !matches!(class, Some(CKO_PUBLIC_KEY) | Some(CKO_PRIVATE_KEY) | Some(CKO_SECRET_KEY)) {
+        return Err(CKR_KEY_HANDLE_INVALID);
+    }
+    if get_object_attr_u32_from(&attrs, CKA_KEY_TYPE) != Some(CKK_ML_DSA) || class == Some(CKO_SECRET_KEY) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    // `attrs` is the non-secret snapshot; the value is read on its own and
+    // wiped when this copy drops.
+    let value = zeroize::Zeroizing::new(crate::state::get_object_value(h_key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?);
+    let pk = if class == Some(CKO_PUBLIC_KEY) {
+        value.to_vec()
+    } else {
+        let ps = match crate::state::get_object_param_set_from(&attrs) {
+            0 => get_object_attr_u32_from(&attrs, CKA_PARAMETER_SET).unwrap_or(0),
+            ps => ps,
+        };
+        crate::crypto::handlers::ml_dsa_public_from_private(ps, &value).ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+    };
+    let mut hasher = sha3::Shake256::default();
+    Update::update(&mut hasher, &pk);
+    let mut reader = sha3::digest::ExtendableOutput::finalize_xof(hasher);
+    let mut tr = [0u8; 64];
+    sha3::digest::XofReader::read(&mut reader, &mut tr);
+    Ok(tr)
+}
+
 /// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU: parse
-/// `CK_MU_GEN_PARAMS`, resolve `tr` (either the caller's own
-/// precomputed 64 bytes, or `SHAKE256(pk, 64)` from a public-key handle's
-/// `CKA_VALUE` — PKCS#11 v3.2 Table 280's `pk_encode` IS the raw
-/// `CKA_VALUE` bytes, no re-encoding needed), and seed a fresh SHAKE256
-/// with `tr || 0x00 || len(ctx) || ctx` (FIPS 204 Eq. 2's own prefix) —
-/// the caller's message follows via the normal C_DigestUpdate/C_Digest
-/// path from here on, this function has no more FIPS 204 awareness past
-/// this point.
-unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u32> {
+/// `CK_MU_GEN_PARAMS`, resolve `tr` (either the caller's own precomputed 64
+/// bytes, or `H(pk, 64)` from a key handle — see [`mu_gen_tr_from_key`]), and
+/// seed a fresh SHAKE256 with `tr || 0x00 || len(ctx) || ctx` (FIPS 204 Eq. 2's
+/// own prefix) — the caller's message follows via the normal
+/// C_DigestUpdate/C_Digest path from here on, this function has no more FIPS
+/// 204 awareness past this point.
+unsafe fn init_mu_gen_digest(h_session: u32, p_mechanism: *const u8) -> Result<sha3::Shake256, u32> {
     use sha3::digest::Update;
     let r = ck_param::mech(p_mechanism)
         .params(&ck_param::mu_gen_params::LAYOUT, ck_param::mu_gen_params::FIELD_COUNT)
@@ -11782,13 +11845,7 @@ unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u
     let tr: [u8; 64] = if have_tr {
         tr_buf.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?
     } else {
-        let pk = crate::state::get_key_material(h_key).ok_or(CKR_KEY_HANDLE_INVALID)?;
-        let mut hasher = sha3::Shake256::default();
-        Update::update(&mut hasher, &pk);
-        let mut reader = sha3::digest::ExtendableOutput::finalize_xof(hasher);
-        let mut tr = [0u8; 64];
-        sha3::digest::XofReader::read(&mut reader, &mut tr);
-        tr
+        mu_gen_tr_from_key(h_session, h_key)?
     };
 
     let ctx_len = r.ulong(ck_param::mu_gen_params::UL_CTX_LEN);
@@ -28122,6 +28179,12 @@ mod composite_sig_tests;
 #[cfg(test)]
 #[path = "xmss_keys_remaining_tests.rs"]
 mod xmss_keys_remaining_tests;
+
+/// PKCS#11 v3.2 → v3.3 working-draft delta-audit gaps (2026-10-21) — see the
+/// module's own docs.
+#[cfg(test)]
+#[path = "pkcs11_v33_audit_tests.rs"]
+mod pkcs11_v33_audit_tests;
 
 /// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
 /// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.

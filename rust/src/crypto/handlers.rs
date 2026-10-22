@@ -1745,6 +1745,29 @@ pub fn ml_dsa_keygen_from_seed(ps: u32, xi: &[u8; 32]) -> Option<(Vec<u8>, Vec<u
     }
 }
 
+/// The FIPS 204 public key `pk` paired with an encoded private key `sk`
+/// (Algorithm 25 skDecode, then t = A·s1 + s2 and pkEncode(ρ, t1)). Used where
+/// a public value is needed from a private key handle without disclosing or
+/// hashing any private material, e.g. `tr = H(pk, 64)` for
+/// `CKM_ML_DSA_EXTERNAL_MU_GEN`. `None` for an unknown set, a wrong length or
+/// an sk that does not decode.
+pub fn ml_dsa_public_from_private(ps: u32, sk: &[u8]) -> Option<Vec<u8>> {
+    use fips204::traits::{SerDes, Signer};
+    macro_rules! derive_with {
+        ($m:ident) => {{
+            let arr: [u8; fips204::$m::SK_LEN] = sk.try_into().ok()?;
+            let key = fips204::$m::PrivateKey::try_from_bytes(arr).ok()?;
+            Some(key.get_public_key().into_bytes().to_vec())
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => derive_with!(ml_dsa_44),
+        CKP_ML_DSA_65 => derive_with!(ml_dsa_65),
+        CKP_ML_DSA_87 => derive_with!(ml_dsa_87),
+        _ => None,
+    }
+}
+
 /// FIPS 203 Algorithm 16 `ML-KEM.KeyGen_internal(d, z)`, `dz = d ‖ z`
 /// (64 bytes, length checked by the caller) → `(ek, dk)`. AWS-LC when routed
 /// (byte-identical), else ml-kem. `None` for an unknown set.
