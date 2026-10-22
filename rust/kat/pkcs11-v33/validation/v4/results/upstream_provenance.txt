@@ -1,0 +1,8 @@
+kem d77e75420034d826e14cbef0b779986511f114e9 https://github.com/lamps-wg/draft-composite-kem
+1b8d80f3ce623f368466eda44820f8b82ca67c9955e213d212c997137ef9ff24  kem/src/testvectors.json
+c5478a81045fc2193e0e816f144a0033432208b95a0eb0d16050b4fc4b866098  kem/src/generate_test_vectors.py
+4d017661802b8a8d8591ee97cf92d98ca74e9f67dbf5b9bd4e2f846befdc65a4  kem/src/requirements.txt
+sigs f0627ab34acfe1aee0abce4bee91ed2b577eab76 https://github.com/lamps-wg/draft-composite-sigs
+a60f697f9fd94c3cd5e4501a40c4396d9a9ffc7cf0f8a1ddd87dedbb46a7abf0  sigs/src/testvectors.json
+ceec4e506b5f5ff148b7b5309ad7bc7a05324234bc1902ce3126c680e50f37d6  sigs/src/generate_test_vectors.py
+6f9c3cb1597a526e5c62f8a56138fe4fa8251d95208fc596cb1d10b23112635f  sigs/src/requirements.txt

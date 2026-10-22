@@ -1,0 +1,378 @@
+{
+  "kem": {
+    "id-alg-ml-kem-768": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": true,
+      "loader_shim_used": "not-run: not applicable",
+      "ref_validatePrivateKey": "not-run: reference validatePrivateKey expects a composite PKCS#8 (plain ML-KEM uses an [0] wrapper)"
+    },
+    "id-alg-ml-kem-1024": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": true,
+      "loader_shim_used": "not-run: not applicable",
+      "ref_validatePrivateKey": "not-run: reference validatePrivateKey expects a composite PKCS#8 (plain ML-KEM uses an [0] wrapper)"
+    },
+    "id-MLKEM768-RSA2048-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM768-RSA3072-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM768-RSA4096-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM768-X25519-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM768-ECDH-P256-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM768-ECDH-P384-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM768-ECDH-brainpoolP256r1-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM1024-RSA3072-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM1024-ECDH-P384-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM1024-ECDH-brainpoolP384r1-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM1024-X448-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    },
+    "id-MLKEM1024-ECDH-P521-SHA3-256": {
+      "decaps_matches_k": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_sig_by_ca": true,
+      "dk_pkcs8_wraps_dk": true,
+      "ref_loadKeyPair_as_shipped": "error: ValueError('not enough values to unpack (expected 3, got 2)')",
+      "loader_shim_used": true,
+      "ref_validatePrivateKey": "error: ValueError('not enough values to unpack (expected 3, got 2)')"
+    }
+  },
+  "sig": {
+    "id-ML-DSA-44": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-ML-DSA-65": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-ML-DSA-87": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA44-RSA2048-PSS-SHA256": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA44-RSA2048-PKCS15-SHA256": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA44-Ed25519-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA44-ECDSA-P256-SHA256": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-RSA3072-PSS-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-RSA3072-PKCS15-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-RSA4096-PSS-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-RSA4096-PKCS15-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-ECDSA-P256-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-ECDSA-P384-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-ECDSA-brainpoolP256r1-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA65-Ed25519-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA87-ECDSA-P384-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA87-ECDSA-brainpoolP384r1-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA87-Ed448-SHAKE256": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA87-RSA3072-PSS-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA87-RSA4096-PSS-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    },
+    "id-MLDSA87-ECDSA-P521-SHA512": {
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "pk_matches_sk": true,
+      "cert_spki_matches": true,
+      "cert_selfsig_verifies": true,
+      "sk_pkcs8_wraps_sk": true,
+      "neg_sWithContext_without_ctx_rejected": true
+    }
+  },
+  "independent": {
+    "id-MLDSA65-ECDSA-P256-SHA512": {
+      "follows": "draft-ietf-lamps-pq-composite-sigs-19",
+      "s_components": {
+        "mldsa_half": true,
+        "ecdsa_half": true
+      },
+      "sWithContext_components": {
+        "mldsa_half": true,
+        "ecdsa_half": true
+      },
+      "sig_verifies": true,
+      "sigWithContext_verifies": true,
+      "neg_wrong_ctx_rejected": true,
+      "pk_matches_sk": true
+    },
+    "id-MLKEM768-X25519-SHA3-256": {
+      "follows": "draft-ietf-lamps-pq-composite-kem-23",
+      "dk_len": 96,
+      "c_len": 1120,
+      "pk_matches_sk": true,
+      "decaps_matches_k": true
+    }
+  },
+  "meta": {
+    "kem_reference_VERSION_IMPLEMENTED": "draft-ietf-lamps-pq-composite-kem-11",
+    "sig_reference_VERSION_IMPLEMENTED": "draft-ietf-lamps-pq-composite-sigs-09",
+    "independent_tooling": "OpenSSL 3.5.7 9 Jun 2026 (Library: OpenSSL 3.5.7 9 Jun 2026); Python 3.12.15 stdlib"
+  },
+  "summary": {
+    "kem_composite_decaps": "12/12",
+    "kem_composite_pk_rederived": "12/12",
+    "kem_composite_cert_spki": "12/12",
+    "kem_composite_cert_ca_sig": "12/12",
+    "kem_composite_ref_loader_as_shipped": "0/12",
+    "kem_plain_decaps": "2/2",
+    "sig_composite_s": "18/18",
+    "sig_composite_sWithContext": "18/18",
+    "sig_composite_pk_rederived": "18/18",
+    "sig_composite_cert_spki": "18/18",
+    "sig_composite_cert_selfsig": "18/18",
+    "sig_plain_s_and_ctx": "3/3"
+  }
+}
