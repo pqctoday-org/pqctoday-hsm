@@ -824,8 +824,10 @@ static CK_BYTE kOidSecp256k1[] = {0x06,0x05,0x2b,0x81,0x04,0x00,0x0a};
 static CK_BYTE kOidEd25519[] = {0x06,0x03,0x2b,0x65,0x70};
 // DER OID for X25519 (RFC 8410) — 06 03 2B 65 6E
 static CK_BYTE kOidX25519[] = {0x06,0x03,0x2b,0x65,0x6e};
-// DER OID for brainpoolP256r1 — deliberately a curve neither engine implements.
-static CK_BYTE kOidBrainpool[] = {0x06,0x09,0x2b,0x24,0x03,0x03,0x02,0x08,0x01,0x01,0x07};
+// DER OID for brainpoolP512r1 (1.3.36.3.3.2.8.1.1.13) — a curve the Rust
+// engine does not implement (it has brainpoolP256r1 / P384r1 since
+// 2026-10-21, so P256r1 no longer probes the refusal path).
+static CK_BYTE kOidBrainpool[] = {0x06,0x09,0x2b,0x24,0x03,0x03,0x02,0x08,0x01,0x01,0x0d};
 
 static CK_OBJECT_CLASS clSecret  = CKO_SECRET_KEY;
 static CK_OBJECT_CLASS clPublic  = CKO_PUBLIC_KEY;

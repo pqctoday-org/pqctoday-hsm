@@ -12,8 +12,9 @@ carries these data files and fact extracts only, never the draft documents.
 | `composite-kem/testvectors.json` | https://raw.githubusercontent.com/lamps-wg/draft-composite-kem/d77e75420034d826e14cbef0b779986511f114e9/src/testvectors.json | `d77e75420034d826e14cbef0b779986511f114e9` (2026-02-21) | 14: the 12 composite ML-KEM sets plus plain ML-KEM-768 and ML-KEM-1024. Fields `tcId, ek, dk, dk_pkcs8, c, k, x5c`; top-level `cacert`. | `1b8d80f3ce623f368466eda44820f8b82ca67c9955e213d212c997137ef9ff24` |
 | `composite-sig/testvectors.json` | https://raw.githubusercontent.com/lamps-wg/draft-composite-sigs/f0627ab34acfe1aee0abce4bee91ed2b577eab76/src/testvectors.json | `f0627ab34acfe1aee0abce4bee91ed2b577eab76` (2026-01-07) | 21: the 18 composite ML-DSA sets plus plain ML-DSA-44/65/87. Fields `tcId, pk, sk, sk_pkcs8, s, sWithContext, x5c`; top-level message `m` and context `ctx`. | `a60f697f9fd94c3cd5e4501a40c4396d9a9ffc7cf0f8a1ddd87dedbb46a7abf0` |
 
-Every entry is kept, including the four brainpool sets the engine does not
-support yet and the plain ML-KEM / ML-DSA entries.
+Every entry is kept, including the four brainpool sets (run since the
+engine gained brainpoolP256r1/P384r1, cargo feature `brainpool`) and the
+plain ML-KEM / ML-DSA entries.
 
 These are single known-answer vectors per set, written by the draft
 authors, not by a certification body. They predate the current drafts

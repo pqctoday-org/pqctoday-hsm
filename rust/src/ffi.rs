@@ -2179,6 +2179,10 @@ mod mechanism_table_tests {
             (CURVE_K256, 256, "secp256k1"),
             (CURVE_P384, 384, "P-384"),
             (CURVE_P521, 521, "P-521"),
+            #[cfg(feature = "brainpool")]
+            (crate::crypto::brainpool::CURVE_BP256R1, 256, "brainpoolP256r1"),
+            #[cfg(feature = "brainpool")]
+            (crate::crypto::brainpool::CURVE_BP384R1, 384, "brainpoolP384r1"),
         ];
         let mechs = [
             CKM_ECDSA_SHA256,
@@ -2224,6 +2228,14 @@ mod mechanism_table_tests {
                         sk.to_bytes().to_vec(),
                         pk.to_encoded_point(false).as_bytes().to_vec(),
                     )
+                }
+                c if crate::crypto::brainpool::is_brainpool(c) => {
+                    use rand::RngCore;
+                    let (d, q) = crate::crypto::brainpool::generate(c, &mut |b: &mut [u8]| {
+                        rng.fill_bytes(b)
+                    })
+                    .unwrap();
+                    (d.to_vec(), q)
                 }
                 _ => {
                     let sk = k256::ecdsa::SigningKey::random(&mut rng);
@@ -2709,7 +2721,8 @@ fn C_GenerateKeyPair_impl(
                         return CKR_ATTRIBUTE_TYPE_INVALID;
                     }
                 }
-                // An unknown value names no set, a brainpool set is not
+                // An unknown value names no set, a set this build does not
+                // run (brainpool without feature `brainpool`) is not
                 // supported by this token: both CKR_PARAMETER_SET_NOT_SUPPORTED,
                 // as the CKM_ML_KEM_KEY_PAIR_GEN arm returns for an
                 // unrecognised set.
@@ -3437,11 +3450,14 @@ fn C_GenerateKeyPair_impl(
                     Ok(c) => c,
                     Err(rv) => return rv,
                 };
+                let is_brainpool = crate::crypto::brainpool::is_brainpool(curve);
                 let (is_p521, is_p384, is_secp256k1) = match curve {
                     CURVE_P521 => (true, false, false),
                     CURVE_P384 => (false, true, false),
                     CURVE_K256 => (false, false, true),
                     CURVE_P256 => (false, false, false),
+                    // brainpoolP256r1 / brainpoolP384r1 (crypto::brainpool).
+                    _ if is_brainpool => (false, false, false),
                     // Edwards / Montgomery curves have their own mechanisms
                     // (§6.3.10); asking for one here names a curve this
                     // mechanism cannot generate.
@@ -3493,6 +3509,10 @@ fn C_GenerateKeyPair_impl(
                     CURVE_P521 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
                     CURVE_P384 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
                     CURVE_K256 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
+                    c if is_brainpool => match crate::crypto::brainpool::ec_params(c) {
+                        Some(p) => p,
+                        None => return CKR_CURVE_NOT_SUPPORTED,
+                    },
                     _ => vec![
                         0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
                     ],
@@ -3517,6 +3537,33 @@ fn C_GenerateKeyPair_impl(
                     pub_attrs.insert(CKA_EC_POINT, ec_point);
                     let spki = build_ec_spki_p521(&vk_bytes);
                     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                } else if is_brainpool {
+                    store_param_set(&mut pub_attrs, curve);
+                    store_param_set(&mut prv_attrs, curve);
+                    let generated = with_rng!(rng, {
+                        crate::crypto::brainpool::generate(curve, &mut |b: &mut [u8]| {
+                            rand::RngCore::fill_bytes(&mut rng, b)
+                        })
+                    });
+                    let (d, q) = match generated {
+                        Ok(v) => v,
+                        Err(rv) => return rv,
+                    };
+                    // CKA_VALUE: big-endian private scalar (PKCS#11 v3.2 §2.3.7)
+                    prv_attrs.insert(CKA_VALUE, d.to_vec());
+                    // CKA_EC_POINT: DER OCTET STRING around the uncompressed
+                    // point (65 or 97 bytes, short-form length).
+                    let mut ec_point = Vec::with_capacity(2 + q.len());
+                    ec_point.push(0x04u8);
+                    ec_point.push(q.len() as u8);
+                    ec_point.extend_from_slice(&q);
+                    pub_attrs.insert(CKA_EC_POINT, ec_point);
+                    match crate::crypto::brainpool::spki(curve, &q) {
+                        Some(spki) => {
+                            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                        }
+                        None => return CKR_CURVE_NOT_SUPPORTED,
+                    }
                 } else if is_p384 {
                     store_param_set(&mut pub_attrs, CURVE_P384);
                     store_param_set(&mut prv_attrs, CURVE_P384);
@@ -4311,6 +4358,13 @@ fn C_GenerateKeyPair_impl(
                 let xmss_max_sigs = crate::crypto::xmss_bridge::xmss_param_max_sigs(xmss_param);
                 store_ulong(&mut pub_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, xmss_max_sigs);
                 store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, xmss_max_sigs);
+                // PKCS#11 v3.3 working draft, xmss_and_xmss-mt.md: key pair
+                // generation contributes the standard CKA_KEYS_REMAINING to the
+                // PRIVATE key only (it is absent from the public key table).
+                prv_attrs.insert(
+                    CKA_KEYS_REMAINING,
+                    crate::crypto::xmss_bridge::keys_remaining_attr_bytes(xmss_max_sigs as u64),
+                );
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
@@ -4411,10 +4465,17 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut prv_attrs, CKA_SIGN, true);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
-                let mt_max = crate::crypto::xmss_bridge::xmssmt_param_max_sigs(mt_param)
-                    .min(u32::MAX as u64) as u32;
+                let mt_total = crate::crypto::xmss_bridge::xmssmt_param_max_sigs(mt_param);
+                let mt_max = crate::crypto::xmss_bridge::keys_remaining_cap(mt_total);
                 store_ulong(&mut pub_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
                 store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
+                // PKCS#11 v3.3 working draft, xmss_and_xmss-mt.md: the standard
+                // CKA_KEYS_REMAINING on the private key, capped at 2^32-1 (a
+                // height-40 or height-60 tree exceeds it).
+                prv_attrs.insert(
+                    CKA_KEYS_REMAINING,
+                    crate::crypto::xmss_bridge::keys_remaining_attr_bytes(mt_total),
+                );
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
                 mirror_public_key_info(&pub_attrs, &mut prv_attrs);
@@ -5163,8 +5224,8 @@ unsafe fn comp_kem_refuse_parameter(p_mechanism: *const u8) -> Result<(), u32> {
 
 /// The `CKM_COMP_KEM` parameter set of `h_key`, which the key-type check has
 /// already shown to be a CKK_COMP_KEM key. A key without CKA_PARAMETER_SET is
-/// incomplete (the CKM_ML_KEM arms' P-10 rule); a brainpool set is
-/// CKR_PARAMETER_SET_NOT_SUPPORTED (listed for both KEM functions, v3.3
+/// incomplete (the CKM_ML_KEM arms' P-10 rule); a set this build does not run
+/// (brainpool without feature `brainpool`) is CKR_PARAMETER_SET_NOT_SUPPORTED (listed for both KEM functions, v3.3
 /// key_management_functions.md).
 fn comp_kem_key_params(h_key: u32) -> Result<&'static crate::native::composite::CompositeKemParams, u32> {
     let ckp = get_object_attr_u32(h_key, CKA_PARAMETER_SET).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
@@ -5593,8 +5654,8 @@ fn C_EncapsulateKey_impl(
             // decapsulation stays, which is correct practice and keeps
             // anything already deployed working.
             let ct_len: u32 = match curve {
-                CURVE_P256 => 65,
-                CURVE_P384 => 97,
+                CURVE_P256 | crate::crypto::brainpool::CURVE_BP256R1 => 65,
+                CURVE_P384 | crate::crypto::brainpool::CURVE_BP384R1 => 97,
                 CURVE_P521 => 133,
                 CURVE_X25519 => 32,
                 CURVE_X448 => 56,
@@ -5658,6 +5719,20 @@ fn C_EncapsulateKey_impl(
                     CURVE_P256 => ecdh_encap!(p256, &mut rng),
                     CURVE_P384 => ecdh_encap!(p384, &mut rng),
                     CURVE_P521 => ecdh_encap!(p521, &mut rng),
+                    // brainpool: the same ephemeral-static DH (crypto::brainpool).
+                    c if crate::crypto::brainpool::is_brainpool(c) => {
+                        let (eph_d, eph_q) = match crate::crypto::brainpool::generate(
+                            c,
+                            &mut |b: &mut [u8]| rand::RngCore::fill_bytes(&mut rng, b),
+                        ) {
+                            Ok(v) => v,
+                            Err(rv) => return rv,
+                        };
+                        match crate::crypto::brainpool::ecdh(c, &eph_d, peer_point) {
+                            Ok(z) => (eph_q, z.to_vec()),
+                            Err(rv) => return rv,
+                        }
+                    }
                     // V-09 — Montgomery: the peer public and the emitted
                     // ephemeral are both bare little-endian bytes (§6.3.10),
                     // so there is no encoding to strip or add.
@@ -5785,7 +5860,11 @@ fn C_EncapsulateKey_impl(
                 Ok(r) => r,
                 Err(rv) => return rv,
             };
-            debug_assert_eq!(ct.len(), ct_len as usize);
+            // Never write past the caller's buffer, which was checked against
+            // ct_len only.
+            if ct.len() != ct_len as usize {
+                return CKR_FUNCTION_FAILED;
+            }
             std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct.len());
             *pul_ciphertext_len = ct.len() as u32;
             *ph_key = match comp_kem_secret_object(_h_session, h_key, _p_template, _ul_attribute_count, &ss, false) {
@@ -6181,8 +6260,8 @@ fn C_DecapsulateKey_impl(
             // DER form at all, but passing the exact expected length here is
             // still correct — it simply never has a wrapped total to unwrap.
             let expected_ct_len: Option<usize> = match curve {
-                CURVE_P256 => Some(65),
-                CURVE_P384 => Some(97),
+                CURVE_P256 | crate::crypto::brainpool::CURVE_BP256R1 => Some(65),
+                CURVE_P384 | crate::crypto::brainpool::CURVE_BP384R1 => Some(97),
                 CURVE_P521 => Some(133),
                 CURVE_X25519 => Some(32),
                 CURVE_X448 => Some(56),
@@ -6210,6 +6289,15 @@ fn C_DecapsulateKey_impl(
                 CURVE_P256 => ecdh_decap!(p256),
                 CURVE_P384 => ecdh_decap!(p384),
                 CURVE_P521 => ecdh_decap!(p521),
+                c if crate::crypto::brainpool::is_brainpool(c) => {
+                    match crate::crypto::brainpool::ecdh(c, &scalar, peer_point) {
+                        Ok(z) => z.to_vec(),
+                        // §5.18.9 — an undecodable point is invalid input
+                        // ciphertext, as in ecdh_decap! above.
+                        Err(CKR_ARGUMENTS_BAD) => return CKR_ENCRYPTED_DATA_INVALID,
+                        Err(rv) => return rv,
+                    }
+                }
                 // V-09 — Montgomery: bare little-endian bytes both ways.
                 // E1 keeps the TOLERANT READER on this side, which for
                 // Montgomery means accepting the historical DER-wrapped
@@ -7356,8 +7444,8 @@ fn validate_imported_ec_public_key(attrs: &Attributes) -> Result<(), u32> {
     use crate::crypto::handlers::*;
     let raw_len = match curve {
         CURVE_P224 => Some(57),
-        CURVE_P256 | CURVE_K256 => Some(65),
-        CURVE_P384 => Some(97),
+        CURVE_P256 | CURVE_K256 | crate::crypto::brainpool::CURVE_BP256R1 => Some(65),
+        CURVE_P384 | crate::crypto::brainpool::CURVE_BP384R1 => Some(97),
         CURVE_P521 => Some(133),
         CURVE_ED25519 | CURVE_X25519 => Some(32),
         CURVE_ED448 => Some(57),
@@ -7509,6 +7597,9 @@ pub(crate) fn create_object_from_attrs(
         // AES-256 key-unwrap's integrity check failed downstream.
         match crate::crypto::handlers::decode_ec_params(&ec_params) {
             Ok(curve @ (CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256 | CURVE_P224)) => {
+                store_param_set(&mut new_attrs, curve);
+            }
+            Ok(curve) if crate::crypto::brainpool::is_brainpool(curve) => {
                 store_param_set(&mut new_attrs, curve);
             }
             Ok(CURVE_X25519) => {
@@ -8765,14 +8856,21 @@ fn C_Sign_impl(
                             // state (the index width differs from single-tree).
                             let mt_param = xmss_param_set_of(hkey, true)
                                 .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
-                            let remaining = crate::crypto::xmss_bridge::xmssmt_keys_remaining(
+                            let remaining_full = crate::crypto::xmss_bridge::xmssmt_keys_remaining(
                                 mt_param,
                                 new_priv_bytes,
-                            )
-                            .min(u32::MAX as u64) as u32;
+                            );
+                            let remaining =
+                                crate::crypto::xmss_bridge::keys_remaining_cap(remaining_full);
                             changes.push((
                                 CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
+                            ));
+                            // The standard counter moves in the same batch
+                            // (v3.3 working draft, xmss_and_xmss-mt.md).
+                            changes.push((
+                                CKA_KEYS_REMAINING,
+                                crate::crypto::xmss_bridge::keys_remaining_attr_bytes(remaining_full),
                             ));
                         } else {
                             // XMSS: derive remaining from the updated signing key state.
@@ -8789,6 +8887,10 @@ fn C_Sign_impl(
                                 CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
                             ));
+                            changes.push((
+                                CKA_KEYS_REMAINING,
+                                crate::crypto::xmss_bridge::keys_remaining_attr_bytes(remaining as u64),
+                            ));
                         }
                         crate::state::set_object_attrs_bytes_batch(hkey, &changes);
                     }
@@ -8802,8 +8904,10 @@ fn C_Sign_impl(
             return rv;
         }
 
+        // The private key material (for a composite key, mlSeed ‖ tradSK) is
+        // wiped when this copy drops.
         let sk_bytes = match get_object_value(hkey) {
-            Some(v) => v,
+            Some(v) => zeroize::Zeroizing::new(v),
             None => return CKR_ARGUMENTS_BAD,
         };
         let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
@@ -13268,6 +13372,15 @@ pub fn C_DeriveKey(
                             .raw_secret_bytes()
                             .to_vec()
                     }
+                    (ALGO_ECDSA | 0, c) if crate::crypto::brainpool::is_brainpool(c) => {
+                        let field = crate::crypto::brainpool::field_len(c).unwrap_or(0);
+                        let peer_pk_bytes =
+                            crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(1 + 2 * field));
+                        match crate::crypto::brainpool::ecdh(c, &our_sk_bytes, peer_pk_bytes) {
+                            Ok(z) => z.to_vec(),
+                            Err(rv) => return rv,
+                        }
+                    }
                     (ALGO_ECDSA, CURVE_P521) | (0, CURVE_P521) => {
                         let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(133));
                         let sk = match p521::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
@@ -14208,6 +14321,9 @@ fn ec_public_point_from_scalar(curve: u32, scalar: &[u8]) -> Result<Vec<u8>, u32
         CURVE_P384 => point_of!(p384),
         CURVE_P521 => point_of!(p521),
         CURVE_K256 => point_of!(k256),
+        c if crate::crypto::brainpool::is_brainpool(c) => {
+            crate::crypto::brainpool::public_from_private(c, scalar).map_err(|_| CKR_KEY_NOT_WRAPPABLE)?
+        }
         _ => return Err(CKR_KEY_NOT_WRAPPABLE),
     })
 }
@@ -28001,11 +28117,23 @@ mod composite_kem_tests;
 #[path = "composite_sig_tests.rs"]
 mod composite_sig_tests;
 
+/// CKA_KEYS_REMAINING on XMSS and XMSS^MT private keys (PKCS#11 v3.3 working
+/// draft) — see the module's own docs.
+#[cfg(test)]
+#[path = "xmss_keys_remaining_tests.rs"]
+mod xmss_keys_remaining_tests;
+
 /// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
 /// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.
 #[cfg(test)]
 #[path = "wycheproof_mldsa_tests.rs"]
 mod wycheproof_mldsa_tests;
+
+/// Project Wycheproof brainpoolP256r1 / brainpoolP384r1 ECDSA and ECDH
+/// vectors (2026-10-21) — see the module's own docs.
+#[cfg(all(test, feature = "brainpool"))]
+#[path = "wycheproof_brainpool_tests.rs"]
+mod wycheproof_brainpool_tests;
 
 // ── Mechanism-parameter struct widths (2026-08-13) ──────────────────────────
 //

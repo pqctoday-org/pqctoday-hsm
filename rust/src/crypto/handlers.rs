@@ -116,8 +116,17 @@ pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
             // 1.3.101.112 / .113 — Ed25519 / Ed448 (Edwards)
             [0x2b, 0x65, 0x70] => CURVE_ED25519,
             [0x2b, 0x65, 0x71] => CURVE_ED448,
+            // 1.3.36.3.3.2.8.1.1.7 / .11 — brainpoolP256r1 / brainpoolP384r1
+            // (RFC 5639 §4.1)
+            // (feature `brainpool`; without it they fall to CURVE_UNSUPPORTED).
+            b if crate::crypto::brainpool::ENABLED && b == crate::crypto::brainpool::OID_BP256R1 => {
+                crate::crypto::brainpool::CURVE_BP256R1
+            }
+            b if crate::crypto::brainpool::ENABLED && b == crate::crypto::brainpool::OID_BP384R1 => {
+                crate::crypto::brainpool::CURVE_BP384R1
+            }
             // A well-formed OID naming a curve this token does not
-            // implement (brainpool, the F_2^m curves, …).
+            // implement (the other brainpool curves, the F_2^m curves, …).
             _ => CURVE_UNSUPPORTED,
         }),
         // ── PrintableString curveName ────────────────────────────────────
@@ -133,6 +142,8 @@ pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
                 "curve448" | "X448" => CURVE_X448,
                 "edwards25519" | "Ed25519" => CURVE_ED25519,
                 "edwards448" | "Ed448" => CURVE_ED448,
+                "brainpoolP256r1" if crate::crypto::brainpool::ENABLED => crate::crypto::brainpool::CURVE_BP256R1,
+                "brainpoolP384r1" if crate::crypto::brainpool::ENABLED => crate::crypto::brainpool::CURVE_BP384R1,
                 _ => CURVE_UNSUPPORTED,
             })
         }
@@ -2332,6 +2343,17 @@ fn ecdsa_mech_digest(mech: u32, msg: &[u8]) -> Option<Vec<u8>> {
     })
 }
 
+/// The conditioned digest a brainpool ECDSA mechanism signs: raw `CKM_ECDSA`
+/// input as given (PKCS#11 v3.2 §6.3.12), or the mechanism's hash of `msg`;
+/// then FIPS 186-5 §6.4 conditioning to the field size.
+fn ecdsa_brainpool_digest(mech: u32, curve: u32, msg: &[u8]) -> Result<Vec<u8>, u32> {
+    let digest = match mech {
+        CKM_ECDSA => msg.to_vec(),
+        m => ecdsa_mech_digest(m, msg).ok_or(CKR_MECHANISM_INVALID)?,
+    };
+    Ok(fit_digest_to_curve(curve, digest))
+}
+
 /// FIPS 186-5 §6.4 — condition a digest for prehash-sign/verify on `curve`:
 /// digests longer than the field are truncated to the LEFTMOST field-size
 /// bytes; shorter digests are left-padded with zeros to the field size
@@ -2341,9 +2363,9 @@ fn ecdsa_mech_digest(mech: u32, msg: &[u8]) -> Option<Vec<u8>> {
 fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
     let field: usize = match curve {
         CURVE_P521 => 66,
-        CURVE_P384 => 48,
+        CURVE_P384 | crate::crypto::brainpool::CURVE_BP384R1 => 48,
         CURVE_P224 => 28,
-        _ => 32, // CURVE_P256 / CURVE_K256
+        _ => 32, // CURVE_P256 / CURVE_K256 / CURVE_BP256R1
     };
     if digest.len() >= field {
         digest.truncate(field);
@@ -2381,6 +2403,9 @@ pub fn validate_ec_public_point(curve: u32, point: &[u8]) -> Result<(), u32> {
         CURVE_P384 => p384::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
         CURVE_P521 => p521::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
         CURVE_K256 => k256::PublicKey::from_sec1_bytes(point).map(|_| ()).or(bad),
+        c if crate::crypto::brainpool::is_brainpool(c) => {
+            if crate::crypto::brainpool::validate_public(c, point) { Ok(()) } else { bad }
+        }
         CURVE_ED25519 => {
             let Ok(bytes) = <[u8; 32]>::try_from(point) else { return bad };
             let c = curve25519_dalek::edwards::CompressedEdwardsY(bytes);
@@ -2526,8 +2551,8 @@ pub fn sign_ecdsa_explicit_k(
 }
 
 /// P-224 ECDSA over an already-conditioned (FIPS 186-5 §6.4) digest, with
-/// the same RFC 6979 deterministic nonce as the other curves (see
-/// `sign_ecdsa`'s header comment).
+/// the same RFC 6979 deterministic nonce as P-256/P-384 (see `sign_ecdsa`'s
+/// header comment; P-521 is randomised).
 fn sign_prehash_p224(sk_bytes: &[u8], digest: &[u8]) -> Result<Vec<u8>, u32> {
     use p224::ecdsa::signature::hazmat::PrehashSigner;
     let sk = p224::ecdsa::SigningKey::from_slice(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -2544,13 +2569,30 @@ fn verify_prehash_p224(pk_bytes: &[u8], digest: &[u8], sig_bytes: &[u8]) -> Resu
 }
 
 pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
-    // ECDSA stays on the pure-Rust `p256`/`p384`/`p521` crates deliberately:
-    // they sign with RFC 6979 DETERMINISTIC nonces, and this engine's
-    // contract relies on that (see verbs_v32's MultiPart_ECDSA FSM test —
-    // one-shot and Update/Final must produce the SAME signature). aws-lc-rs
-    // has no deterministic-ECDSA API (only randomized `EcdsaKeyPair::sign`),
-    // so routing ECDSA there would silently break reproducibility for a ~2x
-    // speedup. RSA (no nonce) and ECDH (no signature) still use AWS-LC.
+    // ECDSA stays on the pure-Rust `p224`/`p256`/`p384`/`k256` crates
+    // deliberately: they sign with RFC 6979 DETERMINISTIC nonces, and this
+    // engine's contract relies on that for those curves (see verbs_v32's
+    // MultiPart_ECDSA FSM test, on P-256 — one-shot and Update/Final must
+    // produce the SAME signature). aws-lc-rs has no deterministic-ECDSA API
+    // (only randomized `EcdsaKeyPair::sign`), so routing ECDSA there would
+    // silently break reproducibility for a ~2x speedup. RSA (no nonce) and
+    // ECDH (no signature) still use AWS-LC.
+    //
+    // P-521 is the exception: `p521` 0.13.3's `Signer` and `PrehashSigner`
+    // both draw the nonce from `OsRng` (its source still carries "TODO: use
+    // RFC6979"), so P-521 signatures are RANDOMISED — two signatures over
+    // the same message differ, and nothing may compare them byte for byte.
+    // That is why the composite P-521 sets refuse CKH_DETERMINISTIC_REQUIRED
+    // (native::composite_sig).
+    //
+    // brainpoolP256r1 / brainpoolP384r1 (crypto::brainpool, RFC 6979 nonces
+    // like P-256 / P-384): every hash-composite mechanism digests per the
+    // mechanism, raw CKM_ECDSA takes the caller's digest, and both are
+    // conditioned per FIPS 186-5 §6.4 as in the T1 arm below.
+    if crate::crypto::brainpool::is_brainpool(curve) {
+        let digest = ecdsa_brainpool_digest(mech, curve, msg)?;
+        return crate::crypto::brainpool::sign_prehash(curve, sk_bytes, &digest);
+    }
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Signer;
@@ -3153,9 +3195,9 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         | CKM_ECDSA_SHA3_384
         | CKM_ECDSA_SHA3_512 => match ps {
             CURVE_P521 => 132,
-            CURVE_P384 => 96,
+            CURVE_P384 | crate::crypto::brainpool::CURVE_BP384R1 => 96,
             CURVE_P224 => 56, // E13
-            _ => 64, // CURVE_P256, CURVE_K256, and default
+            _ => 64, // CURVE_P256, CURVE_K256, CURVE_BP256R1, and default
         },
         // Ed448 (2026-08-27) — CKM_EDDSA/_PH cover both curves (§6.3.14), and
         // their signature sizes differ (RFC 8032): Ed25519 = 64 bytes,
@@ -3698,6 +3740,10 @@ pub fn verify_ecdsa(
     sig_bytes: &[u8],
 ) -> Result<(), u32> {
     // ECDSA verify stays on pure Rust alongside signing (see sign_ecdsa).
+    if crate::crypto::brainpool::is_brainpool(curve) {
+        let digest = ecdsa_brainpool_digest(mech, curve, msg)?;
+        return crate::crypto::brainpool::verify_prehash(curve, pk_bytes, &digest, sig_bytes);
+    }
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Verifier;
@@ -4201,6 +4247,32 @@ mod tests {
     ///
     /// Testing only that sign succeeds, or only that verify accepts some
     /// externally-produced signature, would have missed it. Test the seam.
+    /// `sign_ecdsa`'s header comment: P-256 and P-384 sign with RFC 6979
+    /// deterministic nonces, P-521 (`p521` 0.13.3, `OsRng`) is randomised.
+    /// If the p521 crate ever moves to RFC 6979 this fails, and the comment
+    /// and `composite_sig::deterministic_available` must be revisited.
+    #[test]
+    fn ecdsa_determinism_is_per_curve() {
+        let msg = b"same key, same message";
+        let p256_sk: Vec<u8> = (1u8..=32).collect();
+        let p384_sk: Vec<u8> = (1u8..=48).collect();
+        let mut p521_sk = vec![0u8; 66];
+        p521_sk[2..].copy_from_slice(&(1u8..=64).collect::<Vec<u8>>());
+        for (mech, curve, sk) in [
+            (CKM_ECDSA_SHA256, CURVE_P256, &p256_sk),
+            (CKM_ECDSA_SHA384, CURVE_P384, &p384_sk),
+        ] {
+            assert_eq!(
+                sign_ecdsa(mech, curve, sk, msg).unwrap(),
+                sign_ecdsa(mech, curve, sk, msg).unwrap(),
+                "curve {curve} signs deterministically"
+            );
+        }
+        let a = sign_ecdsa(CKM_ECDSA_SHA512, CURVE_P521, &p521_sk, msg).unwrap();
+        let b = sign_ecdsa(CKM_ECDSA_SHA512, CURVE_P521, &p521_sk, msg).unwrap();
+        assert_ne!(a, b, "P-521 signatures are randomised");
+    }
+
     #[test]
     fn every_advertised_ecdsa_p256_mechanism_round_trips() {
         // A fixed, non-trivial P-256 scalar (1..=32), so the test is

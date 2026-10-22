@@ -363,6 +363,7 @@ enum DraftTrad {
 }
 
 fn draft_trad(tc_id: &str) -> DraftTrad {
+    use crate::crypto::brainpool::{CURVE_BP256R1, CURVE_BP384R1};
     use crate::crypto::handlers::{CURVE_P256, CURVE_P384, CURVE_P521};
     match tc_id {
         // id-RSASSA-PSS, §6.1 Table 2 (SHA-256, MGF1-SHA-256, salt 32).
@@ -381,6 +382,9 @@ fn draft_trad(tc_id: &str) -> DraftTrad {
         "id-MLDSA44-ECDSA-P256-SHA256" | "id-MLDSA65-ECDSA-P256-SHA512" => DraftTrad::Ecdsa(CKM_ECDSA_SHA256, CURVE_P256),
         "id-MLDSA65-ECDSA-P384-SHA512" | "id-MLDSA87-ECDSA-P384-SHA512" => DraftTrad::Ecdsa(CKM_ECDSA_SHA384, CURVE_P384),
         "id-MLDSA87-ECDSA-P521-SHA512" => DraftTrad::Ecdsa(CKM_ECDSA_SHA512, CURVE_P521),
+        // ecdsa-with-SHA256 / SHA384 on brainpoolP256r1 / brainpoolP384r1.
+        "id-MLDSA65-ECDSA-brainpoolP256r1-SHA512" => DraftTrad::Ecdsa(CKM_ECDSA_SHA256, CURVE_BP256R1),
+        "id-MLDSA87-ECDSA-brainpoolP384r1-SHA512" => DraftTrad::Ecdsa(CKM_ECDSA_SHA384, CURVE_BP384R1),
         // id-Ed25519 / id-Ed448, pure.
         "id-MLDSA44-Ed25519-SHA512" | "id-MLDSA65-Ed25519-SHA512" | "id-MLDSA87-Ed448-SHAKE256" => DraftTrad::EdDsa,
         other => panic!("no draft entry for {other}"),
@@ -399,6 +403,15 @@ fn independent_trad_public(tc_id: &str, sk: &[u8]) -> Vec<u8> {
         }
         DraftTrad::Ecdsa(_, 256) => p256::SecretKey::from_sec1_der(sk).unwrap().public_key().to_encoded_point(false).as_bytes().to_vec(),
         DraftTrad::Ecdsa(_, 384) => p384::SecretKey::from_sec1_der(sk).unwrap().public_key().to_encoded_point(false).as_bytes().to_vec(),
+        // brainpool: the RustCrypto `sec1` parser, as in composite_kem_tests.
+        DraftTrad::Ecdsa(_, crate::crypto::brainpool::CURVE_BP256R1) => {
+            use bp256::elliptic_curve::sec1::ToSec1Point;
+            bp256::r1::SecretKey::from_sec1_der(sk).unwrap().public_key().as_affine().to_sec1_point(false).as_bytes().to_vec()
+        }
+        DraftTrad::Ecdsa(_, crate::crypto::brainpool::CURVE_BP384R1) => {
+            use bp384::elliptic_curve::sec1::ToSec1Point;
+            bp384::r1::SecretKey::from_sec1_der(sk).unwrap().public_key().as_affine().to_sec1_point(false).as_bytes().to_vec()
+        }
         DraftTrad::Ecdsa(_, _) => p521::SecretKey::from_sec1_der(sk).unwrap().public_key().to_encoded_point(false).as_bytes().to_vec(),
         DraftTrad::EdDsa if sk.len() == 32 => {
             ed25519_dalek::SigningKey::from_bytes(sk.try_into().unwrap()).verifying_key().to_bytes().to_vec()
@@ -433,6 +446,12 @@ fn halves_verify(tc_id: &str, pk: &[u8], m: &[u8], ctx: &[u8], s: &[u8]) -> (boo
             let raw = match curve {
                 256 => p256::ecdsa::Signature::from_der(trad_sig).map(|s| s.to_bytes().to_vec()).ok(),
                 384 => p384::ecdsa::Signature::from_der(trad_sig).map(|s| s.to_bytes().to_vec()).ok(),
+                crate::crypto::brainpool::CURVE_BP256R1 => ecdsa017::Signature::<bp256::BrainpoolP256r1>::from_der(trad_sig)
+                    .map(|s| s.to_bytes().to_vec())
+                    .ok(),
+                crate::crypto::brainpool::CURVE_BP384R1 => ecdsa017::Signature::<bp384::BrainpoolP384r1>::from_der(trad_sig)
+                    .map(|s| s.to_bytes().to_vec())
+                    .ok(),
                 _ => p521::ecdsa::Signature::from_der(trad_sig).map(|s| s.to_bytes().to_vec()).ok(),
             };
             raw.is_some_and(|r| verify_ecdsa(mech, curve, trad_pk, &mp, &r).is_ok())
@@ -450,10 +469,9 @@ fn halves_verify(tc_id: &str, pk: &[u8], m: &[u8], ctx: &[u8], s: &[u8]) -> (boo
 /// the table equals the one the §6 name gives; then split `s` and
 /// `sWithContext` (§4.3) and verify EACH HALF SEPARATELY over the M' built
 /// here from §2.2 — `s` with the empty ctx, `sWithContext` with the
-/// top-level ctx — and check each half fails under the other ctx. Brainpool
-/// rows: their traditional half needs brainpool curves, which the engine
-/// does not have yet; their ML-DSA halves are still checked, and the
-/// composite import is asserted unsupported.
+/// top-level ctx — and check each half fails under the other ctx. All 18;
+/// without feature `brainpool` the two brainpool rows check only their
+/// ML-DSA halves and assert the composite import unsupported.
 #[test]
 fn v3_composite_sig_vectors_halves_verify_independently() {
     let _guard = test_lock::acquire();
@@ -490,13 +508,17 @@ fn v3_composite_sig_vectors_halves_verify_independently() {
         assert_eq!(halves_verify(id, &v.pk, &d.m, &[], &v.s_ctx), (false, false), "{id}: sWithContext without ctx");
         full += 1;
     }
-    assert_eq!(full, 16);
-    assert_eq!(ml_only, ["id-MLDSA65-ECDSA-brainpoolP256r1-SHA512", "id-MLDSA87-ECDSA-brainpoolP384r1-SHA512"]);
+    if crate::crypto::brainpool::ENABLED {
+        assert_eq!((full, ml_only.len()), (18, 0));
+    } else {
+        assert_eq!(full, 16);
+        assert_eq!(ml_only, ["id-MLDSA65-ECDSA-brainpoolP256r1-SHA512", "id-MLDSA87-ECDSA-brainpoolP384r1-SHA512"]);
+    }
 }
 
 // ── A4: KATs ─────────────────────────────────────────────────────────────
 
-/// Verification KAT, all 16 supported vectors: `pk` imported through
+/// Verification KAT, all 18 vectors (16 without feature `brainpool`): `pk` imported through
 /// C_CreateObject; `s` verifies under CKM_COMP_SIG with no parameter and
 /// with an empty CK_SIGN_ADDITIONAL_CONTEXT, `sWithContext` with the
 /// top-level ctx; both through CKM_COMP_SIG_EXTERNAL_HASH with PH(m)
@@ -528,7 +550,7 @@ fn kat_verify_all_supported_vectors() {
         destroy(&[hp]);
         n += 1;
     }
-    assert_eq!(n, 16);
+    assert_eq!(n, if crate::crypto::brainpool::ENABLED { 18 } else { 16 });
 }
 
 /// The vectors' private keys sign: `sk` imported, our signature (empty ctx
@@ -567,19 +589,19 @@ fn kat_imported_private_key_signs_verifiably() {
         destroy(&[hk, hp]);
         n += 1;
     }
-    assert_eq!(n, 16);
+    assert_eq!(n, if crate::crypto::brainpool::ENABLED { 18 } else { 16 });
 }
 
 // ── Key generation and round trips ───────────────────────────────────────
 
-/// CKM_COMP_SIG_KEY_PAIR_GEN for all 16 supported sets: object attributes,
+/// CKM_COMP_SIG_KEY_PAIR_GEN for all 18 sets (16 without feature `brainpool`): object attributes,
 /// value sizes, the public half re-derivable from the private value, and
 /// round trips — single-part, multi-part (one-shot == streamed: with
 /// CKH_DETERMINISTIC_REQUIRED the two signatures are byte-identical for every
 /// set that can sign deterministically; for the PSS and P-521 sets each
 /// verifies under the other form), external hash against CKM_COMP_SIG, and the V3 checker
-/// on the generated pair. Brainpool and an unknown set:
-/// CKR_PARAMETER_SET_NOT_SUPPORTED.
+/// on the generated pair. An unknown set, and without feature `brainpool` a
+/// brainpool set: CKR_PARAMETER_SET_NOT_SUPPORTED.
 #[test]
 fn keygen_and_round_trip_all_supported_sets() {
     let _guard = test_lock::acquire();
@@ -631,7 +653,7 @@ fn keygen_and_round_trip_all_supported_sets() {
         destroy(&[hp, hk]);
         n += 1;
     }
-    assert_eq!(n, 16);
+    assert_eq!(n, if crate::crypto::brainpool::ENABLED { 18 } else { 16 });
     assert_eq!(generate_comp_sig(0x7f).0, CKR_PARAMETER_SET_NOT_SUPPORTED);
     assert_eq!(generate(CKM_COMP_SIG_KEY_PAIR_GEN, vec![], vec![]).0, CKR_TEMPLATE_INCOMPLETE);
     assert_eq!(
@@ -858,8 +880,8 @@ fn hex(b: &[u8]) -> String {
 
 /// Plan V5 input, NOT a test of its own and ignored by default: writes
 /// engine-generated artefacts for the reference implementation to check —
-/// for each of the 16 signature sets a fresh pk and signatures over the
-/// vector file's `m`, without and with its `ctx`; for each of the 10 KEM
+/// for each of the 18 signature sets a fresh pk and signatures over the
+/// vector file's `m`, without and with its `ctx`; for each of the 12 KEM
 /// sets a fresh ek, its dk, a ciphertext and the engine's shared secret k.
 /// The private values and k are read here through the crate-internal object
 /// store, which only test code can reach; the PKCS#11 API never exports
@@ -915,6 +937,7 @@ fn v5_fixture_generator() {
         }));
         destroy(&[hp, hk, hs]);
     }
+    let (sigs_len, kems_len) = (sigs.len(), kems.len());
     let doc = serde_json::json!({
         "source": "pqctoday-hsm Rust engine, self-generated (NOT upstream vectors)",
         "encoding": "hex",
@@ -924,5 +947,5 @@ fn v5_fixture_generator() {
         "kem": kems,
     });
     std::fs::write(&out, serde_json::to_vec_pretty(&doc).unwrap()).expect("write fixture");
-    eprintln!("wrote {} signature and {} KEM entries to {out}", 16, 10);
+    eprintln!("wrote {} signature and {} KEM entries to {out}", sigs_len, kems_len);
 }

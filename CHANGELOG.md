@@ -22,6 +22,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Rust engine: composite ML-KEM and composite ML-DSA (PKCS#11 v3.3 working draft).** PKCS#11 v3.2 has no
+  composite post-quantum/traditional keys; the OASIS PKCS 11 TC's v3.3 working draft (commit `9ef73f9`) does, and
+  the engine now implements it, labelled "PKCS#11 v3.3 working draft". The engine still reports Cryptoki 3.2.0, and
+  this is not a v3.3 conformance claim: no v3.3 profile or test cases exist yet.
+  - A composite key is one object (`CKK_COMP_KEM` or `CKK_COMP_SIG`) holding both halves, in the encodings of the
+    IETF drafts draft-ietf-lamps-pq-composite-kem-23 and draft-ietf-lamps-pq-composite-sigs-19. Private keys are
+    sensitive and non-extractable by default. An imported key has both public halves re-derived and checked.
+  - Composite ML-KEM (`CKM_COMP_KEM_KEY_PAIR_GEN`, `CKM_COMP_KEM`) through `C_EncapsulateKey` and
+    `C_DecapsulateKey` for all 12 sets (ML-KEM-768/1024 with RSA-OAEP, ECDH P-256/P-384/P-521,
+    brainpoolP256r1/P384r1, X25519 or X448). The shared secret is the draft's SHA3-256 combiner over both secrets, the traditional ciphertext and
+    public key and the set's label, and comes back as a key handle.
+  - Composite ML-DSA (`CKM_COMP_SIG_KEY_PAIR_GEN`, `CKM_COMP_SIG`, `CKM_COMP_SIG_EXTERNAL_HASH`) for all 18
+    sets (ML-DSA-44/65/87 with RSASSA-PSS, RSA PKCS#1 v1.5, ECDSA P-256/P-384/P-521 or brainpoolP256r1/P384r1,
+    Ed25519 or Ed448), single- and multi-part, with an optional context string.
+  - Checked against the draft authors' test vectors for every set (decapsulation and verification), and against
+    the draft authors' own reference code in both directions: their code verifies the engine's signatures and
+    decapsulates the engine's ciphertexts to the engine's secret. The evidence is in
+    `rust/kat/pkcs11-v33/validation/`.
+  - The C++ engine does not have these mechanisms (recorded in `tests/differential/exceptions.json`).
+- **Rust engine: brainpoolP256r1 and brainpoolP384r1.** Plain EC keys on these two curves can be generated,
+  imported, used for ECDSA (`CKM_ECDSA` and its hash variants) and for ECDH (`CKM_ECDH1_DERIVE`, ECDH-as-KEM),
+  and they complete the composite sets above (30 of 30). The curves come from RustCrypto's `bp256`/`bp384`
+  0.14.0: pure Rust, constant-time, but not independently audited. They are checked against Project Wycheproof's
+  brainpool ECDSA and ECDH files and the draft authors' vectors and reference code. They add about 320 KB to the
+  browser bundle (+9.8%), so they sit behind the cargo feature `brainpool`, on by default;
+  `rust/build-wasm-bundle.sh --no-brainpool` leaves them out. brainpoolP512r1 and the twisted curves are still
+  refused with `CKR_CURVE_NOT_SUPPORTED`. KMIP does not offer brainpool keys yet.
+- **Rust engine: XMSS and XMSS^MT private keys report `CKA_KEYS_REMAINING`.** The v3.3 working draft gives these
+  keys the standard remaining-signatures attribute already used by HSS. It is set at key generation, goes down with
+  every signature, and is capped at 2^32-1 for trees larger than that.
+- **Rust engine: an imported composite EC private key may carry its public key.** The drafts encode the EC half
+  without the optional public-key field but ask implementations to be lenient with legacy encodings. An import that
+  includes the field is accepted only when it matches the private key, and is stored without it.
+
 - **Rust engine: the FHE custody mechanisms are listed.** `CKM_PQCTODAY_FHE_KEY_GEN`, `CKM_PQCTODAY_FHE_DERIVE_PUBLIC`
   and `CKM_PQCTODAY_FHE_DECRYPT` now appear in `C_GetMechanismList` and are answered by `C_GetMechanismInfo` (key size
   32 bytes, the seed; `CKF_GENERATE`, `CKF_DERIVE`, `CKF_DECRYPT`) in native builds once the replication profile is
@@ -75,6 +109,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rust engine: no leftover secret objects when a hybrid-KEM combiner fails part-way.** The intermediate secrets
+  the combiner registers are now removed on every path, not only on success, and the derive helpers wipe their
+  copies of key material.
 - **Rust engine: the TFHE parameter fingerprint named the wrong library commit.** The TFHE-rs 1.8.1 commit encoded in
   `CKA_PQCTODAY_FHE_PARAM_HASH` for registry ID 1 had a typo (one hex digit dropped). The engine now encodes the real
   commit (`187fc0b9…43b6db`), so the hash changes from `2ce45553…` to `e3219e9e…`. TFHE keys made before this change

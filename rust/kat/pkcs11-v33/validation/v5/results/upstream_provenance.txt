@@ -1,0 +1,9 @@
+kem d77e75420034d826e14cbef0b779986511f114e9 https://github.com/lamps-wg/draft-composite-kem
+sigs f0627ab34acfe1aee0abce4bee91ed2b577eab76 https://github.com/lamps-wg/draft-composite-sigs
+c5478a81045fc2193e0e816f144a0033432208b95a0eb0d16050b4fc4b866098  kem/src/generate_test_vectors.py
+4d017661802b8a8d8591ee97cf92d98ca74e9f67dbf5b9bd4e2f846befdc65a4  kem/src/requirements.txt
+ceec4e506b5f5ff148b7b5309ad7bc7a05324234bc1902ce3126c680e50f37d6  sigs/src/generate_test_vectors.py
+6f9c3cb1597a526e5c62f8a56138fe4fa8251d95208fc596cb1d10b23112635f  sigs/src/requirements.txt
+container image python:3.12-slim-trixie id=sha256:7efd45553a98be3d940b73600550669831c0be34f30c521159e7030a91fcdee6 digests=[python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2]
+input fixture sha256 089c6e2a942ac9eed1a402ee2de2172c9fbd280cacafe711ff9cd8aa3ae76fbf (self-generated, not committed: holds throwaway private keys)
+run date 2026-10-21 (re-run with all 30 sets after brainpool support), host: build host (M4 Pro), throwaway container

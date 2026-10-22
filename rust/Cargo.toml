@@ -43,7 +43,20 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 #   cargo build --features acvp ...     # an authorized ACVP-lab submission
 # (Was `default = ["acvp"]`; flipped to opt-in per the 2026-06-21 compliance
 # audit — shipping a release build with this hook on is a §5.6 violation.)
-default = ["awslc-pq", "fhe-custody"]
+default = ["awslc-pq", "fhe-custody", "brainpool"]
+
+# brainpoolP256r1 / brainpoolP384r1 ECDSA and ECDH (crypto::brainpool), and with
+# them the four brainpool composite sets of the PKCS#11 v3.3 working draft.
+# DEFAULT ON, native and wasm32. It is a switch because it makes the browser
+# bundle noticeably bigger (owner decision D2, plan pkcs11-v33 A5): measured
+# 2026-10-21 on the release wasm-pack bundle, softhsmrustv3_bg.wasm grows from
+# 3,347,854 to 3,674,928 bytes (+327,074, +9.8%; gzip -9 +99,165, +10.9%).
+# Off (`--no-default-features`, which on wasm32 drops nothing else, since
+# awslc-pq and fhe-custody compile nothing there; or build-wasm-bundle.sh
+# --no-brainpool): the brainpool OIDs read as recognised-but-unsupported
+# (CKR_CURVE_NOT_SUPPORTED) and the four sets as CKR_PARAMETER_SET_NOT_SUPPORTED,
+# exactly as before the curves existed.
+brainpool = ["dep:bp256", "dep:bp384", "dep:ecdsa017"]
 acvp = []
 
 # K2–K4 PQCToday key hierarchy, attestation and protected replication
@@ -314,6 +327,29 @@ p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+# brainpoolP256r1 / brainpoolP384r1 (RFC 5639) for ECDSA and ECDH, used by
+# plain CKK_EC keys and the four brainpool composite sets (PKCS#11 v3.3
+# working draft). Chosen 2026-10-21 over the alternatives:
+#   * AWS-LC (the native backend here) has no brainpool curves (only the NID
+#     constants), and it does not build for wasm32 anyway;
+#   * bp256/bp384 0.14.0 (2026-09) are RustCrypto's maintained crates, pure
+#     Rust, `no_std`, `forbid(unsafe_code)`, and build for wasm32. Field
+#     arithmetic is fiat-crypto output (formally verified, constant time),
+#     points use primeorder's complete formulas, and scalar multiplication
+#     uses a constant-time lookup table. Apache-2.0 OR MIT.
+# They have NOT had a third-party audit (unlike the P-256/P-384 code paths
+# AWS-LC covers natively), which the README and CHANGELOG say plainly.
+# They sit on the elliptic-curve 0.14 line (already in the graph through
+# ed448-goldilocks), not the 0.13 line of p256/p384. `sha256`/`sha384` give
+# each curve its RFC 6979 nonce hash; the hash of the message itself is
+# still chosen by the mechanism (crypto::brainpool).
+bp256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "sha256"], optional = true }
+bp384 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "sha384"], optional = true }
+# bp256, bp384 and ecdsa017 are optional: feature `brainpool` (default on).
+# ecdsa017 is the ecdsa 0.17 the brainpool crates use, with `algorithm` on: that is what
+# compiles SigningKey/VerifyingKey (RFC 6979 deterministic signing). No new
+# crate version: the same ecdsa 0.17 bp256/bp384 already pull in.
+ecdsa017 = { package = "ecdsa", version = "0.17", default-features = false, features = ["algorithm"], optional = true }
 # Direct edge to the ecdsa crate the curve crates above already pull in with
 # exactly these features (their "ecdsa" feature enables ecdsa/signing, which
 # includes hazmat + arithmetic) — no new crate, no new feature. It exists only
@@ -490,6 +526,12 @@ x509-cert = { version = "0.2", default-features = false, features = ["builder"] 
 der = { version = "0.7", features = ["oid", "alloc", "std"] }
 spki07 = { package = "spki", version = "0.7", features = ["alloc"] }
 const-oid = { version = "0.9", features = ["db"] }
+# Test-only: RFC 5915 ECPrivateKey parsing for brainpool through RustCrypto's
+# `sec1` crate, so the composite vector checks do not rely on the engine's own
+# parser. Same crate versions as [dependencies]; nothing new ships.
+bp256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "pkcs8"] }
+bp384 = { version = "0.14.0", default-features = false, features = ["arithmetic", "pkcs8"] }
+ecdsa017 = { package = "ecdsa", version = "0.17", default-features = false, features = ["algorithm", "der"] }
 # Cross-validation oracle only (Phase 0.9/0.6 of the FrodoKEM/McEliece/HQC plan) —
 # native liboqs bindings, dev-dependency only so it never has to cross the wasm32
 # target; the engine's shipping crypto never depends on this.

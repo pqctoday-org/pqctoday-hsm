@@ -288,6 +288,20 @@ fn independent_trad_public(c: KemClassical, sk: &[u8]) -> Vec<u8> {
         KemClassical::Ecdh { curve: EcCurve::P521 } => {
             p521::SecretKey::from_sec1_der(sk).unwrap().public_key().to_encoded_point(false).as_bytes().to_vec()
         }
+        // brainpool: the RustCrypto `sec1` DER parser (dev-dependency
+        // features), not the engine's own ECPrivateKey parser. The curve
+        // arithmetic is the engine's crate; the independent arithmetic checks
+        // are the authors' reference code (V4, OpenSSL) and Wycheproof.
+        KemClassical::Ecdh { curve: EcCurve::BrainpoolP256r1 } => {
+            use bp256::elliptic_curve::sec1::ToSec1Point;
+            let sk = bp256::r1::SecretKey::from_sec1_der(sk).unwrap();
+            sk.public_key().as_affine().to_sec1_point(false).as_bytes().to_vec()
+        }
+        KemClassical::Ecdh { curve: EcCurve::BrainpoolP384r1 } => {
+            use bp384::elliptic_curve::sec1::ToSec1Point;
+            let sk = bp384::r1::SecretKey::from_sec1_der(sk).unwrap();
+            sk.public_key().as_affine().to_sec1_point(false).as_bytes().to_vec()
+        }
         KemClassical::X25519 => {
             let k: [u8; 32] = sk.try_into().unwrap();
             x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(k)).as_bytes().to_vec()
@@ -296,7 +310,6 @@ fn independent_trad_public(c: KemClassical, sk: &[u8]) -> Vec<u8> {
             let k: [u8; 56] = sk.try_into().unwrap();
             x448::PublicKey::from(&x448::StaticSecret::from(k)).as_bytes().to_vec()
         }
-        other => panic!("no independent derivation for {other:?}"),
     }
 }
 
@@ -310,7 +323,8 @@ fn independent_trad_public(c: KemClassical, sk: &[u8]) -> Vec<u8> {
 /// re-derived from `tradSK`; every size against the parameter table;
 /// `dk_pkcs8` wraps exactly `dk` under the set's OID; the `x5c`
 /// certificate's SPKI is the set's OID (parameters absent) over exactly
-/// `ek`. The two brainpool vectors are reported, not silently passed.
+/// `ek`. All 12 (10 without feature `brainpool`: the two brainpool vectors
+/// are then reported, not silently passed).
 #[test]
 fn v3_composite_kem_vectors_are_internally_consistent() {
     let mut checked = 0;
@@ -340,14 +354,13 @@ fn v3_composite_kem_vectors_are_internally_consistent() {
         assert_eq!(cert_spki(&v.x5c), composite_key::spki(p.oid, &v.ek), "{name}: x5c SPKI");
 
         if !p.supported {
-            // Plan decision D2: brainpool comes last (A5). The engine must say
-            // so, not pass the vector by accident.
+            // Feature `brainpool` off: the engine must say so, not pass the
+            // vector by accident.
             assert_eq!(
                 composite_key::supported_layout(CKK_COMP_KEM, p.ckp, CKR_ATTRIBUTE_VALUE_INVALID).unwrap_err(),
                 CKR_PARAMETER_SET_NOT_SUPPORTED,
                 "{name}"
             );
-            eprintln!("SKIP {name}: brainpool curve not in the engine yet (plan A5); sizes, PKCS#8 and x5c checked");
             skipped.push(name);
             continue;
         }
@@ -366,8 +379,12 @@ fn v3_composite_kem_vectors_are_internally_consistent() {
         assert!(composite_key::public_is_valid(&layout, &v.ek), "{name}");
         checked += 1;
     }
-    assert_eq!(checked, 10, "supported composite vectors");
-    assert_eq!(skipped, ["id-MLKEM768-ECDH-brainpoolP256r1-SHA3-256", "id-MLKEM1024-ECDH-brainpoolP384r1-SHA3-256"]);
+    if crate::crypto::brainpool::ENABLED {
+        assert_eq!((checked, skipped.len()), (12, 0), "composite vectors");
+    } else {
+        assert_eq!(checked, 10, "composite vectors");
+        assert_eq!(skipped, ["id-MLKEM768-ECDH-brainpoolP256r1-SHA3-256", "id-MLKEM1024-ECDH-brainpoolP384r1-SHA3-256"]);
+    }
 
     // The two plain ML-KEM entries cross-check the single-algorithm code the
     // composite path builds on: KeyGen_internal from the 64-byte seed gives
@@ -385,8 +402,8 @@ fn v3_composite_kem_vectors_are_internally_consistent() {
 
 /// Import of every supported `dk` and `ek` (comp_kem.md object tables): the
 /// engine re-derives the public key from the private value and stores the
-/// composite SPKI, which equals the vector certificate's. Brainpool imports
-/// are CKR_PARAMETER_SET_NOT_SUPPORTED.
+/// composite SPKI, which equals the vector certificate's. Without feature
+/// `brainpool`, brainpool imports are CKR_PARAMETER_SET_NOT_SUPPORTED.
 #[test]
 fn import_vector_keys_and_spki() {
     let _guard = test_lock::acquire();
@@ -416,8 +433,8 @@ fn import_vector_keys_and_spki() {
 /// from the LAMPS signature vectors (`pk`, `sk` = mldsaSeed ‖ tradSK,
 /// composite-sigs-19 §4.1/§4.2) with both public halves re-derived from the
 /// private value, and the stored SPKI equals the vector certificate's. The
-/// signature operations are `composite_sig_tests`; the brainpool sets are
-/// refused.
+/// signature operations are `composite_sig_tests`. All 18 (16 without
+/// feature `brainpool`, which refuses the brainpool sets).
 #[test]
 fn composite_sig_objects_import_from_lamps_vectors() {
     let _guard = test_lock::acquire();
@@ -454,7 +471,7 @@ fn composite_sig_objects_import_from_lamps_vectors() {
         destroy(&[hk, hp]);
         imported += 1;
     }
-    assert_eq!(imported, 16);
+    assert_eq!(imported, if crate::crypto::brainpool::ENABLED { 18 } else { 16 });
 }
 
 /// Import refusals, PKCS#11 v3.2 §4.1.1 (codes listed on
@@ -573,9 +590,18 @@ fn keygen_template_rules() {
     let x25519 = kem_params(CKP_COMP_KEM_MLKEM768_X25519).unwrap().ckp;
     // No parameter set in the public template (comp_kem.md: it is given there).
     assert_eq!(generate(CKM_COMP_KEM_KEY_PAIR_GEN, vec![], vec![]).0, CKR_TEMPLATE_INCOMPLETE);
-    // Brainpool and an unknown value: not supported by this token.
-    for ckp in [CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1, CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1, 0x7f] {
-        assert_eq!(generate_comp_kem(ckp).0, CKR_PARAMETER_SET_NOT_SUPPORTED, "ckp {ckp:#x}");
+    // An unknown value: not supported by this token.
+    assert_eq!(generate_comp_kem(0x7f).0, CKR_PARAMETER_SET_NOT_SUPPORTED);
+    // The brainpool sets generate (crypto::brainpool), or without feature
+    // `brainpool` are not supported by this token.
+    for ckp in [CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1, CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1] {
+        let (rv, hp, hk) = generate_comp_kem(ckp);
+        if crate::crypto::brainpool::ENABLED {
+            assert_eq!(rv, CKR_OK, "ckp {ckp:#x}");
+            destroy(&[hp, hk]);
+        } else {
+            assert_eq!(rv, CKR_PARAMETER_SET_NOT_SUPPORTED, "ckp {ckp:#x}");
+        }
     }
     // The private template may restate the set, never contradict it.
     let (rv, hp, hk) = generate(
@@ -622,7 +648,7 @@ fn mechanism_info_and_advertising() {
 
 // ── A3: the KAT ──────────────────────────────────────────────────────────
 
-/// Decapsulation KAT, all 10 supported LAMPS vectors: `dk` imported through
+/// Decapsulation KAT, all 12 LAMPS vectors (10 without feature `brainpool`): `dk` imported through
 /// C_CreateObject, `c` through C_DecapsulateKey, the secret key's value
 /// must be `k` (draft §3.3 + §3.4).
 #[test]
@@ -639,7 +665,53 @@ fn kat_decapsulate_all_supported_vectors() {
         destroy(&[hk, hs]);
         n += 1;
     }
-    assert_eq!(n, 10);
+    assert_eq!(n, if crate::crypto::brainpool::ENABLED { 12 } else { 10 });
+}
+
+/// composite-kem-23 §10.5 leniency at import: an EC `tradSK` carrying the
+/// RFC 5915 publicKey field imports when the point is the scalar's own
+/// public key (taken from the vector's `ek`), is stored in the drafts'
+/// canonical form (the vector's `dk`) and decapsulates to `k`; the point of
+/// a different key is CKR_ATTRIBUTE_VALUE_INVALID, like any invalid half.
+#[test]
+fn import_accepts_ec_private_key_with_matching_public_key_field() {
+    let _guard = test_lock::acquire();
+    setup();
+    let mut n = 0;
+    for v in supported() {
+        let KemClassical::Ecdh { .. } = v.p.classical else { continue };
+        let name = v.p.name;
+        let layout = Layout::from(CompositeParams::Kem(v.p));
+        let (seed, trad_sk) = layout.split_private(&v.dk).unwrap();
+        let (_, trad_pk) = layout.split_public(&v.ek).unwrap();
+        let with_point = |point: &[u8]| {
+            let (_, start, len) = tlv(trad_sk, 0);
+            let mut bits = vec![0u8];
+            bits.extend_from_slice(point);
+            let mut body = trad_sk[start..start + len].to_vec();
+            body.extend_from_slice(&composite_key::der_tlv(0xa1, &composite_key::der_tlv(0x03, &bits)));
+            let mut dk = seed.to_vec();
+            dk.extend_from_slice(&composite_key::der_tlv(0x30, &body));
+            dk
+        };
+
+        let (rv, hk) = import_private(v.p.ckp, &with_point(trad_pk), vec![]);
+        assert_eq!(rv, CKR_OK, "{name}: matching publicKey field accepted");
+        assert_eq!(value(hk), v.dk, "{name}: stored without the field");
+        let (rv, hs) = decapsulate(hk, &v.c);
+        assert_eq!(rv, CKR_OK, "{name}: decapsulate");
+        assert_eq!(value(hs), v.k, "{name}: k");
+        destroy(&[hk, hs]);
+
+        let (other_pk, _) = composite_key::trad_generate(layout.trad).unwrap();
+        assert_eq!(
+            import_private(v.p.ckp, &with_point(&other_pk), vec![]).0,
+            CKR_ATTRIBUTE_VALUE_INVALID,
+            "{name}: another key's point refused"
+        );
+        n += 1;
+    }
+    assert_eq!(n, if crate::crypto::brainpool::ENABLED { 6 } else { 4 }, "the P-256, P-384 (x2), P-521, brainpoolP256r1 and brainpoolP384r1 ECDH sets");
 }
 
 // ── V6: negative vectors derived from the good ones ─────────────────────
@@ -694,8 +766,10 @@ fn v6_derived_negative_vectors() {
         let mut longer = v.c.clone();
         longer.push(0);
         assert_eq!(decapsulate(hk, &longer).0, CKR_WRAPPED_KEY_LEN_RANGE, "{name}: one byte longer");
-        let other = &all[(i + 1) % all.len()];
-        assert_ne!(other.c.len(), v.c.len());
+        // The next set with another ciphertext length (P-256 and
+        // brainpoolP256r1 points are the same size, as are P-384's and
+        // brainpoolP384r1's).
+        let other = (1..all.len()).map(|k| &all[(i + k) % all.len()]).find(|o| o.c.len() != v.c.len()).unwrap();
         assert_eq!(decapsulate(hk, &other.c).0, CKR_WRAPPED_KEY_LEN_RANGE, "{name}: ciphertext of {}", other.p.name);
 
         // The untouched vector still decapsulates to k.

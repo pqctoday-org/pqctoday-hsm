@@ -66,6 +66,13 @@ pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<
         let ss = k256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
         return Ok(ss.raw_secret_bytes().to_vec());
     }
+    // brainpoolP256r1 / brainpoolP384r1: always by the stored curve (the
+    // scalar length alone would read them as P-256 / P-384).
+    if key_type == CKK_EC && crate::crypto::brainpool::is_brainpool(curve_id) {
+        return crate::crypto::brainpool::ecdh(curve_id, &scalar, peer_public)
+            .map(|z| z.to_vec())
+            .map_err(|rv| if rv == CKR_KEY_TYPE_INCONSISTENT { CKR_KEY_HANDLE_INVALID } else { rv });
+    }
     if key_type == CKK_EC
         && curve_id != 0
         && !matches!((curve_id, scalar.len()), (CURVE_P256, 32) | (CURVE_P384, 48) | (CURVE_P521, 66))

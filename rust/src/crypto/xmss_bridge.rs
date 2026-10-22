@@ -1,6 +1,22 @@
 use crate::constants::*;
 use xmss::*;
 
+/// The `CKA_KEYS_REMAINING` value for a stateful private key. PKCS#11 v3.3
+/// working draft, `xmss_and_xmss-mt.md` (XMSS and XMSS^MT private key object
+/// attribute tables): "The minimum of the following two values: 1) The number
+/// of one-time private keys remaining; 2) 2^32-1".
+pub fn keys_remaining_cap(remaining: u64) -> u32 {
+    remaining.min(0xFFFF_FFFF) as u32
+}
+
+/// The stored bytes of `CKA_KEYS_REMAINING`: the capped count at CK_ULONG
+/// width, little-endian. Not `store_ulong`, which maps 0xFFFF_FFFF to
+/// CK_UNAVAILABLE_INFORMATION on a 64-bit CK_ULONG; here 2^32-1 is the
+/// spec's cap, a real count.
+pub fn keys_remaining_attr_bytes(remaining: u64) -> Vec<u8> {
+    (keys_remaining_cap(remaining) as usize).to_le_bytes().to_vec()
+}
+
 /// Return the total signature capacity (2^H) for a given CKP_XMSS_* parameter set.
 pub fn xmss_param_max_sigs(xmss_param: u32) -> u32 {
     match xmss_param {
