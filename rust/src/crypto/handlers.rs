@@ -2526,8 +2526,8 @@ pub fn sign_ecdsa_explicit_k(
 }
 
 /// P-224 ECDSA over an already-conditioned (FIPS 186-5 §6.4) digest, with
-/// the same RFC 6979 deterministic nonce as the other curves (see
-/// `sign_ecdsa`'s header comment).
+/// the same RFC 6979 deterministic nonce as P-256/P-384 (see `sign_ecdsa`'s
+/// header comment; P-521 is randomised).
 fn sign_prehash_p224(sk_bytes: &[u8], digest: &[u8]) -> Result<Vec<u8>, u32> {
     use p224::ecdsa::signature::hazmat::PrehashSigner;
     let sk = p224::ecdsa::SigningKey::from_slice(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -2544,13 +2544,21 @@ fn verify_prehash_p224(pk_bytes: &[u8], digest: &[u8], sig_bytes: &[u8]) -> Resu
 }
 
 pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
-    // ECDSA stays on the pure-Rust `p256`/`p384`/`p521` crates deliberately:
-    // they sign with RFC 6979 DETERMINISTIC nonces, and this engine's
-    // contract relies on that (see verbs_v32's MultiPart_ECDSA FSM test —
-    // one-shot and Update/Final must produce the SAME signature). aws-lc-rs
-    // has no deterministic-ECDSA API (only randomized `EcdsaKeyPair::sign`),
-    // so routing ECDSA there would silently break reproducibility for a ~2x
-    // speedup. RSA (no nonce) and ECDH (no signature) still use AWS-LC.
+    // ECDSA stays on the pure-Rust `p224`/`p256`/`p384`/`k256` crates
+    // deliberately: they sign with RFC 6979 DETERMINISTIC nonces, and this
+    // engine's contract relies on that for those curves (see verbs_v32's
+    // MultiPart_ECDSA FSM test, on P-256 — one-shot and Update/Final must
+    // produce the SAME signature). aws-lc-rs has no deterministic-ECDSA API
+    // (only randomized `EcdsaKeyPair::sign`), so routing ECDSA there would
+    // silently break reproducibility for a ~2x speedup. RSA (no nonce) and
+    // ECDH (no signature) still use AWS-LC.
+    //
+    // P-521 is the exception: `p521` 0.13.3's `Signer` and `PrehashSigner`
+    // both draw the nonce from `OsRng` (its source still carries "TODO: use
+    // RFC6979"), so P-521 signatures are RANDOMISED — two signatures over
+    // the same message differ, and nothing may compare them byte for byte.
+    // That is why the composite P-521 sets refuse CKH_DETERMINISTIC_REQUIRED
+    // (native::composite_sig).
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Signer;
@@ -4201,6 +4209,32 @@ mod tests {
     ///
     /// Testing only that sign succeeds, or only that verify accepts some
     /// externally-produced signature, would have missed it. Test the seam.
+    /// `sign_ecdsa`'s header comment: P-256 and P-384 sign with RFC 6979
+    /// deterministic nonces, P-521 (`p521` 0.13.3, `OsRng`) is randomised.
+    /// If the p521 crate ever moves to RFC 6979 this fails, and the comment
+    /// and `composite_sig::deterministic_available` must be revisited.
+    #[test]
+    fn ecdsa_determinism_is_per_curve() {
+        let msg = b"same key, same message";
+        let p256_sk: Vec<u8> = (1u8..=32).collect();
+        let p384_sk: Vec<u8> = (1u8..=48).collect();
+        let mut p521_sk = vec![0u8; 66];
+        p521_sk[2..].copy_from_slice(&(1u8..=64).collect::<Vec<u8>>());
+        for (mech, curve, sk) in [
+            (CKM_ECDSA_SHA256, CURVE_P256, &p256_sk),
+            (CKM_ECDSA_SHA384, CURVE_P384, &p384_sk),
+        ] {
+            assert_eq!(
+                sign_ecdsa(mech, curve, sk, msg).unwrap(),
+                sign_ecdsa(mech, curve, sk, msg).unwrap(),
+                "curve {curve} signs deterministically"
+            );
+        }
+        let a = sign_ecdsa(CKM_ECDSA_SHA512, CURVE_P521, &p521_sk, msg).unwrap();
+        let b = sign_ecdsa(CKM_ECDSA_SHA512, CURVE_P521, &p521_sk, msg).unwrap();
+        assert_ne!(a, b, "P-521 signatures are randomised");
+    }
+
     #[test]
     fn every_advertised_ecdsa_p256_mechanism_round_trips() {
         // A fixed, non-trivial P-256 scalar (1..=32), so the test is
