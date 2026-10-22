@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
 //! Composite ML-KEM through the PKCS#11 boundary — PKCS#11 v3.3 working draft
 //! (`comp_kem.md`, OASIS PKCS 11 TC commit 9ef73f9) over
 //! draft-ietf-lamps-pq-composite-kem-23. Plan workstream A2/A3 and the KEM
@@ -413,8 +415,9 @@ fn import_vector_keys_and_spki() {
 /// The object model is shared by both families: CKK_COMP_SIG keys import
 /// from the LAMPS signature vectors (`pk`, `sk` = mldsaSeed ‖ tradSK,
 /// composite-sigs-19 §4.1/§4.2) with both public halves re-derived from the
-/// private value, and the stored SPKI equals the vector certificate's. No
-/// signature mechanism exists yet (step 3); the brainpool sets are refused.
+/// private value, and the stored SPKI equals the vector certificate's. The
+/// signature operations are `composite_sig_tests`; the brainpool sets are
+/// refused.
 #[test]
 fn composite_sig_objects_import_from_lamps_vectors() {
     let _guard = test_lock::acquire();
@@ -614,10 +617,7 @@ fn mechanism_info_and_advertising() {
     assert_eq!(mechanism_info(CKM_COMP_KEM), Some((1216, 1966, 0x1000_0000 | 0x2000_0000)));
     assert!(SUPPORTED_MECHS.contains(&CKM_COMP_KEM_KEY_PAIR_GEN));
     assert!(SUPPORTED_MECHS.contains(&CKM_COMP_KEM));
-    // The signature mechanisms are not built yet and stay unadvertised.
-    for m in [CKM_COMP_SIG_KEY_PAIR_GEN, CKM_COMP_SIG, CKM_COMP_SIG_EXTERNAL_HASH] {
-        assert!(!SUPPORTED_MECHS.contains(&m) && mechanism_info(m).is_none(), "{m:#x}");
-    }
+    // The signature mechanisms: composite_sig_tests::mechanism_info_and_advertising.
 }
 
 // ── A3: the KAT ──────────────────────────────────────────────────────────

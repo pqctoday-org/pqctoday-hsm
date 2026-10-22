@@ -31,8 +31,9 @@
 //! with Appendix A, including whether the draft marks the size as a maximum
 //! (`*`) rather than fixed.
 //!
-//! This module holds data only; the key objects are `native::composite_key`
-//! and the KEM is `native::composite_kem`. The four brainpool rows are
+//! This module holds data only; the key objects are `native::composite_key`,
+//! the KEM is `native::composite_kem` and the signature is
+//! `native::composite_sig`. The four brainpool rows are
 //! `supported: false` until the engine has brainpool curves.
 
 use crate::constants::{
@@ -818,6 +819,16 @@ pub fn params_by_ckp(family: CompositeFamily, ckp: u32) -> Option<CompositeParam
 /// (Appendix A `*`), so the upper bound is that maximum.
 pub fn kem_public_key_size_range() -> (u32, u32) {
     let sizes = COMPOSITE_KEM_SETS.iter().filter(|p| p.supported).map(|p| p.public_key_size().bytes() as u32);
+    (sizes.clone().min().unwrap_or(0), sizes.max().unwrap_or(0))
+}
+
+/// `(ulMinKeySize, ulMaxKeySize)` of `CKM_COMP_SIG_KEY_PAIR_GEN`,
+/// `CKM_COMP_SIG` and `CKM_COMP_SIG_EXTERNAL_HASH`: "the supported range of
+/// Composite Signature public key[s] in bytes" (comp_sig.md), i.e. the
+/// smallest and largest `mldsaPK ‖ tradPK` over the sets this engine
+/// supports (RSA public keys at their Appendix A maximum).
+pub fn sig_public_key_size_range() -> (u32, u32) {
+    let sizes = COMPOSITE_SIG_SETS.iter().filter(|p| p.supported).map(|p| p.public_key_size().bytes() as u32);
     (sizes.clone().min().unwrap_or(0), sizes.max().unwrap_or(0))
 }
 

@@ -520,6 +520,8 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     MESSAGE_VERIFY_ACC.for_each_shard(|m| m.clear());
     SIGN_MULTIPART_ACC.for_each_shard(|m| m.clear());
     VERIFY_MULTIPART_ACC.for_each_shard(|m| m.clear());
+    COMP_SIG_SIGN_PREHASH.for_each_shard(|m| m.clear());
+    COMP_SIG_VERIFY_PREHASH.for_each_shard(|m| m.clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
     SESSIONS.for_each_shard(|m| m.clear());
     // §5.4.2/§5.4.1 (checked directly against the OASIS spec text, 2026-08-28,
@@ -621,6 +623,8 @@ pub fn reset_all_engine_state_for_test() {
     MESSAGE_VERIFY_ACC.for_each_shard(|m| m.clear());
     SIGN_MULTIPART_ACC.for_each_shard(|m| m.clear());
     VERIFY_MULTIPART_ACC.for_each_shard(|m| m.clear());
+    COMP_SIG_SIGN_PREHASH.for_each_shard(|m| m.clear());
+    COMP_SIG_VERIFY_PREHASH.for_each_shard(|m| m.clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
     SESSIONS.for_each_shard(|m| m.clear());
     TOKEN_STORE.with(|ts| ts.borrow_mut().clear());
@@ -957,6 +961,8 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     MESSAGE_VERIFY_ACC.shard(h_session).remove(&h_session);
     SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
     VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
+    COMP_SIG_SIGN_PREHASH.shard(h_session).remove(&h_session);
+    COMP_SIG_VERIFY_PREHASH.shard(h_session).remove(&h_session);
     // S6 — §5.6.2: when the application's LAST session on the slot closes,
     // its login state returns to public (C1: per application context).
     if let Some(slot) = slot {
@@ -1668,6 +1674,19 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_COMP_KEM => {
             let (lo, hi) = crate::native::composite::kem_public_key_size_range();
             (lo, hi, 0x10000000 | 0x20000000)
+        }
+        // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md): "the
+        // supported range of Composite Signature public key[s] in bytes" —
+        // mldsaPK ‖ tradPK over the supported sets (native::composite).
+        // CKF_GENERATE_KEY_PAIR; CKF_SIGN | CKF_VERIFY (the chapter's "SIG &
+        // VER" column, both signing mechanisms).
+        CKM_COMP_SIG_KEY_PAIR_GEN => {
+            let (lo, hi) = crate::native::composite::sig_public_key_size_range();
+            (lo, hi, 0x00010000)
+        }
+        CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => {
+            let (lo, hi) = crate::native::composite::sig_public_key_size_range();
+            (lo, hi, 0x00000800 | 0x00002000)
         }
         // FrodoKEM (BSI TR-02102-1 §2.4.1) — ek: 9616 B (FrodoKEM-640) … 21520 B
         // (FrodoKEM-1344), verified directly against `frodo-kem` v0.1.0's
@@ -2593,6 +2612,7 @@ fn C_GenerateKeyPair_impl(
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => Some(CKK_PQCTODAY_CLASSIC_MCELIECE),
             CKM_HPKE_KEM_KEY_PAIR_GEN => Some(CKK_HPKE_KEM),
             CKM_COMP_KEM_KEY_PAIR_GEN => Some(CKK_COMP_KEM),
+            CKM_COMP_SIG_KEY_PAIR_GEN => Some(CKK_COMP_SIG),
             _ => None,
         };
         if let Some(exp) = expected_kt {
@@ -2645,14 +2665,19 @@ fn C_GenerateKeyPair_impl(
                 }
             }
 
-            // Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md "key
-            // pair generation"; draft-ietf-lamps-pq-composite-kem-23 §3.1).
-            // One object per key: CKA_VALUE is mlkemPK ‖ tradPK / mlkemSeed ‖
-            // tradSK (native::composite_key).
-            CKM_COMP_KEM_KEY_PAIR_GEN => {
-                // comp_kem.md: "the parameter set for the pair is specified in
-                // the template for the Composite KEM public key"; the private
-                // key's CKA_PARAMETER_SET is contributed by the mechanism.
+            // Composite ML-KEM and composite ML-DSA (PKCS#11 v3.3 working
+            // draft, comp_kem.md / comp_sig.md "key pair generation";
+            // draft-ietf-lamps-pq-composite-kem-23 §3.1,
+            // draft-ietf-lamps-pq-composite-sigs-19 §3.1). One object per key:
+            // CKA_VALUE is mlPK ‖ tradPK / mlSeed ‖ tradSK
+            // (native::composite_key). Both chapters state the same template
+            // rules, so both mechanisms share this arm.
+            CKM_COMP_KEM_KEY_PAIR_GEN | CKM_COMP_SIG_KEY_PAIR_GEN => {
+                let key_type = if mech_type == CKM_COMP_KEM_KEY_PAIR_GEN { CKK_COMP_KEM } else { CKK_COMP_SIG };
+                // comp_kem.md / comp_sig.md: "the parameter set for the pair is
+                // specified in the template for the Composite KEM [Signature]
+                // public key"; the private key's CKA_PARAMETER_SET is
+                // contributed by the mechanism.
                 let ckp = match get_attr_ulong(
                     p_public_key_template,
                     ul_public_key_attribute_count,
@@ -2672,8 +2697,8 @@ fn C_GenerateKeyPair_impl(
                         return CKR_TEMPLATE_INCONSISTENT;
                     }
                 }
-                // comp_kem.md's key tables define no CKA_SEED: the seed is
-                // inside CKA_VALUE. Refused rather than silently ignored
+                // The comp_kem.md / comp_sig.md key tables define no CKA_SEED:
+                // the seed is inside CKA_VALUE. Refused rather than silently ignored
                 // (§4.1.1: an attribute not valid for the object type is
                 // CKR_ATTRIBUTE_TYPE_INVALID).
                 for (t, n) in [
@@ -2689,7 +2714,7 @@ fn C_GenerateKeyPair_impl(
                 // as the CKM_ML_KEM_KEY_PAIR_GEN arm returns for an
                 // unrecognised set.
                 let layout = match crate::native::composite_key::supported_layout(
-                    CKK_COMP_KEM,
+                    key_type,
                     ckp,
                     CKR_PARAMETER_SET_NOT_SUPPORTED,
                 ) {
@@ -2704,7 +2729,7 @@ fn C_GenerateKeyPair_impl(
                     &layout,
                     pk,
                     sk,
-                    CKM_COMP_KEM_KEY_PAIR_GEN,
+                    mech_type,
                 );
                 absorb_template_attrs(
                     &mut pub_attrs,
@@ -5199,6 +5224,66 @@ unsafe fn comp_kem_secret_object(
         return Err(refused);
     }
     ffi_alloc(h_session, ss_attrs)
+}
+
+/// The composite signature set of `h_key` for `CKM_COMP_SIG` /
+/// `CKM_COMP_SIG_EXTERNAL_HASH` (PKCS#11 v3.3 working draft, comp_sig.md).
+/// The key type was checked by check_key_for_mech (mech_key_types); signing
+/// needs the private object and verifying the public one (comp_sig.md "Key
+/// and Data Length": C_Sign takes a "Composite Signature Private Key",
+/// C_Verify and C_VerifySignature a "Composite Signature Public Key"). Any
+/// other object, or one without a supported CKA_PARAMETER_SET, is
+/// CKR_KEY_TYPE_INCONSISTENT — the code the v3.2 §5.13.1 / §5.15.1 *Init
+/// lists carry for "not the correct type of key to use with the specified
+/// mechanism" (an unsupported set cannot be stored: C_CreateObject and
+/// C_GenerateKeyPair refuse it).
+fn comp_sig_key_params(h_key: u32, class: u32) -> Result<&'static crate::native::composite::CompositeSigParams, u32> {
+    if get_object_attr_u32(h_key, CKA_KEY_TYPE) != Some(CKK_COMP_SIG) || get_object_attr_u32(h_key, CKA_CLASS) != Some(class) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    get_object_attr_u32(h_key, CKA_PARAMETER_SET)
+        .and_then(crate::native::composite::sig_params)
+        .filter(|p| p.supported)
+        .ok_or(CKR_KEY_TYPE_INCONSISTENT)
+}
+
+/// The composite half of C_SignInit / C_VerifyInit / C_VerifySignatureInit:
+/// the key check above, and for signing the hedge variant. The parameter was
+/// parsed by parse_sign_additional_ctx (ctx ≤ 255 bytes, draft-ietf-lamps-
+/// pq-composite-sigs-19 §3.2/§3.3 step 1). CKH_DETERMINISTIC_REQUIRED on a
+/// set that cannot sign deterministically (RSASSA-PSS and P-521 ECDSA, see
+/// composite_sig::deterministic_available) is CKR_MECHANISM_PARAM_INVALID:
+/// ml_dsa.md, "the token must produce a deterministic signature or fail".
+/// On verification the hedge variant is ignored (ml_dsa.md).
+fn comp_sig_init(h_key: u32, sign: bool, deterministic: bool) -> Result<&'static crate::native::composite::CompositeSigParams, u32> {
+    let p = comp_sig_key_params(h_key, if sign { CKO_PRIVATE_KEY } else { CKO_PUBLIC_KEY })?;
+    if sign && deterministic && !crate::native::composite_sig::deterministic_available(p) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok(p)
+}
+
+/// C_Sign for the composite mechanisms (native::composite_sig): `data` is M
+/// for CKM_COMP_SIG and PH(M) for CKM_COMP_SIG_EXTERNAL_HASH, whose length
+/// is checked there (CKR_DATA_LEN_RANGE).
+fn comp_sig_sign(mech: u32, h_key: u32, sk: &[u8], data: &[u8], ctx: &[u8], deterministic: bool) -> Result<Vec<u8>, u32> {
+    let p = comp_sig_key_params(h_key, CKO_PRIVATE_KEY)?;
+    if mech == CKM_COMP_SIG {
+        crate::native::composite_sig::sign(p, sk, data, ctx, deterministic)
+    } else {
+        crate::native::composite_sig::sign_ph(p, sk, data, ctx, deterministic)
+    }
+}
+
+/// C_Verify for the composite mechanisms; see comp_sig_sign and
+/// composite_sig::verify_ph for the results.
+fn comp_sig_verify(mech: u32, h_key: u32, pk: &[u8], data: &[u8], sig: &[u8], ctx: &[u8]) -> Result<(), u32> {
+    let p = comp_sig_key_params(h_key, CKO_PUBLIC_KEY)?;
+    if mech == CKM_COMP_SIG {
+        crate::native::composite_sig::verify(p, pk, data, ctx, sig)
+    } else {
+        crate::native::composite_sig::verify_ph(p, pk, data, ctx, sig)
+    }
 }
 
 fn C_EncapsulateKey_impl(
@@ -7919,6 +8004,8 @@ fn mech_key_types(mech: u32) -> Option<&'static [u32]> {
         CKM_ML_KEM => &[CKK_ML_KEM],
         // Composite ML-KEM (PKCS#11 v3.3 working draft, comp_kem.md).
         CKM_COMP_KEM => &[CKK_COMP_KEM],
+        // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md).
+        CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => &[CKK_COMP_SIG],
         CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => &[CKK_PQCTODAY_FRODOKEM],
         CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => &[CKK_PQCTODAY_CLASSIC_MCELIECE],
         // §6.14 / §6.66 — stateful hash-based signatures.
@@ -8152,6 +8239,18 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Ok(v) => v,
             Err(rv) => return rv,
         };
+        // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md): key and
+        // hedge-variant checks, and a fresh streaming PH(M) for C_SignUpdate.
+        if mech_type == CKM_COMP_SIG || mech_type == CKM_COMP_SIG_EXTERNAL_HASH {
+            match comp_sig_init(h_key, true, slh_det) {
+                Ok(p) => {
+                    COMP_SIG_SIGN_PREHASH
+                        .shard(h_session)
+                        .insert(h_session, crate::native::composite_sig::PreHasher::new(p.pre_hash));
+                }
+                Err(rv) => return rv,
+            }
+        }
         SIGN_STATE.with(|s| {
             s.shard(h_session)
                 .insert(h_session, (mech_type, h_key, slh_ctx, slh_det));
@@ -8223,8 +8322,16 @@ unsafe fn remap_generic_hash_mech(
 /// only those. They were left out after R37 stopped remapping them onto the
 /// hash-specific mechanisms, so from then on their hedge variant and context
 /// were silently dropped (gap-closure plan item 4.G).
+///
+/// And the two composite signature mechanisms, PKCS#11 v3.3 working draft
+/// (comp_sig.md: "Both signing mechanisms have an optional parameter
+/// CK_SIGN_ADDITIONAL_CONTEXT", the ML-DSA section's struct). Its context is
+/// the composite ctx of draft-ietf-lamps-pq-composite-sigs-19 §3.2/§3.3
+/// (at most 255 bytes, step 1 — the same check as below).
 fn takes_sign_additional_ctx(mech: u32) -> bool {
     mech == CKM_ML_DSA
+        || mech == CKM_COMP_SIG
+        || mech == CKM_COMP_SIG_EXTERNAL_HASH
         || mech == CKM_SLH_DSA
         || mech == CKM_ML_DSA_EXTERNAL_MU
         || mech == CKM_HASH_ML_DSA
@@ -8866,6 +8973,11 @@ fn C_Sign_impl(
             // signed a different scheme than the caller selected and said
             // CKR_OK while doing it.
             CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, eff_msg, &ctx_bytes),
+            // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md);
+            // ctx_bytes is CK_SIGN_ADDITIONAL_CONTEXT's context.
+            CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => {
+                comp_sig_sign(eff_mech, hkey, &sk_bytes, eff_msg, &ctx_bytes, deterministic)
+            }
             _ => Err(CKR_MECHANISM_INVALID),
         };
 
@@ -8938,6 +9050,17 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Ok(v) => v,
             Err(rv) => return rv,
         };
+        // Composite ML-DSA: see C_SignInit.
+        if mech_type == CKM_COMP_SIG || mech_type == CKM_COMP_SIG_EXTERNAL_HASH {
+            match comp_sig_init(h_key, false, slh_det) {
+                Ok(p) => {
+                    COMP_SIG_VERIFY_PREHASH
+                        .shard(h_session)
+                        .insert(h_session, crate::native::composite_sig::PreHasher::new(p.pre_hash));
+                }
+                Err(rv) => return rv,
+            }
+        }
         VERIFY_STATE.with(|s| {
             s.shard(h_session)
                 .insert(h_session, (mech_type, h_key, slh_ctx, slh_det));
@@ -9249,6 +9372,11 @@ fn C_Verify_impl(
                 }
             }
             CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, eff_msg, sig_bytes, &ctx_bytes),
+            // Composite ML-DSA: both halves must verify; a signature length no
+            // split allows is CKR_SIGNATURE_LEN_RANGE (composite_sig::verify_ph).
+            CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => {
+                comp_sig_verify(eff_mech, hkey, &pk_bytes, eff_msg, sig_bytes, &ctx_bytes)
+            }
             _ => Err(CKR_MECHANISM_INVALID),
         } {
             Ok(()) => CKR_OK,
@@ -9583,6 +9711,17 @@ pub fn C_VerifySignatureInit(
             Err(rv) => return rv,
         };
         let signature = std::slice::from_raw_parts(p_signature, ul_signature_len as usize).to_vec();
+        // Composite ML-DSA: see C_SignInit; the streaming PH(M) lives in the
+        // operation's own context.
+        let comp_prehash = if mech_type == CKM_COMP_SIG || mech_type == CKM_COMP_SIG_EXTERNAL_HASH {
+            match comp_sig_init(h_key, false, slh_det) {
+                Ok(p) if mech_type == CKM_COMP_SIG => Some(crate::native::composite_sig::PreHasher::new(p.pre_hash)),
+                Ok(_) => None,
+                Err(rv) => return rv,
+            }
+        } else {
+            None
+        };
 
         VERIFY_SIG_STATE.with(|s| {
             s.shard(h_session).insert(
@@ -9594,6 +9733,7 @@ pub fn C_VerifySignatureInit(
                     msg_acc: Vec::new(),
                     slh_ctx,
                     slh_det,
+                    comp_prehash,
                 },
             );
         });
@@ -9628,9 +9768,29 @@ pub fn C_VerifySignature(h_session: u32, p_data: *mut u8, ul_data_len: u32) -> u
 #[wasm_bindgen(js_name = _C_VerifySignatureUpdate)]
 pub fn C_VerifySignatureUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
+    // CKM_COMP_SIG_EXTERNAL_HASH is single-part only (comp_sig.md, table
+    // footnote 1): the same answer as C_VerifyUpdate's multipart_op_mech —
+    // the operation ends, CKR_OPERATION_NOT_INITIALIZED.
+    let external_hash = VERIFY_SIG_STATE
+        .shard(h_session)
+        .get(&h_session)
+        .is_some_and(|c| c.mech_type == CKM_COMP_SIG_EXTERNAL_HASH);
+    if external_hash {
+        VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
     let mut ok = false;
     VERIFY_SIG_STATE.with(|s| {
         if let Some(ctx) = s.shard(h_session).get_mut(&h_session) {
+            // CKM_COMP_SIG streams PH(M) instead of buffering M (see
+            // COMP_SIG_SIGN_PREHASH).
+            if let Some(h) = ctx.comp_prehash.as_mut() {
+                if ul_part_len > 0 {
+                    h.update(unsafe { std::slice::from_raw_parts(p_part, ul_part_len as usize) });
+                }
+                ok = true;
+                return;
+            }
             if ul_part_len > 0 {
                 unsafe {
                     let part = std::slice::from_raw_parts(p_part, ul_part_len as usize);
@@ -9652,6 +9812,18 @@ pub fn C_VerifySignatureFinal(h_session: u32) -> u32 {
     require_init!();
     let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
+        // CKM_COMP_SIG: the streamed PH(M) is verified as the external-hash
+        // form of the same operation (draft-ietf-lamps-pq-composite-sigs-19
+        // §10.5), as in C_VerifyFinal.
+        if let Some(h) = ctx.comp_prehash {
+            VERIFY_STATE.shard(h_session).insert(
+                h_session,
+                (CKM_COMP_SIG_EXTERNAL_HASH, ctx.key_handle, ctx.slh_ctx, ctx.slh_det),
+            );
+            let mut ph = h.finalize();
+            let mut sig = ctx.signature;
+            return C_Verify(h_session, ph.as_mut_ptr(), ph.len() as u32, sig.as_mut_ptr(), sig.len() as u32);
+        }
         VERIFY_STATE.with(|s| {
             s.shard(h_session).insert(
                 h_session,
@@ -15375,6 +15547,11 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_ML_DSA_EXTERNAL_MU
             | CKM_SLH_DSA
             | CKM_EDDSA
+            // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md):
+            // multi-part streams PH(M) (COMP_SIG_SIGN_PREHASH) rather than
+            // buffering. CKM_COMP_SIG_EXTERNAL_HASH is single-part only
+            // (comp_sig.md table footnote 1) and stays out of this list.
+            | CKM_COMP_SIG
     ) || hmac_general_base(mech).is_some()
         // Remediation R35: CKM_HASH_ML_DSA_<hash> (PKCS#11 v3.2 §6.67.7,
         // "with hashing") is explicitly single- AND multiple-part; the C++
@@ -15421,6 +15598,76 @@ fn multipart_op_mech(
     Ok(mech)
 }
 
+/// C_SignUpdate / C_VerifyUpdate for `CKM_COMP_SIG`: the part goes into the
+/// operation's streaming PH(M) (draft-ietf-lamps-pq-composite-sigs-19 §2.1:
+/// M' carries PH(M), never M), and the accumulator entry is created EMPTY
+/// only to mark the multi-part phase, so the one-shot C_Sign / C_Verify is
+/// CKR_OPERATION_ACTIVE until Final as for every other mechanism. No PH
+/// state (impossible after a CKM_COMP_SIG *Init) terminates the operation.
+fn comp_sig_update(
+    h_session: u32,
+    prehash: &crate::state::Sharded<HashMap<u32, crate::native::composite_sig::PreHasher>>,
+    op_state: &crate::state::Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>>,
+    acc: &crate::state::Sharded<HashMap<u32, Vec<u8>>>,
+    p_part: *const u8,
+    ul_part_len: u32,
+) -> u32 {
+    let part: &[u8] = if ul_part_len > 0 {
+        unsafe { std::slice::from_raw_parts(p_part, ul_part_len as usize) }
+    } else {
+        &[]
+    };
+    let fed = match prehash.shard(h_session).get_mut(&h_session) {
+        Some(h) => {
+            h.update(part);
+            true
+        }
+        None => false,
+    };
+    if !fed {
+        op_state.shard(h_session).remove(&h_session);
+        acc.shard(h_session).remove(&h_session);
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
+    acc.shard(h_session).entry(h_session).or_default();
+    CKR_OK
+}
+
+/// C_SignFinal for `CKM_COMP_SIG`: PH(M) from the streamed state, signed
+/// through the one-shot C_Sign as the external-hash form of the same
+/// operation (draft-ietf-lamps-pq-composite-sigs-19 §10.5: Sign_ph "is
+/// identical to" Sign with PH(M) given). C_Sign keeps the operation on a
+/// NULL-buffer size query and on CKR_BUFFER_TOO_SMALL (§5.2); on exactly
+/// those paths the mechanism, the phase marker and the PH state are put back
+/// so the second call continues the same operation. A copy of the PH state
+/// is finalized, so the original survives until the operation ends.
+fn comp_sig_sign_final(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
+    let ph = match COMP_SIG_SIGN_PREHASH.shard(h_session).get(&h_session).cloned() {
+        Some(h) => h.finalize(),
+        None => {
+            SIGN_STATE.shard(h_session).remove(&h_session);
+            SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
+            return CKR_OPERATION_NOT_INITIALIZED;
+        }
+    };
+    let marker = SIGN_MULTIPART_ACC.shard(h_session).remove(&h_session);
+    if let Some(st) = SIGN_STATE.shard(h_session).get_mut(&h_session) {
+        st.0 = CKM_COMP_SIG_EXTERNAL_HASH;
+    }
+    let rv = C_Sign(h_session, ph.as_ptr() as *mut u8, ph.len() as u32, p_signature, pul_signature_len);
+    if rv == CKR_BUFFER_TOO_SMALL || (rv == CKR_OK && p_signature.is_null()) {
+        if let Some(st) = SIGN_STATE.shard(h_session).get_mut(&h_session) {
+            st.0 = CKM_COMP_SIG;
+        }
+        if let Some(m) = marker {
+            SIGN_MULTIPART_ACC.shard(h_session).insert(h_session, m);
+        }
+    } else {
+        COMP_SIG_SIGN_PREHASH.shard(h_session).remove(&h_session);
+    }
+    rv
+}
+
 #[wasm_bindgen(js_name = _C_SignUpdate)]
 pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
@@ -15435,8 +15682,12 @@ pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    if let Err(rv) = multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
-        return rv;
+    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+        Ok(m) => m,
+        Err(rv) => return rv,
+    };
+    if mech == CKM_COMP_SIG {
+        return comp_sig_update(h_session, &COMP_SIG_SIGN_PREHASH, &SIGN_STATE, &SIGN_MULTIPART_ACC, p_part, ul_part_len);
     }
     // The op enters its multi-part phase even for an empty part — the
     // one-shot C_Sign is CKR_OPERATION_ACTIVE until C_SignFinal (mirror
@@ -15460,8 +15711,12 @@ fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mu
     // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(pul_signature_len);
-    if let Err(rv) = multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
-        return rv;
+    let mech = match multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+        Ok(m) => m,
+        Err(rv) => return rv,
+    };
+    if mech == CKM_COMP_SIG {
+        return comp_sig_sign_final(h_session, p_signature, pul_signature_len);
     }
     // §5.13.4 — C_SignFinal with no preceding C_SignUpdate signs the empty
     // message (legal); the accumulator entry is simply absent.
@@ -15497,8 +15752,12 @@ pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    if let Err(rv) = multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
-        return rv;
+    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+        Ok(m) => m,
+        Err(rv) => return rv,
+    };
+    if mech == CKM_COMP_SIG {
+        return comp_sig_update(h_session, &COMP_SIG_VERIFY_PREHASH, &VERIFY_STATE, &VERIFY_MULTIPART_ACC, p_part, ul_part_len);
     }
     VERIFY_MULTIPART_ACC.with(|s| {
         let mut m = s.shard(h_session);
@@ -15519,8 +15778,27 @@ fn C_VerifyFinal_impl(h_session: u32, p_signature: *mut u8, ul_signature_len: u3
     // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(p_signature);
-    if let Err(rv) = multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
-        return rv;
+    let mech = match multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+        Ok(m) => m,
+        Err(rv) => return rv,
+    };
+    if mech == CKM_COMP_SIG {
+        // §5.15.4: the op ends here whatever the result. The streamed PH(M)
+        // goes to the one-shot handler as the external-hash form of the same
+        // operation (draft-ietf-lamps-pq-composite-sigs-19 §10.5:
+        // Verify with PH(M) given is the same verification).
+        VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
+        let ph = match COMP_SIG_VERIFY_PREHASH.shard(h_session).remove(&h_session) {
+            Some(h) => h.finalize(),
+            None => {
+                VERIFY_STATE.shard(h_session).remove(&h_session);
+                return CKR_OPERATION_NOT_INITIALIZED;
+            }
+        };
+        if let Some(st) = VERIFY_STATE.shard(h_session).get_mut(&h_session) {
+            st.0 = CKM_COMP_SIG_EXTERNAL_HASH;
+        }
+        return C_Verify(h_session, ph.as_ptr() as *mut u8, ph.len() as u32, p_signature, ul_signature_len);
     }
     // §5.15.4 — "a call to C_VerifyFinal always terminates the active
     // verification operation": take the accumulator out unconditionally and
@@ -27714,6 +27992,14 @@ mod mlkem_input_check_tests;
 #[cfg(test)]
 #[path = "composite_kem_tests.rs"]
 mod composite_kem_tests;
+
+/// Composite ML-DSA (PKCS#11 v3.3 working draft) through the FFI: LAMPS
+/// vector consistency (each half verified on its own), verification KAT,
+/// signing, round trips and derived negative vectors — see the module's own
+/// docs.
+#[cfg(test)]
+#[path = "composite_sig_tests.rs"]
+mod composite_sig_tests;
 
 /// Project Wycheproof ML-DSA sign vectors: out-of-range s1/s2 private keys
 /// and zero-length CKA_SEED (2026-09-30) — see the module's own docs.

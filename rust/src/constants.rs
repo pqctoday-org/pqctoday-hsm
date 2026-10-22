@@ -857,9 +857,9 @@ pub const CKM_ML_DSA_EXTERNAL_MU_GEN: u32 = 0x0000_403b;
 // draft (working/doc/spec/comp_sig.md, comp_kem.md). Allocated by TC commit
 // 45be037 ("Composites (#143)"), approved and added to the TC header by
 // 88f1ba8 (#152): https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L1225-L1229
-// Each is advertised only once it works: CKM_COMP_KEM_KEY_PAIR_GEN and
-// CKM_COMP_KEM are (native::composite_kem); the three signature mechanisms
-// are not yet.
+// Each is advertised only once it works; all five are: CKM_COMP_KEM_KEY_PAIR_GEN
+// and CKM_COMP_KEM (native::composite_kem), CKM_COMP_SIG_KEY_PAIR_GEN,
+// CKM_COMP_SIG and CKM_COMP_SIG_EXTERNAL_HASH (native::composite_sig).
 pub const CKM_COMP_SIG_KEY_PAIR_GEN: u32 = 0x0000_403d;
 pub const CKM_COMP_SIG: u32 = 0x0000_403e;
 pub const CKM_COMP_SIG_EXTERNAL_HASH: u32 = 0x0000_403f;
@@ -1299,6 +1299,11 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // constants' comment). Rust engine only; the 10 non-brainpool sets.
     CKM_COMP_KEM_KEY_PAIR_GEN,
     CKM_COMP_KEM,
+    // Composite ML-DSA, PKCS#11 v3.3 working draft (comp_sig.md). Rust
+    // engine only; the 16 non-brainpool sets.
+    CKM_COMP_SIG_KEY_PAIR_GEN,
+    CKM_COMP_SIG,
+    CKM_COMP_SIG_EXTERNAL_HASH,
 ];
 
 /// FHE custody mechanisms (spec docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md

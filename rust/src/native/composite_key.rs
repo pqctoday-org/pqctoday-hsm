@@ -169,7 +169,7 @@ fn der_len(len: usize, out: &mut Vec<u8>) {
     }
 }
 
-fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+pub(crate) fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     let mut out = vec![tag];
     der_len(body.len(), &mut out);
     out.extend_from_slice(body);
