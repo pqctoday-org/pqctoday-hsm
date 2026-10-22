@@ -195,21 +195,14 @@ impl KmipPlayground {
         // create_key_pair.rs's own composite branch), resolved and
         // generated in its own path, separate from the single-algorithm
         // match below.
-        // Names are `KmipAlgorithm::spec_name()` values. The four §10.4
-        // profiles added 2026-08-18 were easy to miss here: this list is a
-        // plain string match, so omitting one is not a compile error — the
-        // profile simply never resolves and the caller silently falls through
-        // to the single-algorithm path below.
-        let composite_algo = match algorithm {
-            "ML-DSA-44-RSA2048-PSS" => Some(KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256),
-            "ML-DSA-65-ECDSA-P256" => Some(KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512),
-            "ML-DSA-87-ECDSA-P384" => Some(KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512),
-            "ML-DSA-44-Ed25519" => Some(KmipAlgorithm::CompositeMlDsa44Ed25519Sha512),
-            "ML-DSA-44-ECDSA-P256" => Some(KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256),
-            "ML-DSA-65-RSA3072-PSS" => Some(KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512),
-            "ML-DSA-65-Ed25519" => Some(KmipAlgorithm::CompositeMlDsa65Ed25519Sha512),
-            _ => None,
-        };
+        // Names are `KmipAlgorithm::spec_name()` values, resolved through
+        // `KmipAlgorithm::composite_from_spec_name` (a sweep of
+        // `KmipAlgorithm::ALL`). This used to be a hand-written string match:
+        // omitting a name was not a compile error, the profile simply never
+        // resolved and the caller silently fell through to the
+        // single-algorithm path below — which is how `ML-DSA-65-ECDSA-P384`
+        // went missing. Deriving it makes every composite variant resolve.
+        let composite_algo = KmipAlgorithm::composite_from_spec_name(algorithm);
 
         self.demo_ca_counter += 1;
         let n = self.demo_ca_counter;
@@ -286,11 +279,16 @@ impl KmipPlayground {
             "ML-DSA-65" => KmipAlgorithm::MlDsa65,
             "SLH-DSA-SHA2-128f" => KmipAlgorithm::SlhDsaSha2_128f,
             other => {
+                let composites: Vec<&str> = KmipAlgorithm::ALL
+                    .iter()
+                    .filter(|a| a.is_composite())
+                    .map(|a| a.spec_name())
+                    .collect();
                 return error_json(&format!(
                     "unsupported demo-CA algorithm '{other}' — expected \
-                     RSA-2048 | ECDSA-P256 | ML-DSA-65 | SLH-DSA-SHA2-128f | \
-                     ML-DSA-{{44-RSA2048-PSS,65-ECDSA-P256,87-ECDSA-P384}}"
-                ))
+                     RSA-2048 | ECDSA-P256 | ML-DSA-65 | SLH-DSA-SHA2-128f | {}",
+                    composites.join(" | ")
+                ));
             }
         };
 
@@ -1790,6 +1788,39 @@ fn wire_error_response(err: &WireError) -> ResponseMessage {
             asynchronous_correlation_value: None,
             payload: None,
         }],
+    }
+}
+
+#[cfg(test)]
+mod demo_ca_tests {
+    use super::*;
+
+    /// Every composite variant's `spec_name()` takes the composite demo-CA
+    /// path and mints a CA. `ML-DSA-65-ECDSA-P384` was missing from the old
+    /// hand-written name match and fell through to "unsupported demo-CA
+    /// algorithm"; the name set is now derived from `KmipAlgorithm::ALL`, so
+    /// this sweeps the same source and a future composite is covered here too.
+    #[test]
+    fn setup_demo_ca_resolves_every_composite_name() {
+        let composites: Vec<KmipAlgorithm> =
+            KmipAlgorithm::ALL.iter().copied().filter(|a| a.is_composite()).collect();
+        assert_eq!(composites.len(), 8, "8 composite signature variants today");
+        let mut pg = KmipPlayground::new(None, None).unwrap_or_else(|_| panic!("playground boot"));
+        for a in composites {
+            let name = a.spec_name();
+            let out: serde_json::Value =
+                serde_json::from_str(&pg.setup_demo_ca(name, "")).expect("setup_demo_ca returns JSON");
+            assert_eq!(out["ok"], serde_json::Value::Bool(true), "{name}: {out}");
+            assert_eq!(out["algorithm"], name, "{name}");
+            let rec = pg
+                .deps
+                .store
+                .get(out["privateKeyUid"].as_str().expect("privateKeyUid"))
+                .expect("store read")
+                .expect("CA private key record");
+            assert_eq!(rec.algorithm, a, "{name} stored as its composite variant");
+            assert!(rec.pkcs11_cka_id_secondary.is_some(), "{name} has a classical half");
+        }
     }
 }
 

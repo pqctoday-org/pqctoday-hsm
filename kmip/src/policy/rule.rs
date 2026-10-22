@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{decision::CpOverride, decision::DenyReason, request::PolicyRequest};
-use super::lint::is_ml_dsa_composite_tail;
+use super::lint::is_composite_algorithm_name;
 
 /// Deprecation warn-tier (A1, 2026-08-28 gaps-remediation plan). Available
 /// on the five gating rule types where "flag it, don't block it yet" is a
@@ -1246,32 +1246,6 @@ pub fn algo_matches(policy_entry: &str, request_algo: &str) -> bool {
         && request_algo.as_bytes()[policy_entry.len()] == b'-'
 }
 
-/// `true` if `name` is a KMIP 3.0 LAMPS composite algorithm name —
-/// `ML-DSA-<level>-<classical tail>` (e.g. `ML-DSA-87-ECDSA-P384`,
-/// `ML-DSA-44-RSA2048-PSS`). A6.1, 2026-08-28 gaps-remediation plan.
-///
-/// Every real composite this codebase can produce is
-/// `KmipAlgorithm::CompositeMlDsa*` (`kmip30/algos.rs`) — there is no
-/// composite KEM or other composite family — so this is deliberately
-/// ML-DSA-specific rather than a generic "any two independently-known
-/// halves" heuristic. That generic version was tried first and rejected: it
-/// missed the RSA-PSS-tailed composites (`RSA2048-PSS` etc. are valid only
-/// as a composite tail, not as a standalone `is_known_algorithm_name`), and
-/// it flagged the unrelated legacy identifier `ECDSA-SHA1` as a false
-/// composite (both `ECDSA` and the bare legacy-algorithm-name `SHA1` are
-/// independently known). Reuses [`is_ml_dsa_composite_tail`] — the same
-/// tail set [`is_ml_dsa_suffix`] validates — instead of a second,
-/// hand-maintained copy.
-fn is_composite_algorithm_name(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix("ML-DSA-") else {
-        return false;
-    };
-    let mut parts = rest.splitn(2, '-');
-    let level = parts.next().unwrap_or("");
-    let tail = parts.next().unwrap_or("");
-    matches!(level, "44" | "65" | "87") && is_ml_dsa_composite_tail(tail)
-}
-
 /// `true` if `ts` falls within `[from, until]`. Either bound may be absent.
 ///
 /// Method-naming convention on [`TimeBound`]: `b.matches_at_or_after(ts)`
@@ -2320,15 +2294,22 @@ mod tests {
 
     #[test]
     fn is_composite_algorithm_name_detects_every_real_variant() {
-        // Every tail is_ml_dsa_composite_tail (lint.rs) accepts, at every level.
-        for level in ["44", "65", "87"] {
-            for tail in [
-                "Ed25519", "ED25519", "Ed448", "ECDSA-P256", "ECDSA-P384", "ECDSA-P521",
-                "RSA2048-PSS", "RSA3072-PSS", "RSA4096-PSS",
-            ] {
-                let name = format!("ML-DSA-{level}-{tail}");
-                assert!(is_composite_algorithm_name(&name), "should detect {name}");
-            }
+        // Every composite variant that exists, in both spellings policies use
+        // (the name set is derived from `KmipAlgorithm`, see lint.rs).
+        let composites: Vec<_> = crate::kmip30::KmipAlgorithm::ALL
+            .iter()
+            .filter(|a| a.is_composite())
+            .collect();
+        assert!(!composites.is_empty());
+        for a in composites {
+            let name = a.spec_name();
+            assert!(is_composite_algorithm_name(name), "should detect {name}");
+            let upper = name.to_ascii_uppercase();
+            assert!(is_composite_algorithm_name(&upper), "should detect {upper}");
+        }
+        // Tails and level pairings no variant implements are not composites.
+        for name in ["ML-DSA-87-Ed448", "ML-DSA-87-ECDSA-P521", "ML-DSA-87-RSA4096-PSS", "ML-DSA-87-Ed25519"] {
+            assert!(!is_composite_algorithm_name(name), "no variant: {name}");
         }
         // Ordinary qualified names, and unrelated identifiers that merely
         // start with "ML-DSA-" or contain hyphens elsewhere, are not composites.
