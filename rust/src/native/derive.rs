@@ -22,6 +22,7 @@ use crate::state::{
     allocate_handle_owned, compute_kcv, get_object_value, resolve_session_access, store_bool,
     store_ulong,
 };
+use zeroize::Zeroizing;
 
 /// Register a freshly-derived generic-secret key `value` as a session object
 /// and return its handle. Mirrors the FFI `C_DeriveKey` finalization
@@ -72,18 +73,18 @@ pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkR
     // cross-slot, or not-logged-in handles alike.
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
     // S12 — §4.8 Table 13 on BOTH component handles (the KMIP seam).
-    let base_val = crate::state::checked_value_for_mech(
+    let base_val = Zeroizing::new(crate::state::checked_value_for_mech(
         &access,
         base,
         CKM_CONCATENATE_BASE_AND_KEY,
         CKR_KEY_HANDLE_INVALID,
-    )?;
-    let second_val = crate::state::checked_value_for_mech(
+    )?);
+    let second_val = Zeroizing::new(crate::state::checked_value_for_mech(
         &access,
         second,
         CKM_CONCATENATE_BASE_AND_KEY,
         CKR_KEY_HANDLE_INVALID,
-    )?;
+    )?);
     let combined = [base_val.as_slice(), second_val.as_slice()].concat();
     Ok(register_derived_secret(session, combined))
 }
@@ -99,12 +100,12 @@ pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkR
 pub fn concatenate_data(session: u32, base: u32, data: &[u8]) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
     // S12 — §4.8 Table 13 (the KMIP seam).
-    let base_val = crate::state::checked_value_for_mech(
+    let base_val = Zeroizing::new(crate::state::checked_value_for_mech(
         &access,
         base,
         CKM_CONCATENATE_BASE_AND_DATA,
         CKR_KEY_HANDLE_INVALID,
-    )?;
+    )?);
     let combined = [base_val.as_slice(), data].concat();
     Ok(register_derived_secret(session, combined))
 }
@@ -130,8 +131,9 @@ pub fn digest_key_derivation(
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
     // S12 — §4.8 Table 13, against the CALLER's requested mechanism (the
     // KMIP seam: this function is reached from kmip/src/ops/derive_key.rs).
-    let base_val =
-        crate::state::checked_value_for_mech(&access, base, mech, CKR_KEY_HANDLE_INVALID)?;
+    let base_val = Zeroizing::new(
+        crate::state::checked_value_for_mech(&access, base, mech, CKR_KEY_HANDLE_INVALID)?,
+    );
     let mut digest = digest_of(mech, &base_val)?;
     if let Some(n) = out_len {
         if n > digest.len() {
@@ -307,35 +309,15 @@ pub fn run_combiner(
             }
             // Register every component + intermediate as a handle; destroy them
             // all at the end (hygiene — they hold component secret material).
+            // On EVERY path: an error part-way through the chain must not
+            // leave the already-registered secrets behind in the session.
+            // destroy_object zeroises each CKA_VALUE.
             let mut created: Vec<u32> = Vec::new();
-            let mut running = register_derived_secret(session, components[0].to_vec());
-            created.push(running);
-            for comp in &components[1..] {
-                let h = register_derived_secret(session, comp.to_vec());
-                created.push(h);
-                running = concatenate_keys(session, running, h)?;
-                created.push(running);
-            }
-            for step in finalize {
-                running = match step {
-                    FinalizeStep::ConcatData(data) => concatenate_data(session, running, data)?,
-                    FinalizeStep::Digest(mech) => {
-                        digest_key_derivation(session, running, *mech, None)?
-                    }
-                    FinalizeStep::Hkdf { prf, salt, info, len } => {
-                        let ikm = get_object_value(running).ok_or(CKR_KEY_HANDLE_INVALID)?;
-                        let salt_opt = if salt.is_empty() { None } else { Some(salt.as_slice()) };
-                        let out = hkdf_extract_expand(*prf, salt_opt, &ikm, info, *len)?;
-                        register_derived_secret(session, out)
-                    }
-                };
-                created.push(running);
-            }
-            let value = get_object_value(running).ok_or(CKR_FUNCTION_FAILED)?;
+            let result = concat_chain(session, components, finalize, &mut created);
             for h in created {
                 let _ = crate::native::object::destroy_object(session, h);
             }
-            Ok(value)
+            result
         }
         Combiner::DualPrf { prf, info, len } => {
             if components.len() != 2 {
@@ -345,6 +327,40 @@ pub fn run_combiner(
             hkdf_extract_expand(*prf, Some(components[0]), components[1], info, *len)
         }
     }
+}
+
+/// The `Concat` chain of [`run_combiner`]. Every handle it registers is
+/// pushed onto `created` as soon as it exists, so the caller can destroy them
+/// whether the chain finishes or fails.
+fn concat_chain(
+    session: u32,
+    components: &[&[u8]],
+    finalize: &[FinalizeStep],
+    created: &mut Vec<u32>,
+) -> Result<Vec<u8>, CkRv> {
+    let mut running = register_derived_secret(session, components[0].to_vec());
+    created.push(running);
+    for comp in &components[1..] {
+        let h = register_derived_secret(session, comp.to_vec());
+        created.push(h);
+        running = concatenate_keys(session, running, h)?;
+        created.push(running);
+    }
+    for step in finalize {
+        running = match step {
+            FinalizeStep::ConcatData(data) => concatenate_data(session, running, data)?,
+            FinalizeStep::Digest(mech) => digest_key_derivation(session, running, *mech, None)?,
+            FinalizeStep::Hkdf { prf, salt, info, len } => {
+                // The read-out IKM is the running secret: wiped on drop.
+                let ikm = Zeroizing::new(get_object_value(running).ok_or(CKR_KEY_HANDLE_INVALID)?);
+                let salt_opt = if salt.is_empty() { None } else { Some(salt.as_slice()) };
+                let out = hkdf_extract_expand(*prf, salt_opt, &ikm, info, *len)?;
+                register_derived_secret(session, out)
+            }
+        };
+        created.push(running);
+    }
+    get_object_value(running).ok_or(CKR_FUNCTION_FAILED)
 }
 
 #[cfg(test)]
@@ -581,6 +597,29 @@ mod tests {
         assert_eq!(out, expect.to_vec());
     }
 
+    /// A chain that fails part-way (here: a non-digest mechanism in a
+    /// `Digest` step, after both components and their concatenation were
+    /// registered) must not leave those secret objects behind.
+    #[test]
+    fn run_combiner_failure_destroys_every_intermediate_secret() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let before = secret_with_value(session, &[0u8; 4]);
+        let rv = run_combiner(
+            session,
+            &[&[0x11; 32], &[0x22; 32]],
+            &Combiner::Concat {
+                finalize: vec![FinalizeStep::Digest(CKM_CONCATENATE_BASE_AND_KEY)],
+            },
+        );
+        assert_eq!(rv, Err(CKR_MECHANISM_INVALID));
+        let after = secret_with_value(session, &[0u8; 4]);
+        assert!(after > before + 1, "the chain registered intermediates first");
+        for h in before + 1..after {
+            assert!(get_object_value(h).is_none(), "intermediate secret {h} left behind");
+        }
+    }
+
     #[test]
     fn digest_key_derivation_rejects_overlong_request_and_bad_mech() {
         let _guard = test_lock::acquire();
@@ -684,9 +723,10 @@ pub fn hmac_key_derivation(
     sensitive: bool,
 ) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val =
-        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?;
-    let mut mac = hmac_of(hmac_mech, &base_val, data)?;
+    let base_val = Zeroizing::new(
+        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?,
+    );
+    let mut mac = Zeroizing::new(hmac_of(hmac_mech, &base_val, data)?);
     if let Some(n) = out_len {
         if n > mac.len() {
             return Err(CKR_KEY_SIZE_RANGE);
@@ -736,9 +776,10 @@ pub fn digest_key_derivation_typed(
     sensitive: bool,
 ) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val =
-        crate::state::checked_value_for_mech(&access, base, mech, CKR_KEY_HANDLE_INVALID)?;
-    let mut digest = digest_of(mech, &base_val)?;
+    let base_val = Zeroizing::new(
+        crate::state::checked_value_for_mech(&access, base, mech, CKR_KEY_HANDLE_INVALID)?,
+    );
+    let mut digest = Zeroizing::new(digest_of(mech, &base_val)?);
     if let Some(n) = out_len {
         if n > digest.len() {
             return Err(CKR_KEY_SIZE_RANGE);
@@ -780,13 +821,13 @@ pub fn pbkdf2_key_derivation(
     sensitive: bool,
 ) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let password = crate::state::checked_value_for_mech(
+    let password = Zeroizing::new(crate::state::checked_value_for_mech(
         &access,
         base,
         CKM_PKCS5_PBKD2,
         CKR_KEY_HANDLE_INVALID,
-    )?;
-    let mut out = vec![0u8; out_len];
+    )?);
+    let mut out = Zeroizing::new(vec![0u8; out_len]);
     match hash {
         PrfHash::Sha256 => pbkdf2::pbkdf2_hmac::<sha2::Sha256>(&password, salt, iterations, &mut out),
         PrfHash::Sha384 => pbkdf2::pbkdf2_hmac::<sha2::Sha384>(&password, salt, iterations, &mut out),
@@ -822,14 +863,15 @@ pub fn sp800_108_counter_key_derivation(
     sensitive: bool,
 ) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val =
-        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?;
-    let mut out: Vec<u8> = Vec::with_capacity(out_len);
+    let base_val = Zeroizing::new(
+        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?,
+    );
+    let mut out = Zeroizing::new(Vec::<u8>::with_capacity(out_len));
     let mut counter: u32 = 1;
     while out.len() < out_len {
         let mut block_input = counter.to_be_bytes().to_vec();
         block_input.extend_from_slice(derivation_data);
-        out.extend_from_slice(&hmac_of(hmac_mech, &base_val, &block_input)?);
+        out.extend_from_slice(&Zeroizing::new(hmac_of(hmac_mech, &base_val, &block_input)?));
         counter += 1;
     }
     out.truncate(out_len);
@@ -855,17 +897,18 @@ pub fn sp800_108_double_pipeline_key_derivation(
     sensitive: bool,
 ) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val =
-        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?;
-    let mut a = hmac_of(hmac_mech, &base_val, derivation_data)?;
-    let mut out: Vec<u8> = Vec::with_capacity(out_len);
+    let base_val = Zeroizing::new(
+        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?,
+    );
+    let mut a = Zeroizing::new(hmac_of(hmac_mech, &base_val, derivation_data)?);
+    let mut out = Zeroizing::new(Vec::<u8>::with_capacity(out_len));
     let mut counter: u32 = 1;
     while out.len() < out_len {
-        let mut round_input = a.clone();
+        let mut round_input = Zeroizing::new(a.to_vec());
         round_input.extend_from_slice(&counter.to_be_bytes());
         round_input.extend_from_slice(derivation_data);
-        out.extend_from_slice(&hmac_of(hmac_mech, &base_val, &round_input)?);
-        a = hmac_of(hmac_mech, &base_val, &a)?;
+        out.extend_from_slice(&Zeroizing::new(hmac_of(hmac_mech, &base_val, &round_input)?));
+        a = Zeroizing::new(hmac_of(hmac_mech, &base_val, &a)?);
         counter += 1;
     }
     out.truncate(out_len);
