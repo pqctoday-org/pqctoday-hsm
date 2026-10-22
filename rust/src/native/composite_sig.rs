@@ -240,10 +240,116 @@ fn ecdsa_der_to_raw(curve: EcCurve, der: &[u8]) -> Result<Vec<u8>, CkRv> {
     })
 }
 
+/// The traditional half's own drawn value under the ACVP explicit-randomness
+/// model (plan D4, shape 2): the RSASSA-PSS salt (§6.1 Tables 2/3) or the
+/// P-521 ECDSA nonce k (66 bytes; the engine's P-521 signer is randomised,
+/// see [`deterministic_available`]). The other halves draw nothing —
+/// PKCS#1 v1.5 and PureEdDSA by construction, P-256 / P-384 / brainpool
+/// ECDSA through RFC 6979 nonces.
+fn trad_random_len(c: SigClassical) -> usize {
+    match c {
+        SigClassical::RsaPss { salt_len, .. } => salt_len,
+        SigClassical::Ecdsa { curve: EcCurve::P521, .. } => 66,
+        _ => 0,
+    }
+}
+
+/// The exact `ulRandomLen` a composite signature takes (plan D4, shape 2):
+/// the ML-DSA rnd (32 bytes, FIPS 204 Alg 2) then the traditional half's
+/// value, post-quantum first as in the signature itself (§4.3).
+pub fn supplied_random_len(p: &CompositeSigParams) -> usize {
+    32 + trad_random_len(p.classical)
+}
+
+/// Init-time check of a supplied value (plan M4: refused before any work):
+/// its length, and for P-521 the range 1 <= k < n of the traditional k.
+pub fn check_supplied_random(p: &CompositeSigParams, random: &[u8]) -> Result<(), CkRv> {
+    if random.len() != supplied_random_len(p) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if let SigClassical::Ecdsa { curve: EcCurve::P521, .. } = p.classical {
+        crate::crypto::handlers::ecdsa_explicit_k_check(crate::crypto::handlers::CURVE_P521, &random[32..])?;
+    }
+    Ok(())
+}
+
+/// The traditional half's hash over the concatenation of `parts`.
+fn trad_digest(hash: TradHash, parts: &[&[u8]]) -> Vec<u8> {
+    use sha2::Digest;
+    macro_rules! run {
+        ($d:ty) => {{
+            let mut d = <$d>::new();
+            for p in parts {
+                d.update(p);
+            }
+            d.finalize().to_vec()
+        }};
+    }
+    match hash {
+        TradHash::Sha256 => run!(sha2::Sha256),
+        TradHash::Sha384 => run!(sha2::Sha384),
+        TradHash::Sha512 => run!(sha2::Sha512),
+    }
+}
+
+/// RSASSA-PSS with the caller's salt: RFC 8017 §9.1.1 EMSA-PSS-ENCODE
+/// (MGF1 with the message hash, as §6.1 Tables 2/3 fix) then RSASP1 through
+/// the engine's raw `CKM_RSA_X_509` primitive (AWS-LC natively, blinded
+/// `rsa` hazmat on wasm32). Signing with a given salt is the only difference
+/// from the engine's PSS signer, which draws the salt itself.
+fn rsa_pss_sign_with_salt(pkcs8: &[u8], modulus_bits: u32, hash: TradHash, salt: &[u8], m: &[u8]) -> Result<Vec<u8>, CkRv> {
+    let h = trad_digest;
+    let h_len = hash.output_len();
+    let em_bits = modulus_bits as usize - 1;
+    let em_len = em_bits.div_ceil(8);
+    if em_len < h_len + salt.len() + 2 {
+        return Err(CKR_FUNCTION_FAILED);
+    }
+    let m_hash = h(hash, &[m]);
+    let hh = h(hash, &[&[0u8; 8], &m_hash, salt]);
+    // DB = PS ‖ 0x01 ‖ salt, masked with MGF1(H, emLen − hLen − 1).
+    let db_len = em_len - h_len - 1;
+    let mut db = vec![0u8; db_len - salt.len() - 1];
+    db.push(0x01);
+    db.extend_from_slice(salt);
+    let mut counter = 0u32;
+    let mut off = 0;
+    while off < db_len {
+        let block = h(hash, &[&hh, &counter.to_be_bytes()]);
+        for b in block {
+            if off == db_len {
+                break;
+            }
+            db[off] ^= b;
+            off += 1;
+        }
+        counter += 1;
+    }
+    db[0] &= 0xffu8 >> (8 * em_len - em_bits);
+    let mut em = db;
+    em.extend_from_slice(&hh);
+    em.push(0xbc);
+    crate::ffi::rsa_x509_sign_recover(pkcs8, &em)
+}
+
 /// `Trad.Sign(tradSK, M')` in the §4 encodings. `tradSK` is the stored
-/// private value's second half, checked at import or generation.
-fn trad_sign(c: SigClassical, trad_sk: &[u8], m: &[u8]) -> Result<Vec<u8>, CkRv> {
+/// private value's second half, checked at import or generation. `random`
+/// is the traditional half's supplied value (see [`trad_random_len`]),
+/// already checked by [`check_supplied_random`].
+fn trad_sign(c: SigClassical, trad_sk: &[u8], m: &[u8], random: Option<&[u8]>) -> Result<Vec<u8>, CkRv> {
     use crate::crypto::handlers::{sign_ecdsa, sign_eddsa, sign_rsa};
+    match (c, random) {
+        (SigClassical::RsaPss { modulus_bits, hash, .. }, Some(salt)) => {
+            return rsa_pss_sign_with_salt(&rsa_pkcs8(trad_sk), modulus_bits, hash, salt, m);
+        }
+        (SigClassical::Ecdsa { curve: EcCurve::P521, hash }, Some(k)) => {
+            let d = ec_private_key_scalar(EcCurve::P521, trad_sk).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+            let digest = trad_digest(hash, &[m]);
+            let raw = crate::crypto::handlers::sign_ecdsa_explicit_k(EcCurve::P521.engine_curve(), d, &digest, k)?;
+            return ecdsa_raw_to_der(EcCurve::P521, &raw);
+        }
+        _ => {}
+    }
     match c {
         SigClassical::RsaPss { .. } | SigClassical::RsaPkcs15 { .. } => {
             let (mech, salt) = rsa_mechanism(c);
@@ -296,10 +402,39 @@ fn layout(p: &'static CompositeSigParams) -> Result<Layout, CkRv> {
 /// Algorithm 2). A value that no longer splits is `CKR_KEY_TYPE_INCONSISTENT`,
 /// as for CKM_COMP_KEM; a component failure is an error (§3.2 step 5).
 pub fn sign_ph(p: &'static CompositeSigParams, sk: &[u8], ph: &[u8], ctx: &[u8], deterministic: bool) -> Result<Vec<u8>, CkRv> {
+    sign_ph_with_random(p, sk, ph, ctx, deterministic, None)
+}
+
+/// [`sign_ph`] with an optional supplied value (ACVP explicit-randomness
+/// plan, D4 shape 2): `random` = ML-DSA rnd (32) ‖ the traditional half's
+/// value ([`supplied_random_len`]), which then replaces every value the
+/// signature would draw, so the whole composite signature is reproducible.
+/// It contradicts `deterministic` (CKR_MECHANISM_PARAM_INVALID, as at
+/// C_SignInit).
+pub fn sign_ph_with_random(
+    p: &'static CompositeSigParams,
+    sk: &[u8],
+    ph: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+    random: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
     let layout = layout(p)?;
     if deterministic && !deterministic_available(p) {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
+    let (rnd, trad_random) = match random {
+        None => (None, None),
+        Some(r) => {
+            if deterministic {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            check_supplied_random(p, r)?;
+            let (a, b) = r.split_at(32);
+            let rnd: [u8; 32] = a.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            (Some(rnd), (!b.is_empty()).then_some(b))
+        }
+    };
     let m = message_representative(p, ctx, ph)?;
     // (mldsaSeed, tradSK) = DeserializePrivateKey(sk);
     // (_, mldsaSK) = ML-DSA.KeyGen_internal(mldsaSeed) — §3.2 step 3.
@@ -308,11 +443,14 @@ pub fn sign_ph(p: &'static CompositeSigParams, sk: &[u8], ph: &[u8], ctx: &[u8],
     let (_, ml_sk) = crate::crypto::handlers::ml_dsa_keygen_from_seed(p.ml_dsa, xi).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
     let ml_sk = Zeroizing::new(ml_sk);
     // §3.2 step 4: mldsaSig = ML-DSA.Sign(mldsaSK, M', mldsa_ctx=Label).
-    let mut s = crate::crypto::handlers::sign_ml_dsa(CKM_ML_DSA, p.ml_dsa, &ml_sk, &m, p.label, deterministic)?;
+    let mut s = match rnd {
+        Some(rnd) => crate::crypto::handlers::sign_ml_dsa_external_rnd(p.ml_dsa, &ml_sk, &m, p.label, rnd)?,
+        None => crate::crypto::handlers::sign_ml_dsa(CKM_ML_DSA, p.ml_dsa, &ml_sk, &m, p.label, deterministic)?,
+    };
     if s.len() != p.ml_dsa_signature_len() {
         return Err(CKR_FUNCTION_FAILED);
     }
-    let trad_sig = trad_sign(p.classical, trad_sk, &m)?;
+    let trad_sig = trad_sign(p.classical, trad_sk, &m, trad_random)?;
     if !p.classical_sizes.output.admits(trad_sig.len()) {
         return Err(CKR_FUNCTION_FAILED);
     }

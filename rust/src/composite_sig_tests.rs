@@ -949,3 +949,179 @@ fn v5_fixture_generator() {
     std::fs::write(&out, serde_json::to_vec_pretty(&doc).unwrap()).expect("write fixture");
     eprintln!("wrote {} signature and {} KEM entries to {out}", sigs_len, kems_len);
 }
+
+// ── Optional test input (ACVP explicit-randomness plan, D4, shape 2) ──────
+
+/// The extended `CK_SIGN_ADDITIONAL_CONTEXT`: the three standard fields, then
+/// pRandom, ulRandomLen, messageEncoding (`ck_param::sign_ctx_ext`).
+struct ExtCtx {
+    words: [usize; 6],
+    _ctx: Vec<u8>,
+    _random: Vec<u8>,
+}
+
+fn ext_ctx(hedge: u32, ctx: &[u8], random: &[u8], encoding: usize) -> ExtCtx {
+    let (c, r) = (ctx.to_vec(), random.to_vec());
+    let p = |v: &Vec<u8>| if v.is_empty() { 0 } else { v.as_ptr() as usize };
+    ExtCtx { words: [hedge as usize, p(&c), c.len(), p(&r), r.len(), encoding], _ctx: c, _random: r }
+}
+
+fn mech_bytes(m: u32, param: &[u8]) -> [usize; 3] {
+    [m as usize, if param.is_empty() { 0 } else { param.as_ptr() as usize }, param.len()]
+}
+
+fn ext_bytes(e: &ExtCtx) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(e.words.as_ptr() as *const u8, std::mem::size_of_val(&e.words)) }
+}
+
+fn sign_raw(m: u32, param: &[u8], hk: u32, data: &[u8]) -> (u32, Vec<u8>) {
+    let mut mm = mech_bytes(m, param);
+    let rv = C_SignInit(SESSION, mm.as_mut_ptr() as *mut u8, hk);
+    if rv != CKR_OK {
+        return (rv, Vec::new());
+    }
+    let mut d = data.to_vec();
+    let mut len = 0u32;
+    assert_eq!(C_Sign(SESSION, d.as_mut_ptr(), d.len() as u32, std::ptr::null_mut(), &mut len), CKR_OK);
+    let mut sig = vec![0u8; len as usize];
+    let rv = C_Sign(SESSION, d.as_mut_ptr(), d.len() as u32, sig.as_mut_ptr(), &mut len);
+    sig.truncate(len as usize);
+    (rv, sig)
+}
+
+fn verify_init_raw(m: u32, param: &[u8], hp: u32) -> u32 {
+    let mut mm = mech_bytes(m, param);
+    C_VerifyInit(SESSION, mm.as_mut_ptr() as *mut u8, hp)
+}
+
+/// A supplied value for `p`: rnd, then the traditional half's value (a
+/// P-521 k must be 1 <= k < n, so a small one is used).
+fn comp_random(p: &CompositeSigParams, salt: u8) -> Vec<u8> {
+    let n = crate::native::composite_sig::supplied_random_len(p);
+    let mut r: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul(13).wrapping_add(salt)).collect();
+    if n == 98 {
+        r[32..].iter_mut().for_each(|b| *b = 0);
+        r[97] = 5 + salt;
+    }
+    r
+}
+
+/// Self-consistency for every supported set (no published vector carries
+/// randomness — P0 report §6): the same value gives the same signature, it
+/// verifies under the standard mechanism, single- and multi-part, and
+/// external-hash; rnd moves only the ML-DSA half and the traditional value
+/// only the traditional half; rnd = {0}^32 equals the deterministic variant
+/// where the set has one (FIPS 204 Alg 2 line 5); the lengths are the P0
+/// table's.
+#[test]
+fn supplied_random_is_self_consistent_for_every_set() {
+    let _guard = test_lock::acquire();
+    setup();
+    let mut n = 0;
+    for p in COMPOSITE_SIG_SETS.iter().filter(|p| p.supported) {
+        let name = p.name;
+        let (rv, hp, hk) = generate_comp_sig(p.ckp);
+        assert_eq!(rv, CKR_OK, "{name}");
+        let r = comp_random(p, 0);
+        let want_len = 32 + match p.classical {
+            crate::native::composite::SigClassical::RsaPss { salt_len, .. } => salt_len,
+            crate::native::composite::SigClassical::Ecdsa { curve: crate::native::composite::EcCurve::P521, .. } => 66,
+            _ => 0,
+        };
+        assert_eq!(r.len(), want_len, "{name}");
+        let e = ext_ctx(CKH_HEDGE_PREFERRED, b"ctx", &r, 0);
+        let (rv, s1) = sign_raw(CKM_COMP_SIG, ext_bytes(&e), hk, b"message");
+        assert_eq!(rv, CKR_OK, "{name}");
+        let (_, s2) = sign_raw(CKM_COMP_SIG, ext_bytes(&e), hk, b"message");
+        assert_eq!(s1, s2, "{name}: reproducible");
+        let std = sign_ctx(CKH_HEDGE_PREFERRED, b"ctx");
+        assert_eq!(verify(CKM_COMP_SIG, Some(&std), hp, b"message", &s1), CKR_OK, "{name}: verifies normally");
+        assert_eq!(verify_multi(CKM_COMP_SIG, Some(&std), hp, b"message", 3, &s1), CKR_OK, "{name}");
+        // CKM_COMP_SIG_EXTERNAL_HASH with the same value is the same signature.
+        let ph = crate::native::composite_sig::pre_hash(p.pre_hash, b"message");
+        let (rv, s3) = sign_raw(CKM_COMP_SIG_EXTERNAL_HASH, ext_bytes(&e), hk, &ph);
+        assert_eq!((rv, &s3), (CKR_OK, &s1), "{name}: external hash");
+
+        let ml = p.ml_dsa_signature_len();
+        let mut r2 = r.clone();
+        r2[0] ^= 1;
+        let (_, s4) = sign_raw(CKM_COMP_SIG, ext_bytes(&ext_ctx(0, b"ctx", &r2, 0)), hk, b"message");
+        assert_ne!(s4[..ml], s1[..ml], "{name}: rnd moves the ML-DSA half");
+        assert_eq!(s4[ml..], s1[ml..], "{name}: and only it");
+        if r.len() > 32 {
+            let mut r3 = comp_random(p, 1);
+            r3[..32].copy_from_slice(&r[..32]);
+            let (_, s5) = sign_raw(CKM_COMP_SIG, ext_bytes(&ext_ctx(0, b"ctx", &r3, 0)), hk, b"message");
+            assert_eq!(s5[..ml], s1[..ml], "{name}");
+            assert_ne!(s5[ml..], s1[ml..], "{name}: the traditional value is used");
+            assert_eq!(verify(CKM_COMP_SIG, Some(&std), hp, b"message", &s5), CKR_OK, "{name}");
+        }
+        if crate::native::composite_sig::deterministic_available(p) {
+            let (_, det) = sign(CKM_COMP_SIG, Some(&sign_ctx(CKH_DETERMINISTIC_REQUIRED, b"ctx")), hk, b"message");
+            let (_, z) = sign_raw(CKM_COMP_SIG, ext_bytes(&ext_ctx(0, b"ctx", &[0u8; 32], 0)), hk, b"message");
+            assert_eq!(z, det, "{name}: rnd = 0^32 is the deterministic variant");
+        }
+        // Absent: hedged as before.
+        let (_, a) = sign(CKM_COMP_SIG, None, hk, b"message");
+        let (_, b) = sign(CKM_COMP_SIG, None, hk, b"message");
+        assert_ne!(a[..ml], b[..ml], "{name}");
+        destroy(&[hp, hk]);
+        n += 1;
+    }
+    assert!(n >= 14, "{n} sets");
+}
+
+/// Plan revision 9, correction 1: a CKM_COMP_SIG / _EXTERNAL_HASH parameter
+/// must be exactly the standard or the extended struct (it used to be read as
+/// absent when short and have its tail ignored when long); and the
+/// extended-form rules: exact random length, no random with
+/// CKH_DETERMINISTIC_REQUIRED or on verification, a P-521 k in range, no
+/// internal encoding.
+#[test]
+fn exact_size_and_supplied_random_refusals() {
+    let _guard = test_lock::acquire();
+    setup();
+    let w = std::mem::size_of::<usize>();
+    for ckp in [CKP_COMP_SIG_MLDSA44_ED25519_SHA512, CKP_COMP_SIG_MLDSA87_ECDSA_P521_SHA512, CKP_COMP_SIG_MLDSA65_RSA4096_PSS_SHA512] {
+        let p = sig_params(ckp).unwrap();
+        let name = p.name;
+        let (rv, hp, hk) = generate_comp_sig(ckp);
+        assert_eq!(rv, CKR_OK);
+        let std = sign_ctx(CKH_HEDGE_PREFERRED, &[]);
+        let std_b = unsafe { std::slice::from_raw_parts(std.words.as_ptr() as *const u8, 3 * w) }.to_vec();
+        let ext = ext_ctx(CKH_HEDGE_PREFERRED, &[], &[], 0);
+        let ext_b = ext_bytes(&ext).to_vec();
+        let mut longer = ext_b.clone();
+        longer.extend(vec![0u8; w]);
+        for m in [CKM_COMP_SIG, CKM_COMP_SIG_EXTERNAL_HASH] {
+            for (bad, what) in [(&std_b[..3 * w - 1], "standard - 1"), (&[std_b.clone(), vec![0]].concat()[..], "standard + 1"), (&ext_b[..5 * w], "extended - one word"), (&longer[..], "extended + one word")] {
+                let mut mm = mech_bytes(m, bad);
+                assert_eq!(C_SignInit(SESSION, mm.as_mut_ptr() as *mut u8, hk), CKR_MECHANISM_PARAM_INVALID, "{name}: sign {what}");
+                assert_eq!(verify_init_raw(m, bad, hp), CKR_MECHANISM_PARAM_INVALID, "{name}: verify {what}");
+            }
+            assert_eq!(verify_init_raw(m, &ext_b, hp), CKR_OK, "{name}: extended form without inputs");
+            VERIFY_STATE.shard(SESSION).remove(&SESSION);
+        }
+        let r = comp_random(p, 0);
+        let bad_init = |param: &[u8], what: &str| {
+            let mut mm = mech_bytes(CKM_COMP_SIG, param);
+            assert_eq!(C_SignInit(SESSION, mm.as_mut_ptr() as *mut u8, hk), CKR_MECHANISM_PARAM_INVALID, "{name}: {what}");
+        };
+        bad_init(ext_bytes(&ext_ctx(0, &[], &r[..r.len() - 1], 0)), "random - 1");
+        bad_init(ext_bytes(&ext_ctx(0, &[], &[r.clone(), vec![1]].concat(), 0)), "random + 1");
+        bad_init(ext_bytes(&ext_ctx(0, &[], &r, 1)), "internal encoding");
+        if crate::native::composite_sig::deterministic_available(p) {
+            bad_init(ext_bytes(&ext_ctx(CKH_DETERMINISTIC_REQUIRED, &[], &r, 0)), "deterministic + random");
+        }
+        if r.len() == 98 {
+            let mut k0 = r.clone();
+            k0[32..].iter_mut().for_each(|b| *b = 0);
+            bad_init(ext_bytes(&ext_ctx(0, &[], &k0, 0)), "P-521 k = 0");
+            let mut kbig = r.clone();
+            kbig[32..].iter_mut().for_each(|b| *b = 0xff);
+            bad_init(ext_bytes(&ext_ctx(0, &[], &kbig, 0)), "P-521 k >= n");
+        }
+        assert_eq!(verify_init_raw(CKM_COMP_SIG, ext_bytes(&ext_ctx(0, &[], &r, 0)), hp), CKR_MECHANISM_PARAM_INVALID, "{name}: random on verify");
+        destroy(&[hp, hk]);
+    }
+}

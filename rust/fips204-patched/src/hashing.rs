@@ -417,6 +417,8 @@ pub(crate) fn expand_mask<const L: usize>(gamma1: i32, rho: &[u8; 64], mu: u16) 
 /// expected length also doubles as the caller's own PHM-length validation.
 pub(crate) fn oid_and_len(ph: &Ph) -> ([u8; 11], usize) {
     match ph {
+        Ph::SHA512_224 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x05], 28),
+        Ph::SHA512_256 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x06], 32),
         Ph::SHA224 => (
             [
                 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04,
@@ -485,6 +487,18 @@ pub(crate) fn oid_and_len(ph: &Ph) -> ([u8; 11], usize) {
 /// OIDs are per FIPS 204 Table 1 / RFC 8017 / IANA AlgorithmIdentifier registry.
 pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8; 11], usize) {
     match ph {
+        Ph::SHA512_224 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x05], {
+            let mut hasher = sha2::Sha512_224::new();
+            Digest::update(&mut hasher, message);
+            phm[0..28].copy_from_slice(&hasher.finalize());
+            28
+        }),
+        Ph::SHA512_256 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x06], {
+            let mut hasher = sha2::Sha512_256::new();
+            Digest::update(&mut hasher, message);
+            phm[0..32].copy_from_slice(&hasher.finalize());
+            32
+        }),
         Ph::SHA256 => (
             [
                 0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,

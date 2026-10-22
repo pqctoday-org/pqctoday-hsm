@@ -522,6 +522,8 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     VERIFY_MULTIPART_ACC.for_each_shard(|m| m.clear());
     COMP_SIG_SIGN_PREHASH.for_each_shard(|m| m.clear());
     COMP_SIG_VERIFY_PREHASH.for_each_shard(|m| m.clear());
+    SIGN_SUPPLIED.for_each_shard(|m| m.clear());
+    VERIFY_SUPPLIED.for_each_shard(|m| m.clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
     SESSIONS.for_each_shard(|m| m.clear());
     // §5.4.2/§5.4.1 (checked directly against the OASIS spec text, 2026-08-28,
@@ -625,6 +627,8 @@ pub fn reset_all_engine_state_for_test() {
     VERIFY_MULTIPART_ACC.for_each_shard(|m| m.clear());
     COMP_SIG_SIGN_PREHASH.for_each_shard(|m| m.clear());
     COMP_SIG_VERIFY_PREHASH.for_each_shard(|m| m.clear());
+    SIGN_SUPPLIED.for_each_shard(|m| m.clear());
+    VERIFY_SUPPLIED.for_each_shard(|m| m.clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
     SESSIONS.for_each_shard(|m| m.clear());
     TOKEN_STORE.with(|ts| ts.borrow_mut().clear());
@@ -963,6 +967,8 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     VERIFY_MULTIPART_ACC.shard(h_session).remove(&h_session);
     COMP_SIG_SIGN_PREHASH.shard(h_session).remove(&h_session);
     COMP_SIG_VERIFY_PREHASH.shard(h_session).remove(&h_session);
+    SIGN_SUPPLIED.shard(h_session).remove(&h_session);
+    VERIFY_SUPPLIED.shard(h_session).remove(&h_session);
     // S6 — §5.6.2: when the application's LAST session on the slot closes,
     // its login state returns to public (C1: per application context).
     if let Some(slot) = slot {
@@ -1851,10 +1857,6 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
         CKM_ECDSA => (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS | MSG_CAPABILITY),
-        // Explicit-nonce ECDSA (vendor, SECURITY.md) — CKF_SIGN only: no
-        // verify (plain CKM_ECDSA verifies its signatures) and no message
-        // flags (single-part; see C_MessageSignInit).
-        CKM_PQCTODAY_ECDSA_EXPLICIT_K => (256, 521, 0x00000800 | EC_CAPABILITY_FLAGS),
         // Ed25519ph / Ed448ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
         CKM_EDDSA_PH => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
@@ -5408,7 +5410,9 @@ unsafe fn apply_key_template_fixed(
 /// `CKM_COMP_KEM` (PKCS#11 v3.3 working draft, comp_kem.md): "It has no
 /// parameters." A non-NULL pParameter or a non-zero ulParameterLen is
 /// CKR_MECHANISM_PARAM_INVALID (v3.2 §5.1.6: "Invalid parameters were
-/// supplied to the mechanism"), on both C_EncapsulateKey and C_DecapsulateKey.
+/// supplied to the mechanism") on C_DecapsulateKey. C_EncapsulateKey takes
+/// the optional shape-1 test input instead (ACVP explicit-randomness plan,
+/// D4; see its CKM_COMP_KEM arm).
 unsafe fn comp_kem_refuse_parameter(p_mechanism: *const u8) -> Result<(), u32> {
     let m = ck_param::mech(p_mechanism);
     if !m.p_parameter.is_null() || m.ul_parameter_len != 0 {
@@ -5519,13 +5523,24 @@ fn comp_sig_init(h_key: u32, sign: bool, deterministic: bool) -> Result<&'static
 /// C_Sign for the composite mechanisms (native::composite_sig): `data` is M
 /// for CKM_COMP_SIG and PH(M) for CKM_COMP_SIG_EXTERNAL_HASH, whose length
 /// is checked there (CKR_DATA_LEN_RANGE).
-fn comp_sig_sign(mech: u32, h_key: u32, sk: &[u8], data: &[u8], ctx: &[u8], deterministic: bool) -> Result<Vec<u8>, u32> {
+fn comp_sig_sign(
+    mech: u32,
+    h_key: u32,
+    sk: &[u8],
+    data: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+    random: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
     let p = comp_sig_key_params(h_key, CKO_PRIVATE_KEY)?;
-    if mech == CKM_COMP_SIG {
-        crate::native::composite_sig::sign(p, sk, data, ctx, deterministic)
+    // `random` (plan D4, shape 2): ML-DSA rnd ‖ the traditional half's
+    // value, length-checked at C_SignInit (composite_sig::supplied_random_len).
+    let ph = if mech == CKM_COMP_SIG {
+        crate::native::composite_sig::pre_hash(p.pre_hash, data)
     } else {
-        crate::native::composite_sig::sign_ph(p, sk, data, ctx, deterministic)
-    }
+        data.to_vec()
+    };
+    crate::native::composite_sig::sign_ph_with_random(p, sk, &ph, ctx, deterministic, random)
 }
 
 /// C_Verify for the composite mechanisms; see comp_sig_sign and
@@ -5550,6 +5565,18 @@ fn C_EncapsulateKey_impl(
     ph_key: *mut u32,
 ) -> u32 {
     require_init!();
+    // Shape 1 (plan M2): a malformed CKM_ML_KEM m is refused before any
+    // session or key lookup, as in the C++ engine (D2 parity).
+    if !p_mechanism.is_null() {
+        let m = unsafe { ck_param::mech(p_mechanism) };
+        if m.mechanism == CKM_ML_KEM {
+            match unsafe { shape1_value(&m) } {
+                Ok(None) => {}
+                Ok(Some(v)) if v.len() == 32 => {}
+                _ => return CKR_MECHANISM_PARAM_INVALID,
+            }
+        }
+    }
     require_session!(_h_session);
     use ml_kem::KemCore;
 
@@ -6028,9 +6055,15 @@ fn C_EncapsulateKey_impl(
         // draft-ietf-lamps-pq-composite-kem-23 §3.2 in native::composite_kem;
         // the key type was checked by check_key_for_mech (mech_key_types).
         if mech_type == CKM_COMP_KEM {
-            if let Err(rv) = comp_kem_refuse_parameter(p_mechanism) {
-                return rv;
-            }
+            // Shape 1 (ACVP explicit-randomness plan, D4): pParameter may
+            // carry the values the encapsulation would draw — ML-KEM m ‖ the
+            // traditional half's (composite_kem::supplied_random_len) —
+            // checked before any work. NULL/0 is the standard, randomised
+            // operation the draft defines ("It has no parameters").
+            let supplied = match shape1_value(&ck_param::mech(p_mechanism)) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
             // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
             if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
                 return rv;
@@ -6039,6 +6072,15 @@ fn C_EncapsulateKey_impl(
                 Ok(p) => p,
                 Err(rv) => return rv,
             };
+            let pk = match get_object_value(h_key) {
+                Some(v) => v,
+                None => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            if let Some(r) = supplied {
+                if let Err(rv) = crate::native::composite_kem::check_supplied_random(p, r) {
+                    return rv;
+                }
+            }
             // Every supported set has a fixed ciphertext length (§4.3,
             // Appendix A): query-then-fill as for CKM_ML_KEM.
             let ct_len = p.ciphertext_size().bytes() as u32;
@@ -6050,11 +6092,7 @@ fn C_EncapsulateKey_impl(
                 *pul_ciphertext_len = ct_len;
                 return CKR_BUFFER_TOO_SMALL;
             }
-            let pk = match get_object_value(h_key) {
-                Some(v) => v,
-                None => return CKR_KEY_TYPE_INCONSISTENT,
-            };
-            let (ct, ss) = match crate::native::composite_kem::encapsulate(_h_session, p, &pk) {
+            let (ct, ss) = match crate::native::composite_kem::encapsulate_with_random(_h_session, p, &pk, supplied) {
                 Ok(r) => r,
                 Err(rv) => return rv,
             };
@@ -6075,6 +6113,18 @@ fn C_EncapsulateKey_impl(
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
         }
+        // Shape 1 (ACVP explicit-randomness plan, M2): pParameter may be m,
+        // the 32 bytes FIPS 203 Alg 20 would draw, used as given by
+        // ML-KEM.Encaps_internal (§6.2 Alg 17). NULL/0 draws m as usual.
+        // A test interface outside PKCS#11 (CKM_ML_KEM "has no parameters").
+        let supplied_m: Option<[u8; 32]> = match shape1_value(&ck_param::mech(p_mechanism)) {
+            Ok(None) => None,
+            Ok(Some(v)) => match <[u8; 32]>::try_from(v) {
+                Ok(m) => Some(m),
+                Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+            },
+            Err(rv) => return rv,
+        };
         // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
         if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
             return rv;
@@ -6130,8 +6180,11 @@ fn C_EncapsulateKey_impl(
                 // m drawn exactly as ml-kem's encapsulate(rng) draws it (one
                 // 32-byte fill_bytes), so ACVP-seeded runs stay reproducible;
                 // then AWS-LC or ml-kem (crypto::handlers::ml_kem_encaps).
-                let mut m = [0u8; 32];
-                rand::RngCore::fill_bytes($rng, &mut m);
+                let mut m = zeroize::Zeroizing::new([0u8; 32]);
+                match supplied_m {
+                    Some(v) => *m = v,
+                    None => rand::RngCore::fill_bytes($rng, m.as_mut()),
+                }
                 let (ct, ss) = match crate::crypto::handlers::ml_kem_encaps(ps, &pub_key_bytes, &m) {
                     Ok(r) => r,
                     Err(rv) => return rv,
@@ -6215,6 +6268,14 @@ fn C_DecapsulateKey_impl(
     ph_key: *mut u32,
 ) -> u32 {
     require_init!();
+    // Decapsulation takes no optional input (plan M2): any CKM_ML_KEM
+    // parameter is refused before any session or key lookup (C++ parity).
+    if !p_mechanism.is_null() {
+        let m = unsafe { ck_param::mech(p_mechanism) };
+        if m.mechanism == CKM_ML_KEM && (m.ul_parameter_len != 0) {
+            return CKR_MECHANISM_PARAM_INVALID;
+        }
+    }
     require_session!(_h_session);
 
     nonnull!(p_mechanism, p_ciphertext, ph_key);
@@ -6633,6 +6694,14 @@ fn C_DecapsulateKey_impl(
 
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
+        }
+        // Decapsulation draws no randomness, so it takes no optional input
+        // (ACVP explicit-randomness plan, M2): CKM_ML_KEM "has no
+        // parameters" and a parameter here is CKR_MECHANISM_PARAM_INVALID.
+        // It used to be ignored.
+        match shape1_value(&ck_param::mech(p_mechanism)) {
+            Ok(None) => {}
+            _ => return CKR_MECHANISM_PARAM_INVALID,
         }
         // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
         if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
@@ -8302,7 +8371,7 @@ fn mech_key_types(mech: u32) -> Option<&'static [u32]> {
         // §6.3 — ECDSA (Weierstrass curves only).
         CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256
         | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256
-        | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 | CKM_PQCTODAY_ECDSA_EXPLICIT_K => &[CKK_EC],
+        | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => &[CKK_EC],
         // §6.3.15 — EdDSA.
         CKM_EDDSA | CKM_EDDSA_PH => &[CKK_EC_EDWARDS],
         // §6.3.17 Table 78 — ECDH allows CKK_EC and CKK_EC_MONTGOMERY;
@@ -8549,7 +8618,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         };
         // Mechanism parameters — see parse_sign_mech_params (shared with
         // the other two *SignInit/*VerifyInit entry points).
-        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type, h_key) {
+        let (slh_ctx, slh_det, supplied) = match parse_sign_mech_params_op(p_mechanism, mech_type, h_key, SigOp::Sign) {
             Ok(v) => v,
             Err(rv) => return rv,
         };
@@ -8565,12 +8634,61 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 Err(rv) => return rv,
             }
         }
+        set_supplied(&SIGN_SUPPLIED, h_session, supplied);
         SIGN_STATE.with(|s| {
             s.shard(h_session)
                 .insert(h_session, (mech_type, h_key, slh_ctx, slh_det));
         });
     }
     CKR_OK
+}
+
+/// The operation-log field that marks an operation started with optional
+/// test inputs (ACVP explicit-randomness plan M4, "visible use"): appended to
+/// the C_SignInit / C_VerifyInit record as ` test_input=random`,
+/// ` test_input=internal` or ` test_input=random+internal`; empty otherwise,
+/// so records of standard operations are byte-for-byte unchanged.
+fn supplied_log_field(
+    map: &crate::state::Sharded<HashMap<u32, crate::state::SuppliedInput>>,
+    h_session: u32,
+) -> &'static str {
+    match map.shard(h_session).get(&h_session).map(|s| (s.random.is_some(), s.internal)) {
+        Some((true, true)) => " test_input=random+internal",
+        Some((true, false)) => " test_input=random",
+        Some((false, true)) => " test_input=internal",
+        _ => "",
+    }
+}
+
+/// Owner decision D7 (plan rev 10): the generic CKM_HASH_ML_DSA /
+/// CKM_HASH_SLH_DSA take PH(M), whose length the HashML-DSA / HashSLH-DSA
+/// "Key and Data Length" tables fix to the digest length of `hash`. Any
+/// other length is CKR_DATA_LEN_RANGE (v3.3 function_return_values.md:
+/// "input data ... has a bad length"), on C_Sign and C_Verify alike.
+fn generic_phm_len_ok(hash: u32, phm: &[u8]) -> Result<(), u32> {
+    let want = match hash {
+        CKM_SHA224 | CKM_SHA3_224 | CKM_SHA512_224 => 28,
+        CKM_SHA256 | CKM_SHA3_256 | CKM_SHA512_256 => 32,
+        CKM_SHA384 | CKM_SHA3_384 => 48,
+        CKM_SHA512 | CKM_SHA3_512 => 64,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+    if phm.len() == want { Ok(()) } else { Err(CKR_DATA_LEN_RANGE) }
+}
+
+/// Record the optional test inputs of the operation an Init call is starting
+/// — or their absence, so nothing from an earlier operation on the session
+/// is ever read (see state::SIGN_SUPPLIED).
+fn set_supplied(
+    map: &crate::state::Sharded<HashMap<u32, crate::state::SuppliedInput>>,
+    h_session: u32,
+    supplied: crate::state::SuppliedInput,
+) {
+    if supplied.is_empty() {
+        map.shard(h_session).remove(&h_session);
+    } else {
+        map.shard(h_session).insert(h_session, supplied);
+    }
 }
 
 /// If `mech_type` is a GENERIC pre-hash mechanism (CKM_HASH_ML_DSA /
@@ -8616,7 +8734,10 @@ unsafe fn remap_generic_hash_mech(
         )
         .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let hash = r.ulong32(ck_param::hash_sign_ctx::HASH);
-    if map_generic_hash_mech(mech_type, hash).is_none() {
+    // Owner decision D5 (plan rev 10): SHA-512/224 and SHA-512/256 are also
+    // legal here (v3.3 draft: `hash` is any digest mechanism; FIPS 204 / 205
+    // give their OIDs). They have no hash-specific mechanism to map onto.
+    if map_generic_hash_mech(mech_type, hash).is_none() && hash != CKM_SHA512_224 && hash != CKM_SHA512_256 {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     GENERIC_HASH_STATE.with(|s| {
@@ -8706,6 +8827,81 @@ unsafe fn parse_sign_mech_params(
     mech_type: u32,
     h_key: u32,
 ) -> Result<(Vec<u8>, bool), u32> {
+    parse_sign_mech_params_op(p_mechanism, mech_type, h_key, SigOp::Sign).map(|(c, d, _)| (c, d))
+}
+
+/// Which half of a signature mechanism an Init call starts. The optional
+/// test inputs (ACVP explicit-randomness plan, M2/M3) differ by side: a
+/// random value is a signing input only, so on verification it is refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SigOp {
+    Sign,
+    Verify,
+}
+
+/// Shape 1 of the optional-input model (plan M2): for a mechanism whose
+/// standard parameter is "none", `pParameter` IS the value the operation
+/// would draw. NULL/0 (and, as before, a non-NULL pointer with length 0) is
+/// the standard behaviour; a NULL pointer with a non-zero length is
+/// CKR_MECHANISM_PARAM_INVALID.
+unsafe fn shape1_value<'a>(m: &ck_param::Mech) -> Result<Option<&'a [u8]>, u32> {
+    if m.p_parameter.is_null() && m.ul_parameter_len != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok(m.has_param().then(|| m.raw()))
+}
+
+/// FIPS 205 Table 2: n (the addrnd length) for an SLH-DSA parameter set.
+fn slh_dsa_n(ps: u32) -> Option<usize> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S | CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => Some(16),
+        CKP_SLH_DSA_SHA2_192S | CKP_SLH_DSA_SHAKE_192S | CKP_SLH_DSA_SHA2_192F | CKP_SLH_DSA_SHAKE_192F => Some(24),
+        CKP_SLH_DSA_SHA2_256S | CKP_SLH_DSA_SHAKE_256S | CKP_SLH_DSA_SHA2_256F | CKP_SLH_DSA_SHAKE_256F => Some(32),
+        _ => None,
+    }
+}
+
+/// Is `r` a value the shape-2 mechanism `mech` can take with `h_key` (plan
+/// M3)? ML-DSA rnd is exactly 32 bytes (FIPS 204 Alg 7), SLH-DSA addrnd
+/// exactly n (FIPS 205 Alg 19, Table 2), a composite the concatenation of
+/// its components' values (`composite_sig::check_supplied_random`, which
+/// also range-checks a P-521 k). A composite key whose set cannot be read
+/// passes here: comp_sig_init refuses that key right after.
+fn check_sign_random(mech: u32, h_key: u32, r: &[u8]) -> Result<(), u32> {
+    use crate::crypto::handlers::{is_prehash_ml_dsa, is_prehash_slh_dsa};
+    let want = if mech == CKM_ML_DSA || mech == CKM_HASH_ML_DSA || mech == CKM_ML_DSA_EXTERNAL_MU || is_prehash_ml_dsa(mech) {
+        32
+    } else if mech == CKM_SLH_DSA || mech == CKM_HASH_SLH_DSA || is_prehash_slh_dsa(mech) {
+        slh_dsa_n(get_object_param_set(h_key)).ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+    } else if mech == CKM_COMP_SIG || mech == CKM_COMP_SIG_EXTERNAL_HASH {
+        return match get_object_attr_u32(h_key, CKA_PARAMETER_SET).and_then(crate::native::composite::sig_params) {
+            Some(p) => crate::native::composite_sig::check_supplied_random(p, r),
+            None => Ok(()),
+        };
+    } else {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    };
+    if r.len() == want {
+        Ok(())
+    } else {
+        Err(CKR_MECHANISM_PARAM_INVALID)
+    }
+}
+
+/// `parse_sign_mech_params` for one side of the operation, also returning
+/// the optional test inputs (plan M1–M4). Every rule is checked here, at
+/// the Init call, before any work (M4).
+unsafe fn parse_sign_mech_params_op(
+    p_mechanism: *const u8,
+    mech_type: u32,
+    h_key: u32,
+    op: SigOp,
+) -> Result<(Vec<u8>, bool, crate::state::SuppliedInput), u32> {
+    // A retired vendor number (0x8000_0015, CKM_PQCTODAY_ECDSA_EXPLICIT_K,
+    // decision D1) is no mechanism at all: refused here, at every Init.
+    if RETIRED_VENDOR_MECHANISMS.contains(&mech_type) {
+        return Err(CKR_MECHANISM_INVALID);
+    }
     let m = ck_param::mech(p_mechanism);
     if takes_sign_additional_ctx(mech_type) {
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
@@ -8719,8 +8915,35 @@ unsafe fn parse_sign_mech_params(
         // meaning once µ is already computed — FIPS 204 folds context into
         // µ before the caller ever gets here). Overlong ctx / bad hedge →
         // error either way.
-        return parse_sign_additional_ctx(p_mechanism);
+        return parse_sign_additional_ctx(p_mechanism, mech_type, h_key, op);
     }
+    if mech_type == CKM_ECDSA {
+        // Shape 1 (plan M2, decision D1): pParameter is k (big-endian,
+        // exactly the order's byte length, 1 <= k < n; P-256 / P-384 /
+        // P-521, the rules of the retired CKM_PQCTODAY_ECDSA_EXPLICIT_K),
+        // checked against the key here so a bad k is
+        // CKR_MECHANISM_PARAM_INVALID at C_SignInit (§5.13.1). Verification
+        // draws no randomness: a parameter there is refused.
+        let mut supplied = crate::state::SuppliedInput::default();
+        if let Some(k) = shape1_value(&m)? {
+            if op == SigOp::Verify {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            crate::crypto::handlers::ecdsa_explicit_k_check(get_object_param_set(h_key), k)?;
+            supplied.random = Some(zeroize::Zeroizing::new(k.to_vec()));
+        }
+        return Ok((Vec::new(), false, supplied));
+    }
+    parse_other_sign_mech_params(&m, mech_type, h_key).map(|(c, d)| (c, d, crate::state::SuppliedInput::default()))
+}
+
+/// The mechanisms without optional test inputs: EdDSA, RSA-PSS, KMAC, GMAC,
+/// HMAC-general (unchanged).
+unsafe fn parse_other_sign_mech_params(
+    m: &ck_param::Mech,
+    mech_type: u32,
+    h_key: u32,
+) -> Result<(Vec<u8>, bool), u32> {
     if mech_type == CKM_EDDSA || mech_type == CKM_EDDSA_PH {
         // CK_EDDSA_PARAMS (v3.2 §6.3.7) — `phFlag` was already consumed by
         // `eddsa_ph_flag` before this function was ever called (a `true`
@@ -8759,17 +8982,6 @@ unsafe fn parse_sign_mech_params(
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
         return Ok((context, false));
-    }
-    if mech_type == CKM_PQCTODAY_ECDSA_EXPLICIT_K {
-        // pParameter IS k (big-endian, the order's byte length). It is
-        // required, and validated against the key's curve here so a bad k is
-        // CKR_MECHANISM_PARAM_INVALID at init (§5.13.1), not a C_Sign failure.
-        let k = m.raw().to_vec();
-        if k.is_empty() {
-            return Err(CKR_MECHANISM_PARAM_INVALID);
-        }
-        crate::crypto::handlers::ecdsa_explicit_k_check(get_object_param_set(h_key), &k)?;
-        return Ok((k, false));
     }
     if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
         // CK_RSA_PKCS_PSS_PARAMS (v3.2 §6.1.9) — hashAlg/mgf must match the
@@ -8883,31 +9095,64 @@ unsafe fn parse_sign_mech_params(
     Ok((Vec::new(), false))
 }
 
-unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, bool), u32> {
-    // An absent parameter — and, unchanged from before this port, a short one
-    // — means "empty context, hedged".
-    let r = match ck_param::mech(p_mechanism)
-        .opt_params(&ck_param::sign_ctx::LAYOUT, ck_param::sign_ctx::FIELD_COUNT)
-    {
-        Ok(Some(r)) => r,
-        _ => return Ok((Vec::new(), false)),
+unsafe fn parse_sign_additional_ctx(
+    p_mechanism: *const u8,
+    mech: u32,
+    h_key: u32,
+    op: SigOp,
+) -> Result<(Vec<u8>, bool, crate::state::SuppliedInput), u32> {
+    // One parser for the standard and the extended form (ck_param::
+    // sign_additional_ctx; plan M3). Absent ⇒ empty context, hedged. A
+    // parameter of any size other than the standard or the extended struct
+    // is CKR_MECHANISM_PARAM_INVALID (it used to be read as "absent" when
+    // short and have its tail ignored when long — correction 1 of the plan's
+    // revision 9, which also covers CKM_COMP_SIG).
+    let hash_form = mech == CKM_HASH_ML_DSA || mech == CKM_HASH_SLH_DSA;
+    let c = match ck_param::sign_additional_ctx(&ck_param::mech(p_mechanism), hash_form) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok((Vec::new(), false, crate::state::SuppliedInput::default())),
+        Err(_) => return Err(CKR_MECHANISM_PARAM_INVALID),
     };
-    let hedge = r.ulong32(ck_param::sign_ctx::HEDGE_VARIANT);
     // CKH_HEDGE_PREFERRED(0) / CKH_HEDGE_REQUIRED(1) both sign hedged here
     // (hedging is always available); CKH_DETERMINISTIC_REQUIRED(2) selects
     // the deterministic variant.
-    let deterministic = match hedge {
+    let deterministic = match c.hedge_variant {
         0 | 1 => false,
-        x if x == CKH_DETERMINISTIC_REQUIRED => true,
+        x if x == CKH_DETERMINISTIC_REQUIRED as usize => true,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID),
     };
-    if r.ulong(ck_param::sign_ctx::UL_CONTEXT_LEN) > 255 {
+    if c.context_len > 255 {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
-    let context = r
-        .buffer(ck_param::sign_ctx::P_CONTEXT, ck_param::sign_ctx::UL_CONTEXT_LEN)
-        .to_vec();
-    Ok((context, deterministic))
+    let context = c.context.to_vec();
+    // messageEncoding (plan M3, decision D3): internal signs / verifies M′
+    // as given — CKM_SLH_DSA only, with an empty context (the internal
+    // interface has none). Owner decision D6 (plan rev 10, "standard
+    // first"): every ML-DSA mechanism refuses it, because the standard
+    // CKM_ML_DSA_EXTERNAL_MU already carries M′ as µ = SHAKE256(tr ‖ M′, 64);
+    // SLH-DSA has no standard route.
+    let internal = match c.message_encoding {
+        ck_param::MESSAGE_ENCODING_STANDARD => false,
+        ck_param::MESSAGE_ENCODING_INTERNAL => true,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+    if internal && (mech != CKM_SLH_DSA || c.context_len != 0) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    // pRandom: the value the signature would otherwise draw. Not a
+    // verification input; contradicts CKH_DETERMINISTIC_REQUIRED; exactly
+    // the length the mechanism and key take.
+    let random = match c.random {
+        None => None,
+        Some(r) => {
+            if op == SigOp::Verify || deterministic {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            check_sign_random(mech, h_key, r)?;
+            Some(zeroize::Zeroizing::new(r.to_vec()))
+        }
+    };
+    Ok((context, deterministic, crate::state::SuppliedInput { random, internal }))
 }
 
 /// E16 (2026-09-25) — `CK_PQCTODAY_KMAC_PARAMS.ulOutputLen` as
@@ -8968,6 +9213,26 @@ fn C_Sign_impl(
                 get_sig_len(mech, hkey)
             };
             return CKR_OK;
+        }
+
+        // Owner decision D7 (C++ parity): a PH(M) of the wrong length for
+        // the generic pre-hash mechanisms is CKR_DATA_LEN_RANGE at the real
+        // C_Sign — after the size query above and after the buffer-size
+        // check — and ends the operation.
+        if mech == CKM_HASH_ML_DSA || mech == CKM_HASH_SLH_DSA {
+            if let Some(hash) = GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
+                let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
+                if let Err(rv) = generic_phm_len_ok(hash, msg) {
+                    let need = get_sig_len(mech, hkey);
+                    if *pul_signature_len < need {
+                        *pul_signature_len = need;
+                        return CKR_BUFFER_TOO_SMALL;
+                    }
+                    SIGN_STATE.shard(h_session).remove(&h_session);
+                    SIGN_SUPPLIED.shard(h_session).remove(&h_session);
+                    return rv;
+                }
+            }
         }
 
         // ── HSS/LMS stateful sign — single source of truth for the
@@ -9135,6 +9400,11 @@ fn C_Sign_impl(
         };
         let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
         let ps = get_object_param_set(hkey);
+        // The operation's optional test inputs, validated at C_SignInit
+        // (ACVP explicit-randomness plan, M2/M3): the value the signature
+        // would otherwise draw, and the internal message encoding.
+        let supplied = SIGN_SUPPLIED.shard(h_session).get(&h_session).cloned().unwrap_or_default();
+        let rnd32 = supplied.random.as_deref().and_then(|r| <[u8; 32]>::try_from(r.as_slice()).ok());
 
         // then sign the digest as if it were plain CKM_ML_DSA / CKM_SLH_DSA.
         let eff_mech = mech;
@@ -9149,20 +9419,36 @@ fn C_Sign_impl(
             // GENERIC_HASH_STATE at Init time since mech_type alone can no
             // longer carry it.
             CKM_HASH_ML_DSA => {
-                match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
-                    Some(hash) => sign_ml_dsa_phm(ps, &sk_bytes, msg, &ctx_bytes, hash, deterministic),
-                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                match (GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied(), rnd32) {
+                    (Some(hash), _) if generic_phm_len_ok(hash, msg).is_err() => generic_phm_len_ok(hash, msg).map(|_| Vec::new()),
+                    (Some(hash), Some(rnd)) => {
+                        crate::crypto::handlers::sign_ml_dsa_phm_external_rnd(ps, &sk_bytes, msg, &ctx_bytes, hash, rnd)
+                    }
+                    (Some(hash), None) => sign_ml_dsa_phm(ps, &sk_bytes, msg, &ctx_bytes, hash, deterministic),
+                    (None, _) => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
             CKM_HASH_SLH_DSA => {
                 match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
-                    Some(hash) => sign_slh_dsa_phm(ps, hash, &sk_bytes, msg, &ctx_bytes, deterministic),
+                    Some(hash) if generic_phm_len_ok(hash, msg).is_err() => generic_phm_len_ok(hash, msg).map(|_| Vec::new()),
+                    Some(hash) => match supplied.random.as_deref() {
+                        Some(addrnd) => crate::crypto::handlers::sign_slh_dsa_phm_external_rnd(
+                            ps, hash, &sk_bytes, msg, &ctx_bytes, addrnd,
+                        ),
+                        None => sign_slh_dsa_phm(ps, hash, &sk_bytes, msg, &ctx_bytes, deterministic),
+                    },
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
-            m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
-                sign_ml_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
-            }
+            m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => match rnd32 {
+                Some(rnd) if m == CKM_ML_DSA => {
+                    crate::crypto::handlers::sign_ml_dsa_external_rnd(ps, &sk_bytes, msg, &ctx_bytes, rnd)
+                }
+                Some(rnd) => {
+                    crate::crypto::handlers::sign_hash_ml_dsa_external_rnd(m, ps, &sk_bytes, msg, &ctx_bytes, rnd)
+                }
+                None => sign_ml_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic),
+            },
             CKM_ML_DSA_EXTERNAL_MU => {
                 // Remediation R34, PQCTODAY-VENDOR-EXT-MU. `msg` here is the
                 // caller's 64-byte µ (FIPS 204 Eq. 2), not a message — see
@@ -9180,6 +9466,10 @@ fn C_Sign_impl(
                     // code the v3.2 §5.13.2 C_Sign / §5.15.2 C_Verify lists
                     // carry for it (was CKR_ARGUMENTS_BAD).
                     Err(CKR_DATA_LEN_RANGE)
+                } else if let Some(rnd) = rnd32 {
+                    // Plan revision 9, correction 3: the hedged internal
+                    // external-µ NIST groups need rnd here.
+                    sign_ml_dsa_external_mu(ps, &sk_bytes, msg, rnd)
                 } else if deterministic {
                     sign_ml_dsa_external_mu(ps, &sk_bytes, msg, [0u8; 32])
                 } else {
@@ -9187,9 +9477,31 @@ fn C_Sign_impl(
                     sign_ml_dsa_external_mu_hedged(ps, &sk_bytes, msg)
                 }
             }
-            m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
-                sign_slh_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
+            // FIPS 205 Alg 19 slh_sign_internal on the caller's M′: addrnd
+            // supplied, else PK.seed when deterministic, else fresh n bytes.
+            CKM_SLH_DSA if supplied.internal => {
+                let fresh;
+                let addrnd = match supplied.random.as_deref() {
+                    Some(r) => Some(r.as_slice()),
+                    None if deterministic => None,
+                    None => {
+                        let mut r = vec![0u8; slh_dsa_n(ps).unwrap_or(0)];
+                        rand::RngCore::fill_bytes(&mut OsRng, &mut r);
+                        fresh = r;
+                        Some(fresh.as_slice())
+                    }
+                };
+                crate::crypto::handlers::sign_slh_dsa_internal(ps, &sk_bytes, msg, addrnd)
             }
+            m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => match supplied.random.as_deref() {
+                Some(addrnd) if m == CKM_SLH_DSA => crate::crypto::handlers::sign_slh_dsa_external_rnd(
+                    ps, &sk_bytes, msg, &ctx_bytes, Some(addrnd),
+                ),
+                Some(addrnd) => crate::crypto::handlers::sign_hash_slh_dsa_external_rnd(
+                    m, ps, &sk_bytes, msg, &ctx_bytes, Some(addrnd),
+                ),
+                None => sign_slh_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic),
+            },
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
             | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
@@ -9277,15 +9589,19 @@ fn C_Sign_impl(
                     sign_rsa_pss_bare(hash_alg, &sk_bytes, eff_msg, s_len)
                 }
             }
+            // Shape 1 (plan M2, D1): CKM_ECDSA with the caller's k, range-
+            // checked at C_SignInit — FIPS 186-5 §6.4.1 with k supplied.
+            CKM_ECDSA if supplied.random.is_some() => crate::crypto::handlers::sign_ecdsa_explicit_k(
+                ps,
+                &sk_bytes,
+                eff_msg,
+                supplied.random.as_deref().map(|k| k.as_slice()).unwrap_or(&[]),
+            ),
             // E11 — CKM_ECDSA_SHA1 / CKM_ECDSA_SHA224 are advertised and
             // sign_ecdsa implements them; this list had left them out.
             CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
             | CKM_ECDSA_SHA3_512 => sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg),
-            // ctx_bytes is k, already range-checked by parse_sign_mech_params.
-            CKM_PQCTODAY_ECDSA_EXPLICIT_K => {
-                crate::crypto::handlers::sign_ecdsa_explicit_k(ps, &sk_bytes, eff_msg, &ctx_bytes)
-            }
             // ctx_bytes is CK_EDDSA_PARAMS.pContextData/ulContextDataLen,
             // parsed by parse_sign_mech_params's CKM_EDDSA branch — empty
             // means plain EdDSA, non-empty means RFC 8032 Ed25519ctx/
@@ -9307,9 +9623,15 @@ fn C_Sign_impl(
             CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, eff_msg, &ctx_bytes),
             // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md);
             // ctx_bytes is CK_SIGN_ADDITIONAL_CONTEXT's context.
-            CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => {
-                comp_sig_sign(eff_mech, hkey, &sk_bytes, eff_msg, &ctx_bytes, deterministic)
-            }
+            CKM_COMP_SIG | CKM_COMP_SIG_EXTERNAL_HASH => comp_sig_sign(
+                eff_mech,
+                hkey,
+                &sk_bytes,
+                eff_msg,
+                &ctx_bytes,
+                deterministic,
+                supplied.random.as_deref().map(|r| r.as_slice()),
+            ),
             _ => Err(CKR_MECHANISM_INVALID),
         };
 
@@ -9327,6 +9649,7 @@ fn C_Sign_impl(
         };
         // Consume sign state after the actual sign (not the size-query path above)
         SIGN_STATE.shard(h_session).remove(&h_session);
+        SIGN_SUPPLIED.shard(h_session).remove(&h_session);
         rv
     }
 }
@@ -9345,11 +9668,6 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
-        }
-        // CKM_PQCTODAY_ECDSA_EXPLICIT_K is sign-only (no CKF_VERIFY): its
-        // signatures are ordinary ECDSA and verify under CKM_ECDSA.
-        if ck_param::mech(p_mechanism).mechanism == CKM_PQCTODAY_ECDSA_EXPLICIT_K {
-            return CKR_MECHANISM_INVALID;
         }
         // PKCS#11 v3.2 §5.15.1 — key handle, visibility, key type (E5/E6),
         // and CKA_VERIFY permission.
@@ -9378,7 +9696,7 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         };
         // Mechanism parameters — see parse_sign_mech_params (shared with
         // the other two *SignInit/*VerifyInit entry points).
-        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type, h_key) {
+        let (slh_ctx, slh_det, supplied) = match parse_sign_mech_params_op(p_mechanism, mech_type, h_key, SigOp::Verify) {
             Ok(v) => v,
             Err(rv) => return rv,
         };
@@ -9393,6 +9711,7 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 Err(rv) => return rv,
             }
         }
+        set_supplied(&VERIFY_SUPPLIED, h_session, supplied);
         VERIFY_STATE.with(|s| {
             s.shard(h_session)
                 .insert(h_session, (mech_type, h_key, slh_ctx, slh_det));
@@ -9436,6 +9755,10 @@ fn C_Verify_impl(
     let fixed_len = match mech {
         m if m == CKM_ML_DSA
             || is_prehash_ml_dsa(m)
+            // D7 (C++ parity): the signature-length check comes before the
+            // PH(M) length check for the generic pre-hash mechanisms too.
+            || m == CKM_HASH_ML_DSA
+            || m == CKM_HASH_SLH_DSA
             || m == CKM_SLH_DSA
             || is_prehash_slh_dsa(m)
             || m == CKM_EDDSA
@@ -9531,6 +9854,11 @@ fn C_Verify_impl(
         let sig_bytes = std::slice::from_raw_parts(p_signature, ul_signature_len as usize);
         let ps = get_object_param_set(hkey);
 
+        // The internal message encoding (ACVP explicit-randomness plan, M3;
+        // validated at C_VerifyInit / C_VerifySignatureInit; SLH-DSA only,
+        // decision D6): M′ verified as given (FIPS 205 Alg 20).
+        let internal = VERIFY_SUPPLIED.shard(h_session).get(&h_session).is_some_and(|s| s.internal);
+
         // Pre-hash dispatch: same logic as C_Sign
         let eff_mech = mech;
         let eff_msg = msg;
@@ -9538,13 +9866,15 @@ fn C_Verify_impl(
             // Remediation R37 (phase 8): see C_Sign's identical comment.
             CKM_HASH_ML_DSA => {
                 match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
-                    Some(hash) => verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash),
+                    Some(hash) => generic_phm_len_ok(hash, msg)
+                        .and_then(|_| verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash)),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
             CKM_HASH_SLH_DSA => {
                 match GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
-                    Some(hash) => verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes),
+                    Some(hash) => generic_phm_len_ok(hash, msg)
+                        .and_then(|_| verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes)),
                     None => Err(CKR_MECHANISM_PARAM_INVALID),
                 }
             }
@@ -9566,6 +9896,9 @@ fn C_Verify_impl(
                 } else {
                     verify_ml_dsa_external_mu(ps, &pk_bytes, msg, sig_bytes)
                 }
+            }
+            CKM_SLH_DSA if internal => {
+                crate::crypto::handlers::verify_slh_dsa_internal(ps, &pk_bytes, msg, sig_bytes)
             }
             m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
                 verify_slh_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
@@ -9731,14 +10064,48 @@ fn C_Verify_impl(
 pub fn C_MessageSignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
-    // CKM_PQCTODAY_ECDSA_EXPLICIT_K carries no CKF_MESSAGE_SIGN: a message
-    // operation would sign every message under the one k fixed at init.
-    if !p_mechanism.is_null()
-        && unsafe { ck_param::mech(p_mechanism).mechanism } == CKM_PQCTODAY_ECDSA_EXPLICIT_K
-    {
-        return CKR_MECHANISM_INVALID;
+    // The optional test inputs (ACVP explicit-randomness plan, M2/M3) are
+    // single-operation inputs: a message operation would sign every message
+    // under the one value fixed at init (an ECDSA k twice is the private
+    // key). C_MessageSignInit therefore refuses them, before any state is
+    // created.
+    if !p_mechanism.is_null() && unsafe { requests_supplied_input(p_mechanism) } {
+        return CKR_MECHANISM_PARAM_INVALID;
     }
     C_SignInit(h_session, p_mechanism, h_key)
+}
+
+/// True when `p_mechanism` asks for an optional test input: a parameter on
+/// CKM_ECDSA (shape 1), or an extended signing-settings structure with
+/// `pRandom` or the internal message encoding (shape 2). A malformed
+/// parameter reads false here and is refused by the Init call's own parse.
+unsafe fn requests_supplied_input(p_mechanism: *const u8) -> bool {
+    let m = ck_param::mech(p_mechanism);
+    if m.mechanism == CKM_ECDSA {
+        return m.has_param();
+    }
+    if !takes_sign_additional_ctx(m.mechanism) {
+        return false;
+    }
+    let hash_form = m.mechanism == CKM_HASH_ML_DSA || m.mechanism == CKM_HASH_SLH_DSA;
+    // The extended form itself is refused on the message interface, with or
+    // without inputs (C++ parity, D2).
+    matches!(ck_param::sign_additional_ctx(&m, hash_form), Ok(Some(c)) if c.form == ck_param::SignCtxForm::Extended)
+}
+
+/// A per-message parameter (C_SignMessage / C_VerifyMessage and their
+/// Begin forms) of exactly an extended signing-settings size is refused:
+/// the optional test inputs are single-operation inputs (C++ parity, D2).
+/// Any other per-message parameter keeps its existing treatment.
+fn per_message_extended_form(state: &crate::state::Sharded<HashMap<u32, (u32, u32, Vec<u8>, bool)>>, h_session: u32, ul_param_len: u32) -> bool {
+    let Some(mech) = state.shard(h_session).get(&h_session).map(|s| s.0) else {
+        return false;
+    };
+    if !takes_sign_additional_ctx(mech) || ul_param_len == 0 {
+        return false;
+    }
+    let hash_form = mech == CKM_HASH_ML_DSA || mech == CKM_HASH_SLH_DSA;
+    ck_param::sign_ctx_form_at(ul_param_len as usize, hash_form, ck_param::WORD) == Some(ck_param::SignCtxForm::Extended)
 }
 
 #[wasm_bindgen(js_name = _C_SignMessage)]
@@ -9752,6 +10119,9 @@ pub fn C_SignMessage(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&SIGN_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     let saved = SIGN_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Sign(
         h_session,
@@ -9788,6 +10158,9 @@ pub fn C_MessageSignFinal(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_SignMessageBegin)]
 pub fn C_SignMessageBegin(h_session: u32, _p_param: *mut u8, _ul_param_len: u32) -> u32 {
     require_init!();
+    if per_message_extended_form(&SIGN_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -9811,6 +10184,9 @@ pub fn C_SignMessageNext(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&SIGN_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !SIGN_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -9884,6 +10260,11 @@ pub fn C_SignMessageNext(
 pub fn C_MessageVerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // See C_MessageSignInit: the internal message encoding is a
+    // single-operation test input.
+    if !p_mechanism.is_null() && unsafe { requests_supplied_input(p_mechanism) } {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     C_VerifyInit(h_session, p_mechanism, h_key)
 }
 
@@ -9898,6 +10279,9 @@ pub fn C_VerifyMessage(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&VERIFY_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     let saved = VERIFY_STATE.shard(h_session).get(&h_session).cloned();
     let rv = C_Verify(
         h_session,
@@ -9932,6 +10316,9 @@ pub fn C_MessageVerifyFinal(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_VerifyMessageBegin)]
 pub fn C_VerifyMessageBegin(h_session: u32, _p_param: *mut u8, _ul_param_len: u32) -> u32 {
     require_init!();
+    if per_message_extended_form(&VERIFY_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -9954,6 +10341,9 @@ pub fn C_VerifyMessageNext(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
+    if per_message_extended_form(&VERIFY_STATE, h_session, _ul_param_len) {
+        return CKR_MECHANISM_PARAM_INVALID;
+    }
     if !VERIFY_STATE.shard(h_session).contains_key(&h_session) {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
@@ -10043,7 +10433,7 @@ pub fn C_VerifySignatureInit(
         };
         // Mechanism parameters — see parse_sign_mech_params (shared with
         // the other two *SignInit/*VerifyInit entry points).
-        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type, h_key) {
+        let (slh_ctx, slh_det, supplied) = match parse_sign_mech_params_op(p_mechanism, mech_type, h_key, SigOp::Verify) {
             Ok(v) => v,
             Err(rv) => return rv,
         };
@@ -10071,6 +10461,7 @@ pub fn C_VerifySignatureInit(
                     slh_ctx,
                     slh_det,
                     comp_prehash,
+                    supplied,
                 },
             );
         });
@@ -10083,6 +10474,7 @@ pub fn C_VerifySignature(h_session: u32, p_data: *mut u8, ul_data_len: u32) -> u
     require_init!();
     let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
+        set_supplied(&VERIFY_SUPPLIED, h_session, ctx.supplied.clone());
         VERIFY_STATE.with(|s| {
             s.shard(h_session).insert(
                 h_session,
@@ -10163,6 +10555,7 @@ pub fn C_VerifySignatureFinal(h_session: u32) -> u32 {
     }
     let state = VERIFY_SIG_STATE.shard(h_session).remove(&h_session);
     if let Some(ctx) = state {
+        set_supplied(&VERIFY_SUPPLIED, h_session, ctx.supplied.clone());
         // CKM_COMP_SIG: the streamed PH(M) is verified as the external-hash
         // form of the same operation (draft-ietf-lamps-pq-composite-sigs-19
         // §10.5), as in C_VerifyFinal.
@@ -17040,7 +17433,7 @@ pub fn C_VerifyRecover(
 /// k bytes (left-zero-padded if the numeric result is shorter). Uses
 /// `rsa::hazmat::rsa_decrypt` — the same raw primitive `RSA-SignaturePrimitive-2.0`
 /// (NIST ACVP) exercises; blinded (RNG passed) against timing side channels.
-fn rsa_x509_sign_recover(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+pub(crate) fn rsa_x509_sign_recover(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     // Native: raw RSASP1 in AWS-LC (blinded, constant-time). wasm32 below.
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -27212,11 +27605,12 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         crate::oplog::emit(
             "C_SignInit",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur={}",
+                "sess={} mech={} mech_id=0x{:08x} {}{} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
+                if rv == CKR_OK { supplied_log_field(&SIGN_SUPPLIED, h_session) } else { "" },
                 crate::oplog::rv_name(rv),
                 rv,
                 dur
@@ -27366,11 +27760,12 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         crate::oplog::emit(
             "C_VerifyInit",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur={}",
+                "sess={} mech={} mech_id=0x{:08x} {}{} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
+                if rv == CKR_OK { supplied_log_field(&VERIFY_SUPPLIED, h_session) } else { "" },
                 crate::oplog::rv_name(rv),
                 rv,
                 dur
@@ -27629,14 +28024,21 @@ pub fn C_EncapsulateKey(
         } else {
             unsafe { *pul_ciphertext_len }
         };
+        // A supplied m (shape 1, ACVP explicit-randomness plan M4) is
+        // recorded as `test_input=random`, the field C_SignInit uses.
+        let supplied = rv == CKR_OK
+            && !p_ciphertext.is_null()
+            && (mech == CKM_ML_KEM || mech == CKM_COMP_KEM)
+            && unsafe { ck_param::mech(p_mechanism).has_param() };
         crate::oplog::emit(
             "C_EncapsulateKey",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe={} rv={} rv_id=0x{:08x} dur={}",
+                "sess={} mech={} mech_id=0x{:08x} {}{} ct={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
+                if supplied { " test_input=random" } else { "" },
                 ct,
                 if p_ciphertext.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
@@ -30114,11 +30516,13 @@ mod p11_behaviour_tests;
 mod a3_session_state_tests;
 
 #[cfg(test)]
-mod ecdsa_explicit_k_ffi_tests {
-    //! CKM_PQCTODAY_ECDSA_EXPLICIT_K end-to-end through C_CreateObject /
+mod ecdsa_k_shape1_ffi_tests {
+    //! CKM_ECDSA with a supplied k — shape 1 of the ACVP explicit-randomness
+    //! model (plan M2; decision D1 retired CKM_PQCTODAY_ECDSA_EXPLICIT_K,
+    //! whose tests these were) — end to end through C_CreateObject /
     //! C_SignInit / C_Sign: NIST ACVP ECDSA SigGen (FIPS 186-5) byte-matches,
-    //! the parameter refusals, sabotage controls, and the key recovery the
-    //! mechanism exists to teach.
+    //! the parameter refusals, sabotage controls, the key recovery a known k
+    //! teaches, and the retired number's refusal.
     use super::*;
     use crate::native::test_lock;
 
@@ -30198,9 +30602,13 @@ mod ecdsa_explicit_k_ffi_tests {
         )
     }
 
+    /// The retired CKM_PQCTODAY_ECDSA_EXPLICIT_K number (vendor ledger:
+    /// retired, never reused).
+    const RETIRED_EXPLICIT_K: u32 = 0x8000_0015;
+
     fn init(session: u32, key: u32, k: Option<&[u8]>) -> u32 {
         let (p, l) = k.map(|k| (k.as_ptr() as usize, k.len())).unwrap_or((0, 0));
-        let mut m: [usize; 3] = [CKM_PQCTODAY_ECDSA_EXPLICIT_K as usize, p, l];
+        let mut m: [usize; 3] = [CKM_ECDSA as usize, p, l];
         C_SignInit(session, m.as_mut_ptr() as *mut u8, key)
     }
 
@@ -30232,7 +30640,7 @@ mod ecdsa_explicit_k_ffi_tests {
     }
 
     #[test]
-    fn explicit_k_reproduces_nist_acvp_siggen() {
+    fn ecdsa_with_k_reproduces_nist_acvp_siggen() {
         let _guard = test_lock::acquire();
         let session = setup();
         let v: serde_json::Value = serde_json::from_str(include_str!(
@@ -30287,7 +30695,7 @@ mod ecdsa_explicit_k_ffi_tests {
     }
 
     #[test]
-    fn explicit_k_sabotage_is_detected() {
+    fn ecdsa_with_k_sabotage_is_detected() {
         let _guard = test_lock::acquire();
         let session = setup();
         let v: serde_json::Value = serde_json::from_str(include_str!(
@@ -30348,15 +30756,21 @@ mod ecdsa_explicit_k_ffi_tests {
     }
 
     #[test]
-    fn explicit_k_refuses_bad_parameters_and_keys() {
+    fn ecdsa_with_k_refuses_bad_parameters_and_keys() {
         let _guard = test_lock::acquire();
         let session = setup();
         let d = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
         let priv_h = ec_private(session, OID_P256, &d);
         let good = unhex("a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60");
 
-        // No parameter, k = 0, k = n, k > n, and the wrong length.
-        assert_eq!(init(session, priv_h, None), CKR_MECHANISM_PARAM_INVALID);
+        // No parameter is now plain CKM_ECDSA (the standard behaviour) — the
+        // one assertion that inverts from the vendor mechanism, which
+        // required k. A NULL pointer with a length is still malformed.
+        assert_eq!(init(session, priv_h, None), CKR_OK);
+        SIGN_STATE.shard(session).remove(&session);
+        let mut m: [usize; 3] = [CKM_ECDSA as usize, 0, 32];
+        assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_PARAM_INVALID);
+        // k = 0, k = n, k > n, and the wrong length.
         assert_eq!(init(session, priv_h, Some(&[0u8; 32])), CKR_MECHANISM_PARAM_INVALID);
         assert_eq!(init(session, priv_h, Some(&unhex(N_P256))), CKR_MECHANISM_PARAM_INVALID);
         assert_eq!(init(session, priv_h, Some(&[0xffu8; 32])), CKR_MECHANISM_PARAM_INVALID);
@@ -30370,14 +30784,19 @@ mod ecdsa_explicit_k_ffi_tests {
         assert_eq!(init(session, priv_h, Some(&n_minus_1)), CKR_OK);
         SIGN_STATE.shard(session).remove(&session);
 
-        // Curves outside P-256/384/521: the two key codes §5.13.1 allows.
+        // k on a curve outside P-256/384/521: the two key codes §5.13.1
+        // allows, as for the retired mechanism. Without k those keys sign.
         let p224 = ec_private(session, OID_P224, &unhex("3f0c488e987c80be0fee521f8d90be6034ec69ae11ca72aa777481e8"));
         assert_eq!(init(session, p224, Some(&good[..28])), CKR_KEY_SIZE_RANGE);
+        assert_eq!(init(session, p224, None), CKR_OK);
+        SIGN_STATE.shard(session).remove(&session);
         let k256 = ec_private(session, OID_K256, &d);
         assert_eq!(init(session, k256, Some(&good)), CKR_KEY_TYPE_INCONSISTENT);
 
-        // Sign only, single-part. The verify refusal uses a real P-256 verify
-        // key (vector group 0's Q), so the mechanism is the only thing wrong.
+        // Verification draws no randomness: a parameter on C_VerifyInit /
+        // C_VerifySignatureInit is refused (new; it used to be ignored). The
+        // public key is real (vector group 0's Q), so the parameter is the
+        // only thing wrong.
         let v: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/acvp/ecdsa_siggen_explicit_k_test.json"
         ))
@@ -30389,21 +30808,106 @@ mod ecdsa_explicit_k_ffi_tests {
             &unhex(g0["qx"].as_str().unwrap()),
             &unhex(g0["qy"].as_str().unwrap()),
         );
-        let mut m: [usize; 3] = [CKM_PQCTODAY_ECDSA_EXPLICIT_K as usize, good.as_ptr() as usize, 32];
-        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, pub_h), CKR_MECHANISM_INVALID);
-        assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_INVALID);
+        let mut m: [usize; 3] = [CKM_ECDSA as usize, good.as_ptr() as usize, 32];
+        assert_eq!(C_VerifyInit(session, m.as_mut_ptr() as *mut u8, pub_h), CKR_MECHANISM_PARAM_INVALID);
+        let mut sig = [0u8; 64];
+        assert_eq!(
+            C_VerifySignatureInit(session, m.as_mut_ptr() as *mut u8, pub_h, sig.as_mut_ptr(), 64),
+            CKR_MECHANISM_PARAM_INVALID
+        );
+        let mut plain: [usize; 3] = [CKM_ECDSA as usize, 0, 0];
+        assert_eq!(C_VerifyInit(session, plain.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
+        VERIFY_STATE.shard(session).remove(&session);
+        // A message operation would sign every message under the one k.
+        assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_PARAM_INVALID);
+        // Raw CKM_ECDSA stays single-part with k.
         assert_eq!(init(session, priv_h, Some(&good)), CKR_OK);
-        assert_ne!(C_SignUpdate(session, good.as_ptr() as *mut u8, 32), CKR_OK);
+        assert_eq!(C_SignUpdate(session, good.as_ptr() as *mut u8, 32), CKR_OPERATION_NOT_INITIALIZED);
     }
 
+    /// k is a single-operation input: the next C_SignInit without it signs
+    /// with RFC 6979 again (P-256 is deterministic here), never with the
+    /// previous k — the write-on-every-Init rule of state::SIGN_SUPPLIED.
     #[test]
-    fn explicit_k_is_advertised_sign_only() {
-        let (min, max, flags) =
-            mechanism_info(CKM_PQCTODAY_ECDSA_EXPLICIT_K).expect("mechanism info");
-        assert_eq!((min, max), (256, 521));
+    fn supplied_k_does_not_leak_into_the_next_operation() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let d = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+        let priv_h = ec_private(session, OID_P256, &d);
+        let k = unhex("a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60");
+        let digest = [0x5au8; 32];
+        let with_k = sign(session, priv_h, &k, &digest);
+        let plain = |s: u32| {
+            assert_eq!(init(s, priv_h, None), CKR_OK);
+            let mut sig = vec![0u8; 132];
+            let mut len = sig.len() as u32;
+            assert_eq!(C_Sign(s, digest.as_ptr() as *mut u8, 32, sig.as_mut_ptr(), &mut len), CKR_OK);
+            sig.truncate(len as usize);
+            sig
+        };
+        let a = plain(session);
+        let b = plain(session);
+        assert_eq!(a, b, "RFC 6979: plain CKM_ECDSA on P-256 is deterministic");
+        assert_ne!(a, with_k, "the earlier k is not reused");
+        assert_eq!(sign(session, priv_h, &k, &digest), with_k);
+    }
+
+    /// Plan M4, visible use: the operation log's Init record carries
+    /// `test_input=…` exactly when a supplied value was taken, and nothing
+    /// otherwise (records of standard operations unchanged).
+    #[test]
+    fn operation_log_marks_supplied_inputs() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let d = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+        let priv_h = ec_private(session, OID_P256, &d);
+        let k = unhex("a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60");
+        assert_eq!(init(session, priv_h, Some(&k)), CKR_OK);
+        assert_eq!(supplied_log_field(&SIGN_SUPPLIED, session), " test_input=random");
+        SIGN_STATE.shard(session).remove(&session);
+        assert_eq!(init(session, priv_h, None), CKR_OK);
+        assert_eq!(supplied_log_field(&SIGN_SUPPLIED, session), "");
+        VERIFY_SUPPLIED.shard(session).insert(session, crate::state::SuppliedInput { random: None, internal: true });
+        assert_eq!(supplied_log_field(&VERIFY_SUPPLIED, session), " test_input=internal");
+        VERIFY_SUPPLIED.shard(session).insert(
+            session,
+            crate::state::SuppliedInput { random: Some(zeroize::Zeroizing::new(vec![1])), internal: true },
+        );
+        assert_eq!(supplied_log_field(&VERIFY_SUPPLIED, session), " test_input=random+internal");
+        VERIFY_SUPPLIED.shard(session).remove(&session);
+    }
+
+    /// Decision D1 / S4 proof of removal: the retired number is refused
+    /// everywhere and advertised nowhere; CKM_ECDSA is advertised for sign
+    /// and verify as before.
+    #[test]
+    fn retired_explicit_k_number_is_refused() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        assert!(!SUPPORTED_MECHS.contains(&RETIRED_EXPLICIT_K));
+        assert!(mechanism_info(RETIRED_EXPLICIT_K).is_none());
+        let mut info = [0usize; 3];
+        assert_eq!(C_GetMechanismInfo(0, RETIRED_EXPLICIT_K, info.as_mut_ptr() as *mut u8), CKR_MECHANISM_INVALID);
+        let mut n = 0u32;
+        assert_eq!(C_GetMechanismList(0, std::ptr::null_mut(), &mut n), CKR_OK);
+        let mut list = vec![0u32; n as usize];
+        assert_eq!(C_GetMechanismList(0, list.as_mut_ptr(), &mut n), CKR_OK);
+        assert!(!list.contains(&RETIRED_EXPLICIT_K), "not advertised");
+        assert!(list.contains(&CKM_ECDSA));
+
+        let d = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+        let priv_h = ec_private(session, OID_P256, &d);
+        let k = unhex("a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60");
+        let mut m: [usize; 3] = [RETIRED_EXPLICIT_K as usize, k.as_ptr() as usize, 32];
+        assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_INVALID);
+        assert_eq!(C_MessageSignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_INVALID);
+        let mut plain: [usize; 3] = [RETIRED_EXPLICIT_K as usize, 0, 0];
+        assert_eq!(C_SignInit(session, plain.as_mut_ptr() as *mut u8, priv_h), CKR_MECHANISM_INVALID);
+        assert!(SIGN_STATE.shard(session).get(&session).is_none(), "no operation started");
+        let (min, max, flags) = mechanism_info(CKM_ECDSA).expect("CKM_ECDSA info");
+        assert_eq!((min, max), (224, 521));
         assert_ne!(flags & 0x0000_0800, 0, "CKF_SIGN");
-        assert_eq!(flags & 0x0000_2000, 0, "no CKF_VERIFY");
-        assert!(SUPPORTED_MECHS.contains(&CKM_PQCTODAY_ECDSA_EXPLICIT_K));
+        assert_ne!(flags & 0x0000_2000, 0, "CKF_VERIFY");
     }
 }
 

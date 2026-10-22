@@ -804,15 +804,13 @@ pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
 // ck_param::hpke_params.
 pub const CKM_HPKE_KEM_KEY_PAIR_GEN: u32 = 0x8000_0013;
 pub const CKM_HPKE: u32 = 0x8000_0014;
-// ECDSA with a CALLER-SUPPLIED nonce k — a deliberate key-recovery primitive
-// for teaching (SECURITY.md, "Deliberate key-recovery primitive"). Same input
-// as CKM_ECDSA (the caller's digest); pParameter is k itself, big-endian,
-// exactly the curve's order length, 1 <= k < n. Anyone who knows k and one
-// signature recovers the private key: d = r^-1 (s*k - z) mod n. Sign only,
-// single-part, P-256/P-384/P-521. Allocated in the priv vendor ledger
-// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in
-// src/lib/vendor_mechanisms.h.
-pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
+// 0x8000_0015 was CKM_PQCTODAY_ECDSA_EXPLICIT_K (ECDSA with a caller-supplied
+// nonce k). RETIRED, no alias (owner decision D1, 21 Oct 2026, ACVP
+// explicit-randomness plan S4): k is now the optional shape-1 parameter of
+// standard CKM_ECDSA on C_SignInit. The number stays allocated in the vendor
+// ledger and is never reused; the engine refuses it and does not advertise it
+// (ffi::ecdsa_k_shape1_ffi_tests::retired_explicit_k_number_is_refused).
+pub const RETIRED_VENDOR_MECHANISMS: &[u32] = &[0x8000_0015];
 // K0B constrained hierarchy mechanisms (private-authority reservation,
 // landed in pqctoday-priv main by PR #147 (merge 62044042; commits 7c497c34, 5165c313; formerly 36340f93/f2e5cfa)). Engine-internal only: they appear in function
 // keys' CKA_ALLOWED_MECHANISMS but are deliberately ABSENT from
@@ -1292,9 +1290,6 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // discover them (gap-closure finding E19, 2026-09-25).
     CKM_HPKE_KEM_KEY_PAIR_GEN,
     CKM_HPKE,
-    // Explicit-nonce ECDSA — deliberate key-recovery teaching primitive
-    // (see the constant's comment). Both engines.
-    CKM_PQCTODAY_ECDSA_EXPLICIT_K,
     // Composite ML-KEM, PKCS#11 v3.3 working draft (comp_kem.md; see the
     // constants' comment). Rust engine only; all 12 sets (brainpool with
     // cargo feature `brainpool`, default on).
