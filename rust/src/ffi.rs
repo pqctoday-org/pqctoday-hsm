@@ -9215,6 +9215,26 @@ fn C_Sign_impl(
             return CKR_OK;
         }
 
+        // Owner decision D7 (C++ parity): a PH(M) of the wrong length for
+        // the generic pre-hash mechanisms is CKR_DATA_LEN_RANGE at the real
+        // C_Sign — after the size query above and after the buffer-size
+        // check — and ends the operation.
+        if mech == CKM_HASH_ML_DSA || mech == CKM_HASH_SLH_DSA {
+            if let Some(hash) = GENERIC_HASH_STATE.shard(h_session).get(&h_session).copied() {
+                let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
+                if let Err(rv) = generic_phm_len_ok(hash, msg) {
+                    let need = get_sig_len(mech, hkey);
+                    if *pul_signature_len < need {
+                        *pul_signature_len = need;
+                        return CKR_BUFFER_TOO_SMALL;
+                    }
+                    SIGN_STATE.shard(h_session).remove(&h_session);
+                    SIGN_SUPPLIED.shard(h_session).remove(&h_session);
+                    return rv;
+                }
+            }
+        }
+
         // ── HSS/LMS stateful sign — single source of truth for the
         // leaf advance-and-persist core lives in `native::hbs`, shared
         // with the KMIP-facing `native::sign` path (see that module's
@@ -9735,6 +9755,10 @@ fn C_Verify_impl(
     let fixed_len = match mech {
         m if m == CKM_ML_DSA
             || is_prehash_ml_dsa(m)
+            // D7 (C++ parity): the signature-length check comes before the
+            // PH(M) length check for the generic pre-hash mechanisms too.
+            || m == CKM_HASH_ML_DSA
+            || m == CKM_HASH_SLH_DSA
             || m == CKM_SLH_DSA
             || is_prehash_slh_dsa(m)
             || m == CKM_EDDSA

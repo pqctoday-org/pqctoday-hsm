@@ -861,6 +861,11 @@ fn internal_encoding_rejects_invalid_signatures() {
         assert_eq!(C_VerifySignatureInit(session, mechanism(mech, &[]).as_ptr() as *mut u8, hp, short2.as_mut_ptr(), short2.len() as u32), CKR_OK);
         assert_eq!(C_VerifySignature(session, m.as_ptr() as *mut u8, m.len() as u32), CKR_SIGNATURE_LEN_RANGE, "standard C_VerifySignature, wrong length");
         assert_eq!(verify(session, mech, &[], hp, m, &sig[..sig.len() - 1]), CKR_SIGNATURE_LEN_RANGE, "standard C_Verify, wrong length");
+        // Multi-part: C_VerifySignatureUpdate + C_VerifySignatureFinal.
+        let mut short3 = sig[..sig.len() - 1].to_vec();
+        assert_eq!(C_VerifySignatureInit(session, mechanism(mech, &[]).as_ptr() as *mut u8, hp, short3.as_mut_ptr(), short3.len() as u32), CKR_OK);
+        assert_eq!(C_VerifySignatureUpdate(session, m.as_ptr() as *mut u8, m.len() as u32), CKR_OK);
+        assert_eq!(C_VerifySignatureFinal(session), CKR_SIGNATURE_LEN_RANGE, "C_VerifySignatureFinal, wrong length");
         assert_eq!(verify(session, mech, &internal, hp, b"another M-prime", &sig), CKR_SIGNATURE_INVALID);
         // Not an external-interface signature over the same bytes.
         assert_eq!(verify(session, mech, &[], hp, m, &sig), CKR_SIGNATURE_INVALID);
@@ -967,7 +972,12 @@ fn d7_wrong_phm_length_is_data_len_range() {
     let hdp = public_key(session, CKK_ML_DSA, dps, &dpk, CKA_VERIFY);
     let hs = private_key(session, CKK_SLH_DSA, sps, &ssk, false);
     let hsp = public_key(session, CKK_SLH_DSA, sps, &spk, CKA_VERIFY);
-    for (alg, digest) in [("SHA2-512/224", CKM_SHA512_224), ("SHA2-256", CKM_SHA256), ("SHA3-512", CKM_SHA3_512)] {
+    for (alg, digest) in [
+        ("SHA2-512/224", CKM_SHA512_224),
+        ("SHA2-512/256", CKM_SHA512_256),
+        ("SHA2-256", CKM_SHA256),
+        ("SHA3-512", CKM_SHA3_512),
+    ] {
         let phm = ph(alg, b"m");
         let std = ext_hash_ctx(0, &[], digest, &[], 0);
         for (generic, hk, hp, rlen) in [(CKM_HASH_ML_DSA, hd, hdp, 32usize), (CKM_HASH_SLH_DSA, hs, hsp, 16)] {
@@ -981,6 +991,36 @@ fn d7_wrong_phm_length_is_data_len_range() {
                 assert_eq!(sign(session, generic, &std, hk, bad).unwrap_err(), CKR_DATA_LEN_RANGE, "{alg} 0x{generic:x} sign len {}", bad.len());
                 assert_eq!(sign(session, generic, &with_rnd, hk, bad).unwrap_err(), CKR_DATA_LEN_RANGE, "{alg} sign+rnd len {}", bad.len());
                 assert_eq!(verify(session, generic, &std, hp, bad, &good), CKR_DATA_LEN_RANGE, "{alg} 0x{generic:x} verify len {}", bad.len());
+                // Ordering (C++ parity): the size query still succeeds; a
+                // short buffer is CKR_BUFFER_TOO_SMALL first; then
+                // CKR_DATA_LEN_RANGE ends the operation.
+                assert_eq!(sign_init(session, generic, &std, hk), CKR_OK);
+                let mut len = 0u32;
+                assert_eq!(C_Sign(session, bad.as_ptr() as *mut u8, bad.len() as u32, std::ptr::null_mut(), &mut len), CKR_OK);
+                let mut small = vec![0u8; 8];
+                let mut sl = 8u32;
+                assert_eq!(C_Sign(session, bad.as_ptr() as *mut u8, bad.len() as u32, small.as_mut_ptr(), &mut sl), CKR_BUFFER_TOO_SMALL);
+                let mut out = vec![0u8; len as usize];
+                assert_eq!(C_Sign(session, bad.as_ptr() as *mut u8, bad.len() as u32, out.as_mut_ptr(), &mut len), CKR_DATA_LEN_RANGE);
+                assert_eq!(C_Sign(session, phm.as_ptr() as *mut u8, phm.len() as u32, out.as_mut_ptr(), &mut len), CKR_OPERATION_NOT_INITIALIZED, "ended");
+                // Verify: the signature length is checked first.
+                assert_eq!(verify(session, generic, &std, hp, bad, &good[..good.len() - 1]), CKR_SIGNATURE_LEN_RANGE);
+                // C_VerifySignature and C_VerifySignatureFinal.
+                let m = mechanism(generic, &std);
+                let mut sg = good.clone();
+                assert_eq!(C_VerifySignatureInit(session, m.as_ptr() as *mut u8, hp, sg.as_mut_ptr(), sg.len() as u32), CKR_OK);
+                assert_eq!(C_VerifySignature(session, bad.as_ptr() as *mut u8, bad.len() as u32), CKR_DATA_LEN_RANGE);
+                let mut sshort = good[..good.len() - 1].to_vec();
+                assert_eq!(C_VerifySignatureInit(session, m.as_ptr() as *mut u8, hp, sshort.as_mut_ptr(), sshort.len() as u32), CKR_OK);
+                assert_eq!(C_VerifySignature(session, bad.as_ptr() as *mut u8, bad.len() as u32), CKR_SIGNATURE_LEN_RANGE);
+                assert_eq!(C_VerifySignatureInit(session, m.as_ptr() as *mut u8, hp, sg.as_mut_ptr(), sg.len() as u32), CKR_OK);
+                let rv = C_VerifySignatureUpdate(session, bad.as_ptr() as *mut u8, bad.len() as u32);
+                if rv == CKR_OK {
+                    assert_eq!(C_VerifySignatureFinal(session), CKR_DATA_LEN_RANGE, "{alg} VerifySignatureFinal");
+                } else {
+                    // Generic pre-hash is single-part for verify-signature (ml_dsa.md).
+                    assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
+                }
             }
             assert_eq!(verify(session, generic, &std, hp, &phm, &good), CKR_OK, "{alg}");
         }
