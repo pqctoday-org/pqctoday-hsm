@@ -101,6 +101,16 @@ fn trad_encaps(trad: TradKey, trad_pk: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<
         TradKey::Ec(super::composite::EcCurve::P256) => dhkem!(p256),
         TradKey::Ec(super::composite::EcCurve::P384) => dhkem!(p384),
         TradKey::Ec(super::composite::EcCurve::P521) => dhkem!(p521),
+        // brainpool (crypto::brainpool): the same DHKEM, §2.2.
+        TradKey::Ec(curve) => {
+            use rand::RngCore;
+            let c = curve.engine_curve();
+            if !crate::crypto::brainpool::validate_public(c, trad_pk) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let (eph_d, ct) = crate::crypto::brainpool::generate(c, &mut |b: &mut [u8]| rng.fill_bytes(b))?;
+            (ct, crate::crypto::brainpool::ecdh(c, &eph_d, trad_pk)?)
+        }
         TradKey::X25519 => {
             let peer: [u8; 32] = trad_pk.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
@@ -120,7 +130,6 @@ fn trad_encaps(trad: TradKey, trad_pk: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<
             let k = x448::x448(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
             (ct, Zeroizing::new(k.to_vec()))
         }
-        TradKey::Ec(_) => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
         TradKey::Ed25519 | TradKey::Ed448 => return Err(CKR_KEY_TYPE_INCONSISTENT),
     })
 }
@@ -172,13 +181,21 @@ fn trad_decaps(trad: TradKey, trad_sk: &[u8], trad_ct: &[u8]) -> Result<Zeroizin
             .ok_or(CKR_WRAPPED_KEY_INVALID)?;
             Zeroizing::new(z.as_bytes().to_vec())
         }
+        // brainpool: an off-curve or undecodable ephemeral point is invalid
+        // input, as for the NIST curves above.
+        TradKey::Ec(curve) => {
+            let d = super::composite_key::ec_private_key_scalar(curve, trad_sk).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+            crate::crypto::brainpool::ecdh(curve.engine_curve(), d, trad_ct).map_err(|rv| match rv {
+                CKR_ARGUMENTS_BAD => CKR_WRAPPED_KEY_INVALID,
+                rv => rv,
+            })?
+        }
         TradKey::X448 => {
             let k: [u8; 56] = trad_sk.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let k = Zeroizing::new(k);
             let eph: [u8; 56] = trad_ct.try_into().map_err(|_| CKR_WRAPPED_KEY_LEN_RANGE)?;
             Zeroizing::new(x448::x448(*k, eph).ok_or(CKR_WRAPPED_KEY_INVALID)?.to_vec())
         }
-        TradKey::Ec(_) => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
         TradKey::Ed25519 | TradKey::Ed448 => return Err(CKR_KEY_TYPE_INCONSISTENT),
     })
 }

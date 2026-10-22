@@ -42,7 +42,6 @@ use super::composite::{CompositeParams, CompositeSigParams, EcCurve, PreHash, Si
 use super::composite_key::{der_tlv, ec_private_key_scalar, oid_body, Layout};
 use super::CkRv;
 use crate::constants::*;
-use crate::crypto::handlers::{CURVE_P256, CURVE_P384, CURVE_P521};
 
 /// Maximum `ctx` length: "If len(ctx) > 255: return error" (§3.2 step 1,
 /// §3.3 step 1); `len(ctx)` is a single byte.
@@ -197,12 +196,7 @@ fn rsa_mechanism(c: SigClassical) -> (u32, Option<usize>) {
 /// The engine's `(CKM_ECDSA_SHAnnn, curve)` for an ECDSA row: §6
 /// "ecdsa-with-SHAnnn", whose hash tracks the curve, not PH.
 fn ecdsa_mechanism(curve: EcCurve, hash: TradHash) -> Result<(u32, u32), CkRv> {
-    let curve = match curve {
-        EcCurve::P256 => CURVE_P256,
-        EcCurve::P384 => CURVE_P384,
-        EcCurve::P521 => CURVE_P521,
-        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
-    };
+    let curve = curve.engine_curve();
     let mech = match hash {
         TradHash::Sha256 => CKM_ECDSA_SHA256,
         TradHash::Sha384 => CKM_ECDSA_SHA384,
@@ -224,7 +218,9 @@ fn ecdsa_raw_to_der(curve: EcCurve, raw: &[u8]) -> Result<Vec<u8>, CkRv> {
         EcCurve::P256 => der!(p256),
         EcCurve::P384 => der!(p384),
         EcCurve::P521 => der!(p521),
-        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => {
+            crate::crypto::brainpool::sig_raw_to_der(curve.engine_curve(), raw)?
+        }
     })
 }
 
@@ -238,7 +234,9 @@ fn ecdsa_der_to_raw(curve: EcCurve, der: &[u8]) -> Result<Vec<u8>, CkRv> {
         EcCurve::P256 => raw!(p256),
         EcCurve::P384 => raw!(p384),
         EcCurve::P521 => raw!(p521),
-        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => {
+            crate::crypto::brainpool::sig_der_to_raw(curve.engine_curve(), der)?
+        }
     })
 }
 

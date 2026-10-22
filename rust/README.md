@@ -142,9 +142,8 @@ permanent guarantee). The native Rust API is described in
 
 **PKCS#11 v3.3 working-draft features — not a conformance claim.** The
 engine also implements composite ML-KEM and composite ML-DSA
-(`CKK_COMP_KEM`/`CKK_COMP_SIG`, the five `CKM_COMP_*` mechanisms, 26 of
-the 30 parameter sets — not the 4 brainpool sets yet; module
-`src/native/composite*.rs`) and `CKA_KEYS_REMAINING` on XMSS/XMSS-MT keys,
+(`CKK_COMP_KEM`/`CKK_COMP_SIG`, the five `CKM_COMP_*` mechanisms, all 30
+parameter sets; module `src/native/composite*.rs`) and `CKA_KEYS_REMAINING` on XMSS/XMSS-MT keys,
 from the OASIS PKCS 11 TC's unpublished v3.3 working draft (commit
 `9ef73f9`). They are labelled "PKCS#11 v3.3 working draft" and the engine
 still reports Cryptoki 3.2.0. No v3.3 specification, profile or test cases
@@ -152,6 +151,19 @@ exist, so the v3.2 report above makes no claim about them, and nothing
 here claims v3.3 conformance. The evidence is the draft authors' test
 vectors (`kat/pkcs11-v33/`) and their reference code checking our output
 in both directions ([`kat/pkcs11-v33/validation/`](kat/pkcs11-v33/validation/README.md)).
+
+**Brainpool curves.** brainpoolP256r1 and brainpoolP384r1 (RFC 5639) work for
+plain `CKK_EC` keys (`CKM_EC_KEY_PAIR_GEN`, `CKM_ECDSA` and its hash
+variants, `CKM_ECDH1_DERIVE`, ECDH-as-KEM) and carry the four brainpool
+composite sets. They come from RustCrypto's `bp256`/`bp384` 0.14.0
+(`src/crypto/brainpool.rs`): pure Rust, constant-time field and scalar
+arithmetic, but **without a third-party audit**, unlike the AWS-LC code the
+native build uses for P-256/P-384 ECDH. Evidence: Project Wycheproof's
+brainpool ECDSA and ECDH files (`kat/wycheproof/`) and the LAMPS vectors.
+Cargo feature `brainpool`, on by default; it adds about 320 KB to the
+release browser bundle, so `./build-wasm-bundle.sh --no-brainpool` builds
+without it (the curves then answer `CKR_CURVE_NOT_SUPPORTED` and the four
+sets `CKR_PARAMETER_SET_NOT_SUPPORTED`). KMIP does not offer them yet.
 
 [`CK_ABI_NATIVE_COMPLIANCE_PLAN.md`](CK_ABI_NATIVE_COMPLIANCE_PLAN.md) is a
 **historical** plan document, explicitly marked superseded as of 2026-08-23 —

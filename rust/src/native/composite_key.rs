@@ -144,7 +144,8 @@ impl Layout {
 
 /// The parameter set of a composite key type, refusing what this engine cannot
 /// run: an unknown `CKA_PARAMETER_SET` value is not a parameter set at all
-/// (`unknown_rv`), a known but unsupported one (the brainpool sets) is
+/// (`unknown_rv`), a known one the engine does not run (the brainpool sets in
+/// a build without feature `brainpool`) is
 /// `CKR_PARAMETER_SET_NOT_SUPPORTED` ("This parameter set is not supported by
 /// this token", v3.3 `function_return_values.md`; listed for C_CreateObject
 /// and C_GenerateKeyPair in v3.2 §5.7.1 / §5.18.2 and v3.3
@@ -337,7 +338,13 @@ pub fn canonical_trad_private(trad: TradKey, sk: &[u8]) -> Result<Option<Zeroizi
         EcCurve::P256 => same_point!(p256),
         EcCurve::P384 => same_point!(p384),
         EcCurve::P521 => same_point!(p521),
-        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => {
+            let c = curve.engine_curve();
+            if !crate::crypto::brainpool::validate_public(c, embedded) {
+                return Err(BAD);
+            }
+            crate::crypto::brainpool::public_from_private(c, d).map_err(|_| BAD)? == embedded
+        }
     };
     if !same {
         return Err(BAD);
@@ -381,7 +388,9 @@ pub fn trad_public_from_private(trad: TradKey, sk: &[u8]) -> Result<Vec<u8>, CkR
                 EcCurve::P256 => ec_pub!(p256, d),
                 EcCurve::P384 => ec_pub!(p384, d),
                 EcCurve::P521 => ec_pub!(p521, d),
-                EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+                EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => {
+                    crate::crypto::brainpool::public_from_private(curve.engine_curve(), d).map_err(|_| BAD)?
+                }
             }
         }
         TradKey::X25519 => {
@@ -431,7 +440,9 @@ pub fn trad_public_is_valid(trad: TradKey, pk: &[u8]) -> bool {
                     EcCurve::P256 => p256::PublicKey::from_sec1_bytes(pk).is_ok(),
                     EcCurve::P384 => p384::PublicKey::from_sec1_bytes(pk).is_ok(),
                     EcCurve::P521 => p521::PublicKey::from_sec1_bytes(pk).is_ok(),
-                    EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => false,
+                    EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1 => {
+                        crate::crypto::brainpool::validate_public(curve.engine_curve(), pk)
+                    }
                 }
         }
         TradKey::X25519 => pk.len() == 32,
@@ -486,8 +497,12 @@ pub fn trad_generate(trad: TradKey) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CkR
         TradKey::Ec(EcCurve::P256) => ec_gen!(p256, EcCurve::P256),
         TradKey::Ec(EcCurve::P384) => ec_gen!(p384, EcCurve::P384),
         TradKey::Ec(EcCurve::P521) => ec_gen!(p521, EcCurve::P521),
-        TradKey::Ec(EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1) => {
-            return Err(CKR_PARAMETER_SET_NOT_SUPPORTED);
+        TradKey::Ec(curve @ (EcCurve::BrainpoolP256r1 | EcCurve::BrainpoolP384r1)) => {
+            use rand::RngCore;
+            let (d, pk) = crate::crypto::brainpool::generate(curve.engine_curve(), &mut |b: &mut [u8]| {
+                rng.fill_bytes(b)
+            })?;
+            (pk, Zeroizing::new(ec_private_key_der(curve, &d)))
         }
         TradKey::X25519 => {
             let sk = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
@@ -652,8 +667,8 @@ pub fn key_pair_attrs(layout: &Layout, pk: Vec<u8>, sk: Zeroizing<Vec<u8>>, keyg
 /// - a caller CKA_PUBLIC_KEY_INFO that is not the SPKI of the key derived
 ///   from CKA_VALUE (halves of different keys) → CKR_TEMPLATE_INCONSISTENT
 ///   (rule 5, attribute values that "are inconsistent");
-/// - a brainpool set → CKR_PARAMETER_SET_NOT_SUPPORTED (see
-///   [`supported_layout`]).
+/// - a set this build does not run (brainpool without feature `brainpool`)
+///   → CKR_PARAMETER_SET_NOT_SUPPORTED (see [`supported_layout`]).
 pub fn check_imported_key(class: Option<u32>, attrs: &mut Attributes) -> Result<(), CkRv> {
     let Some(key_type) = get_object_attr_u32_from(attrs, CKA_KEY_TYPE) else {
         return Ok(());

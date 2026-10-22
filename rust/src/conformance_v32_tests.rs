@@ -1390,15 +1390,40 @@ fn w1_ec_params_are_decoded_never_defaulted() {
     let _guard = test_lock::acquire();
     w_setup();
 
-    // brainpoolP256r1 — 1.3.36.3.3.2.8.1.1.7. A well-formed OID this token
-    // does not implement. It previously produced a P-256 key, stamped P-256,
-    // returning success.
-    let brainpool = oid(&[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07]);
-    let (rv, _, _) = gen_ec(Some(brainpool), CKM_EC_KEY_PAIR_GEN);
+    // brainpoolP512r1 — 1.3.36.3.3.2.8.1.1.13 (RFC 5639 §4.1). A well-formed
+    // OID this token does not implement. brainpoolP256r1 used to be this
+    // probe: it produced a P-256 key, stamped P-256, returning success.
+    let bp512 = oid(&[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d]);
+    let (rv, _, _) = gen_ec(Some(bp512), CKM_EC_KEY_PAIR_GEN);
     assert_eq!(
         rv, CKR_CURVE_NOT_SUPPORTED,
         "an unimplemented curve must be refused, not silently substituted"
     );
+
+    // brainpoolP256r1 / brainpoolP384r1 (1.3.36.3.3.2.8.1.1.7 / .11) are
+    // implemented (crypto::brainpool, feature `brainpool`): a genuine key on
+    // the named curve, CKA_EC_PARAMS read back as that curve's OID. Without
+    // the feature they are refused like P512r1.
+    for (last, n) in [(0x07u8, 32usize), (0x0b, 48)] {
+        let params = oid(&[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, last]);
+        let (rv, hp, hs) = gen_ec(Some(params.clone()), CKM_EC_KEY_PAIR_GEN);
+        if !crate::crypto::brainpool::ENABLED {
+            assert_eq!(rv, CKR_CURVE_NOT_SUPPORTED);
+            continue;
+        }
+        assert_eq!(rv, CKR_OK, "brainpool OID ending {last:#04x}");
+        assert_eq!(obj_attr(hs, CKA_VALUE).unwrap().len(), n);
+        assert_eq!(obj_attr(hp, CKA_EC_PARAMS), Some(params.clone()));
+        assert_eq!(obj_attr(hs, CKA_EC_PARAMS), Some(params));
+        assert_eq!(obj_attr(hp, CKA_EC_POINT).unwrap().len(), 2 + 1 + 2 * n);
+    }
+    let (rv, _, hs) = gen_ec(Some(curve_name("brainpoolP384r1")), CKM_EC_KEY_PAIR_GEN);
+    if crate::crypto::brainpool::ENABLED {
+        assert_eq!(rv, CKR_OK, "the brainpool curveName form");
+        assert_eq!(obj_attr(hs, CKA_VALUE).unwrap().len(), 48);
+    } else {
+        assert_eq!(rv, CKR_CURVE_NOT_SUPPORTED);
+    }
 
     // P-384 must be a genuine P-384 key.
     let (rv, hp, hs) = gen_ec(Some(oid(&[0x2b, 0x81, 0x04, 0x00, 0x22])), CKM_EC_KEY_PAIR_GEN);

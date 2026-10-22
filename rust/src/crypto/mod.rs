@@ -15,6 +15,8 @@ pub mod awslc_rsa;
 // see its module doc for the coverage matrix and the dispatch rule.
 #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
 pub mod awslc_pq;
+// brainpoolP256r1 / brainpoolP384r1 ECDSA and ECDH (native and wasm32).
+pub mod brainpool;
 pub mod handlers;
 // Expanded ML-DSA private keys for repeated signing (native only, like the
 // AWS-LC cache: the wasm bundle keeps decoding per call).

@@ -90,7 +90,7 @@
       "status": "legal",
       "scenario": "errors.unsupported_curve",
       "path": "brainpool*",
-      "justification": "C++ implements brainpoolP256r1 and generates a genuine brainpool key (the harness reads back OID 1.3.36.3.3.2.8.1.1.7, not a substituted P-256); Rust does not implement the curve and correctly answers CKR_CURVE_NOT_SUPPORTED. Which curves a token implements is a product decision.",
+      "justification": "The errors.unsupported_curve probe asks for brainpoolP512r1 (OID 1.3.36.3.3.2.8.1.1.13) since 2026-10-21. C++ implements the brainpool curves through OpenSSL and is expected to generate a genuine brainpoolP512r1 key (the harness reads the OID back, so a substituted P-256 would show); Rust implements only brainpoolP256r1 and brainpoolP384r1 and correctly answers CKR_CURVE_NOT_SUPPORTED for P512r1. Which curves a token implements is a product decision. Until 2026-10-21 the probe used brainpoolP256r1, for which C++ was measured to read back OID 1.3.36.3.3.2.8.1.1.7; Rust now implements that curve too, so the engines no longer diverge there.",
       "citation": "PKCS#11 v3.2 §6.3: an unsupported curve should fail CKR_CURVE_NOT_SUPPORTED — a requirement on the refusal, not on the coverage. Profiles v3.2 mandates no curve."
     },
     {

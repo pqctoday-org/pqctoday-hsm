@@ -49,25 +49,26 @@ every per-vector result and a summary.
 
 ## V5: our output, checked by the reference code (`v5/`)
 
-The engine generated, for each supported set, a fresh key pair; for each of
-the 16 signature sets two signatures over the vector file's `m` (without and
-with its `ctx`), and for each of the 10 KEM sets one encapsulation and the
-engine's shared secret. The generator is the ignored test
+The engine generated, for each set, a fresh key pair; for each of the 18
+signature sets two signatures over the vector file's `m` (without and with
+its `ctx`), and for each of the 12 KEM sets one encapsulation and the
+engine's shared secret. (First run 2026-10-21 over the 26 non-brainpool
+sets; re-run the same day over all 30 once the engine had brainpoolP256r1
+and brainpoolP384r1. The results here are the 30-set run.) The generator is the ignored test
 `v5_fixture_generator` in `rust/src/composite_sig_tests.rs`. The reference
 code then checked them (`v5/scripts/run_v5.sh`, results in
 `v5/results/results.json`):
 
 | Check | What it proves | Result |
 |---|---|---|
-| reference `verify(s, m)` under our `pk` | our CKM_COMP_SIG signing (M', label, both halves, serialisation) matches the draft authors' | 16/16 |
-| reference `verify(sWithContext, m, ctx)` under our `pk` | the same, with a context | 16/16 |
-| `sWithContext` without `ctx`, `s` with `ctx`, `s` over another message: rejected | the reference is not accepting everything | 16/16 each |
-| reference `decap(c)` with our `dk` equals our `k` | our encapsulation and our combiner agree with the authors' | 10/10 |
-| reference public key from our `dk` equals our `ek` | our key generation and serialisation agree | 10/10 |
-| `c` with its last byte flipped: the reference does not return our `k` | the check can fail | 10/10 |
+| reference `verify(s, m)` under our `pk` | our CKM_COMP_SIG signing (M', label, both halves, serialisation) matches the draft authors' | 18/18 |
+| reference `verify(sWithContext, m, ctx)` under our `pk` | the same, with a context | 18/18 |
+| `sWithContext` without `ctx`, `s` with `ctx`, `s` over another message: rejected | the reference is not accepting everything | 18/18 each |
+| reference `decap(c)` with our `dk` equals our `k` | our encapsulation and our combiner agree with the authors' | 12/12 |
+| reference public key from our `dk` equals our `ek` | our key generation and serialisation agree | 12/12 |
+| `c` with its last byte flipped: the reference does not return our `k` | the check can fail | 12/12 |
 
-The four brainpool sets are not supported by the engine yet and are not in
-V5. `v5/engine-signatures.json` is the public part of the V5 input (our
+`v5/engine-signatures.json` is the public part of the V5 input (our
 public keys and signatures, marked self-generated, never to be mistaken for
 upstream vectors). The KEM half of the input holds the private keys and
 shared secrets of throwaway keys and is not committed; its sha256 is recorded.
@@ -77,7 +78,7 @@ shared secrets of throwaway keys and is not committed; its sha256 is recorded.
 At `d77e754` the KEM reference's `CompositeKEM.loadKeyPair` unpacks three
 values (`a, _, b = self.deserializePrivateKey(private_bytes)`) from a
 function that returns two (`mlkemSeed, tradSK`), so it raises for every
-composite key: `ref_loadKeyPair_as_shipped` is 0/12 in V4 and 0/10 in V5.
+composite key: `ref_loadKeyPair_as_shipped` is 0/12 in V4 and 0/12 in V5.
 Both runs use a three-line loader shim built from the reference's own
 functions (split `dk` with its `deserializePrivateKey`, load each half with
 the component `loadKeyPair`); `decap()` and the combiner are the reference's,

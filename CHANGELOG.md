@@ -30,18 +30,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     IETF drafts draft-ietf-lamps-pq-composite-kem-23 and draft-ietf-lamps-pq-composite-sigs-19. Private keys are
     sensitive and non-extractable by default. An imported key has both public halves re-derived and checked.
   - Composite ML-KEM (`CKM_COMP_KEM_KEY_PAIR_GEN`, `CKM_COMP_KEM`) through `C_EncapsulateKey` and
-    `C_DecapsulateKey` for 10 of the 12 sets (ML-KEM-768/1024 with RSA-OAEP, ECDH P-256/P-384/P-521, X25519 or
-    X448). The shared secret is the draft's SHA3-256 combiner over both secrets, the traditional ciphertext and
+    `C_DecapsulateKey` for all 12 sets (ML-KEM-768/1024 with RSA-OAEP, ECDH P-256/P-384/P-521,
+    brainpoolP256r1/P384r1, X25519 or X448). The shared secret is the draft's SHA3-256 combiner over both secrets, the traditional ciphertext and
     public key and the set's label, and comes back as a key handle.
-  - Composite ML-DSA (`CKM_COMP_SIG_KEY_PAIR_GEN`, `CKM_COMP_SIG`, `CKM_COMP_SIG_EXTERNAL_HASH`) for 16 of the 18
-    sets (ML-DSA-44/65/87 with RSASSA-PSS, RSA PKCS#1 v1.5, ECDSA P-256/P-384/P-521, Ed25519 or Ed448), single-
-    and multi-part, with an optional context string.
-  - The four brainpool sets report `CKR_PARAMETER_SET_NOT_SUPPORTED` for now.
+  - Composite ML-DSA (`CKM_COMP_SIG_KEY_PAIR_GEN`, `CKM_COMP_SIG`, `CKM_COMP_SIG_EXTERNAL_HASH`) for all 18
+    sets (ML-DSA-44/65/87 with RSASSA-PSS, RSA PKCS#1 v1.5, ECDSA P-256/P-384/P-521 or brainpoolP256r1/P384r1,
+    Ed25519 or Ed448), single- and multi-part, with an optional context string.
   - Checked against the draft authors' test vectors for every set (decapsulation and verification), and against
     the draft authors' own reference code in both directions: their code verifies the engine's signatures and
     decapsulates the engine's ciphertexts to the engine's secret. The evidence is in
     `rust/kat/pkcs11-v33/validation/`.
   - The C++ engine does not have these mechanisms (recorded in `tests/differential/exceptions.json`).
+- **Rust engine: brainpoolP256r1 and brainpoolP384r1.** Plain EC keys on these two curves can be generated,
+  imported, used for ECDSA (`CKM_ECDSA` and its hash variants) and for ECDH (`CKM_ECDH1_DERIVE`, ECDH-as-KEM),
+  and they complete the composite sets above (30 of 30). The curves come from RustCrypto's `bp256`/`bp384`
+  0.14.0: pure Rust, constant-time, but not independently audited. They are checked against Project Wycheproof's
+  brainpool ECDSA and ECDH files and the draft authors' vectors and reference code. They add about 320 KB to the
+  browser bundle (+9.8%), so they sit behind the cargo feature `brainpool`, on by default;
+  `rust/build-wasm-bundle.sh --no-brainpool` leaves them out. brainpoolP512r1 and the twisted curves are still
+  refused with `CKR_CURVE_NOT_SUPPORTED`. KMIP does not offer brainpool keys yet.
 - **Rust engine: XMSS and XMSS^MT private keys report `CKA_KEYS_REMAINING`.** The v3.3 working draft gives these
   keys the standard remaining-signatures attribute already used by HSS. It is set at key generation, goes down with
   every signature, and is capped at 2^32-1 for trees larger than that.

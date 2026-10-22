@@ -33,8 +33,9 @@
 //!
 //! This module holds data only; the key objects are `native::composite_key`,
 //! the KEM is `native::composite_kem` and the signature is
-//! `native::composite_sig`. The four brainpool rows are
-//! `supported: false` until the engine has brainpool curves.
+//! `native::composite_sig`. Every row is supported; the four brainpool
+//! rows run on `crypto::brainpool` and follow its cargo feature `brainpool`
+//! (default on).
 
 use crate::constants::{
     CKK_COMP_KEM, CKK_COMP_SIG, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1,
@@ -222,6 +223,20 @@ impl EcCurve {
         }
     }
 
+    /// The engine's curve ID (`CKA_PRIV_PARAM_SET`), the one
+    /// `crypto::handlers::sign_ecdsa` and `crypto::brainpool` dispatch on.
+    pub fn engine_curve(self) -> u32 {
+        use crate::crypto::brainpool::{CURVE_BP256R1, CURVE_BP384R1};
+        use crate::crypto::handlers::{CURVE_P256, CURVE_P384, CURVE_P521};
+        match self {
+            EcCurve::P256 => CURVE_P256,
+            EcCurve::P384 => CURVE_P384,
+            EcCurve::P521 => CURVE_P521,
+            EcCurve::BrainpoolP256r1 => CURVE_BP256R1,
+            EcCurve::BrainpoolP384r1 => CURVE_BP384R1,
+        }
+    }
+
     /// Field element width in bytes.
     pub fn field_bytes(self) -> usize {
         match self {
@@ -285,8 +300,8 @@ pub struct CompositeSigParams {
     pub pre_hash: PreHash,
     pub classical: SigClassical,
     pub classical_sizes: ComponentSizes,
-    /// Whether the engine can run this set. False for brainpool until the
-    /// engine has brainpool curves.
+    /// Whether the engine can run this set: all 30 with the default
+    /// features; the brainpool sets need feature `brainpool`.
     pub supported: bool,
 }
 
@@ -306,8 +321,8 @@ pub struct CompositeKemParams {
     pub ml_kem: u32,
     pub classical: KemClassical,
     pub classical_sizes: ComponentSizes,
-    /// Whether the engine can run this set. False for brainpool until the
-    /// engine has brainpool curves.
+    /// Whether the engine can run this set: all 30 with the default
+    /// features; the brainpool sets need feature `brainpool`.
     pub supported: bool,
 }
 
@@ -550,7 +565,7 @@ pub const COMPOSITE_SIG_SETS: [CompositeSigParams; 18] = [
         pre_hash: PreHash::Sha512,
         classical: SigClassical::Ecdsa { curve: EcCurve::BrainpoolP256r1, hash: TradHash::Sha256 },
         classical_sizes: ECDSA_BP256,
-        supported: false,
+        supported: crate::crypto::brainpool::ENABLED,
     },
     CompositeSigParams {
         ckp: CKP_COMP_SIG_MLDSA65_ED25519_SHA512,
@@ -583,7 +598,7 @@ pub const COMPOSITE_SIG_SETS: [CompositeSigParams; 18] = [
         pre_hash: PreHash::Sha512,
         classical: SigClassical::Ecdsa { curve: EcCurve::BrainpoolP384r1, hash: TradHash::Sha384 },
         classical_sizes: ECDSA_BP384,
-        supported: false,
+        supported: crate::crypto::brainpool::ENABLED,
     },
     CompositeSigParams {
         ckp: CKP_COMP_SIG_MLDSA87_ED448_SHAKE256,
@@ -703,7 +718,7 @@ pub const COMPOSITE_KEM_SETS: [CompositeKemParams; 12] = [
         ml_kem: CKP_ML_KEM_768,
         classical: KemClassical::Ecdh { curve: EcCurve::BrainpoolP256r1 },
         classical_sizes: ECDH_BP256,
-        supported: false,
+        supported: crate::crypto::brainpool::ENABLED,
     },
     CompositeKemParams {
         ckp: CKP_COMP_KEM_MLKEM1024_RSA3072,
@@ -733,7 +748,7 @@ pub const COMPOSITE_KEM_SETS: [CompositeKemParams; 12] = [
         ml_kem: CKP_ML_KEM_1024,
         classical: KemClassical::Ecdh { curve: EcCurve::BrainpoolP384r1 },
         classical_sizes: ECDH_BP384,
-        supported: false,
+        supported: crate::crypto::brainpool::ENABLED,
     },
     CompositeKemParams {
         ckp: CKP_COMP_KEM_MLKEM1024_X448,
@@ -978,15 +993,20 @@ mod tests {
         let labels: BTreeSet<&[u8]> =
             COMPOSITE_SIG_SETS.iter().map(|p| p.label).chain(COMPOSITE_KEM_SETS.iter().map(|p| p.label)).collect();
         assert_eq!(labels.len(), 30);
-        // Brainpool is the only unsupported family for now.
+        // All 30 sets run; without feature `brainpool`, all but the four
+        // brainpool sets.
         let unsupported: Vec<&str> = COMPOSITE_SIG_SETS
             .iter()
             .filter(|p| !p.supported)
             .map(|p| p.name)
             .chain(COMPOSITE_KEM_SETS.iter().filter(|p| !p.supported).map(|p| p.name))
             .collect();
-        assert_eq!(unsupported.len(), 4);
-        assert!(unsupported.iter().all(|n| n.contains("brainpool")), "{unsupported:?}");
+        if crate::crypto::brainpool::ENABLED {
+            assert!(unsupported.is_empty(), "{unsupported:?}");
+        } else {
+            assert_eq!(unsupported.len(), 4);
+            assert!(unsupported.iter().all(|n| n.contains("brainpool")), "{unsupported:?}");
+        }
     }
 
     fn draft_size(v: &Value) -> Size {

@@ -3068,7 +3068,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x4041 (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_kem.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-KEM per draft-ietf-lamps-pq-composite-kem-23 through C_EncapsulateKey/C_DecapsulateKey, no parameter; 10 of 12 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_kem.md).",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x4041 (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_kem.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-KEM per draft-ietf-lamps-pq-composite-kem-23 through C_EncapsulateKey/C_DecapsulateKey, no parameter; all 12 parameter sets (the two brainpool sets with cargo feature brainpool, default on). Rust engine only. Key-size range: composite public-key bytes (comp_kem.md).",
       "rust_min": 1216,
       "rust_max": 1966
     },
@@ -3076,7 +3076,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x4040 (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_kem.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Generates single-object CKK_COMP_KEM key pairs for 10 of 12 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_kem.md).",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x4040 (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_kem.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Generates single-object CKK_COMP_KEM key pairs for all 12 parameter sets (the two brainpool sets with cargo feature brainpool, default on). Rust engine only. Key-size range: composite public-key bytes (comp_kem.md).",
       "rust_min": 1216,
       "rust_max": 1966
     },
@@ -3084,7 +3084,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x403e (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-DSA per draft-ietf-lamps-pq-composite-sigs-19 through C_Sign/C_Verify (single- and multi-part, the pre-hash streamed) and C_VerifySignature, optional CK_SIGN_ADDITIONAL_CONTEXT; 16 of 18 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x403e (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-DSA per draft-ietf-lamps-pq-composite-sigs-19 through C_Sign/C_Verify (single- and multi-part, the pre-hash streamed) and C_VerifySignature, optional CK_SIGN_ADDITIONAL_CONTEXT; all 18 parameter sets (the two brainpool sets with cargo feature brainpool, default on). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
       "rust_min": 1344,
       "rust_max": 3118
     },
@@ -3092,7 +3092,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x403f (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-DSA over a caller-supplied PH(M) of exactly the set's pre-hash length (draft-ietf-lamps-pq-composite-sigs-19 §10.5), single-part only, optional CK_SIGN_ADDITIONAL_CONTEXT; 16 of 18 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x403f (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Composite ML-DSA over a caller-supplied PH(M) of exactly the set's pre-hash length (draft-ietf-lamps-pq-composite-sigs-19 §10.5), single-part only, optional CK_SIGN_ADDITIONAL_CONTEXT; all 18 parameter sets (the two brainpool sets with cargo feature brainpool, default on). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
       "rust_min": 1344,
       "rust_max": 3118
     },
@@ -3100,7 +3100,7 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x403d (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Generates single-object CKK_COMP_SIG key pairs for 16 of 18 parameter sets (brainpool not yet). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
+      "note": "PKCS#11 v3.3 working draft mechanism 0x403d (OASIS PKCS 11 TC commit 9ef73f9, working/headers/pkcs11t.h; working/doc/spec/comp_sig.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Generates single-object CKK_COMP_SIG key pairs for all 18 parameter sets (the two brainpool sets with cargo feature brainpool, default on). Rust engine only. Key-size range: composite public-key bytes (comp_sig.md).",
       "rust_min": 1344,
       "rust_max": 3118
     },

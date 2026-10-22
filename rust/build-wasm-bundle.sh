@@ -16,10 +16,14 @@
 # Usage:  ./build-wasm-bundle.sh                         # shipped release, no KAT hooks
 #         ./build-wasm-bundle.sh --dev                   # shipped-shape dev build
 #         ./build-wasm-bundle.sh --acvp-test [--dev]     # test-only deterministic hooks
+#         ./build-wasm-bundle.sh --no-brainpool [...]    # without the brainpool curves
+#           (cargo feature `brainpool`, default on; about 320 KB of the release
+#           .wasm, see rust/Cargo.toml. On wasm32 --no-default-features drops
+#           nothing else: awslc-pq and fhe-custody compile nothing there.)
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROFILE="release"; OUT="pkg-release"; ACVP_TEST=0
+PROFILE="release"; OUT="pkg-release"; ACVP_TEST=0; FEATURE_ARGS=()
 # Both fips204 ML-DSA keygen (unoptimized builds) and
 # CKM_PQCTODAY_FRODOKEM_ENCAPSULATE / CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE
 # (BSI TR-02102-1 §2.4.1/§2.4.2, ffi.rs — even in --release) overflow the
@@ -42,6 +46,7 @@ for arg in "$@"; do
   case "$arg" in
     --dev) PROFILE="dev"; OUT="pkg" ;;
     --acvp-test) ACVP_TEST=1 ;;
+    --no-brainpool) FEATURE_ARGS=(--no-default-features) ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -79,10 +84,10 @@ echo "▶ wasm-pack build ($PROFILE, target=bundler, acvp-test=$ACVP_TEST, toolc
 # explicitly named test build enables deterministic KAT hooks.
 if [[ "$ACVP_TEST" == "1" ]]; then
   PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$EXTRA_RUSTFLAGS" \
-    wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- --features acvp
+    wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- --features acvp ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}
 else
   PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$EXTRA_RUSTFLAGS" \
-    wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE"
+    wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}
 fi
 
 # ── Re-apply the __wbg_get_memory post-build shim (idempotent) ───────────────

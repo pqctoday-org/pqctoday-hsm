@@ -1296,11 +1296,13 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // (see the constant's comment). Both engines.
     CKM_PQCTODAY_ECDSA_EXPLICIT_K,
     // Composite ML-KEM, PKCS#11 v3.3 working draft (comp_kem.md; see the
-    // constants' comment). Rust engine only; the 10 non-brainpool sets.
+    // constants' comment). Rust engine only; all 12 sets (brainpool with
+    // cargo feature `brainpool`, default on).
     CKM_COMP_KEM_KEY_PAIR_GEN,
     CKM_COMP_KEM,
     // Composite ML-DSA, PKCS#11 v3.3 working draft (comp_sig.md). Rust
-    // engine only; the 16 non-brainpool sets.
+    // engine only; all 18 sets (brainpool with cargo feature `brainpool`,
+    // default on).
     CKM_COMP_SIG_KEY_PAIR_GEN,
     CKM_COMP_SIG,
     CKM_COMP_SIG_EXTERNAL_HASH,
