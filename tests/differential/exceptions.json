@@ -33,6 +33,51 @@
       "citation": "PKCS#11 v3.2 §3.2 Slot and token types, CK_TOKEN_INFO: \"the fields ulMaxSessionCount and ulMaxRwSessionCount can have the special value CK_EFFECTIVELY_INFINITE, which means that there is no practical limit\". CORRECTED 2026-09-07 (H1): this cited §5.5.4, which is C_WaitForSlotEvent. On the version fields the spec is SILENT rather than permissive — it says only \"version number of hardware\" and \"version number of firmware\", imposing nothing, so the divergence is unconstrained rather than explicitly allowed."
     },
     {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-COMP-SIG-KEY-PAIR-GEN",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x0000403d",
+      "rust": "present",
+      "justification": "ADDED 2026-10-21. CKM_COMP_SIG_KEY_PAIR_GEN (0x0000403d) is a PKCS#11 v3.3 working-draft composite mechanism (composite ML-DSA / composite ML-KEM over draft-ietf-lamps-pq-composite-sigs-19 / -kem-23). The Rust engine implements and advertises it, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; the C++ engine does not implement it. The harness prints it as CKM_0x0000403d because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no composite mechanisms. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so a composite mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no composite mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/headers/pkcs11t.h#L1225 defines CKM_COMP_SIG_KEY_PAIR_GEN = 0x0000403d; working/doc/spec/comp_sig.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-COMP-SIG",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x0000403e",
+      "rust": "present",
+      "justification": "ADDED 2026-10-21. CKM_COMP_SIG (0x0000403e) is a PKCS#11 v3.3 working-draft composite mechanism (composite ML-DSA / composite ML-KEM over draft-ietf-lamps-pq-composite-sigs-19 / -kem-23). The Rust engine implements and advertises it, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; the C++ engine does not implement it. The harness prints it as CKM_0x0000403e because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no composite mechanisms. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so a composite mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no composite mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/headers/pkcs11t.h#L1226 defines CKM_COMP_SIG = 0x0000403e; working/doc/spec/comp_sig.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-COMP-SIG-EXTERNAL-HASH",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x0000403f",
+      "rust": "present",
+      "justification": "ADDED 2026-10-21. CKM_COMP_SIG_EXTERNAL_HASH (0x0000403f) is a PKCS#11 v3.3 working-draft composite mechanism (composite ML-DSA / composite ML-KEM over draft-ietf-lamps-pq-composite-sigs-19 / -kem-23). The Rust engine implements and advertises it, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; the C++ engine does not implement it. The harness prints it as CKM_0x0000403f because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no composite mechanisms. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so a composite mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no composite mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/headers/pkcs11t.h#L1227 defines CKM_COMP_SIG_EXTERNAL_HASH = 0x0000403f; working/doc/spec/comp_sig.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-COMP-KEM-KEY-PAIR-GEN",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x00004040",
+      "rust": "present",
+      "justification": "ADDED 2026-10-21. CKM_COMP_KEM_KEY_PAIR_GEN (0x00004040) is a PKCS#11 v3.3 working-draft composite mechanism (composite ML-DSA / composite ML-KEM over draft-ietf-lamps-pq-composite-sigs-19 / -kem-23). The Rust engine implements and advertises it, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; the C++ engine does not implement it. The harness prints it as CKM_0x00004040 because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no composite mechanisms. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so a composite mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no composite mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/headers/pkcs11t.h#L1228 defines CKM_COMP_KEM_KEY_PAIR_GEN = 0x00004040; working/doc/spec/comp_kem.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-COMP-KEM",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x00004041",
+      "rust": "present",
+      "justification": "ADDED 2026-10-21. CKM_COMP_KEM (0x00004041) is a PKCS#11 v3.3 working-draft composite mechanism (composite ML-DSA / composite ML-KEM over draft-ietf-lamps-pq-composite-sigs-19 / -kem-23). The Rust engine implements and advertises it, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; the C++ engine does not implement it. The harness prints it as CKM_0x00004041 because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no composite mechanisms. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so a composite mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no composite mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/headers/pkcs11t.h#L1229 defines CKM_COMP_KEM = 0x00004041; working/doc/spec/comp_kem.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
       "id": "LEGAL-VENDOR-MECHANISMS",
       "status": "legal",
       "scenario": "env.mechanism_set",
@@ -303,8 +348,8 @@
       "status": "legal",
       "scenario": "create.generate_key_pair.xmss|create.generate_key_pair.xmssmt|verify.stateful_multipart_prebound",
       "path": "*.CKA_HSS_KEYS_REMAINING.*",
-      "justification": "Same materialisation convention, but recorded separately because what C++ materialises here is odd enough that a future reader should see it rather than have it folded into a family entry. CKA_HSS_KEYS_REMAINING is an HSS attribute (Table 270), and C++ returns it on XMSS and XMSS-MT keys — on the PUBLIC half as well as the private — with the value 0. Zero would mean 'no one-time signatures left' on a key that has just been generated. Nothing reads it: the harness performs XMSS signing successfully in the same run, and neither engine consults this attribute to decide whether a key is exhausted. So it is a cosmetic artefact of C++ materialising its whole class table, not a capability claim, and Rust's absence is the more accurate answer of the two. Flagged for a C++-side follow-up rather than adjudicated away: the attribute should not be on an XMSS key at all, and certainly not on a public one.",
-      "citation": "PKCS#11 v3.2 defines only CKA_HSS_KEYS_REMAINING (0x0000061c, pkcs11t.h:641) and Table 270 scopes it to HSS private keys. The v3.3 draft deprecates the name in favour of CKA_KEYS_REMAINING — that rename is NOT in v3.2 and this harness targets v3.2, so the attribute probed here is the correct spelling for this specification version."
+      "justification": "Same materialisation convention, but recorded separately because what C++ materialises here is odd enough that a future reader should see it rather than have it folded into a family entry. CKA_HSS_KEYS_REMAINING is an HSS attribute (Table 270), and C++ returns it on XMSS and XMSS-MT keys — on the PUBLIC half as well as the private — with the value 0. Zero would mean 'no one-time signatures left' on a key that has just been generated. Nothing reads it: the harness performs XMSS signing successfully in the same run, and neither engine consults this attribute to decide whether a key is exhausted. So it is a cosmetic artefact of C++ materialising its whole class table, not a capability claim. UPDATED 2026-10-21: the Rust engine now sets 0x61c on XMSS and XMSS-MT PRIVATE keys only, with the real count (min(one-time keys remaining, 2^32-1), 1024 for a fresh XMSS-SHA2_10_256 key), and decrements it per signature, as the v3.3 working draft's CKA_KEYS_REMAINING; the public half still has none. The divergence remains (C++ 0 on both halves, Rust the count on the private half and absent on the public) and Rust's answer is the accurate one. Flagged for a C++-side follow-up rather than adjudicated away: the attribute should not be on an XMSS key at all, and certainly not on a public one.",
+      "citation": "PKCS#11 v3.2 defines only CKA_HSS_KEYS_REMAINING (0x0000061c, pkcs11t.h:641) and Table 270 scopes it to HSS private keys. The v3.3 draft deprecates the name in favour of CKA_KEYS_REMAINING — that rename is NOT in v3.2 and this harness targets v3.2, so the attribute probed here is the correct spelling for this specification version. The Rust engine's XMSS/XMSS-MT value follows the v3.3 working draft (TC commit 9ef73f9, working/doc/spec/xmss_and_xmss-mt.md private key tables: CKA_KEYS_REMAINING, \"The minimum of ... 1) The number of one-time private keys remaining; 2) 2^32-1\"), the gap-fill rule in CLAUDE.md; v3.2 Table 270 is silent on XMSS."
     },
     {
       "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ENCAPSULATE-TEMPLATE",

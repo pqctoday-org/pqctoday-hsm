@@ -4,6 +4,7 @@
 **Source:** OASIS PKCS 11 TC working tree, `https://github.com/oasis-tcs/pkcs11`, branch `master`
 **Snapshot commit:** `2b25dd8ed4a85d22937d8509bb296555cd329f43` (2026-08-26), pinned at `https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43` (a local copy was vendored until 2026-10-15; see `docs/refs/README.md`)
 **Status:** Recorded per phase-5 decision D-4. **Not sent.** Whether and when to raise these with the TC is a separate decision; this document exists so the defects are on file rather than re-discovered.
+**Re-checked:** 2026-10-21 against TC commit `9ef73f9f44ed8a240b05484427a0851ab36be251` (the current pin), for items 2 and 3 and the new item 9 — see "Re-check at 9ef73f9" at the end. Still **not sent**.
 
 Every item below was re-verified against the vendored snapshot before being written down (`https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/doc/spec`), not carried forward from an earlier draft of this list.
 
@@ -101,3 +102,24 @@ This is inside the field-by-field description of `CK_ECDH1_DERIVE_PARAMS` (key d
 v3.2 gives `CKA_OBJECT_VALIDATION_FLAGS` a read-only latch under footnote 12 of its table. v3.3's prose for the same attribute drops that latch with no accompanying rationale — the same shape as item 1 above (a constraint disappearing silently), but scoped to one attribute rather than a whole subsection. Phase-5 D-3 checked both engines: neither implements this attribute at all today, so nothing in this repository currently depends on the answer, but a future implementer would.
 
 **Question:** was dropping the read-only latch on `CKA_OBJECT_VALIDATION_FLAGS` deliberate, and if so, what is the rationale?
+
+---
+
+## 9. Composite chapters cite superseded IETF drafts
+
+`references.md:75` and `references.md:81` (TC commit `9ef73f9`) cite `[COMP_KEM]` as draft-ietf-lamps-pq-composite-kem **-12** and `[COMP_SIG]` as draft-ietf-lamps-pq-composite-sigs **-14** (both dated January 2026). The current drafts are **-23** and **-19**. `comp_kem.md` and `comp_sig.md` cite sections of these documents (for example `comp_kem.md:175,178`, "section 3.2/3.3 of [COMP_KEM]").
+
+Compared on 2026-10-21: the OIDs, the combiner labels and the signature prefix are unchanged between the cited and the current drafts, and the lists of parameter sets in the v3.3 header (18 `CKP_COMP_SIG_*`, 12 `CKP_COMP_KEM_*`) still match the current drafts one for one. Nothing in this repository depends on the stale citation; the engine implements and cites -23 and -19.
+
+**Question:** should the references move to the current drafts (or to the RFC numbers once published), and should the section references in `comp_kem.md` / `comp_sig.md` be re-checked when they do?
+
+---
+
+## Re-check at 9ef73f9 (2026-10-21)
+
+Recorded for the composite work (the v3.3 pin moved from `2b25dd8` to `9ef73f9`); still **not sent**.
+
+- **Item 2 (`CK_MU_GEN_PARAMS`):** unfixed, and the comma is now also in the TC's own header: `working/headers/pkcs11t.h:2744` reads `CK_OBJECT_HANDLE    hKey,     /* public or private. */`. `ml_dsa.md:124` still has it too. A C compiler including that header as written fails, so the defect is no longer prose-only. This repository's `src/lib/pkcs11/pkcs11t.h` stays canonical v3.2 and does not carry the struct.
+- **Item 3 (`comp_kem.md:96`):** unfixed at `9ef73f9`: the Composite KEM private key object is still said to have key type `CKK_ML_KEM`. The engine uses `CKK_COMP_KEM` for both composite KEM objects, as every other line of the chapter and the header do.
+- **Item 9:** new, above.
+
