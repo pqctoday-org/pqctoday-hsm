@@ -25,8 +25,8 @@ pub(crate) const SIG_VECTORS: &[u8] = include_bytes!("../../kat/pkcs11-v33/compo
 const IDENTIFIERS: &str = include_str!("../../kat/pkcs11-v33/pkcs11-v33-identifiers.json");
 
 /// sha256 of the upstream files as recorded in PROVENANCE.md.
-const KEM_VECTORS_SHA256: &str = "1b8d80f3ce623f368466eda44820f8b82ca67c9955e213d212c997137ef9ff24";
-const SIG_VECTORS_SHA256: &str = "a60f697f9fd94c3cd5e4501a40c4396d9a9ffc7cf0f8a1ddd87dedbb46a7abf0";
+pub(crate) const KEM_VECTORS_SHA256: &str = "1b8d80f3ce623f368466eda44820f8b82ca67c9955e213d212c997137ef9ff24";
+pub(crate) const SIG_VECTORS_SHA256: &str = "a60f697f9fd94c3cd5e4501a40c4396d9a9ffc7cf0f8a1ddd87dedbb46a7abf0";
 
 /// The plain (non-composite) entries each file also carries, with the OID
 /// of their PKCS#8 key (FIPS 203 / FIPS 204 NIST arcs).

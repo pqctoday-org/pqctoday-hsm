@@ -105,6 +105,9 @@ pub type CkRv = u32;
 pub(crate) mod composite_vectors;
 
 #[cfg(test)]
+mod composite_validation_evidence;
+
+#[cfg(test)]
 mod parity;
 
 #[cfg(test)]
