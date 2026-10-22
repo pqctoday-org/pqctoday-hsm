@@ -5327,13 +5327,14 @@ fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attribut
     }
 }
 
-/// CKA_DECAPSULATE_TEMPLATE / CKA_UNWRAP_TEMPLATE: the template is APPLIED to
-/// the key being created, then checked against the caller's template.
+/// CKA_DECAPSULATE_TEMPLATE / CKA_UNWRAP_TEMPLATE / CKA_DERIVE_TEMPLATE: the
+/// template is APPLIED to the key being created, then checked against the
+/// caller's template.
 ///
-/// Both have the same SHALL text, v3.2 §5.18.4 for unwrap and v3.3
-/// key_management_functions.md for decapsulate: the attribute holds "an
+/// All three have the same SHALL text, v3.2 §5.18.4 for unwrap, §5.18.5 for
+/// derive and v3.3 key_management_functions.md for decapsulate: the attribute holds "an
 /// attribute set that will be added to attributes of the key to be
-/// [unwrapped / decapsulated]. If the attributes do not conflict with the
+/// [unwrapped / derived / decapsulated]. If the attributes do not conflict with the
 /// user supplied attribute template, in 'pTemplate', then the [operation]
 /// will proceed … If any attribute conflict occurs … the function SHALL
 /// return CKR_TEMPLATE_INCONSISTENT", and the private/secret key tables add
@@ -5361,6 +5362,20 @@ unsafe fn apply_key_template(
     user_count: u32,
     attrs: &mut Attributes,
 ) -> Result<(), u32> {
+    apply_key_template_fixed(h_key, template_attr, user_template, user_count, attrs, &[])
+}
+
+/// [`apply_key_template`] for a creation path that also fixes some attributes
+/// the caller could otherwise set (`engine_fixed`): those are compared, never
+/// added, exactly like the server-managed set.
+unsafe fn apply_key_template_fixed(
+    h_key: u32,
+    template_attr: u32,
+    user_template: *mut u8,
+    user_count: u32,
+    attrs: &mut Attributes,
+    engine_fixed: &[u32],
+) -> Result<(), u32> {
     let blob = match crate::state::with_object(h_key, |a| a.get(&template_attr).cloned()).flatten() {
         Some(b) => b,
         None => return Ok(()),
@@ -5369,7 +5384,8 @@ unsafe fn apply_key_template(
     for (t, v) in entries {
         let compare_only = find_template_entry(user_template, user_count, t).is_some()
             || crate::crypto::handlers::template_attr_is_skipped(t)
-            || t == CKA_VALUE_LEN;
+            || t == CKA_VALUE_LEN
+            || engine_fixed.contains(&t);
         if compare_only {
             if attrs.get(&t) != Some(&v) {
                 return Err(CKR_TEMPLATE_INCONSISTENT);
@@ -13304,24 +13320,22 @@ pub fn C_DeriveKey(
             crate::state::compute_kcv(&mut attrs);
 
             // PKCS#11 v3.2 §5.18.5 — CKA_DERIVE_TEMPLATE on the base key is
-            // an additional template the result must satisfy. The stored
-            // nested template is already flattened by absorb_template_attrs;
-            // compare it against the FINAL attributes so mechanism-contributed
-            // class/type/history values cannot be bypassed by caller input.
-            let derive_permitted = OBJECTS.with(|o| {
-                o.borrow()
-                    .get(&h_base_key)
-                    .map(|base| {
-                        crate::state::key_template_permits(
-                            base,
-                            CKA_DERIVE_TEMPLATE,
-                            &attrs,
-                        )
-                    })
-                    .unwrap_or(false)
-            });
-            if !derive_permitted {
-                return CKR_TEMPLATE_INCONSISTENT;
+            // "an attribute set that will be added to attributes of the key
+            // to be derived", checked against the caller's template (a
+            // conflict is CKR_TEMPLATE_INCONSISTENT). Applied to the FINAL
+            // attributes so mechanism-contributed class/type values cannot be
+            // bypassed. This path fixes CKA_TOKEN / CKA_PRIVATE / CKA_SENSITIVE
+            // / CKA_EXTRACTABLE itself, so the template is compared on those,
+            // never added.
+            if let Err(rv) = apply_key_template_fixed(
+                h_base_key,
+                CKA_DERIVE_TEMPLATE,
+                p_template,
+                ul_attribute_count,
+                &mut attrs,
+                &[CKA_TOKEN, CKA_PRIVATE, CKA_SENSITIVE, CKA_EXTRACTABLE],
+            ) {
+                return rv;
             }
 
             *ph_key = match ffi_alloc(_h_session, attrs) {
@@ -14265,20 +14279,18 @@ pub fn C_DeriveKey(
         }
 
         if h_base_key != 0 {
-            let derive_permitted = OBJECTS.with(|o| {
-                o.borrow()
-                    .get(&h_base_key)
-                    .map(|base| {
-                        crate::state::key_template_permits(
-                            base,
-                            CKA_DERIVE_TEMPLATE,
-                            &attrs,
-                        )
-                    })
-                    .unwrap_or(false)
-            });
-            if !derive_permitted {
-                return CKR_TEMPLATE_INCONSISTENT;
+            // PKCS#11 v3.2 §5.18.5 — the base key's CKA_DERIVE_TEMPLATE is
+            // ADDED to the derived key's attributes, then checked against the
+            // caller's template (apply_key_template). It used to be
+            // compare-only, which refused an omitted attribute instead of
+            // applying it.
+            if let Err(rv) = apply_key_template(h_base_key, CKA_DERIVE_TEMPLATE, p_template, ul_attribute_count, &mut attrs) {
+                return rv;
+            }
+            // An applied CKA_TOKEN=TRUE needs a R/W session, as if the caller
+            // had asked for it (the caller's own template was gated above).
+            if let Err(rv) = crate::state::check_rw_for_token_object(_h_session, read_bool_attr(&attrs, CKA_TOKEN)) {
+                return rv;
             }
         }
 
