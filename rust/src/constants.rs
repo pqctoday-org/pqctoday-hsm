@@ -197,6 +197,12 @@ pub const CKK_EC_MONTGOMERY: u32 = 0x0000_0041; // X25519 (PKCS#11 v3.2 §6.7)
 pub const CKK_ML_KEM: u32 = 0x0000_0049;
 pub const CKK_ML_DSA: u32 = 0x0000_004a;
 pub const CKK_SLH_DSA: u32 = 0x0000_004b;
+// Composite key types, PKCS#11 v3.3 working draft (not in v3.2). One object
+// holds both halves (owner decision: single-object composites only). Values
+// from the OASIS PKCS 11 TC header at commit 9ef73f9 (added by 88f1ba8),
+// https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L443-L444
+pub const CKK_COMP_KEM: u32 = 0x0000_004c;
+pub const CKK_COMP_SIG: u32 = 0x0000_004d;
 // Stateful hash-based signature key types (PKCS#11 v3.2 §6.14)
 pub const CKK_HSS: u32 = 0x0000_0046; // HSS/LMS multi-level (standard)
 pub const CKK_XMSS: u32 = 0x0000_0047; // XMSS single-tree (standard)
@@ -832,20 +838,31 @@ pub const CKM_PQCTODAY_FHE_ENCRYPT: u32 = 0x8000_001B;
 // 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
 // draft's own name and codepoint — no longer a vendor-range stopgap. See
 // docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
-// the original design rationale. NOTE: v3.3 itself is still only a
-// working draft; per the OASIS PKCS 11 TC tree at commit 2b25dd8,
-// https://github.com/oasis-tcs/pkcs11/blob/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/identifier_db/raw_ids.db,
-// this codepoint's OASIS status is
-// "proposed" (not yet through final ballot) — double-check against the
-// final ratified v3.3 header once published.
+// the original design rationale. OASIS status: "approved" since TC commit
+// 6edf334 (2026-09-30, "Mark mu mechanisms as approved (#141)"), which also
+// added both codepoints to the TC header:
+// https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L1232-L1233
+// v3.3 itself is still an unpublished working draft (no v3.3 on
+// docs.oasis-open.org), so the reported Cryptoki version stays 3.2.0.
 pub const CKM_ML_DSA_EXTERNAL_MU: u32 = 0x0000_403c;
 pub const PQCTODAY_ML_DSA_MU_LEN: usize = 64;
 // µ GENERATION (remediation R39, phase 8, 2026-08-26; adopted natively
 // 2026-08-30 from the real PKCS#11 v3.3 working draft) — the PRODUCE half
 // of external-µ (the mechanism above is the CONSUME half); a digest-type
-// mechanism (C_Digest/C_DigestUpdate/C_DigestFinal). Same "proposed",
-// not-yet-ratified caveat as the mechanism above.
+// mechanism (C_Digest/C_DigestUpdate/C_DigestFinal). Approved in the same
+// TC commit as the mechanism above; its parameter, CK_MU_GEN_PARAMS, is in
+// the TC header since commit 3cb6647 (2026-10-14).
 pub const CKM_ML_DSA_EXTERNAL_MU_GEN: u32 = 0x0000_403b;
+// Composite ML-DSA and composite ML-KEM mechanisms, PKCS#11 v3.3 working
+// draft (working/doc/spec/comp_sig.md, comp_kem.md). Allocated by TC commit
+// 45be037 ("Composites (#143)"), approved and added to the TC header by
+// 88f1ba8 (#152): https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L1225-L1229
+// Not yet in the mechanism list: each is advertised only once it works.
+pub const CKM_COMP_SIG_KEY_PAIR_GEN: u32 = 0x0000_403d;
+pub const CKM_COMP_SIG: u32 = 0x0000_403e;
+pub const CKM_COMP_SIG_EXTERNAL_HASH: u32 = 0x0000_403f;
+pub const CKM_COMP_KEM_KEY_PAIR_GEN: u32 = 0x0000_4040;
+pub const CKM_COMP_KEM: u32 = 0x0000_4041;
 // PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
 // CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
@@ -951,6 +968,44 @@ pub const CKP_SLH_DSA_SHA2_256S: u32 = 0x09;
 pub const CKP_SLH_DSA_SHAKE_256S: u32 = 0x0A;
 pub const CKP_SLH_DSA_SHA2_256F: u32 = 0x0B;
 pub const CKP_SLH_DSA_SHAKE_256F: u32 = 0x0C;
+
+// Composite parameter sets (CKA_PARAMETER_SET of CKK_COMP_SIG / CKK_COMP_KEM
+// keys), PKCS#11 v3.3 working draft. Values from the OASIS PKCS 11 TC header
+// at commit 9ef73f9 (added by 88f1ba8): CK_COMP_SIG_PARAMETER_SET_TYPE at
+// https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L2779-L2797
+// and CK_COMP_KEM_PARAMETER_SET_TYPE at #L2800-L2812. The per-set components,
+// labels and OIDs are in native::composite.
+pub const CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256: u32 = 0x01;
+pub const CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256: u32 = 0x02;
+pub const CKP_COMP_SIG_MLDSA44_ED25519_SHA512: u32 = 0x03;
+pub const CKP_COMP_SIG_MLDSA44_ECDSA_P256_SHA256: u32 = 0x04;
+pub const CKP_COMP_SIG_MLDSA65_RSA3072_PSS_SHA512: u32 = 0x05;
+pub const CKP_COMP_SIG_MLDSA65_RSA3072_PKCS15_SHA512: u32 = 0x06;
+pub const CKP_COMP_SIG_MLDSA65_RSA4096_PSS_SHA512: u32 = 0x07;
+pub const CKP_COMP_SIG_MLDSA65_RSA4096_PKCS15_SHA512: u32 = 0x08;
+pub const CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512: u32 = 0x09;
+pub const CKP_COMP_SIG_MLDSA65_ECDSA_P384_SHA512: u32 = 0x0A;
+pub const CKP_COMP_SIG_MLDSA65_ECDSA_BRAINPOOLP256R1_SHA512: u32 = 0x0B;
+pub const CKP_COMP_SIG_MLDSA65_ED25519_SHA512: u32 = 0x0C;
+pub const CKP_COMP_SIG_MLDSA87_ECDSA_P384_SHA512: u32 = 0x0D;
+pub const CKP_COMP_SIG_MLDSA87_ECDSA_BRAINPOOLP384R1_SHA512: u32 = 0x0E;
+pub const CKP_COMP_SIG_MLDSA87_ED448_SHAKE256: u32 = 0x0F;
+pub const CKP_COMP_SIG_MLDSA87_RSA3072_PSS_SHA512: u32 = 0x10;
+pub const CKP_COMP_SIG_MLDSA87_RSA4096_PSS_SHA512: u32 = 0x11;
+pub const CKP_COMP_SIG_MLDSA87_ECDSA_P521_SHA512: u32 = 0x12;
+
+pub const CKP_COMP_KEM_MLKEM768_RSA2048: u32 = 0x01;
+pub const CKP_COMP_KEM_MLKEM768_RSA3072: u32 = 0x02;
+pub const CKP_COMP_KEM_MLKEM768_RSA4096: u32 = 0x03;
+pub const CKP_COMP_KEM_MLKEM768_X25519: u32 = 0x04;
+pub const CKP_COMP_KEM_MLKEM768_ECDH_P256: u32 = 0x05;
+pub const CKP_COMP_KEM_MLKEM768_ECDH_P384: u32 = 0x06;
+pub const CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1: u32 = 0x07;
+pub const CKP_COMP_KEM_MLKEM1024_RSA3072: u32 = 0x08;
+pub const CKP_COMP_KEM_MLKEM1024_ECDH_P384: u32 = 0x09;
+pub const CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1: u32 = 0x0A;
+pub const CKP_COMP_KEM_MLKEM1024_X448: u32 = 0x0B;
+pub const CKP_COMP_KEM_MLKEM1024_ECDH_P521: u32 = 0x0C;
 
 // ── PKCS#11 Session/Token Constants ─────────────────────────────────────────
 
@@ -1395,7 +1450,12 @@ pub const CKA_PQCTODAY_FHE_DECRYPT_POLICY: u32 = 0x8000_0112;
 pub const CKA_HSS_LEVELS: u32 = 0x0000_0617;
 pub const CKA_HSS_LMS_TYPE: u32 = 0x0000_0618;
 pub const CKA_HSS_LMOTS_TYPE: u32 = 0x0000_0619;
-pub const CKA_HSS_KEYS_REMAINING: u32 = 0x0000_061c;
+// CKA_KEYS_REMAINING: PKCS#11 v3.3 working-draft name for 0x61c, which now
+// also covers XMSS and XMSS^MT keys. CKA_HSS_KEYS_REMAINING (v3.2 §6.14) stays
+// as an alias with the same value, as the TC header keeps it ("Deprecated")
+// since commit b8e8327: https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L644-L645
+pub const CKA_KEYS_REMAINING: u32 = 0x0000_061c;
+pub const CKA_HSS_KEYS_REMAINING: u32 = CKA_KEYS_REMAINING;
 
 // ── LMS / LMOTS Parameter Set Constants ─────────────────────────────────────
 // Values match PKCS#11 v3.2 §6.14 table (tree-height based naming)

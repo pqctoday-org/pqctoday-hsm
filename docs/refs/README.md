@@ -79,25 +79,34 @@ Until 2026-10-15 a snapshot of that working tree was vendored here as
 
 - Repository: <https://github.com/oasis-tcs/pkcs11> (public TC repository; public
   feedback accepted under the OASIS Feedback License)
-- Branch at snapshot time: `master`
-- Commit: [`2b25dd8ed4a85d22937d8509bb296555cd329f43`](https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43) (2026-08-26T21:46:09+01:00)
-- Snapshot taken: 2026-08-28
-- Content: the removed snapshot was that commit's tree byte for byte
-  (334 files, re-verified against a fresh fetch on 2026-10-15), minus
-  the four `working/doc/*/Makefile` files.
+- Branch: `master`
+- Current pin (2026-10-21): [`9ef73f9f44ed8a240b05484427a0851ab36be251`](https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251) (2026-10-21T13:10:05-07:00), 344 files.
+  It was moved here from the previous pin for the composite ML-DSA / ML-KEM
+  identifiers, which the TC approved and put in its header after that pin.
+  The engine's composite constants and parameter table are checked against
+  this commit, through the fact extracts in `rust/kat/pkcs11-v33/`
+  (identifier values from the header, and the composite draft tables).
+- Previous pin: [`2b25dd8ed4a85d22937d8509bb296555cd329f43`](https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43) (2026-08-26T21:46:09+01:00).
+  The removed snapshot was that commit's tree byte for byte (334 files,
+  re-verified against a fresh fetch on 2026-10-15), minus the four
+  `working/doc/*/Makefile` files. Citations written against it stay valid:
+  they are permalinks to that commit.
 
-A citation of the form `working/headers/pkcs11t.h:658 (commit 2b25dd8)` means
-<https://github.com/oasis-tcs/pkcs11/blob/2b25dd8ed4a85d22937d8509bb296555cd329f43/working/headers/pkcs11t.h#L658>.
-That is how `V33_CORRECTIONS` in `scripts/check_pkcs11_constants.py` cites
-v3.3. To get a local tree: `python3 docs/refs/fetch_refs.py --v33`, or
-`git clone https://github.com/oasis-tcs/pkcs11.git && git -C pkcs11 checkout 2b25dd8`.
+A citation of the form `working/headers/pkcs11t.h:662 (commit 9ef73f9)` means
+<https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L662>.
+That is how `V33_CORRECTIONS` and the `v33-draft` entries in
+`scripts/check_pkcs11_constants.py` cite v3.3. To get a local tree:
+`python3 docs/refs/fetch_refs.py --v33`, or
+`git clone https://github.com/oasis-tcs/pkcs11.git && git -C pkcs11 checkout 9ef73f9`.
 
 This is not a stage document and has no publisher SHA-256 to check: it is a
 live branch, and every fact in it may change before ratification. Its markdown
 carries no section numbers, so cite v3.2 section and table numbers and use
 v3.3 for prose only (see the root `CLAUDE.md`).
 
-Notable post-3.2 commits on `master` up to the pin:
+Notable post-3.2 commits on `master` up to the current pin (22 commits
+separate the two pins; the rest are editorial, scanner and documentation
+changes):
 
 | Date | Commit | Change |
 |---|---|---|
@@ -108,7 +117,17 @@ Notable post-3.2 commits on `master` up to the pin:
 | 2026-07-01 | `1c31190` | Convert Historical Mechanisms, Profiles and Usage Guide to markdown in-repo (#101) |
 | 2026-07-29 | `25a1ece` | Attribute `KEYS_REMAINING` missing for XMSS keys (#115) |
 | 2026-08-26 | `24f8e1a` | Document 32-bit limit for `CK_ULONG` values (#122) |
-| 2026-08-26 | `2b25dd8` | Make explicit that big integers are nonempty (#116/#124) |
+| 2026-08-26 | `2b25dd8` | Make explicit that big integers are nonempty (#116/#124) (previous pin) |
+| 2026-09-25 | `b8e8327` | Update keys remaining in header and database (#142): `CKA_KEYS_REMAINING` (0x61c) in the header, `CKA_HSS_KEYS_REMAINING` kept as a deprecated alias |
+| 2026-09-30 | `6edf334` | Mark mu mechanisms as approved (#141): `CKM_ML_DSA_EXTERNAL_MU_GEN` (0x403b) and `CKM_ML_DSA_EXTERNAL_MU` (0x403c) approved and in the header |
+| 2026-10-07 | `45be037` | Composites (#143): allocates `CKK_COMP_KEM`/`CKK_COMP_SIG`, the five `CKM_COMP_*` mechanisms and the 18 + 12 `CKP_COMP_*` parameter sets |
+| 2026-10-14 | `3cb6647` | Update headers for `CK_MU_GEN_PARAMS` (#155) |
+| 2026-10-15 | `88f1ba8` | Update header files with composite values (#152): the composite identifiers approved and in `working/headers/pkcs11t.h` |
+| 2026-10-21 | `9ef73f9` | Add kmac and mechanism parameter identifiers (#156): `CKM_KMAC*`, `CKM_SHAKE_*`, `CKK_KMAC`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` allocated in `working/identifier_db/` but **not in the header**; not built here (current pin) |
+
+The v3.3 header at the current pin still declares `CRYPTOKI_VERSION_MINOR 2`;
+the engines keep reporting Cryptoki 3.2.0 and label the composites
+"PKCS#11 v3.3 working draft".
 
 On mechanism enable/disable policy: the 2026-08-28 search of this tree found
 nothing new in kind since v3.2: no "quantum-safe only" profile, no attribute

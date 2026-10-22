@@ -135,9 +135,17 @@ New functions in pkcs11f.h:
   and every citation in `tests/differential/exceptions.json` references v3.2
   section and table numbers.
 - **v3.3 governs where v3.2 has a gap or a plain error.** The OASIS PKCS 11
-  TC's working tree is pinned at commit `2b25dd8ed4a85d22937d8509bb296555cd329f43`
-  (https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43; provenance in `docs/refs/README.md`). Where v3.2 is silent,
+  TC's working tree is pinned at commit `9ef73f9f44ed8a240b05484427a0851ab36be251`
+  (2026-10-21; https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251; previous pin `2b25dd8`; provenance and commit table in `docs/refs/README.md`). Where v3.2 is silent,
   ambiguous, or demonstrably wrong, v3.3 is the authority.
+- **Composites are such a gap.** v3.2 has no composite ML-DSA or ML-KEM. The
+  v3.3 identifiers (`CKK_COMP_SIG`/`CKK_COMP_KEM`, the five `CKM_COMP_*`
+  mechanisms, the 18 + 12 `CKP_COMP_*` sets) are approved and in the TC
+  header at the pin; they live in `rust/src/constants.rs` and `constants.js`
+  only, pinned as kind `v33-draft` in `scripts/check_pkcs11_constants.py`,
+  and are labelled "PKCS#11 v3.3 working draft". The C header
+  `src/lib/pkcs11/pkcs11t.h` stays canonical v3.2. The per-set parameters
+  (components, labels, OIDs) are one table, `rust/src/native/composite.rs`.
 - **v3.3 does NOT otherwise supersede v3.2.** It is an *unpublished* working
   draft — no v3.3 CSD/CS/OS exists on `docs.oasis-open.org`, its own header
   still declares `CRYPTOKI_VERSION_MINOR 2`, and it moves with every TC commit
@@ -154,9 +162,10 @@ New functions in pkcs11f.h:
   three older `*_TEMPLATE` attributes.
 - **The v3.3 markdown is prose only.** Use it to read what a rule *says*; never
   to check a section or table number. Its content has drifted from v3.2 (for
-  example `CKA_UNIQUE_ID` moved sections, and it renames
-  `CKA_HSS_KEYS_REMAINING` to `CKA_KEYS_REMAINING` — a rename NOT present in
-  either header).
+  example `CKA_UNIQUE_ID` moved sections). Since TC commit `b8e8327` its
+  header also renames `CKA_HSS_KEYS_REMAINING` to `CKA_KEYS_REMAINING`
+  (0x61c), keeping the old name as a deprecated alias; the Rust engine and
+  `constants.js` carry both names with the one value.
 
 - Canonical `pkcs11t.h`: https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/pkcs11t.h
 - Local copy: `src/lib/pkcs11/pkcs11t.h` (kept in sync with the spec)

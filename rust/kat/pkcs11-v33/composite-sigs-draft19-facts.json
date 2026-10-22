@@ -1,0 +1,477 @@
+{
+ "_provenance": {
+  "draft": "draft-ietf-lamps-pq-composite-sigs-19",
+  "url": "https://www.ietf.org/archive/id/draft-ietf-lamps-pq-composite-sigs-19.txt",
+  "sha256": "b4ee04416efc26e7d8de7c740dc3848ffe8b8cc9dcd035ad9d4e33e18844ec83",
+  "bytes": 698947,
+  "retrieved": "2026-10-21",
+  "what": "Facts extracted from Section 2.2 (Prefix), Section 6 (algorithm list: OID, Label, PH, components) and Appendix A Table 4 (maximum sizes; max=true where the draft marks the size with an asterisk). The draft itself is not committed.",
+  "pkcs11_reference": "PKCS#11 v3.3 working draft (working/doc/spec/references.md, [COMP_SIG], TC commit 9ef73f9) cites the -14 revision; the Section 6 labels are unchanged in -19"
+ },
+ "prefix_hex": "436F6D706F73697465416C676F726974686D5369676E61747572657332303235",
+ "ml_dsa_sizes": {
+  "id-ML-DSA-44": {
+   "public_key": 1312,
+   "private_key": 32,
+   "signature": 2420
+  },
+  "id-ML-DSA-65": {
+   "public_key": 1952,
+   "private_key": 32,
+   "signature": 3309
+  },
+  "id-ML-DSA-87": {
+   "public_key": 2592,
+   "private_key": 32,
+   "signature": 4627
+  }
+ },
+ "rsassa_pss": {
+  "2048_3072": {
+   "hash": "SHA256",
+   "mgf1_hash": "SHA256",
+   "salt_length": 32
+  },
+  "4096": {
+   "hash": "SHA384",
+   "mgf1_hash": "SHA384",
+   "salt_length": 48
+  }
+ },
+ "algorithms": [
+  {
+   "name": "id-MLDSA44-RSA2048-PSS-SHA256",
+   "oid": "1.3.6.1.5.5.7.6.37",
+   "label": "COMPSIG-MLDSA44-RSA2048-PSS-SHA256",
+   "pre_hash": "SHA256",
+   "ml_dsa": "ML-DSA-44",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "id-RSASSA-PSS",
+   "rsa_size": "2048",
+   "rsassa_pss_parameters": "See Table 2",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1582,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1226,
+     "max": true
+    },
+    "signature": {
+     "bytes": 2676,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA44-RSA2048-PKCS15-SHA256",
+   "oid": "1.3.6.1.5.5.7.6.38",
+   "label": "COMPSIG-MLDSA44-RSA2048-PKCS15-SHA256",
+   "pre_hash": "SHA256",
+   "ml_dsa": "ML-DSA-44",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "sha256WithRSAEncryption",
+   "rsa_size": "2048",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1582,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1226,
+     "max": true
+    },
+    "signature": {
+     "bytes": 2676,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA44-Ed25519-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.39",
+   "label": "COMPSIG-MLDSA44-Ed25519-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-44",
+   "traditional_algorithm": "Ed25519",
+   "traditional_signature_algorithm": "id-Ed25519",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1344,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 64,
+     "max": false
+    },
+    "signature": {
+     "bytes": 2484,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA44-ECDSA-P256-SHA256",
+   "oid": "1.3.6.1.5.5.7.6.40",
+   "label": "COMPSIG-MLDSA44-ECDSA-P256-SHA256",
+   "pre_hash": "SHA256",
+   "ml_dsa": "ML-DSA-44",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA256",
+   "ecdsa_curve": "secp256r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1377,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 83,
+     "max": false
+    },
+    "signature": {
+     "bytes": 2492,
+     "max": true
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-RSA3072-PSS-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.41",
+   "label": "COMPSIG-MLDSA65-RSA3072-PSS-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "id-RSASSA-PSS",
+   "rsa_size": "3072",
+   "rsassa_pss_parameters": "See Table 2",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2350,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1802,
+     "max": true
+    },
+    "signature": {
+     "bytes": 3693,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-RSA3072-PKCS15-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.42",
+   "label": "COMPSIG-MLDSA65-RSA3072-PKCS15-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "sha256WithRSAEncryption",
+   "rsa_size": "3072",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2350,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1802,
+     "max": true
+    },
+    "signature": {
+     "bytes": 3693,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-RSA4096-PSS-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.43",
+   "label": "COMPSIG-MLDSA65-RSA4096-PSS-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "id-RSASSA-PSS",
+   "rsa_size": "4096",
+   "rsassa_pss_parameters": "See Table 3",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2478,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 2383,
+     "max": true
+    },
+    "signature": {
+     "bytes": 3821,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-RSA4096-PKCS15-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.44",
+   "label": "COMPSIG-MLDSA65-RSA4096-PKCS15-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "sha384WithRSAEncryption",
+   "rsa_size": "4096",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2478,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 2383,
+     "max": true
+    },
+    "signature": {
+     "bytes": 3821,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-ECDSA-P256-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.45",
+   "label": "COMPSIG-MLDSA65-ECDSA-P256-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA256",
+   "ecdsa_curve": "secp256r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2017,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 83,
+     "max": false
+    },
+    "signature": {
+     "bytes": 3381,
+     "max": true
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-ECDSA-P384-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.46",
+   "label": "COMPSIG-MLDSA65-ECDSA-P384-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA384",
+   "ecdsa_curve": "secp384r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2049,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 96,
+     "max": false
+    },
+    "signature": {
+     "bytes": 3413,
+     "max": true
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-ECDSA-brainpoolP256r1-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.47",
+   "label": "COMPSIG-MLDSA65-ECDSA-BP256-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA256",
+   "ecdsa_curve": "brainpoolP256r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2017,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 84,
+     "max": false
+    },
+    "signature": {
+     "bytes": 3381,
+     "max": true
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA65-Ed25519-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.48",
+   "label": "COMPSIG-MLDSA65-Ed25519-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-65",
+   "traditional_algorithm": "Ed25519",
+   "traditional_signature_algorithm": "id-Ed25519",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1984,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 64,
+     "max": false
+    },
+    "signature": {
+     "bytes": 3373,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA87-ECDSA-P384-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.49",
+   "label": "COMPSIG-MLDSA87-ECDSA-P384-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-87",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA384",
+   "ecdsa_curve": "secp384r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2689,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 96,
+     "max": false
+    },
+    "signature": {
+     "bytes": 4731,
+     "max": true
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA87-ECDSA-brainpoolP384r1-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.50",
+   "label": "COMPSIG-MLDSA87-ECDSA-BP384-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-87",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA384",
+   "ecdsa_curve": "brainpoolP384r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2689,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 100,
+     "max": false
+    },
+    "signature": {
+     "bytes": 4731,
+     "max": true
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA87-Ed448-SHAKE256",
+   "oid": "1.3.6.1.5.5.7.6.51",
+   "label": "COMPSIG-MLDSA87-Ed448-SHAKE256",
+   "pre_hash": "SHAKE256/64",
+   "ml_dsa": "ML-DSA-87",
+   "traditional_algorithm": "Ed448",
+   "traditional_signature_algorithm": "id-Ed448",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2649,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 89,
+     "max": false
+    },
+    "signature": {
+     "bytes": 4741,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA87-RSA3072-PSS-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.52",
+   "label": "COMPSIG-MLDSA87-RSA3072-PSS-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-87",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "id-RSASSA-PSS",
+   "rsa_size": "3072",
+   "rsassa_pss_parameters": "See Table 2",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2990,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1802,
+     "max": true
+    },
+    "signature": {
+     "bytes": 5011,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA87-RSA4096-PSS-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.53",
+   "label": "COMPSIG-MLDSA87-RSA4096-PSS-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-87",
+   "traditional_algorithm": "RSA",
+   "traditional_signature_algorithm": "id-RSASSA-PSS",
+   "rsa_size": "4096",
+   "rsassa_pss_parameters": "See Table 3",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 3118,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 2383,
+     "max": true
+    },
+    "signature": {
+     "bytes": 5139,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLDSA87-ECDSA-P521-SHA512",
+   "oid": "1.3.6.1.5.5.7.6.54",
+   "label": "COMPSIG-MLDSA87-ECDSA-P521-SHA512",
+   "pre_hash": "SHA512",
+   "ml_dsa": "ML-DSA-87",
+   "traditional_algorithm": "ECDSA",
+   "traditional_signature_algorithm": "ecdsa-with-SHA512",
+   "ecdsa_curve": "secp521r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 2725,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 114,
+     "max": false
+    },
+    "signature": {
+     "bytes": 4766,
+     "max": true
+    }
+   }
+  }
+ ]
+}

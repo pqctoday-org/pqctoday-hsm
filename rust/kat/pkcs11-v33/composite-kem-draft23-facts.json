@@ -1,0 +1,353 @@
+{
+ "_provenance": {
+  "draft": "draft-ietf-lamps-pq-composite-kem-23",
+  "url": "https://www.ietf.org/archive/id/draft-ietf-lamps-pq-composite-kem-23.txt",
+  "sha256": "aaaffdf5eca9cf8e2757e2fd4257a30536f2c6ead7c6eb24f542fcc8b28e26b8",
+  "bytes": 353458,
+  "retrieved": "2026-10-21",
+  "what": "Facts extracted from Section 3.4 (combiner), Section 6 (algorithm list: OID, Label, components), Section 6.1 Table 2 (RSA-OAEP parameters) and Appendix A Table 3 (maximum sizes; max=true where the draft marks the size with an asterisk). Labels are given as hex of their bytes. The draft itself is not committed.",
+  "pkcs11_reference": "PKCS#11 v3.3 working draft (working/doc/spec/references.md, [COMP_KEM], TC commit 9ef73f9) cites the -12 revision; the OIDs and labels are unchanged in -23"
+ },
+ "combiner": "ss = SHA3-256(mlkemSS || tradSS || tradCT || tradPK || Label)",
+ "rsa_oaep": {
+  "hash": "SHA256",
+  "mgf1_hash": "SHA256",
+  "label": "empty"
+ },
+ "ml_kem_sizes": {
+  "id-alg-ml-kem-768": {
+   "public_key": 1184,
+   "private_key": 64,
+   "ciphertext": 1088
+  },
+  "id-alg-ml-kem-1024": {
+   "public_key": 1568,
+   "private_key": 64,
+   "ciphertext": 1568
+  }
+ },
+ "algorithms": [
+  {
+   "name": "id-MLKEM768-RSA2048-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.55",
+   "label_hex": "4d4c4b454d3736382d5253414f41455032303438",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "RSA",
+   "traditional_kem_algorithm": "id-RSAES-OAEP",
+   "rsa_size": "2048",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1454,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1258,
+     "max": true
+    },
+    "ciphertext": {
+     "bytes": 1344,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM768-RSA3072-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.56",
+   "label_hex": "4d4c4b454d3736382d5253414f41455033303732",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "RSA",
+   "traditional_kem_algorithm": "id-RSAES-OAEP",
+   "rsa_size": "3072",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1582,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1834,
+     "max": true
+    },
+    "ciphertext": {
+     "bytes": 1472,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM768-RSA4096-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.57",
+   "label_hex": "4d4c4b454d3736382d5253414f41455034303936",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "RSA",
+   "traditional_kem_algorithm": "id-RSAES-OAEP",
+   "rsa_size": "4096",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1710,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 2415,
+     "max": true
+    },
+    "ciphertext": {
+     "bytes": 1600,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM768-X25519-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.58",
+   "label_hex": "5c2e2f2f5e5c",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "X25519",
+   "traditional_kem_algorithm": "id-X25519",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1216,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 96,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1120,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM768-ECDH-P256-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.59",
+   "label_hex": "4d4c4b454d3736382d50323536",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "ECDH",
+   "traditional_kem_algorithm": "id-ecDH",
+   "ecdh_curve": "secp256r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1249,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 115,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1153,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM768-ECDH-P384-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.60",
+   "label_hex": "4d4c4b454d3736382d50333834",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "ECDH",
+   "traditional_kem_algorithm": "id-ecDH",
+   "ecdh_curve": "secp384r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1281,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 128,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1185,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM768-ECDH-brainpoolP256r1-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.61",
+   "label_hex": "4d4c4b454d3736382d4250323536",
+   "ml_kem": "ML-KEM-768",
+   "traditional_algorithm": "ECDH",
+   "traditional_kem_algorithm": "id-ecDH",
+   "ecdh_curve": "brainpoolP256r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1249,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 116,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1153,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM1024-RSA3072-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.62",
+   "label_hex": "4d4c4b454d313032342d5253414f41455033303732",
+   "ml_kem": "ML-KEM-1024",
+   "traditional_algorithm": "RSA",
+   "traditional_kem_algorithm": "id-RSAES-OAEP",
+   "rsa_size": "3072",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1966,
+     "max": true
+    },
+    "private_key": {
+     "bytes": 1834,
+     "max": true
+    },
+    "ciphertext": {
+     "bytes": 1952,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM1024-ECDH-P384-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.63",
+   "label_hex": "4d4c4b454d313032342d50333834",
+   "ml_kem": "ML-KEM-1024",
+   "traditional_algorithm": "ECDH",
+   "traditional_kem_algorithm": "id-ecDH",
+   "ecdh_curve": "secp384r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1665,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 128,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1665,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM1024-ECDH-brainpoolP384r1-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.64",
+   "label_hex": "4d4c4b454d313032342d4250333834",
+   "ml_kem": "ML-KEM-1024",
+   "traditional_algorithm": "ECDH",
+   "traditional_kem_algorithm": "id-ecDH",
+   "ecdh_curve": "brainpoolP384r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1665,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 132,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1665,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM1024-X448-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.65",
+   "label_hex": "4d4c4b454d313032342d58343438",
+   "ml_kem": "ML-KEM-1024",
+   "traditional_algorithm": "X448",
+   "traditional_kem_algorithm": "id-X448",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1624,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 120,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1624,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  },
+  {
+   "name": "id-MLKEM1024-ECDH-P521-SHA3-256",
+   "oid": "1.3.6.1.5.5.7.6.66",
+   "label_hex": "4d4c4b454d313032342d50353231",
+   "ml_kem": "ML-KEM-1024",
+   "traditional_algorithm": "ECDH",
+   "traditional_kem_algorithm": "id-ecDH",
+   "ecdh_curve": "secp521r1",
+   "max_sizes": {
+    "public_key": {
+     "bytes": 1701,
+     "max": false
+    },
+    "private_key": {
+     "bytes": 146,
+     "max": false
+    },
+    "ciphertext": {
+     "bytes": 1701,
+     "max": false
+    },
+    "shared_secret": {
+     "bytes": 32,
+     "max": false
+    }
+   }
+  }
+ ]
+}

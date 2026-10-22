@@ -71,6 +71,7 @@
 //! design that relies on native-surface isolation is real.
 
 pub mod agree;
+pub mod composite;
 pub mod derive;
 pub mod encrypt;
 pub(crate) mod hbs;

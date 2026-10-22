@@ -251,14 +251,14 @@
   ],
   "git_snapshots": [
     {
-      "path": "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828",
+      "path": "docs/refs/pkcs11-v3.3-draft-git-snapshot-20261021",
       "repo": "https://github.com/oasis-tcs/pkcs11.git",
-      "commit": "2b25dd8ed4a85d22937d8509bb296555cd329f43",
-      "commit_date": "2026-08-26T21:46:09+01:00",
-      "snapshot_date": "2026-08-28",
+      "commit": "9ef73f9f44ed8a240b05484427a0851ab36be251",
+      "commit_date": "2026-10-21T13:10:05-07:00",
+      "snapshot_date": "2026-10-21",
       "title": "OASIS PKCS 11 TC working tree (PKCS #11 v3.3 working draft, unpublished)",
-      "files": 334,
-      "note": "The removed snapshot held the upstream tree at this commit byte for byte (334 files; re-verified 2026-10-15), minus the four working/doc/*/Makefile files, plus a local PROVENANCE.md now folded into docs/refs/README.md."
+      "files": 344,
+      "note": "Re-pinned 2026-10-21 from 2b25dd8ed4a85d22937d8509bb296555cd329f43 (2026-08-26; 334 files, formerly vendored as docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828 minus the four working/doc/*/Makefile files) for the approved composite ML-DSA / ML-KEM identifiers in working/headers/pkcs11t.h. Commit table in docs/refs/README.md."
     }
   ]
 }

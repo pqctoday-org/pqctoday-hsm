@@ -58,8 +58,12 @@ MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 #     (provenance of the pinned commit: docs/refs/README.md).
 #
 # Every entry needs a reason and a citation naming the v3.3 file:line in the
-# OASIS PKCS 11 TC repository (github.com/oasis-tcs/pkcs11) at the pinned
-# commit 2b25dd8ed4a85d22937d8509bb296555cd329f43, so a reader can check the correction rather than trust it.
+# OASIS PKCS 11 TC repository (github.com/oasis-tcs/pkcs11) at the commit
+# pinned when it was registered, so a reader can check the correction rather
+# than trust it. Both entries below were registered at commit
+# 2b25dd8ed4a85d22937d8509bb296555cd329f43 and re-verified at the current pin
+# 9ef73f9f44ed8a240b05484427a0851ab36be251 (2026-10-21), where the same
+# defines sit at working/headers/pkcs11t.h:662-663.
 # The citation is a permalink to that commit; this public repository no
 # longer carries a copy of the TC tree (`python3 docs/refs/fetch_refs.py --v33`
 # restores one locally, gitignored).
@@ -126,6 +130,15 @@ VENDOR_BASE = 0x80000000
 #            same band the ratified spec itself still uses for e.g.
 #            CKM_HKDF_DERIVE) pending official assignment; see the cited
 #            doc for the numeric-value rationale, not just the feature.
+#            No entries since 2026-10-21: its only users, the ML-DSA
+#            external-mu pair, received TC codepoints and moved to v33-draft.
+#   v33-draft — a codepoint the OASIS PKCS 11 TC has assigned, marked
+#            "approved" in working/identifier_db/raw_ids.db and placed in its
+#            working-tree header (working/headers/pkcs11t.h), but which is in
+#            no published spec yet (v3.3 is an unpublished working draft;
+#            pin: docs/refs/README.md). The local header stays canonical
+#            v3.2, so these live here, each with its TC header line. Used
+#            only where v3.2 has a gap (root CLAUDE.md precedence rule).
 PINNED = {
     # LMS tree parameter sets (IANA "LMS" registry, RFC 8554 §5 + SP 800-208 §4)
     "CKP_LMS_SHA256_M32_H5": (0x05, "iana"),
@@ -300,18 +313,64 @@ PINNED = {
     "CK_ATTRIBUTE_SIZE": (12, "abi"),
     "CK_MECHANISM_SIZE": (12, "abi"),
     "CK_SIGN_ADDITIONAL_CONTEXT_SIZE": (12, "abi"),
-    # ML-DSA external-mu (remediation R34, PQCTODAY-VENDOR-EXT-MU). PKCS#11
-    # v3.2 (ratified) has no field for a caller-supplied mu; the OASIS
-    # PKCS#11 TC has committed to specifying it in v3.3 (not ratified, no
-    # codepoint assigned yet) — see oasis-tcs/pkcs11#58 and
-    # docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
-    # the full citation trail (TC issue, IETF 123 LAMPS slides, IACR
-    # eprint 2026/617). Stopgap values pending official assignment.
-    "CKM_ML_DSA_EXTERNAL_MU": (0x0000403C, "pre-ratification"),
-    "CKM_ML_DSA_EXTERNAL_MU_GEN": (0x0000403B, "pre-ratification"),
+    # ML-DSA external-mu (remediation R34). First pinned as
+    # "pre-ratification" stopgaps (oasis-tcs/pkcs11#58,
+    # docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md);
+    # the TC marked both "approved" in commit 6edf334 (2026-09-30, #141) and
+    # put them in its header: https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L1232-L1233
+    "CKM_ML_DSA_EXTERNAL_MU": (0x0000403C, "v33-draft"),
+    "CKM_ML_DSA_EXTERNAL_MU_GEN": (0x0000403B, "v33-draft"),
+    # Composite ML-DSA / ML-KEM (v3.3 working draft comp_sig.md, comp_kem.md).
+    # Allocated by TC commit 45be037 (#143), approved and added to the TC
+    # header by 88f1ba8 (#152):
+    # CKK_* https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L443-L444
+    # CKM_* https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L1225-L1229
+    # CKP_COMP_SIG_* https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L2780-L2797
+    # CKP_COMP_KEM_* https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L2801-L2812
+    "CKK_COMP_KEM": (0x0000004C, "v33-draft"),
+    "CKK_COMP_SIG": (0x0000004D, "v33-draft"),
+    "CKM_COMP_SIG_KEY_PAIR_GEN": (0x0000403D, "v33-draft"),
+    "CKM_COMP_SIG": (0x0000403E, "v33-draft"),
+    "CKM_COMP_SIG_EXTERNAL_HASH": (0x0000403F, "v33-draft"),
+    "CKM_COMP_KEM_KEY_PAIR_GEN": (0x00004040, "v33-draft"),
+    "CKM_COMP_KEM": (0x00004041, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256": (0x01, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256": (0x02, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA44_ED25519_SHA512": (0x03, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA44_ECDSA_P256_SHA256": (0x04, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_RSA3072_PSS_SHA512": (0x05, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_RSA3072_PKCS15_SHA512": (0x06, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_RSA4096_PSS_SHA512": (0x07, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_RSA4096_PKCS15_SHA512": (0x08, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512": (0x09, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_ECDSA_P384_SHA512": (0x0A, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_ECDSA_BRAINPOOLP256R1_SHA512": (0x0B, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA65_ED25519_SHA512": (0x0C, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA87_ECDSA_P384_SHA512": (0x0D, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA87_ECDSA_BRAINPOOLP384R1_SHA512": (0x0E, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA87_ED448_SHAKE256": (0x0F, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA87_RSA3072_PSS_SHA512": (0x10, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA87_RSA4096_PSS_SHA512": (0x11, "v33-draft"),
+    "CKP_COMP_SIG_MLDSA87_ECDSA_P521_SHA512": (0x12, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_RSA2048": (0x01, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_RSA3072": (0x02, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_RSA4096": (0x03, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_X25519": (0x04, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_ECDH_P256": (0x05, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_ECDH_P384": (0x06, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM768_ECDH_BRAINPOOLP256R1": (0x07, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM1024_RSA3072": (0x08, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM1024_ECDH_P384": (0x09, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM1024_ECDH_BRAINPOOLP384R1": (0x0A, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM1024_X448": (0x0B, "v33-draft"),
+    "CKP_COMP_KEM_MLKEM1024_ECDH_P521": (0x0C, "v33-draft"),
+    # CKA_KEYS_REMAINING: v3.3 name for 0x61c (v3.2's CKA_HSS_KEYS_REMAINING),
+    # now also for XMSS/XMSS^MT. TC commit b8e8327 (#142):
+    # https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L644-L645
+    "CKA_KEYS_REMAINING": (0x0000061C, "v33-draft"),
     # CKM_HPKE candidate mechanism family (RFC 9180 HPKE over PKCS#11, a
     # PQCToday vendor proposal — no TC issue exists for it, unlike the
-    # ML-DSA external-mu entries above, so "vendor" not "pre-ratification").
+    # ML-DSA external-mu entries above, so "vendor" and never a TC kind).
     # See docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md.
     "CKM_HPKE_KEM_KEY_PAIR_GEN": (0x80000013, "vendor"),
     "CKM_HPKE": (0x80000014, "vendor"),
@@ -426,6 +485,10 @@ ALIAS_GROUPS = [
     {"CKM_SHA3_512_KEY_DERIVATION", "CKM_SHA3_512_KEY_DERIVE"},
     {"CKM_SHAKE_128_KEY_DERIVATION", "CKM_SHAKE_128_KEY_DERIVE"},
     {"CKM_SHAKE_256_KEY_DERIVATION", "CKM_SHAKE_256_KEY_DERIVE"},
+    # v3.2 name and its v3.3 working-draft successor; the TC header defines
+    # CKA_HSS_KEYS_REMAINING as CKA_KEYS_REMAINING ("Deprecated"), commit
+    # 9ef73f9: https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L645
+    {"CKA_HSS_KEYS_REMAINING", "CKA_KEYS_REMAINING"},
 ]
 
 
