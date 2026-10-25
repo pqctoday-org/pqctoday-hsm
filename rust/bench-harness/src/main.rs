@@ -59,7 +59,8 @@ use clap::Parser;
 use pkcs11::Engine;
 use softhsmrustv3::ck_abi::{CK_OBJECT_HANDLE, CK_SESSION_HANDLE, CK_SLOT_ID};
 use softhsmrustv3::constants::{
-    CKA_EC_POINT, CKA_VALUE, CKM_AES_KEY_GEN, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID,
+    CKA_EC_POINT, CKA_SIGN, CKA_VERIFY, CKM_AES_KEY_GEN, CKM_SHA256_HMAC,
+    CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID,
 };
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
@@ -102,6 +103,11 @@ struct Cli {
     /// `threads * instances`.
     #[arg(long, default_value_t = 4)]
     threads: u32,
+    /// Number of tenant workloads to measure.  The default two-tenant mode
+    /// preserves the tenancy/fairness benchmark; one tenant assigns every
+    /// worker to one workload for a true per-core or whole-machine total.
+    #[arg(long, default_value_t = 2)]
+    tenants: u32,
     /// Measured window per point, seconds (§A6 "seconds-per-point", §A7
     /// "fixed-duration points").
     #[arg(long, default_value_t = 2.0)]
@@ -309,16 +315,33 @@ fn provision_tenant(
         keygen_ms.insert(algo.name, keygen_start.elapsed().as_secs_f64() * 1000.0);
         // Self-contained sanity: encapsulate against this tenant's own
         // public key, decapsulate with its own private key.
+        // Shared secrets must remain inside the HSM.  Ask for the limited
+        // HMAC permissions needed for an in-HSM equality proof; never request
+        // CKA_VALUE, CKA_EXTRACTABLE, or CKA_SENSITIVE weakening.
+        let mut can_sign: u8 = 1;
+        let mut can_verify: u8 = 1;
+        let mut validation_template = [
+            softhsmrustv3::ck_abi::CK_ATTRIBUTE {
+                attrType: CKA_SIGN as _, pValue: &mut can_sign as *mut u8 as _, ulValueLen: 1,
+            },
+            softhsmrustv3::ck_abi::CK_ATTRIBUTE {
+                attrType: CKA_VERIFY as _, pValue: &mut can_verify as *mut u8 as _, ulValueLen: 1,
+            },
+        ];
         let (ciphertext, encap_ss_handle) = engine
-            .encapsulate_key(session, algo.kem_mechanism, pub_handle, &mut [])
+            .encapsulate_key(session, algo.kem_mechanism, pub_handle, &mut validation_template)
             .with_context(|| format!("C_EncapsulateKey({}, tenant={name})", algo.name))?;
         let decap_ss_handle = engine
-            .decapsulate_key(session, algo.kem_mechanism, priv_handle, &ciphertext, &mut [])
+            .decapsulate_key(session, algo.kem_mechanism, priv_handle, &ciphertext, &mut validation_template)
             .with_context(|| format!("C_DecapsulateKey({}, tenant={name})", algo.name))?;
-        let encap_ss = engine.get_attribute_value(session, encap_ss_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(encap CKA_VALUE, {})", algo.name))?;
-        let decap_ss = engine.get_attribute_value(session, decap_ss_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(decap CKA_VALUE, {})", algo.name))?;
-        assert_eq!(encap_ss, decap_ss, "tenant {name}'s {} decapsulate must recover the SAME shared secret encapsulate produced", algo.name);
-        assert_eq!(encap_ss.len(), 32, "{} shared secret must be 32 bytes (FIPS 203)", algo.name);
+        let challenge = b"pqc-hsm-perf KEM in-HSM equality proof";
+        engine.sign_init(session, CKM_SHA256_HMAC, encap_ss_handle)?;
+        let tag = engine.sign(session, challenge)?;
+        engine.verify_init(session, CKM_SHA256_HMAC, decap_ss_handle)?;
+        assert!(engine.verify(session, challenge, &tag)?, "tenant {name}'s {} decapsulate key must verify the encapsulate-key HMAC", algo.name);
+        let mut tampered = tag.clone(); tampered[0] ^= 1;
+        engine.verify_init(session, CKM_SHA256_HMAC, decap_ss_handle)?;
+        assert!(!engine.verify(session, challenge, &tampered)?, "tenant {name}'s {} validation HMAC must reject a tampered tag", algo.name);
         kem.insert(algo.name, KemMaterial { pub_handle, priv_handle, ciphertext });
     }
 
@@ -405,6 +428,9 @@ fn provision_tenant(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if !(1..=2).contains(&cli.tenants) {
+        bail!("--tenants must be 1 or 2, got {}", cli.tenants);
+    }
     if let Some(Command::Kmip(args)) = &cli.command {
         return kmip::run(args);
     }
@@ -541,6 +567,7 @@ fn run_parent(cli: &Cli) -> Result<()> {
         let mut cmd = std::process::Command::new(&self_exe);
         cmd.arg("--library").arg(&cli.library)
             .arg("--threads").arg(cli.threads.to_string())
+            .arg("--tenants").arg(cli.tenants.to_string())
             .arg("--duration-secs").arg(cli.duration_secs.to_string())
             .arg("--warmup-secs").arg(cli.warmup_secs.to_string())
             .arg("--min-ops").arg(cli.min_ops.to_string())
@@ -645,7 +672,9 @@ fn run_instance(cli: &Cli) -> Result<()> {
         if cli.include_slow { "including slow algorithms" } else { "slow algorithms excluded, pass --include-slow to add them" }
     );
 
-    // ── Two tenants, two real tokens, standard PKCS#11 v3.2 calls only. ─
+    // ── Two real tokens, standard PKCS#11 v3.2 calls only.  Both are always
+    // provisioned and cross-checked; --tenants selects whether measurement
+    // uses one workload or the historical two-workload fairness split. ─────
     let (mut alice, alice_keygen_ms) = provision_tenant(&engine, "alice", &sig_algos, &kex_algos, &kem_algos, &enc_algos, &sym_algos, &digest_algos)?;
     eprintln!("[ok] alice bootstrapped on slot {}: session={}", alice.slot, alice.session);
     let (mut bob, bob_keygen_ms) = provision_tenant(&engine, "bob", &sig_algos, &kex_algos, &kem_algos, &enc_algos, &sym_algos, &digest_algos)?;
@@ -728,12 +757,17 @@ fn run_instance(cli: &Cli) -> Result<()> {
 
         let mut bob_point_for_alice = bob_own.clone();
         let mut alice_point_for_bob = alice_own.clone();
-        let alice_shared_handle = engine.ecdh1_derive(alice.session, alice_priv, &mut bob_point_for_alice).with_context(|| format!("C_DeriveKey(ECDH1, {}, alice)", algo.name))?;
-        let bob_shared_handle = engine.ecdh1_derive(bob.session, bob_priv, &mut alice_point_for_bob).with_context(|| format!("C_DeriveKey(ECDH1, {}, bob)", algo.name))?;
-        let alice_shared = engine.get_attribute_value(alice.session, alice_shared_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(alice shared CKA_VALUE, {})", algo.name))?;
-        let bob_shared = engine.get_attribute_value(bob.session, bob_shared_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(bob shared CKA_VALUE, {})", algo.name))?;
-        assert_eq!(alice_shared, bob_shared, "{} ECDH must produce the SAME shared secret on both sides", algo.name);
-        eprintln!("[ok] {} key agreement verified: alice and bob independently derived the SAME {}-byte shared secret", algo.name, alice_shared.len());
+        let alice_shared_handle = engine.ecdh1_derive_for_validation(alice.session, alice_priv, &mut bob_point_for_alice).with_context(|| format!("C_DeriveKey(ECDH1 validation, {}, alice)", algo.name))?;
+        let bob_shared_handle = engine.ecdh1_derive_for_validation(bob.session, bob_priv, &mut alice_point_for_bob).with_context(|| format!("C_DeriveKey(ECDH1 validation, {}, bob)", algo.name))?;
+        let challenge = b"pqc-hsm-perf ECDH in-HSM equality proof";
+        engine.sign_init(alice.session, CKM_SHA256_HMAC, alice_shared_handle)?;
+        let tag = engine.sign(alice.session, challenge)?;
+        engine.verify_init(bob.session, CKM_SHA256_HMAC, bob_shared_handle)?;
+        assert!(engine.verify(bob.session, challenge, &tag)?, "{} ECDH peers must derive the same protected secret", algo.name);
+        let mut tampered = tag.clone(); tampered[0] ^= 1;
+        engine.verify_init(bob.session, CKM_SHA256_HMAC, bob_shared_handle)?;
+        assert!(!engine.verify(bob.session, challenge, &tampered)?, "{} ECDH validation HMAC must reject a tampered tag", algo.name);
+        eprintln!("[ok] {} key agreement verified by in-HSM HMAC challenge/response", algo.name);
 
         alice.kex.get_mut(algo.name).unwrap().peer_point = bob_own;
         bob.kex.get_mut(algo.name).unwrap().peer_point = alice_own;
@@ -748,7 +782,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
 
     // ── Fixed-duration, multi-threaded measurement (§A7): one point per
     // (tenant, algorithm, op) — `cli.threads` workers round-robin across
-    // the 2 tenants, each worker on its OWN session (an operation's
+    // the selected measurement tenants, each worker on its OWN session (an operation's
     // state — SignInit/Sign, etc. — lives on the session, so concurrent
     // workers sharing one session would race each other's operation
     // context). Login state is per-TOKEN not per-session (verified
@@ -768,16 +802,22 @@ fn run_instance(cli: &Cli) -> Result<()> {
     // other (`⌈N/2⌉` vs `⌊N/2⌋`) — a real property of the run, now
     // visible as different `total_ops` between the two tenants' rows at
     // the same `threads` value, not hidden inside a pooled average. ────
-    let tenants = [&alice, &bob];
+    let all_tenants = [&alice, &bob];
+    let tenants = &all_tenants[..cli.tenants as usize];
+    let keygen_by_tenant = [&alice_keygen_ms, &bob_keygen_ms];
     let mut worker_sessions_by_tenant: Vec<Vec<CK_SESSION_HANDLE>> = vec![Vec::new(); tenants.len()];
     for w in 0..cli.threads {
         let tenant_idx = (w as usize) % tenants.len();
         let session = engine.open_session(tenants[tenant_idx].slot).with_context(|| format!("C_OpenSession (worker {w})"))?;
         worker_sessions_by_tenant[tenant_idx].push(session);
     }
+    let worker_split = worker_sessions_by_tenant.iter()
+        .map(|sessions| sessions.len().to_string())
+        .collect::<Vec<_>>()
+        .join(" / ");
     eprintln!(
-        "[ok] {} worker sessions opened across {} tenants ({} / {} split)",
-        cli.threads, tenants.len(), worker_sessions_by_tenant[0].len(), worker_sessions_by_tenant[1].len()
+        "[ok] {} worker sessions opened across {} measurement tenant(s) ({} split)",
+        cli.threads, tenants.len(), worker_split
     );
 
     let engine = Arc::new(engine);
@@ -824,20 +864,24 @@ fn run_instance(cli: &Cli) -> Result<()> {
         emit("keygen", category, name, security_level, tenant_index, slot, 1, vec![latency_ms], duration_s)
     };
     for algo in &sig_algos {
-        emit_keygen("signature", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
-        emit_keygen("signature", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            emit_keygen("signature", algo.name, algo.security_level, tenant_index as u32, tenant.slot as u64, keygen_by_tenant[tenant_index][algo.name])?;
+        }
     }
     for algo in &kex_algos {
-        emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
-        emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            emit_keygen("key_establishment", algo.name, algo.security_level, tenant_index as u32, tenant.slot as u64, keygen_by_tenant[tenant_index][algo.name])?;
+        }
     }
     for algo in &kem_algos {
-        emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
-        emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            emit_keygen("key_establishment", algo.name, algo.security_level, tenant_index as u32, tenant.slot as u64, keygen_by_tenant[tenant_index][algo.name])?;
+        }
     }
     for algo in &sym_algos {
-        emit_keygen("symmetric", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
-        emit_keygen("symmetric", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            emit_keygen("symmetric", algo.name, algo.security_level, tenant_index as u32, tenant.slot as u64, keygen_by_tenant[tenant_index][algo.name])?;
+        }
     }
 
     // sign + verify, every signature algorithm, per tenant

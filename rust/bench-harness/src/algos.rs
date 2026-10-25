@@ -7,29 +7,24 @@
 //! `rust/src/constants.rs`, which itself is checked against the spec's
 //! `pkcs11t.h` per this repo's CLAUDE.md) — no vendor extensions.
 //!
-//! Two categories from plan §A5 are deliberately NOT here, both verified
-//! against source before excluding (not assumed):
-//! - **Composite/hybrid signatures** (e.g. ECDSA P-256 + ML-DSA-44): no
-//!   single PKCS#11 mechanism exists for these in this engine — a caller
-//!   genuinely issues two separate real sign operations. §A5 itself calls
-//!   these "modeled, not native"; a harness-level composite measurement is
-//!   a distinct, separately-scoped increment, not added here.
-//! - **Hybrid/native KEMs** (X25519MLKEM768 etc.): `rust/src/native/hybrid.rs`
-//!   confirms these exist ONLY through the KMIP server's own tenant/handle
-//!   bookkeeping (`kmip/src/hybrid_kem.rs` and friends) — no
-//!   `C_GenerateKeyPair`/`C_EncapsulateKey` dispatch arm reaches them.
-//!   Unreachable from a pkcs11-direct harness; deferred to kmip mode (§P2).
+//! The two `HYBRID_*` entries below are native PKCS#11 v3.3 working-draft
+//! **composite** operations, not a modeled pair of independent calls and not
+//! a TLS/SSH hybrid group. They exercise one `CKK_COMP_KEM` or `CKK_COMP_SIG`
+//! object through `CKM_COMP_*`. The module continues to report Cryptoki 3.2;
+//! those names must therefore remain explicitly labelled in every result.
 
 use softhsmrustv3::constants::{
     CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EC_KEY_PAIR_GEN, CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
     CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512, CKM_EDDSA, CKM_ML_DSA,
     CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
+    CKM_COMP_KEM, CKM_COMP_KEM_KEY_PAIR_GEN, CKM_COMP_SIG, CKM_COMP_SIG_KEY_PAIR_GEN,
     CKM_AES_CBC, CKM_AES_GCM,
     CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_RSA_PKCS_OAEP, CKM_SHA256, CKM_SHA384, CKM_SHA3_256,
     CKM_SHA3_512, CKM_SHA512, CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384_RSA_PKCS_PSS,
     CKM_SHA512_RSA_PKCS_PSS, CKM_SLH_DSA,
     CKM_SLH_DSA_KEY_PAIR_GEN, CKP_ML_DSA_44, CKP_ML_DSA_65, CKP_ML_DSA_87, CKP_ML_KEM_1024,
     CKP_ML_KEM_512, CKP_ML_KEM_768,
+    CKP_COMP_KEM_MLKEM768_X25519, CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512,
     CKP_SLH_DSA_SHA2_128F, CKP_SLH_DSA_SHA2_128S, CKP_SLH_DSA_SHA2_192F, CKP_SLH_DSA_SHA2_192S,
     CKP_SLH_DSA_SHA2_256F, CKP_SLH_DSA_SHA2_256S,
     CKP_SLH_DSA_SHAKE_128F, CKP_SLH_DSA_SHAKE_128S, CKP_SLH_DSA_SHAKE_192F, CKP_SLH_DSA_SHAKE_192S,
@@ -156,6 +151,16 @@ pub const ML_DSA_87: SignatureAlgo = SignatureAlgo {
     sign_mechanism: CKM_ML_DSA, slow: false,
 };
 
+/// PKCS#11 v3.3 working-draft composite signature: one ML-DSA-65 plus one
+/// ECDSA P-256 component, generated and used as a single `CKK_COMP_SIG`
+/// object. This is the L3 hybrid-signature headline lane.
+pub const HYBRID_SIG_MLDSA65_ECDSA_P256: SignatureAlgo = SignatureAlgo {
+    name: "HYBRID-SIG-MLDSA65-ECDSA-P256", security_level: "L3",
+    keygen_mechanism: CKM_COMP_SIG_KEY_PAIR_GEN,
+    keygen_param: KeygenParam::ParameterSet(CKP_COMP_SIG_MLDSA65_ECDSA_P256_SHA512),
+    sign_mechanism: CKM_COMP_SIG, slow: false,
+};
+
 /// Slow (§A6 toggle) — SLH-DSA sign is orders of magnitude more expensive
 /// than every other signature algorithm here (a full hypertree + FORS
 /// computation per signature, vs. a handful of field/lattice ops).
@@ -258,7 +263,7 @@ pub const RSA_PSS_4096: SignatureAlgo = SignatureAlgo {
 
 pub const SIGNATURE_ALGOS: &[SignatureAlgo] = &[
     ED25519, ECDSA_P256, ECDSA_K256, ECDSA_P384, ECDSA_P521,
-    ML_DSA_44, ML_DSA_65, ML_DSA_87,
+    ML_DSA_44, ML_DSA_65, ML_DSA_87, HYBRID_SIG_MLDSA65_ECDSA_P256,
     SLH_DSA_128S, SLH_DSA_256S,
     SLH_DSA_SHAKE_128S, SLH_DSA_SHA2_128F, SLH_DSA_SHAKE_128F,
     SLH_DSA_SHA2_192S, SLH_DSA_SHAKE_192S, SLH_DSA_SHA2_192F, SLH_DSA_SHAKE_192F,
@@ -327,7 +332,18 @@ pub const ML_KEM_1024: KemAlgo = KemAlgo {
     keygen_mechanism: CKM_ML_KEM_KEY_PAIR_GEN, kem_mechanism: CKM_ML_KEM, parameter_set: CKP_ML_KEM_1024,
 };
 
-pub const KEM_ALGOS: &[KemAlgo] = &[ML_KEM_512, ML_KEM_768, ML_KEM_1024];
+/// PKCS#11 v3.3 working-draft composite KEM: ML-KEM-768 plus X25519 in one
+/// `CKK_COMP_KEM` object and one `CKM_COMP_KEM` encapsulation/decapsulation.
+/// This is the L3 hybrid-KEM headline lane.
+pub const HYBRID_KEM_MLKEM768_X25519: KemAlgo = KemAlgo {
+    name: "HYBRID-KEM-MLKEM768-X25519", security_level: "L3",
+    keygen_mechanism: CKM_COMP_KEM_KEY_PAIR_GEN, kem_mechanism: CKM_COMP_KEM,
+    parameter_set: CKP_COMP_KEM_MLKEM768_X25519,
+};
+
+pub const KEM_ALGOS: &[KemAlgo] = &[
+    ML_KEM_512, ML_KEM_768, ML_KEM_1024, HYBRID_KEM_MLKEM768_X25519,
+];
 
 /// One benchmarked key-transport (RSA-OAEP) algorithm — `C_Encrypt`/
 /// `C_Decrypt`, not a KEM's `C_EncapsulateKey`/`C_DecapsulateKey`, but
