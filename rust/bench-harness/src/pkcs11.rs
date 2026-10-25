@@ -20,15 +20,15 @@
 
 use softhsmrustv3::ck_abi::{
     CK_ATTRIBUTE, CK_ATTRIBUTE_TYPE, CK_FLAGS, CK_FUNCTION_LIST, CK_FUNCTION_LIST_3_2,
-    CK_FUNCTION_LIST_PTR, CK_INTERFACE_PTR, CK_INTERFACE_PTR_PTR, CK_MECHANISM,
-    CK_OBJECT_HANDLE, CK_RV, CK_SESSION_HANDLE, CK_SLOT_ID, CK_ULONG, CK_USER_TYPE,
-    CK_VERSION, CK_VOID_PTR,
+    CK_FUNCTION_LIST_PTR, CK_INTERFACE_PTR, CK_INTERFACE_PTR_PTR, CK_MECHANISM, CK_OBJECT_HANDLE,
+    CK_RV, CK_SESSION_HANDLE, CK_SLOT_ID, CK_ULONG, CK_USER_TYPE, CK_VERSION, CK_VOID_PTR,
 };
 use softhsmrustv3::constants::{
-    CKA_EC_PARAMS, CKA_MODULUS_BITS, CKA_PARAMETER_SET, CKA_VALUE_LEN, CKF_RW_SESSION,
-    CKF_SERIAL_SESSION, CKG_MGF1_SHA256, CKG_MGF1_SHA384, CKG_MGF1_SHA512, CKM_AES_CBC,
-    CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM, CKM_SHA256, CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384,
-    CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512, CKM_SHA512_RSA_PKCS_PSS, CKR_OK, CKU_SO, CKU_USER,
+    CKA_EC_PARAMS, CKA_MODULUS_BITS, CKA_PARAMETER_SET, CKA_SIGN, CKA_VERIFY,
+    CKA_VALUE_LEN, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKG_MGF1_SHA256, CKG_MGF1_SHA384,
+    CKG_MGF1_SHA512, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM, CKM_SHA256,
+    CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384, CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512,
+    CKM_SHA512_RSA_PKCS_PSS, CKR_OK, CKU_SO, CKU_USER,
 };
 
 use crate::algos::KeygenParam;
@@ -98,14 +98,12 @@ impl Engine {
         let library = unsafe { libloading::Library::new(library_path) }
             .with_context(|| format!("dlopen {library_path:?}"))?;
 
-        type GetFunctionListFn =
-            unsafe extern "C" fn(*mut CK_FUNCTION_LIST_PTR) -> CK_RV;
+        type GetFunctionListFn = unsafe extern "C" fn(*mut CK_FUNCTION_LIST_PTR) -> CK_RV;
         // SAFETY: `C_GetFunctionList` is the one symbol PKCS#11 §5.4
         // guarantees every conformant library exports under this exact
         // name, with this exact signature.
         let get_function_list: libloading::Symbol<GetFunctionListFn> =
-            unsafe { library.get(b"C_GetFunctionList\0") }
-                .context("resolve C_GetFunctionList")?;
+            unsafe { library.get(b"C_GetFunctionList\0") }.context("resolve C_GetFunctionList")?;
 
         let mut list_ptr: CK_FUNCTION_LIST_PTR = std::ptr::null_mut();
         // SAFETY: `list_ptr` is a valid, non-null out-pointer; the callee
@@ -130,12 +128,8 @@ impl Engine {
         // this harness needs for the KEM cells are unavailable through
         // this particular module. Every v2.40 function still works. See
         // `functions_3_2`'s doc comment.
-        type GetInterfaceFn = unsafe extern "C" fn(
-            *mut u8,
-            *mut CK_VERSION,
-            CK_INTERFACE_PTR_PTR,
-            CK_FLAGS,
-        ) -> CK_RV;
+        type GetInterfaceFn =
+            unsafe extern "C" fn(*mut u8, *mut CK_VERSION, CK_INTERFACE_PTR_PTR, CK_FLAGS) -> CK_RV;
         let functions_3_2 = match unsafe { library.get::<GetInterfaceFn>(b"C_GetInterface\0") } {
             Err(_) => None,
             Ok(get_interface) => {
@@ -146,7 +140,12 @@ impl Engine {
                 // for the duration of this call; `interface_ptr` is a
                 // valid non-null out-pointer per §5.5.
                 let rv = unsafe {
-                    get_interface(interface_name.as_mut_ptr(), &mut version_3_2, &mut interface_ptr, 0)
+                    get_interface(
+                        interface_name.as_mut_ptr(),
+                        &mut version_3_2,
+                        &mut interface_ptr,
+                        0,
+                    )
                 };
                 if rv != CKR_OK_RV || interface_ptr.is_null() {
                     None
@@ -162,7 +161,11 @@ impl Engine {
             }
         };
 
-        Ok(Self { _library: library, functions: list_ptr, functions_3_2 })
+        Ok(Self {
+            _library: library,
+            functions: list_ptr,
+            functions_3_2,
+        })
     }
 
     // SAFETY (every accessor below): `self.functions` was populated by a
@@ -191,12 +194,18 @@ impl Engine {
 
     pub fn initialize(&self) -> Result<()> {
         // SAFETY: PKCS#11 §5.6 — a null pInitArgs is always valid.
-        ck(unsafe { (self.funcs().C_Initialize)(std::ptr::null_mut()) }, "C_Initialize")
+        ck(
+            unsafe { (self.funcs().C_Initialize)(std::ptr::null_mut()) },
+            "C_Initialize",
+        )
     }
 
     pub fn finalize(&self) -> Result<()> {
         // SAFETY: PKCS#11 §5.6 — pReserved must be null; we pass null.
-        ck(unsafe { (self.funcs().C_Finalize)(std::ptr::null_mut()) }, "C_Finalize")
+        ck(
+            unsafe { (self.funcs().C_Finalize)(std::ptr::null_mut()) },
+            "C_Finalize",
+        )
     }
 
     /// §5.4 `C_GetInfo` — `libraryVersion` as `"major.minor"`. Stamped on
@@ -207,7 +216,10 @@ impl Engine {
     pub fn library_version(&self) -> Result<String> {
         let mut info: softhsmrustv3::ck_abi::CK_INFO = unsafe { std::mem::zeroed() };
         ck(unsafe { (self.funcs().C_GetInfo)(&mut info) }, "C_GetInfo")?;
-        Ok(format!("{}.{}", info.libraryVersion.major, info.libraryVersion.minor))
+        Ok(format!(
+            "{}.{}",
+            info.libraryVersion.major, info.libraryVersion.minor
+        ))
     }
 
     /// §5.5 two-call convention: query the count, allocate, fill.
@@ -269,13 +281,7 @@ impl Engine {
         // engine doesn't); null is the documented "no callback" value.
         ck(
             unsafe {
-                (self.funcs().C_OpenSession)(
-                    slot,
-                    flags,
-                    std::ptr::null_mut(),
-                    None,
-                    &mut handle,
-                )
+                (self.funcs().C_OpenSession)(slot, flags, std::ptr::null_mut(), None, &mut handle)
             },
             "C_OpenSession",
         )?;
@@ -283,14 +289,27 @@ impl Engine {
     }
 
     pub fn close_session(&self, session: CK_SESSION_HANDLE) -> Result<()> {
-        ck(unsafe { (self.funcs().C_CloseSession)(session) }, "C_CloseSession")
+        ck(
+            unsafe { (self.funcs().C_CloseSession)(session) },
+            "C_CloseSession",
+        )
     }
 
-    pub fn login(&self, session: CK_SESSION_HANDLE, user_type: CK_USER_TYPE, pin: &str) -> Result<()> {
+    pub fn login(
+        &self,
+        session: CK_SESSION_HANDLE,
+        user_type: CK_USER_TYPE,
+        pin: &str,
+    ) -> Result<()> {
         let mut pin_bytes = pin.as_bytes().to_vec();
         ck(
             unsafe {
-                (self.funcs().C_Login)(session, user_type, pin_bytes.as_mut_ptr(), pin_bytes.len() as CK_ULONG)
+                (self.funcs().C_Login)(
+                    session,
+                    user_type,
+                    pin_bytes.as_mut_ptr(),
+                    pin_bytes.len() as CK_ULONG,
+                )
             },
             "C_Login",
         )
@@ -311,7 +330,13 @@ impl Engine {
     pub fn init_pin(&self, session: CK_SESSION_HANDLE, pin: &str) -> Result<()> {
         let mut pin_bytes = pin.as_bytes().to_vec();
         ck(
-            unsafe { (self.funcs().C_InitPIN)(session, pin_bytes.as_mut_ptr(), pin_bytes.len() as CK_ULONG) },
+            unsafe {
+                (self.funcs().C_InitPIN)(
+                    session,
+                    pin_bytes.as_mut_ptr(),
+                    pin_bytes.len() as CK_ULONG,
+                )
+            },
             "C_InitPIN",
         )
     }
@@ -321,7 +346,13 @@ impl Engine {
     /// uses internally (and what the KMIP server's `provision_tenant`
     /// calls natively) — reproduced here purely through the standard C
     /// ABI. Returns a live, USER-logged-in session on `slot`.
-    pub fn bootstrap_token(&self, slot: CK_SLOT_ID, so_pin: &str, user_pin: &str, label: &str) -> Result<CK_SESSION_HANDLE> {
+    pub fn bootstrap_token(
+        &self,
+        slot: CK_SLOT_ID,
+        so_pin: &str,
+        user_pin: &str,
+        label: &str,
+    ) -> Result<CK_SESSION_HANDLE> {
         self.init_token(slot, so_pin, label)?;
         let so_session = self.open_session(slot)?;
         self.login_so(so_session, so_pin)?;
@@ -340,8 +371,17 @@ impl Engine {
     /// absent on this object — not this crate's harness-only convention,
     /// the engine's own real return code, see `ffi.rs::C_GetAttributeValue`)
     /// is surfaced as a normal `Err`, same as any other non-OK `rv`.
-    pub fn get_attribute_value(&self, session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE, attr_type: u32) -> Result<Vec<u8>> {
-        let mut attr = CK_ATTRIBUTE { attrType: attr_type as CK_ATTRIBUTE_TYPE, pValue: std::ptr::null_mut(), ulValueLen: 0 };
+    pub fn get_attribute_value(
+        &self,
+        session: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        attr_type: u32,
+    ) -> Result<Vec<u8>> {
+        let mut attr = CK_ATTRIBUTE {
+            attrType: attr_type as CK_ATTRIBUTE_TYPE,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
         ck(
             unsafe { (self.funcs().C_GetAttributeValue)(session, object, &mut attr, 1) },
             "C_GetAttributeValue(size)",
@@ -397,9 +437,82 @@ impl Engine {
         let mut derived: CK_OBJECT_HANDLE = 0;
         ck(
             unsafe {
-                (self.funcs().C_DeriveKey)(session, &mut mech, base_key, std::ptr::null_mut(), 0, &mut derived)
+                (self.funcs().C_DeriveKey)(
+                    session,
+                    &mut mech,
+                    base_key,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut derived,
+                )
             },
             "C_DeriveKey(ECDH1)",
+        )?;
+        Ok(derived)
+    }
+
+    /// Same ECDH operation as [`Self::ecdh1_derive`], but gives the
+    /// short-lived validation key HMAC sign/verify permissions.  It remains
+    /// non-extractable: callers prove that Alice and Bob derived the same
+    /// secret by having one HSM create an HMAC tag that the other verifies.
+    /// Timed benchmark operations continue to call `ecdh1_derive`.
+    pub fn ecdh1_derive_for_validation(
+        &self,
+        session: CK_SESSION_HANDLE,
+        base_key: CK_OBJECT_HANDLE,
+        peer_public_point: &mut [u8],
+    ) -> Result<CK_OBJECT_HANDLE> {
+        const CKD_NULL: CK_ULONG = 1;
+        #[repr(C)]
+        struct CkEcdh1DeriveParams {
+            kdf: CK_ULONG,
+            ul_shared_data_len: CK_ULONG,
+            p_shared_data: CK_VOID_PTR,
+            ul_public_data_len: CK_ULONG,
+            p_public_data: CK_VOID_PTR,
+        }
+        let mut params = CkEcdh1DeriveParams {
+            kdf: CKD_NULL,
+            ul_shared_data_len: 0,
+            p_shared_data: std::ptr::null_mut(),
+            ul_public_data_len: peer_public_point.len() as CK_ULONG,
+            p_public_data: peer_public_point.as_mut_ptr() as CK_VOID_PTR,
+        };
+        let mut mech = CK_MECHANISM {
+            mechanism: softhsmrustv3::constants::CKM_ECDH1_DERIVE as CK_ULONG,
+            pParameter: &mut params as *mut CkEcdh1DeriveParams as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CkEcdh1DeriveParams>() as CK_ULONG,
+        };
+        // CK_BBOOL is one byte in the PKCS#11 ABI.  Do not request
+        // CKA_VALUE access here: current engines rightly keep ECDH-derived
+        // material protected.  The public HMAC tag is the validation output.
+        let mut can_sign: u8 = 1;
+        let mut can_verify: u8 = 1;
+        let mut template = [
+            CK_ATTRIBUTE {
+                attrType: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+                pValue: &mut can_sign as *mut u8 as CK_VOID_PTR,
+                ulValueLen: std::mem::size_of::<u8>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                attrType: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+                pValue: &mut can_verify as *mut u8 as CK_VOID_PTR,
+                ulValueLen: std::mem::size_of::<u8>() as CK_ULONG,
+            },
+        ];
+        let mut derived: CK_OBJECT_HANDLE = 0;
+        ck(
+            unsafe {
+                (self.funcs().C_DeriveKey)(
+                    session,
+                    &mut mech,
+                    base_key,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut derived,
+                )
+            },
+            "C_DeriveKey(ECDH1 validation)",
         )?;
         Ok(derived)
     }
@@ -420,15 +533,24 @@ impl Engine {
                  (C_GetInterface unavailable or refused) — C_EncapsulateKey cannot be driven"
             )
         })?;
-        let mut mech = CK_MECHANISM { mechanism: mechanism as CK_ULONG, pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
+        let mut mech = CK_MECHANISM {
+            mechanism: mechanism as CK_ULONG,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
         let mut ct_len: CK_ULONG = 0;
         let mut ss_handle: CK_OBJECT_HANDLE = 0;
         ck(
             unsafe {
                 (funcs_32.C_EncapsulateKey)(
-                    session, &mut mech, public_key,
-                    template.as_mut_ptr(), template.len() as CK_ULONG,
-                    std::ptr::null_mut(), &mut ct_len, &mut ss_handle,
+                    session,
+                    &mut mech,
+                    public_key,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut ct_len,
+                    &mut ss_handle,
                 )
             },
             "C_EncapsulateKey(size)",
@@ -437,9 +559,14 @@ impl Engine {
         ck(
             unsafe {
                 (funcs_32.C_EncapsulateKey)(
-                    session, &mut mech, public_key,
-                    template.as_mut_ptr(), template.len() as CK_ULONG,
-                    ciphertext.as_mut_ptr(), &mut ct_len, &mut ss_handle,
+                    session,
+                    &mut mech,
+                    public_key,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    ciphertext.as_mut_ptr(),
+                    &mut ct_len,
+                    &mut ss_handle,
                 )
             },
             "C_EncapsulateKey(fill)",
@@ -464,15 +591,24 @@ impl Engine {
                  (C_GetInterface unavailable or refused) — C_DecapsulateKey cannot be driven"
             )
         })?;
-        let mut mech = CK_MECHANISM { mechanism: mechanism as CK_ULONG, pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
+        let mut mech = CK_MECHANISM {
+            mechanism: mechanism as CK_ULONG,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
         let mut ciphertext = ciphertext.to_vec();
         let mut ss_handle: CK_OBJECT_HANDLE = 0;
         ck(
             unsafe {
                 (funcs_32.C_DecapsulateKey)(
-                    session, &mut mech, private_key,
-                    template.as_mut_ptr(), template.len() as CK_ULONG,
-                    ciphertext.as_mut_ptr(), ciphertext.len() as CK_ULONG, &mut ss_handle,
+                    session,
+                    &mut mech,
+                    private_key,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    ciphertext.as_mut_ptr(),
+                    ciphertext.len() as CK_ULONG,
+                    &mut ss_handle,
                 )
             },
             "C_DecapsulateKey",
@@ -621,9 +757,17 @@ impl Engine {
         }
     }
 
-    pub fn sign_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+    pub fn sign_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+    ) -> Result<()> {
         let (mut mech, _params) = Self::sig_mechanism(mechanism);
-        ck(unsafe { (self.funcs().C_SignInit)(session, &mut mech, key) }, "C_SignInit")
+        ck(
+            unsafe { (self.funcs().C_SignInit)(session, &mut mech, key) },
+            "C_SignInit",
+        )
     }
 
     /// Two-call convention: query length, then fill.
@@ -632,14 +776,26 @@ impl Engine {
         let mut sig_len: CK_ULONG = 0;
         ck(
             unsafe {
-                (self.funcs().C_Sign)(session, data.as_mut_ptr(), data.len() as CK_ULONG, std::ptr::null_mut(), &mut sig_len)
+                (self.funcs().C_Sign)(
+                    session,
+                    data.as_mut_ptr(),
+                    data.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut sig_len,
+                )
             },
             "C_Sign(size)",
         )?;
         let mut sig = vec![0u8; sig_len as usize];
         ck(
             unsafe {
-                (self.funcs().C_Sign)(session, data.as_mut_ptr(), data.len() as CK_ULONG, sig.as_mut_ptr(), &mut sig_len)
+                (self.funcs().C_Sign)(
+                    session,
+                    data.as_mut_ptr(),
+                    data.len() as CK_ULONG,
+                    sig.as_mut_ptr(),
+                    &mut sig_len,
+                )
             },
             "C_Sign(fill)",
         )?;
@@ -647,15 +803,28 @@ impl Engine {
         Ok(sig)
     }
 
-    pub fn verify_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+    pub fn verify_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+    ) -> Result<()> {
         let (mut mech, _params) = Self::sig_mechanism(mechanism);
-        ck(unsafe { (self.funcs().C_VerifyInit)(session, &mut mech, key) }, "C_VerifyInit")
+        ck(
+            unsafe { (self.funcs().C_VerifyInit)(session, &mut mech, key) },
+            "C_VerifyInit",
+        )
     }
 
     /// `Ok(true)` valid, `Ok(false)` genuinely invalid signature
     /// (`CKR_SIGNATURE_INVALID`/`CKR_SIGNATURE_LEN_RANGE`), `Err` for any
     /// other failure.
-    pub fn verify(&self, session: CK_SESSION_HANDLE, data: &[u8], signature: &[u8]) -> Result<bool> {
+    pub fn verify(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+        signature: &[u8],
+    ) -> Result<bool> {
         let mut data = data.to_vec();
         let mut sig = signature.to_vec();
         let rv = unsafe {
@@ -701,9 +870,17 @@ impl Engine {
         (mech, params)
     }
 
-    pub fn encrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+    pub fn encrypt_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+    ) -> Result<()> {
         let (mut mech, _params) = Self::oaep_mechanism(mechanism);
-        ck(unsafe { (self.funcs().C_EncryptInit)(session, &mut mech, key) }, "C_EncryptInit")
+        ck(
+            unsafe { (self.funcs().C_EncryptInit)(session, &mut mech, key) },
+            "C_EncryptInit",
+        )
     }
 
     /// Two-call convention, same as `sign`.
@@ -712,14 +889,26 @@ impl Engine {
         let mut out_len: CK_ULONG = 0;
         ck(
             unsafe {
-                (self.funcs().C_Encrypt)(session, data.as_mut_ptr(), data.len() as CK_ULONG, std::ptr::null_mut(), &mut out_len)
+                (self.funcs().C_Encrypt)(
+                    session,
+                    data.as_mut_ptr(),
+                    data.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut out_len,
+                )
             },
             "C_Encrypt(size)",
         )?;
         let mut out = vec![0u8; out_len as usize];
         ck(
             unsafe {
-                (self.funcs().C_Encrypt)(session, data.as_mut_ptr(), data.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+                (self.funcs().C_Encrypt)(
+                    session,
+                    data.as_mut_ptr(),
+                    data.len() as CK_ULONG,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
             },
             "C_Encrypt(fill)",
         )?;
@@ -727,9 +916,17 @@ impl Engine {
         Ok(out)
     }
 
-    pub fn decrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+    pub fn decrypt_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+    ) -> Result<()> {
         let (mut mech, _params) = Self::oaep_mechanism(mechanism);
-        ck(unsafe { (self.funcs().C_DecryptInit)(session, &mut mech, key) }, "C_DecryptInit")
+        ck(
+            unsafe { (self.funcs().C_DecryptInit)(session, &mut mech, key) },
+            "C_DecryptInit",
+        )
     }
 
     /// Two-call convention, same as `sign`.
@@ -738,14 +935,26 @@ impl Engine {
         let mut out_len: CK_ULONG = 0;
         ck(
             unsafe {
-                (self.funcs().C_Decrypt)(session, ct.as_mut_ptr(), ct.len() as CK_ULONG, std::ptr::null_mut(), &mut out_len)
+                (self.funcs().C_Decrypt)(
+                    session,
+                    ct.as_mut_ptr(),
+                    ct.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut out_len,
+                )
             },
             "C_Decrypt(size)",
         )?;
         let mut out = vec![0u8; out_len as usize];
         ck(
             unsafe {
-                (self.funcs().C_Decrypt)(session, ct.as_mut_ptr(), ct.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+                (self.funcs().C_Decrypt)(
+                    session,
+                    ct.as_mut_ptr(),
+                    ct.len() as CK_ULONG,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
             },
             "C_Decrypt(fill)",
         )?;
@@ -832,7 +1041,10 @@ impl Engine {
             CKM_AES_ECB => {}
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
                 if iv.len() != 16 {
-                    bail!("CKM_AES_CBC needs exactly a 16-byte IV, got {} bytes", iv.len());
+                    bail!(
+                        "CKM_AES_CBC needs exactly a 16-byte IV, got {} bytes",
+                        iv.len()
+                    );
                 }
                 mech.pParameter = iv.as_mut_ptr() as CK_VOID_PTR;
                 mech.ulParameterLen = 16;
@@ -851,17 +1063,35 @@ impl Engine {
             other => bail!("sym_init: unsupported symmetric mechanism 0x{other:x}"),
         }
         if decrypt {
-            ck(unsafe { (self.funcs().C_DecryptInit)(session, &mut mech, key) }, "C_DecryptInit(symmetric)")
+            ck(
+                unsafe { (self.funcs().C_DecryptInit)(session, &mut mech, key) },
+                "C_DecryptInit(symmetric)",
+            )
         } else {
-            ck(unsafe { (self.funcs().C_EncryptInit)(session, &mut mech, key) }, "C_EncryptInit(symmetric)")
+            ck(
+                unsafe { (self.funcs().C_EncryptInit)(session, &mut mech, key) },
+                "C_EncryptInit(symmetric)",
+            )
         }
     }
 
-    pub fn sym_encrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE, iv: &mut [u8]) -> Result<()> {
+    pub fn sym_encrypt_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+        iv: &mut [u8],
+    ) -> Result<()> {
         self.sym_init(session, mechanism, key, iv, false)
     }
 
-    pub fn sym_decrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE, iv: &mut [u8]) -> Result<()> {
+    pub fn sym_decrypt_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+        iv: &mut [u8],
+    ) -> Result<()> {
         self.sym_init(session, mechanism, key, iv, true)
     }
 
@@ -874,11 +1104,22 @@ impl Engine {
     /// than the engine's AES. `data` is `&mut` only because the C ABI
     /// types the input as `CK_BYTE_PTR`; the engine does not write to it.
     /// Returns the real ciphertext length the engine reported.
-    pub fn encrypt_into(&self, session: CK_SESSION_HANDLE, data: &mut [u8], out: &mut [u8]) -> Result<usize> {
+    pub fn encrypt_into(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: &mut [u8],
+        out: &mut [u8],
+    ) -> Result<usize> {
         let mut out_len: CK_ULONG = out.len() as CK_ULONG;
         ck(
             unsafe {
-                (self.funcs().C_Encrypt)(session, data.as_mut_ptr(), data.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+                (self.funcs().C_Encrypt)(
+                    session,
+                    data.as_mut_ptr(),
+                    data.len() as CK_ULONG,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
             },
             "C_Encrypt(into)",
         )?;
@@ -886,11 +1127,22 @@ impl Engine {
     }
 
     /// `decrypt_into` — `encrypt_into`'s counterpart, same reasoning.
-    pub fn decrypt_into(&self, session: CK_SESSION_HANDLE, ciphertext: &mut [u8], out: &mut [u8]) -> Result<usize> {
+    pub fn decrypt_into(
+        &self,
+        session: CK_SESSION_HANDLE,
+        ciphertext: &mut [u8],
+        out: &mut [u8],
+    ) -> Result<usize> {
         let mut out_len: CK_ULONG = out.len() as CK_ULONG;
         ck(
             unsafe {
-                (self.funcs().C_Decrypt)(session, ciphertext.as_mut_ptr(), ciphertext.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+                (self.funcs().C_Decrypt)(
+                    session,
+                    ciphertext.as_mut_ptr(),
+                    ciphertext.len() as CK_ULONG,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
             },
             "C_Decrypt(into)",
         )?;
@@ -905,7 +1157,10 @@ impl Engine {
             pParameter: std::ptr::null_mut(),
             ulParameterLen: 0,
         };
-        ck(unsafe { (self.funcs().C_DigestInit)(session, &mut mech) }, "C_DigestInit")
+        ck(
+            unsafe { (self.funcs().C_DigestInit)(session, &mut mech) },
+            "C_DigestInit",
+        )
     }
 
     /// One-shot `C_Digest` into a caller-owned buffer — ONE FFI call per
@@ -917,11 +1172,22 @@ impl Engine {
     /// SHA-256 point by roughly a whole extra call's overhead. Caller
     /// passes a buffer at least as large as the mechanism's digest;
     /// `CKR_BUFFER_TOO_SMALL` surfaces as a normal error if not.
-    pub fn digest_into(&self, session: CK_SESSION_HANDLE, data: &mut [u8], out: &mut [u8]) -> Result<usize> {
+    pub fn digest_into(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: &mut [u8],
+        out: &mut [u8],
+    ) -> Result<usize> {
         let mut out_len: CK_ULONG = out.len() as CK_ULONG;
         ck(
             unsafe {
-                (self.funcs().C_Digest)(session, data.as_mut_ptr(), data.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+                (self.funcs().C_Digest)(
+                    session,
+                    data.as_mut_ptr(),
+                    data.len() as CK_ULONG,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
             },
             "C_Digest",
         )?;
