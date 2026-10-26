@@ -519,7 +519,7 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
     // entry generates its own real key via C_GenerateKey, and that cost
     // is a genuine, separately-interesting number on a 4-core A53.
     for algo in &sym_algos {
-        for op in ["keygen", "encrypt"] {
+        for op in ["keygen", "encrypt", "decrypt"] {
             cells.push(AlgoCell { category: "symmetric", algorithm: algo.name, security_level: algo.security_level, op });
         }
     }
@@ -1078,6 +1078,43 @@ fn run_instance(cli: &Cli) -> Result<()> {
             }).collect();
             let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
             emit("encrypt", "symmetric", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+        }
+    }
+
+    // Decrypt the same authenticated AES records.  The ciphertext is made
+    // once per worker with the token-resident key, then each timed operation
+    // executes C_DecryptInit + C_Decrypt including GCM tag verification.
+    // Replaying a ciphertext for decryption is cryptographically safe (only
+    // encryption requires nonce uniqueness), and avoids measuring a second
+    // encryption or host-side allocation instead of the requested decrypt
+    // path.  Encryption above continues to use a fresh nonce per operation.
+    for algo in &sym_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize]
+                .iter()
+                .map(|&session| -> Result<_> {
+                let engine = Arc::clone(&engine);
+                let key = tenant.sym[algo.name];
+                let mechanism = algo.encrypt_mechanism;
+                let data_len = algo.data_len;
+                let mut iv = vec![0x5Au8; algo.iv_len];
+                let mut plaintext: Vec<u8> = (0..data_len).map(|i| (i % 251) as u8).collect();
+                let mut ciphertext = vec![0u8; data_len + 16];
+                engine.sym_encrypt_init(session, mechanism, key, &mut iv)?;
+                let ciphertext_len = engine.encrypt_into(session, &mut plaintext, &mut ciphertext)?;
+                ciphertext.truncate(ciphertext_len);
+                let mut recovered = vec![0u8; data_len + 16];
+                Ok(move || -> Result<()> {
+                    engine.sym_decrypt_init(session, mechanism, key, &mut iv)?;
+                    engine.decrypt_into(session, &mut ciphertext, &mut recovered)?;
+                    Ok(())
+                })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
+            emit("decrypt", "symmetric", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
         }
     }
 
