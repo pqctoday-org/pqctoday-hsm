@@ -5987,7 +5987,7 @@ fn C_EncapsulateKey_impl(
                         }
                         let sk = x448::StaticSecret::from(eph_sk);
                         let eph_pub = x448::PublicKey::from(&sk);
-                        let ss = match x448::x448(eph_sk, peer) {
+                        let ss = match crate::crypto::handlers::x448_dh(eph_sk, peer) {
                             Some(v) => v.to_vec(),
                             None => return CKR_ARGUMENTS_BAD,
                         };
@@ -6594,7 +6594,7 @@ fn C_DecapsulateKey_impl(
                         Ok(v) => v,
                         Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
                     };
-                    match x448::x448(sk, peer) {
+                    match crate::crypto::handlers::x448_dh(sk, peer) {
                         Some(v) => v.to_vec(),
                         None => return CKR_ENCRYPTED_DATA_INVALID,
                     }
@@ -14128,8 +14128,12 @@ pub fn C_DeriveKey(
                         pk_arr.zeroize();
                         // StaticSecret::from() applies RFC7748 clamping; zeroizes on drop
                         let sk = X448StaticSecret::from(sk_arr);
-                        let shared = sk.diffie_hellman(&pk);
-                        shared.as_bytes().to_vec()
+                        // RFC 7748 §6.2: refuse an all-zero shared secret (non-canonical
+                        // low-order encodings get past PublicKey::from_bytes).
+                        match crate::crypto::handlers::x448_contributory(sk.diffie_hellman(&pk)) {
+                            Some(shared) => shared.as_bytes().to_vec(),
+                            None => return CKR_ARGUMENTS_BAD,
+                        }
                     }
                     _ => {
                         // Unknown/legacy key metadata (algo/curve not one of

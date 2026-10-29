@@ -440,7 +440,8 @@ fn classical_encapsulate(
                     getrandom::getrandom(&mut eph_bytes).map_err(|_| CKR_FUNCTION_FAILED)?;
                     let eph = x448::StaticSecret::from(eph_bytes);
                     let eph_pub = x448::PublicKey::from(&eph);
-                    let ss = eph.diffie_hellman(&peer_pub);
+                    let ss = crate::crypto::handlers::x448_contributory(eph.diffie_hellman(&peer_pub))
+                        .ok_or(CKR_ARGUMENTS_BAD)?;
                     Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
                 }
                 _ => Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -531,7 +532,8 @@ fn classical_decapsulate(
                         return Err(CKR_WRAPPED_KEY_LEN_RANGE);
                     }
                     let eph_pub = x448::PublicKey::from_bytes(ciphertext).ok_or(CKR_ARGUMENTS_BAD)?;
-                    let ss = secret.diffie_hellman(&eph_pub);
+                    let ss = crate::crypto::handlers::x448_contributory(secret.diffie_hellman(&eph_pub))
+                        .ok_or(CKR_ARGUMENTS_BAD)?;
                     Ok(ss.as_bytes().to_vec())
                 }
                 _ => Err(CKR_KEY_TYPE_INCONSISTENT),

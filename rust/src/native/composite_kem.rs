@@ -181,8 +181,8 @@ fn trad_encaps(trad: TradKey, trad_pk: &[u8], supplied: Option<&[u8]>) -> Result
             let mut eph = Zeroizing::new([0u8; 56]);
             getrandom::getrandom(eph.as_mut()).map_err(|_| CKR_FUNCTION_FAILED)?;
             let ct = x448::PublicKey::from(&x448::StaticSecret::from(*eph)).as_bytes().to_vec();
-            // RFC 7748 §6.2: the all-zero K is refused (x448 returns None).
-            let k = x448::x448(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
+            // RFC 7748 §6.2: the all-zero K is refused (x448_dh returns None).
+            let k = crate::crypto::handlers::x448_dh(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
             (ct, Zeroizing::new(k.to_vec()))
         }
         TradKey::Ed25519 | TradKey::Ed448 => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -233,7 +233,7 @@ fn trad_encaps_supplied(trad: TradKey, trad_pk: &[u8], v: &[u8]) -> Result<(Vec<
             let peer: [u8; 56] = trad_pk.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let eph: Zeroizing<[u8; 56]> = Zeroizing::new(v.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?);
             let ct = x448::PublicKey::from(&x448::StaticSecret::from(*eph)).as_bytes().to_vec();
-            let k = x448::x448(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
+            let k = crate::crypto::handlers::x448_dh(*eph, peer).ok_or(CKR_FUNCTION_FAILED)?;
             (ct, Zeroizing::new(k.to_vec()))
         }
         TradKey::Ed25519 | TradKey::Ed448 => return Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -300,7 +300,7 @@ fn trad_decaps(trad: TradKey, trad_sk: &[u8], trad_ct: &[u8]) -> Result<Zeroizin
             let k: [u8; 56] = trad_sk.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let k = Zeroizing::new(k);
             let eph: [u8; 56] = trad_ct.try_into().map_err(|_| CKR_WRAPPED_KEY_LEN_RANGE)?;
-            Zeroizing::new(x448::x448(*k, eph).ok_or(CKR_WRAPPED_KEY_INVALID)?.to_vec())
+            Zeroizing::new(crate::crypto::handlers::x448_dh(*k, eph).ok_or(CKR_WRAPPED_KEY_INVALID)?.to_vec())
         }
         TradKey::Ed25519 | TradKey::Ed448 => return Err(CKR_KEY_TYPE_INCONSISTENT),
     })

@@ -69,8 +69,7 @@ pub const CURVE_UNSUPPORTED: u32 = u32::MAX;
 /// shared secret whatever our private key is, and "the check for the all-zero
 /// value results in failure"; RFC 9180 §7.1.4 makes that check a MUST for
 /// DHKEM(X25519). `None` for a non-contributory result, so every X25519 call
-/// site refuses it the way its X448 sibling already refuses a low-order point
-/// (the x448 crate returns `None` from `PublicKey::from_bytes` / `x448()`).
+/// site refuses it; `x448_contributory` / `x448_dh` do the same for X448.
 /// Register row rust-no-contributory-behaviour-check-ecdh.
 pub fn x25519_contributory(ss: x25519_dalek::SharedSecret) -> Option<x25519_dalek::SharedSecret> {
     if ss.was_contributory() {
@@ -78,6 +77,37 @@ pub fn x25519_contributory(ss: x25519_dalek::SharedSecret) -> Option<x25519_dale
     } else {
         None
     }
+}
+
+/// RFC 7748 §6.2 gives X448 the same advice as §6.1 gives X25519: check whether
+/// the shared secret is the all-zero value and abort if so (RFC 9180 §7.1.4 makes
+/// it a MUST for DHKEM(X448)). The `x448` crate refuses the canonical encodings
+/// of the low-order points (`PublicKey::from_bytes`, `x448()`), but their
+/// non-canonical encodings (u = p and u = p + 1 stand for u = 0 and u = 1) pass
+/// that test and give an all-zero shared secret. Checking the OUTPUT covers every
+/// encoding. `None` for an all-zero result.
+pub fn x448_contributory(ss: x448::SharedSecret) -> Option<x448::SharedSecret> {
+    if bytes_nonzero(ss.as_bytes()) {
+        Some(ss)
+    } else {
+        None
+    }
+}
+
+/// `x448::x448(scalar, point)` with the all-zero-output check added: `None` for
+/// a point the crate refuses and for an all-zero result.
+pub fn x448_dh(scalar: [u8; 56], point: [u8; 56]) -> Option<[u8; 56]> {
+    let ss = x448::x448(scalar, point)?;
+    if bytes_nonzero(&ss) {
+        Some(ss)
+    } else {
+        None
+    }
+}
+
+/// True unless every byte is zero. Reads every byte (no early exit).
+fn bytes_nonzero(b: &[u8]) -> bool {
+    b.iter().fold(0u8, |acc, x| acc | x) != 0
 }
 
 pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
@@ -5434,6 +5464,77 @@ mod x25519_contributory_tests {
             ss.as_bytes(),
             &unhex32("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
         );
+    }
+}
+
+#[cfg(test)]
+mod x448_contributory_tests {
+    use super::{x448_contributory, x448_dh};
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    fn unhex56(s: &str) -> [u8; 56] {
+        unhex(s).try_into().unwrap()
+    }
+
+    /// p = 2^448 - 2^224 - 1 as 56 little-endian bytes (the X448 field prime).
+    fn p_le() -> [u8; 56] {
+        let mut b = [0xffu8; 56];
+        b[28] = 0xfe;
+        b
+    }
+
+    /// p + 1 = 2^448 - 2^224 as 56 little-endian bytes.
+    fn p_plus_one_le() -> [u8; 56] {
+        let mut b = [0xffu8; 56];
+        for x in b.iter_mut().take(28) {
+            *x = 0;
+        }
+        b
+    }
+
+    const ALICE_SK: &str = "9a8f4925d1519f5775cf46b04b5800d4ee9ee8bae8bc5565d498c28dd9c9baf574a9419744897391006382a6f127ab1d9ac2d8c0a598726b";
+    const BOB_PK: &str = "3eb7a829b0cd20f5bcfc0b599b6feccf6da4627107bdb0d4f345b43027d8b972fc3e34fb4232a13ca706dcb57aec3dae07bdc1c67bf33609";
+    const SHARED: &str = "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d";
+
+    /// RFC 7748 §6.2: Alice's private key with Bob's public key gives the
+    /// published shared secret, and the contributory check lets it through.
+    #[test]
+    fn rfc7748_exchange_is_accepted() {
+        let got = x448_dh(unhex56(ALICE_SK), unhex56(BOB_PK)).expect("a genuine exchange is contributory");
+        assert_eq!(got, unhex56(SHARED));
+    }
+
+    /// The low-order points u = 0 and u = 1 give an all-zero secret under any
+    /// private key. They are refused in their canonical encodings (by the crate)
+    /// and in their non-canonical encodings u = p and u = p + 1 (by the output
+    /// check; the Wycheproof x448 cases 70 and 71 are these two).
+    #[test]
+    fn low_order_points_are_refused_in_every_encoding() {
+        let sk = unhex56(ALICE_SK);
+        let zero = [0u8; 56];
+        let mut one = [0u8; 56];
+        one[0] = 1;
+        for (name, u) in [
+            ("u = 0", zero),
+            ("u = 1", one),
+            ("u = p (non-canonical 0)", p_le()),
+            ("u = p + 1 (non-canonical 1)", p_plus_one_le()),
+        ] {
+            assert!(x448_dh(sk, u).is_none(), "{name} must be refused");
+        }
+    }
+
+    /// The SharedSecret form used by the HPKE and encapsulate paths lets the
+    /// genuine exchange through and returns the published value.
+    #[test]
+    fn shared_secret_form_accepts_the_rfc7748_exchange() {
+        let sk = x448::StaticSecret::from(unhex56(ALICE_SK));
+        let bob = x448::PublicKey::from_bytes(&unhex56(BOB_PK)).unwrap();
+        let ok = x448_contributory(sk.diffie_hellman(&bob)).expect("contributory");
+        assert_eq!(ok.as_bytes(), &unhex56(SHARED));
     }
 }
 

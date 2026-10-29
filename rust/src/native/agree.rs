@@ -114,8 +114,9 @@ pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<
         (CKK_EC_MONTGOMERY, 56) => {
             let sk: [u8; 56] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let peer: [u8; 56] = peer_public.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
-            // x448::x448(scalar, point) performs Extract+DH, None on invalid point.
-            let ss = x448::x448(sk, peer).ok_or(CKR_ARGUMENTS_BAD)?;
+            // x448_dh = x448::x448(scalar, point) plus the RFC 7748 §6.2 all-zero check:
+            // None on an invalid point or a non-contributory result.
+            let ss = crate::crypto::handlers::x448_dh(sk, peer).ok_or(CKR_ARGUMENTS_BAD)?;
             Ok(ss.to_vec())
         }
         // ── NIST P-256 ──────────────────────────────────────────────────────

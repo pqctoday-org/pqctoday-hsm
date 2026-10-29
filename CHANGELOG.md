@@ -22,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Rust engine: X448 key agreement now refuses an all-zero shared secret, as X25519 already did (RFC 7748 section 6.2; RFC 9180 section 7.1.4 for DHKEM(X448)). The `x448` library refused the canonical encodings of the low-order points but not their non-canonical encodings (u = p and u = p + 1), which returned an all-zero secret. The check is on the result and covers key derivation, encapsulation, HPKE and the composite KEMs; such a peer key now fails with `CKR_ARGUMENTS_BAD` (derive: `CKR_ENCRYPTED_DATA_INVALID`), as on the C++ engine.
 - Decapsulation (`CKM_ML_KEM`) and ECDSA verification now refuse a mechanism parameter, and a signing-context
   structure of any size other than the standard or extended one is refused instead of being read as absent.
 - C++ `C_VerifySignature` returns `CKR_SIGNATURE_LEN_RANGE` for a wrong-length SLH-DSA signature, as `C_Verify` does.
