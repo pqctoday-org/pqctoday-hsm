@@ -50,6 +50,21 @@ fn k4_browser_lab_reuses_enrollment_and_recovers_both_representations() {
 }
 
 #[test]
+fn k4_browser_lab_does_not_touch_replacement_sessions_after_engine_reset() {
+    let _g = lock();
+    let _first = world(1);
+    let mut stale = repl::browser_lab::ProtectedBackupLab::new("demo-so-pin", "demo-user-pin").unwrap();
+    let stale_key = stale.generate(0).unwrap();
+    let _second = world(1);
+    let mut current = repl::browser_lab::ProtectedBackupLab::new("demo-so-pin", "demo-user-pin").unwrap();
+    let key = current.generate(0).unwrap();
+    assert!(stale.backup(stale_key.private_handle(), true).is_err());
+    drop(stale);
+    let package = current.backup(key.private_handle(), true).unwrap();
+    current.recover(&package).unwrap();
+}
+
+#[test]
 fn k4_seed_profile_recovers_original_identity_and_can_back_up_again() {
     let _g = lock();
     let w = world(4);
