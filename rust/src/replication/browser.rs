@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Typed WASM adapters for the EXISTING protected-replication operations.
 //!
 //! Only requests, encrypted packages, signed receipts and object handles cross

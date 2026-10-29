@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Session-only educational provisioning/orchestration for the browser adapter.
 //! Reuses the existing test manufacturing CA, enrollment, policies and ceremony.
 //! All slots are NEW; no existing token or key is reinitialized or rebound.

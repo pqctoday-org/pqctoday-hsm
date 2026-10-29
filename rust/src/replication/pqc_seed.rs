@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Retained PQC Seed profile inside the existing replication protocol.
 //! Destination policy selects Seed or legacy Expanded representation; its
 //! identity is already bound into evidence, header, transaction and retries.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Run against a real wasm-pack --target nodejs build with educational-replication.
 // This checks the browser-facing exports and their refusal behavior, not a full
 // browser ceremony or a successful recovery. No private material is exported.
