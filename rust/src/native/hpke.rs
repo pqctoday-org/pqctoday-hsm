@@ -343,7 +343,8 @@ fn ec_ephemeral_dh(curve: Curve, peer_point: &[u8], forced_scalar: Option<&[u8]>
                 }
             };
             let eph_pub = x448::PublicKey::from(&eph);
-            let ss = eph.diffie_hellman(&peer_pub);
+            let ss = crate::crypto::handlers::x448_contributory(eph.diffie_hellman(&peer_pub))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
             Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
         }
     }
@@ -387,7 +388,9 @@ fn ec_static_dh(curve: Curve, my_scalar: &[u8], peer_point: &[u8]) -> Result<Vec
             arr.copy_from_slice(my_scalar);
             let secret = x448::StaticSecret::from(arr);
             let peer_pub = x448::PublicKey::from_bytes(peer_point).ok_or(CKR_ARGUMENTS_BAD)?;
-            Ok(secret.diffie_hellman(&peer_pub).as_bytes().to_vec())
+            let ss = crate::crypto::handlers::x448_contributory(secret.diffie_hellman(&peer_pub))
+                .ok_or(CKR_ARGUMENTS_BAD)?;
+            Ok(ss.as_bytes().to_vec())
         }
     }
 }
