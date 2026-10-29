@@ -14,6 +14,53 @@ use softhsmrustv3::replication::{self as repl, asn1::Operation, host_verify, oid
 
 const PROHIBITED: Result<(), u32> = Err(CKR_ACTION_PROHIBITED);
 
+#[test]
+fn k4_browser_adapter_preserves_pqc_identity_receipts_and_exact_retry() {
+    use repl::browser;
+    let _g = lock();
+    let w = world(3);
+    let (ps, pd) = policies(&w);
+    for kp in [Kp::MlKem, Kp::MlDsa] {
+        let (src, src_pub) = gen_key(w.tokens[0].user, kp, &ps);
+        let req = request(&w, 0, 1, Operation::LiveClone, &pd);
+        let pkg = browser::create_package(w.tokens[0].user, src, &req).unwrap();
+        let rep = browser::import_package(w.tokens[1].user, &pkg).unwrap();
+        host_verify::verify_receipt(&rep.receipt(), &pkg, &req, &trust_of(&w, 0), w.now, Profile::Educational).unwrap();
+        prove_same_key(kp, w.tokens[0].user, src, src_pub, w.tokens[1].user, rep.handle());
+        let retry = browser::import_package(w.tokens[1].user, &pkg).unwrap();
+        assert_eq!(retry.handle(), rep.handle());
+        assert_eq!(retry.receipt(), rep.receipt());
+        assert_eq!(native::get_attribute_bool(w.tokens[1].user, rep.handle(), CKA_SENSITIVE), Some(true));
+        assert_eq!(native::get_attribute_bool(w.tokens[1].user, rep.handle(), CKA_EXTRACTABLE), Some(false));
+
+        let req = request(&w, 0, 2, Operation::LiveClone, &pd);
+        let cloned = browser::clone_key(w.tokens[0].user, src, w.tokens[2].user, &req).unwrap();
+        prove_same_key(kp, w.tokens[0].user, src, src_pub, w.tokens[2].user, cloned.handle());
+    }
+}
+
+#[test]
+fn k4_browser_adapter_does_not_bypass_profile_role_recipient_or_integrity() {
+    use repl::browser;
+    let _g = lock();
+    let w = world(3);
+    let (ps, pd) = policies(&w);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::MlKem, &ps);
+    let req = request(&w, 0, 1, Operation::LiveClone, &pd);
+    browser::clear_profile();
+    assert!(browser::create_package(w.tokens[0].user, src, &req).is_err());
+    browser::select_educational_profile().unwrap();
+    assert!(browser::create_package(u32::MAX, src, &req).is_err());
+    let pkg = browser::create_package(w.tokens[0].user, src, &req).unwrap();
+    assert!(browser::import_package(w.tokens[2].user, &pkg).is_err());
+    let mut tampered = pkg.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    assert!(browser::import_package(w.tokens[1].user, &tampered).is_err());
+    // Refusals must not consume the valid request or prevent a real recovery.
+    browser::import_package(w.tokens[1].user, &pkg).unwrap();
+}
+
 fn create(w: &World, s: usize, key: u32, req: &[u8]) -> Result<Vec<u8>, u32> {
     repl::create_replication_package(w.tokens[s].user, key, req)
 }

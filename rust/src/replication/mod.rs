@@ -46,6 +46,11 @@ pub mod pki;
 pub mod records;
 pub mod test_ca;
 
+// Typed browser bindings call the same protected operations as the native ABI.
+// Test support also exposes them to the native custody regression suites.
+#[cfg(any(target_arch = "wasm32", feature = "test-support"))]
+pub mod browser;
+
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod abi;
 
@@ -112,12 +117,24 @@ pub fn set_clock_override(unix_secs: Option<u64>) {
 
 pub fn now_unix() -> u64 {
     match CLOCK_OVERRIDE.load(Ordering::SeqCst) {
-        0 => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        0 => host_now_unix(),
         t => t,
     }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn host_now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// SystemTime::now panics on wasm32-unknown-unknown. The educational profile
+// already trusts the host clock; Date.now supplies that same clock in a browser.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn host_now_unix() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
 }
 
 // ── Crash injection (review K0B-R-09; spec §12 "every crash window") ───────
