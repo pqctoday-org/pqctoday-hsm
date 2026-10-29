@@ -15,18 +15,35 @@
       ],
       "buildScript": "scripts/build-kmip-wasm.sh",
       "cargoManifest": "wasm/Cargo.toml",
-      "notices": ["pqctoday-rust"]
+      "notices": [
+        "pqctoday-rust"
+      ]
     },
     {
       "name": "softhsmrustv3-engine",
       "files": [
+        "public/wasm/rust/softhsmrustv3.js",
+        "public/wasm/rust/softhsmrustv3_bg.js",
+        "public/wasm/rust/softhsmrustv3.d.ts",
+        "public/wasm/rust/softhsmrustv3_bg.wasm.d.ts",
         "public/wasm/rust/softhsmrustv3_bg.wasm",
+        "src/wasm/softhsmrustv3.js",
+        "src/wasm/softhsmrustv3_bg.js",
+        "src/wasm/softhsmrustv3.d.ts",
+        "src/wasm/softhsmrustv3_bg.wasm.d.ts",
         "src/wasm/softhsmrustv3_bg.wasm",
-        "src/vendor/softhsm-wasm/wasm/softhsmrustv3_bg.wasm"
+        "src/vendor/softhsm-wasm/wasm/softhsmrustv3.js",
+        "src/vendor/softhsm-wasm/wasm/softhsmrustv3_bg.js",
+        "src/vendor/softhsm-wasm/wasm/softhsmrustv3.d.ts",
+        "src/vendor/softhsm-wasm/wasm/softhsmrustv3_bg.wasm.d.ts",
+        "src/vendor/softhsm-wasm/wasm/softhsmrustv3_bg.wasm",
+        "public/wasm/rust/build-profile.json"
       ],
       "buildScript": "rust/build-wasm-bundle.sh",
       "cargoManifest": "rust/Cargo.toml",
-      "notices": ["pqctoday-rust"]
+      "notices": [
+        "pqctoday-rust"
+      ]
     },
     {
       "name": "softhsm-cpp-engine",
