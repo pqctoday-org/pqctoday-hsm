@@ -3,7 +3,7 @@
 //! Only requests, encrypted packages, signed receipts and object handles cross
 //! this boundary. Enrollment, key eligibility, policies, parsing, replay and
 //! atomic installation remain in the same engine code used by the native ABI.
-//! This does not add a seed payload representation to the expanded-key profile.
+//! Payload representation is governed by the engine's enrolled policy profile.
 
 use crate::constants::*;
 #[cfg(target_arch = "wasm32")]

@@ -24,6 +24,10 @@ pub struct TestManufacturingCa {
     revoked: Vec<(SerialNumber, u64)>,
 }
 
+impl Drop for TestManufacturingCa {
+    fn drop(&mut self) { zeroize::Zeroize::zeroize(&mut self.sk); }
+}
+
 impl TestManufacturingCa {
     /// A fresh root valid from `now - 60` for ten years.
     pub fn new(now: u64) -> Result<Self, u32> {

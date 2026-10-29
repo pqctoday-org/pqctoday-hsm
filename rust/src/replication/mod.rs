@@ -45,11 +45,14 @@ pub mod package;
 pub mod pki;
 pub mod records;
 pub mod test_ca;
+pub mod pqc_seed;
 
 // Typed browser bindings call the same protected operations as the native ABI.
 // Test support also exposes them to the native custody regression suites.
 #[cfg(any(target_arch = "wasm32", feature = "test-support"))]
 pub mod browser;
+#[cfg(any(target_arch = "wasm32", feature = "test-support"))]
+pub mod browser_lab;
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod abi;
@@ -388,9 +391,11 @@ pub fn bind_generated_key(
     }
     let now = now_unix();
     let pol = records::parse_policy(&policy)?;
-    // v1 key profiles take only the unconstrained policy profile; an FHE
-    // profile policy can never bind an AES/ML-KEM/ML-DSA key (FHE P1).
-    if pol.type_constraint_hash != sha384(b"") {
+    // Legacy keys use the unconstrained Expanded profile; only the two
+    // eligible PQC types with retained seeds may use the Seed amendment.
+    // FHE and unknown profiles cannot bind these ordinary key types.
+    if pol.type_constraint_hash != sha384(b"")
+        && !(pqc_seed::is_profile(&pol.type_constraint_hash) && pqc_seed::eligible(&attrs)) {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
     if now < pol.not_before || now >= pol.not_after {

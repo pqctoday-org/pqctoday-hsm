@@ -308,6 +308,15 @@ struct SourceKey {
     policy_id: [u8; 48],
     lineage: [u8; 32],
     budget: u32,
+    seed_representation: bool,
+}
+
+impl Drop for SourceKey {
+    fn drop(&mut self) {
+        for attr in [CKA_VALUE, CKA_SEED] {
+            if let Some(value) = self.attrs.get_mut(&attr) { zeroize::Zeroize::zeroize(value); }
+        }
+    }
 }
 
 /// Spec §9 items 3–6: session, role, visibility, eligibility.
@@ -351,7 +360,7 @@ fn source_key(session: u32, h_key: u32) -> Result<(u32, SourceKey), u32> {
         .map(u32::from_le_bytes)
         .unwrap_or(0);
     let unique_id = String::from_utf8(attrs.get(&CKA_UNIQUE_ID).cloned().unwrap_or_default()).map_err(|_| CKR_DEVICE_ERROR)?;
-    Ok((slot, SourceKey { handle: h_key, attrs, key_type, unique_id, policy_id, lineage, budget }))
+    Ok((slot, SourceKey { handle: h_key, attrs, key_type, unique_id, policy_id, lineage, budget, seed_representation: false }))
 }
 
 /// Spec §9 item 7: bounded canonical request DER, version, suite, sizes.
@@ -393,10 +402,12 @@ fn cache_hit(slot: u32, req: &ReplicationRequest, request: &[u8], key: &SourceKe
     }
 }
 
-/// The type-specific payload extension: the FHE recovery descriptor for an
-/// FHE seed (FHE P1), nothing for the v1 key profiles.
+/// Existing type-extension slot: a PQC Seed descriptor, FHE recovery
+/// descriptor, or nothing for the unchanged legacy Expanded profiles.
 fn type_extension(key: &SourceKey) -> Result<Option<Vec<u8>>, u32> {
-    if key.key_type == CKK_PQCTODAY_FHE {
+    if key.seed_representation {
+        super::pqc_seed::Descriptor::encode(key.key_type, crate::state::get_object_param_set_from(&key.attrs)).map(Some)
+    } else if key.key_type == CKK_PQCTODAY_FHE {
         super::fhe::descriptor_for(&key.attrs).map(Some)
     } else {
         Ok(None)
@@ -414,8 +425,18 @@ fn profile_constraint_for(key_type: u32, attrs: &crate::crypto::handlers::Attrib
     }
 }
 
+fn select_representation(slot: u32, key: &mut SourceKey, req: &ReplicationRequest) -> Result<(), u32> {
+    let policy = records::parse_policy(&records::find_policy(slot, req.requested_policy.as_bytes()).ok_or(CKR_ACTION_PROHIBITED)?)?;
+    key.seed_representation = super::pqc_seed::is_profile(&policy.type_constraint_hash);
+    if key.seed_representation && !super::pqc_seed::eligible(&key.attrs) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    Ok(())
+}
+
 fn build_payload(key: &SourceKey) -> Result<Vec<u8>, u32> {
-    let value = key.attrs.get(&CKA_VALUE).cloned().ok_or(CKR_DEVICE_ERROR)?;
+    let value_attr = if key.seed_representation { CKA_SEED } else { CKA_VALUE };
+    let value = zeroize::Zeroizing::new(key.attrs.get(&value_attr).cloned().ok_or(CKR_KEY_FUNCTION_NOT_PERMITTED)?);
     let (class, paired) = match key.key_type {
         CKK_AES | CKK_PQCTODAY_FHE => (KeyClass::SecretKey, None),
         _ => {
@@ -542,8 +563,9 @@ fn transfer_budget(slot: u32, key: &SourceKey, req: &ReplicationRequest) -> u32 
 /// package will have. No randomness, cryptography, authorization
 /// consumption or ledger mutation (spec §3.1).
 pub fn replication_package_length(session: u32, h_key: u32, request: &[u8]) -> Result<usize, u32> {
-    let (slot, key) = source_key(session, h_key)?;
+    let (slot, mut key) = source_key(session, h_key)?;
     let req = parse_request(request)?;
+    select_representation(slot, &mut key, &req)?;
     ready(slot)?;
     if let Some(p) = cache_hit(slot, &req, request, &key)? {
         return Ok(p.len());
@@ -555,8 +577,9 @@ pub fn replication_package_length(session: u32, h_key: u32, request: &[u8]) -> R
 /// Source step 3 (`C_PQCTODAY_CreateReplicationPackage`, sufficient buffer).
 pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> Result<Vec<u8>, u32> {
     let _op = op_lock();
-    let (slot, key) = source_key(session, h_key)?;
+    let (slot, mut key) = source_key(session, h_key)?;
     let req = parse_request(request)?;
+    select_representation(slot, &mut key, &req)?;
     ready(slot)?;
     if let Some(p) = cache_hit(slot, &req, request, &key)? {
         oplog_event("package_retry", slot, &[("transaction", super::hex(req.transaction_id.as_bytes()))]);
@@ -574,7 +597,8 @@ pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> R
     if req.domain_id.as_bytes() != src_pol.domain {
         return deny(slot, Reject("domain"));
     }
-    if src_pol.type_constraint_hash != profile_constraint_for(key.key_type, &key.attrs) {
+    if src_pol.type_constraint_hash != profile_constraint_for(key.key_type, &key.attrs)
+        && !(super::pqc_seed::is_profile(&src_pol.type_constraint_hash) && super::pqc_seed::eligible(&key.attrs)) {
         return deny(slot, Reject("policy profile does not match key type"));
     }
     // Requested destination policy: enrolled here too, equal or stricter.
@@ -802,6 +826,7 @@ pub fn replication_receipt_length(session: u32, package: &[u8]) -> Result<usize,
 struct Staged {
     key_type: u32,
     secret: Vec<u8>,
+    seed: Option<Vec<u8>>,
     public: Option<Vec<u8>>,
     usage: Vec<(u32, bool)>,
     /// FHE P1: the validated recovery descriptor of an FHE seed.
@@ -814,6 +839,7 @@ struct Staged {
 impl Drop for Staged {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(&mut self.secret);
+        if let Some(seed) = &mut self.seed { zeroize::Zeroize::zeroize(seed); }
     }
 }
 
@@ -831,14 +857,36 @@ fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims, header: &Replicatio
     if header.type_extension_hash.as_bytes() != super::sha384(ext.as_deref().unwrap_or(b"")) {
         return Err(bad);
     }
+    let seed_descriptor = match (p.key_type, &ext) {
+        (CKK_ML_KEM | CKK_ML_DSA, Some(d)) => {
+            let d = super::pqc_seed::Descriptor::parse(d).map_err(|_| bad)?;
+            if d.key_type != p.key_type || d.parameter_set != ev_key.parameter_set { return Err(bad); }
+            Some(d)
+        }
+        _ => None,
+    };
     let fhe = match (p.key_type, &ext) {
         (CKK_PQCTODAY_FHE, Some(d)) => Some(super::fhe::validate_descriptor(d, header.lineage_id.as_bytes())?),
         (CKK_PQCTODAY_FHE, None) => return Err(bad),
+        (CKK_ML_KEM | CKK_ML_DSA, Some(_)) if seed_descriptor.is_some() => None,
         (_, Some(_)) => return Err(bad),
         (_, None) => None,
     };
-    let secret = p.protected_value.as_bytes().to_vec();
+    let mut secret = zeroize::Zeroizing::new(p.protected_value.as_bytes().to_vec());
     let public = p.paired_public.as_ref().map(|o| o.as_bytes().to_vec());
+    let mut seed = None;
+    if let Some(d) = seed_descriptor {
+        if Some(secret.len()) != super::pqc_seed::seed_len(d.key_type) { return Err(bad); }
+        let (generated_public, expanded) = match d.key_type {
+            CKK_ML_KEM => crate::crypto::handlers::ml_kem_keygen_from_seed(d.parameter_set, &secret),
+            CKK_ML_DSA => crate::crypto::handlers::ml_dsa_keygen_from_seed(d.parameter_set, secret.as_slice().try_into().map_err(|_| bad)?),
+            _ => None,
+        }.ok_or(bad)?;
+        let mut expanded = zeroize::Zeroizing::new(expanded);
+        if public.as_deref() != Some(generated_public.as_slice()) { return Err(bad); }
+        seed = Some(zeroize::Zeroizing::new(secret.to_vec()));
+        std::mem::swap(&mut *secret, &mut *expanded);
+    }
     match (p.key_class, p.key_type) {
         (KeyClass::SecretKey, CKK_AES) => {
             if ![16, 24, 32].contains(&secret.len()) || public.is_some() || ev_key.parameter_set != secret.len() as u32 {
@@ -919,7 +967,7 @@ fn validate_payload(pt: &[u8], ev_key: &evidence::KeyClaims, header: &Replicatio
         usage.push((a.attr_type, v[0] == 1));
     }
     let param_set = if matches!(p.key_type, CKK_COMP_KEM | CKK_COMP_SIG) { ev_key.parameter_set } else { 0 };
-    Ok(Staged { key_type: p.key_type, secret, public, usage, fhe, param_set })
+    Ok(Staged { key_type: p.key_type, secret: secret.to_vec(), seed: seed.as_ref().map(|s| s.to_vec()), public, usage, fhe, param_set })
 }
 
 /// Build the installed private/secret object and its public partner.
@@ -933,6 +981,7 @@ fn installed_objects(
 ) -> (Attributes, Option<Attributes>) {
     let mut a: Attributes = Default::default();
     let lineage = header.lineage_id.as_bytes().to_vec();
+    if let Some(seed) = &st.seed { a.insert(CKA_SEED, seed.clone()); }
     let composite = matches!(st.key_type, CKK_COMP_KEM | CKK_COMP_SIG);
     let (class, ps, algo) = match st.key_type {
         CKK_AES | CKK_PQCTODAY_FHE => (CKO_SECRET_KEY, 0, 0),
@@ -1199,6 +1248,13 @@ pub fn import_replication_package(session: u32, package: &[u8], template: &[(u32
     let staged = validate_payload(&pt, &c.key, h);
     zeroize::Zeroize::zeroize(&mut pt);
     let staged = staged?;
+    // The existing evidence-bound destination policy selects representation.
+    // Never accept Expanded under a seed-retaining policy or Seed under v1.
+    if super::pqc_seed::is_profile(&dst_pol.type_constraint_hash) != staged.seed.is_some()
+        || (super::pqc_seed::is_profile(&src_pol.type_constraint_hash)
+            && !super::pqc_seed::supported(staged.key_type, c.key.parameter_set)) {
+        return deny(slot, Reject("PQC seed profile/representation mismatch"));
+    }
     // FHE P1 / plan §6.3: the seed's decryption policy must already be
     // authorized here; a missing policy fails (no weaker default exists).
     if let Some(d) = &staged.fhe {

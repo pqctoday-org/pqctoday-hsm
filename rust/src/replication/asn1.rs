@@ -180,6 +180,15 @@ pub struct ReplicatedKeyPayload {
     pub type_extension: Option<OctetString>,
 }
 
+impl Drop for ReplicatedKeyPayload {
+    fn drop(&mut self) {
+        // DER owns a second plaintext copy when encoding or decoding. Wipe
+        // it on every exit, including validation failures and seed recovery.
+        let mut value = std::mem::replace(&mut self.protected_value, octets(&[])).into_bytes();
+        zeroize::Zeroize::zeroize(&mut value);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct ReplicationReceiptTbs {
     pub version: u8,

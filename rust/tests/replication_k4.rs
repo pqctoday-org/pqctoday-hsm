@@ -14,6 +14,102 @@ use softhsmrustv3::replication::{self as repl, asn1::Operation, host_verify, oid
 
 const PROHIBITED: Result<(), u32> = Err(CKR_ACTION_PROHIBITED);
 
+fn seed_policy(w: &World) -> [u8; 48] {
+    let der = repl::records::build_policy_with_constraint(
+        DOMAIN, [true; 3], w.device_ids(), w.now - 60, w.now + 30 * 86_400,
+        8, test_mechs(), false, repl::pqc_seed::profile_hash(),
+    ).unwrap();
+    w.enroll_policy_everywhere(&der)
+}
+
+#[test]
+fn k4_browser_lab_reuses_enrollment_and_recovers_both_representations() {
+    let _g = lock();
+    let w = world(1);
+    let count_original_slot = || softhsmrustv3::state::OBJECTS.with(|o| o.borrow().values().filter(|a| softhsmrustv3::state::object_slot_of(a) == 0).count());
+    let before = count_original_slot();
+    let mut lab = repl::browser_lab::ProtectedBackupLab::new("demo-so-pin", "demo-user-pin").unwrap();
+    for algorithm in [0, 1] {
+        let generated = lab.generate(algorithm).unwrap();
+        for seed in [true, false] {
+            let pkg = lab.backup(generated.private_handle(), seed).unwrap();
+            let recovered = lab.recover(&pkg).unwrap();
+            assert_eq!(recovered.key_type(), generated.key_type());
+            assert_eq!(recovered.parameter_set(), generated.parameter_set());
+            assert_ne!(recovered.private_handle(), generated.private_handle());
+            assert!(!recovered.receipt().is_empty());
+            assert_eq!(lab.recover(&pkg).unwrap().private_handle(), recovered.private_handle());
+            let mut bad = pkg.clone(); let last = bad.len()-1; bad[last] ^= 1;
+            assert!(lab.recover(&bad).is_err());
+        }
+    }
+    assert!(lab.generate(2).is_err());
+    assert!(lab.backup(u32::MAX, true).is_err());
+    assert_eq!(count_original_slot(), before, "existing token must not be reset or re-enrolled");
+    assert_eq!(softhsmrustv3::state::session_slot(w.tokens[0].user), Some(0));
+}
+
+#[test]
+fn k4_seed_profile_recovers_original_identity_and_can_back_up_again() {
+    let _g = lock();
+    let w = world(4);
+    let seed = seed_policy(&w);
+    let expanded = w.enroll_policy_everywhere(&w.policy([true; 3], 8, test_mechs()));
+    for kp in [Kp::MlKem, Kp::MlDsa] {
+        let (src, src_pub) = gen_key(w.tokens[0].user, kp, &seed);
+        let req = request(&w, 0, 1, Operation::OfflineBackup, &seed);
+        let pkg = create(&w, 0, src, &req).unwrap();
+        let (rep, receipt) = import(&w, 1, &pkg).unwrap();
+        host_verify::verify_receipt(&receipt, &pkg, &req, &trust_of(&w, 0), w.now, Profile::Educational).unwrap();
+        prove_same_key(kp, w.tokens[0].user, src, src_pub, w.tokens[1].user, rep);
+        // A second Seed backup proves the recovered seed stayed inside the
+        // recovered object, without reading it through the caller interface.
+        let req2 = request(&w, 1, 2, Operation::LiveClone, &seed);
+        let pkg2 = create(&w, 1, rep, &req2).unwrap();
+        let (rep2, _) = import(&w, 2, &pkg2).unwrap();
+        prove_same_key(kp, w.tokens[0].user, src, src_pub, w.tokens[2].user, rep2);
+        let expanded_req = request(&w, 0, 3, Operation::LiveClone, &expanded);
+        let expanded_pkg = create(&w, 0, src, &expanded_req).unwrap();
+        let (expanded_rep, _) = import(&w, 3, &expanded_pkg).unwrap();
+        prove_same_key(kp, w.tokens[0].user, src, src_pub, w.tokens[3].user, expanded_rep);
+        assert!(pkg.len() < expanded_pkg.len(), "Seed is a compact representation");
+        let retry = create(&w, 0, src, &req).unwrap();
+        assert_eq!(pkg, retry, "same evidence-bound policy/request is byte-identical");
+    }
+}
+
+#[test]
+fn k4_seed_profile_cannot_elevate_legacy_keys_or_bind_unrelated_types() {
+    let _g = lock();
+    let w = world(2);
+    let seed = seed_policy(&w);
+    let (expanded, _) = policies(&w);
+    assert!(gen_aes(w.tokens[0].user, 32, Some(&seed)).is_err());
+    for kp in [Kp::MlKem, Kp::MlDsa] {
+        let (src, _) = gen_key(w.tokens[0].user, kp, &expanded);
+        let req = request(&w, 0, 1, Operation::LiveClone, &seed);
+        assert_eq!(err(create(&w, 0, src, &req)), PROHIBITED);
+    }
+}
+
+#[test]
+fn k4_seed_profile_missing_or_wrong_seed_never_restores_a_different_key() {
+    let _g = lock();
+    let w = world(2);
+    let seed = seed_policy(&w);
+    for kp in [Kp::MlKem, Kp::MlDsa] {
+        let (src, _) = gen_key(w.tokens[0].user, kp, &seed);
+        let req = request(&w, 0, 1, Operation::LiveClone, &seed);
+        // Fault injection only: the real token marks this object immutable.
+        softhsmrustv3::state::OBJECTS.with(|o| { o.borrow_mut().get_mut(&src).unwrap().remove(&CKA_SEED); });
+        assert_eq!(err(create(&w, 0, src, &req)), Err(CKR_KEY_FUNCTION_NOT_PERMITTED));
+        let len = if kp == Kp::MlKem { 64 } else { 32 };
+        softhsmrustv3::state::OBJECTS.with(|o| { o.borrow_mut().get_mut(&src).unwrap().insert(CKA_SEED, vec![0xa5; len]); });
+        let pkg = create(&w, 0, src, &req).unwrap();
+        assert_eq!(err(import(&w, 1, &pkg)), Err(CKR_ENCRYPTED_DATA_INVALID));
+    }
+}
+
 #[test]
 fn k4_browser_adapter_preserves_pqc_identity_receipts_and_exact_retry() {
     use repl::browser;

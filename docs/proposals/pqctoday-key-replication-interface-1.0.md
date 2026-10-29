@@ -443,7 +443,7 @@ ReplicationProvenance ::= SEQUENCE {
 
 Its standard history is `CKA_LOCAL`, `CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` false, and
 `CKA_KEY_GEN_MECHANISM` = `CK_UNAVAILABLE_INFORMATION`.
-`CKA_SEED`, even when the source object retained one, is not replicated: the canonical expanded
+For the legacy policy profile, `CKA_SEED`, even when the source object retained one, is not replicated: the canonical expanded
 private key above is sufficient and avoids creating a second accepted payload representation.
 
 ## 7. Receipt
@@ -666,3 +666,18 @@ the explicitly fenced RFC 5612 profile.
 | 1 | 2026-10-02 | K0B working specification |
 | 2 | 2026-10-02 | Amendments E-01…E-14 from the K0B review (`docs/k0b-protocol-review-codex-2026-10-02.md`), approved by the owner for the spec. They cover evidence domain separation and claim profile (E-01/E-02), the device-ID derivation and same-device chain binding (E-03), engine-issued reserved challenges and a destination-generated transaction ID (E-04/E-07), HPKE identifiers and length checks (E-06), reserved/committed ledger states (E-09), the installed public partner (E-11), budget conservation and the provenance DER (E-12), a unified trust-failure code (E-13), and reservation lifetime as the freshness bound (E-14). R-14 is recorded as an accepted version-1 limitation (§10a). Implemented and tested in the Rust engine's `educational-replication` feature |
 | 3 | 2026-10-03 | Fixes from the second independent review (Claude, fresh context, `docs/k0b-protocol-review-claude-2026-10-03.md`): restricted keys are ineligible (R2-01); the store-durable commit and logout re-key (R2-02/03, engine-level); retention, pruning and reservation cancel (R2-04); source-policy re-check at import (R2-05); read-only sessions refused (R2-06); precedence fixes (R2-08); receipts bound to the request and package (R2-09); the source, not the requester, fixes the transferred budget (R2-10); the snapshot stated as unauthenticated (R2-12) |
+
+
+## Amendment — retained PQC Seed profile, 28 October 2026
+
+Owner scope: initial Rust ML-KEM-768 and ML-DSA-65 only; retain both Seed and Expanded choices and reuse existing seed generation. This amendment extends the SAME replication interface and existing protected package/typeExtension. No new mechanism, encrypted envelope, operation, trust hierarchy or receipt is defined.
+
+The legacy policy profile SHA-384(empty) and legacy Expanded payload stay unchanged. A new seed-retaining profile is identified by SHA-384 of the exact ASCII bytes `PQCToday PQC Seed Profile 1: ML-KEM-768 d||z 64; ML-DSA-65 xi 32`. It can bind only newly generated eligible ML-KEM-768/ML-DSA-65 keys with the corresponding real retained CKA_SEED. Existing creation-time binding, custody flags, operation/peer restrictions and budget checks remain mandatory.
+
+The existing requested destination policy selects representation, without adding an unauthenticated selector or changing request DER: seed-profile destination means Seed, legacy-profile destination means Expanded. A seed-profile source may move to an otherwise equal-or-stricter legacy-profile destination because that drops seed-retention rights. The reverse transition is prohibited. This one-way rule applies only to the named seed profile, not FHE or any unknown profile. All other policy ordering checks remain unchanged.
+
+Seed packages keep ReplicatedKeyPayload.version=1 but use its existing typeExtension: strict DER SEQUENCE { version INTEGER 1, keyType INTEGER, parameterSet INTEGER }. Only ML-KEM-768 and ML-DSA-65 are admitted. protectedValue contains exactly the real d||z (64 bytes) or xi (32 bytes); pairedPublic remains mandatory. The existing signed typeExtensionHash binds this descriptor and the existing encrypted payload protects the seed. A seed-profile destination MUST receive this descriptor/seed, and a legacy destination MUST receive the unchanged Expanded payload with no PQC extension. Earlier importers reject the unknown non-FHE extension and/or policy profile; no downgrade or fallback is permitted.
+
+The destination regenerates key material with the EXISTING seed generator, verifies the generated public value against the authenticated pairedPublic and source evidence, then installs the expanded private key AND retained seed atomically under the destination policy. Expanded recovery does not synthesize or claim a seed. Subsequent Seed backups of the recovered seed-profile key must work. No plaintext seed/private value may be returned through the browser adapter. Zeroize newly introduced temporary secret buffers.
+
+Representation is covered by existing policy identity in destination evidence, source/destination policy IDs in the signed header, pending receive-policy checks, package hash, request-hash retry cache and receipt. Tampering with policy selection, descriptor, seed/public pairing, unknown versions, incompatible key types, missing seeds and attempts to elevate Expanded keys must fail. Native recovery evidence is separate from ACVP/KAT generation evidence and from actual browser acceptance.
