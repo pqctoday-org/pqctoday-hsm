@@ -131,7 +131,7 @@ rules:
   - type: min_key_length
     algorithm: RSA
     min_bits: 3072
-    reason: "RSA >= 3072 (SP 800-57 128-bit-security floor; FIPS 186-5 minimum is 2048)"
+    reason: "RSA >= 3072 (SP 800-57 Part 1 Rev. 5: the RSA size for 128-bit security, the minimum for applying protection from 2031; FIPS 186-5 minimum is 2048)"
 
   # 4. AES minimum 128 bits (already enforced by AES-128 allowlist, but explicit).
   - type: min_key_length
