@@ -99,9 +99,13 @@ pub(crate) fn op_lock() -> std::sync::MutexGuard<'static, ()> {
 const LEDGER_RESERVED: u8 = 1;
 const LEDGER_COMMITTED: u8 = 2;
 
+fn log_refusal(slot: u32, reason: &'static str) {
+    super::note_refusal(reason);
+    oplog_event("refused", slot, &[("reason", format!("\"{}\"", reason))]);
+}
+
 fn deny<T>(slot: u32, why: Reject) -> Result<T, u32> {
-    super::note_refusal(why.0);
-    oplog_event("refused", slot, &[("reason", format!("\"{}\"", why.0))]);
+    log_refusal(slot, why.0);
     Err(CKR_ACTION_PROHIBITED)
 }
 
@@ -425,11 +429,17 @@ fn profile_constraint_for(key_type: u32, attrs: &crate::crypto::handlers::Attrib
     }
 }
 
-fn select_representation(slot: u32, key: &mut SourceKey, req: &ReplicationRequest) -> Result<(), u32> {
-    let policy = records::parse_policy(&records::find_policy(slot, req.requested_policy.as_bytes()).ok_or(CKR_ACTION_PROHIBITED)?)?;
+/// Why `select_representation` refused: the reason to audit and the code the
+/// caller gets back. Creating a package audits it; the sizing query must not.
+struct NoRepresentation(&'static str, u32);
+
+fn select_representation(slot: u32, key: &mut SourceKey, req: &ReplicationRequest) -> Result<(), NoRepresentation> {
+    let der = records::find_policy(slot, req.requested_policy.as_bytes())
+        .ok_or(NoRepresentation("requested policy not enrolled at source", CKR_ACTION_PROHIBITED))?;
+    let policy = records::parse_policy(&der).map_err(|code| NoRepresentation("requested policy unreadable", code))?;
     key.seed_representation = super::pqc_seed::is_profile(&policy.type_constraint_hash);
     if key.seed_representation && !super::pqc_seed::eligible(&key.attrs) {
-        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+        return Err(NoRepresentation("PQC seed representation not available for this key", CKR_KEY_FUNCTION_NOT_PERMITTED));
     }
     Ok(())
 }
@@ -565,7 +575,7 @@ fn transfer_budget(slot: u32, key: &SourceKey, req: &ReplicationRequest) -> u32 
 pub fn replication_package_length(session: u32, h_key: u32, request: &[u8]) -> Result<usize, u32> {
     let (slot, mut key) = source_key(session, h_key)?;
     let req = parse_request(request)?;
-    select_representation(slot, &mut key, &req)?;
+    select_representation(slot, &mut key, &req).map_err(|refusal| refusal.1)?;
     ready(slot)?;
     if let Some(p) = cache_hit(slot, &req, request, &key)? {
         return Ok(p.len());
@@ -579,7 +589,10 @@ pub fn create_replication_package(session: u32, h_key: u32, request: &[u8]) -> R
     let _op = op_lock();
     let (slot, mut key) = source_key(session, h_key)?;
     let req = parse_request(request)?;
-    select_representation(slot, &mut key, &req)?;
+    select_representation(slot, &mut key, &req).map_err(|refusal| {
+        log_refusal(slot, refusal.0);
+        refusal.1
+    })?;
     ready(slot)?;
     if let Some(p) = cache_hit(slot, &req, request, &key)? {
         oplog_event("package_retry", slot, &[("transaction", super::hex(req.transaction_id.as_bytes()))]);

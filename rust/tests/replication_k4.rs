@@ -118,11 +118,36 @@ fn k4_seed_profile_missing_or_wrong_seed_never_restores_a_different_key() {
         // Fault injection only: the real token marks this object immutable.
         softhsmrustv3::state::OBJECTS.with(|o| { o.borrow_mut().get_mut(&src).unwrap().remove(&CKA_SEED); });
         assert_eq!(err(create(&w, 0, src, &req)), Err(CKR_KEY_FUNCTION_NOT_PERMITTED));
+        assert_eq!(repl::last_refusal(), Some("PQC seed representation not available for this key"));
         let len = if kp == Kp::MlKem { 64 } else { 32 };
         softhsmrustv3::state::OBJECTS.with(|o| { o.borrow_mut().get_mut(&src).unwrap().insert(CKA_SEED, vec![0xa5; len]); });
         let pkg = create(&w, 0, src, &req).unwrap();
         assert_eq!(err(import(&w, 1, &pkg)), Err(CKR_ENCRYPTED_DATA_INVALID));
     }
+}
+
+#[test]
+fn k4_unenrolled_requested_policy_is_refused_and_audited_only_when_creating() {
+    let _g = lock();
+    let w = world(2);
+    let src_pol = w.policy([true, true, true], 4, test_mechs());
+    let ps = w.as_so(0, |so| repl::enroll_policy(so, &src_pol).unwrap());
+    let dst_pol = w.policy([true, true, true], 1, test_mechs());
+    let pd = w.enroll_policy_everywhere(&dst_pol);
+    let (src, _) = gen_key(w.tokens[0].user, Kp::MlKem, &ps);
+    // An earlier refusal with a different reason, so the checks below can tell
+    // a new audit entry from a stale one.
+    let pkg = create(&w, 0, src, &request(&w, 0, 1, Operation::LiveClone, &pd)).unwrap();
+    assert_eq!(err(import(&w, 1, &pkg)), PROHIBITED);
+    assert_eq!(repl::last_refusal(), Some("source policy not enrolled at destination"));
+    // The requested destination policy is enrolled at the destination only.
+    let other = w.policy([true, true, true], 2, test_mechs());
+    let po = w.as_so(1, |so| repl::enroll_policy(so, &other).unwrap());
+    let req = request(&w, 0, 1, Operation::LiveClone, &po);
+    assert_eq!(err(repl::replication_package_length(w.tokens[0].user, src, &req)), PROHIBITED);
+    assert_eq!(repl::last_refusal(), Some("source policy not enrolled at destination"), "the sizing query must not write the audit log");
+    assert_eq!(err(create(&w, 0, src, &req)), PROHIBITED);
+    assert_eq!(repl::last_refusal(), Some("requested policy not enrolled at source"));
 }
 
 #[test]
