@@ -17,13 +17,14 @@
 #         ./build-wasm-bundle.sh --dev                   # shipped-shape dev build
 #         ./build-wasm-bundle.sh --acvp-test [--dev]     # test-only deterministic hooks
 #         ./build-wasm-bundle.sh --no-brainpool [...]    # without the brainpool curves
+#         ./build-wasm-bundle.sh --replication [...]     # existing educational backup bindings
 #           (cargo feature `brainpool`, default on; about 320 KB of the release
 #           .wasm, see rust/Cargo.toml. On wasm32 --no-default-features drops
 #           nothing else: awslc-pq and fhe-custody compile nothing there.)
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROFILE="release"; OUT="pkg-release"; ACVP_TEST=0; FEATURE_ARGS=()
+PROFILE="release"; OUT="pkg-release"; ACVP_TEST=0; REPLICATION=0; FEATURE_ARGS=()
 # Both fips204 ML-DSA keygen (unoptimized builds) and
 # CKM_PQCTODAY_FRODOKEM_ENCAPSULATE / CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE
 # (BSI TR-02102-1 §2.4.1/§2.4.2, ffi.rs — even in --release) overflow the
@@ -46,6 +47,7 @@ for arg in "$@"; do
   case "$arg" in
     --dev) PROFILE="dev"; OUT="pkg" ;;
     --acvp-test) ACVP_TEST=1 ;;
+    --replication) REPLICATION=1 ;;
     --no-brainpool) FEATURE_ARGS=(--no-default-features) ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -56,6 +58,9 @@ if [[ "$ACVP_TEST" == "1" ]]; then
   else
     OUT="pkg-acvp-dev"
   fi
+fi
+if [[ "$REPLICATION" == "1" ]]; then
+  FEATURE_ARGS+=(--features educational-replication)
 fi
 
 # Resolve the rustup toolchain bin dir (NOT Homebrew's cargo/rustc).
@@ -151,6 +156,13 @@ if [[ "$ACVP_TEST" == "1" ]]; then
 else
   ACVP_JSON=false
   FEATURES_JSON='[]'
+fi
+if [[ "$REPLICATION" == "1" ]]; then
+  if [[ "$ACVP_TEST" == "1" ]]; then
+    FEATURES_JSON='["acvp", "educational-replication"]'
+  else
+    FEATURES_JSON='["educational-replication"]'
+  fi
 fi
 printf '{\n  "profile": "%s",\n  "features": %s,\n  "acvp_test_hooks": %s,\n  "wasm_sha256": "%s"\n}\n' \
   "$PROFILE" "$FEATURES_JSON" "$ACVP_JSON" "$WASM_SHA256" \

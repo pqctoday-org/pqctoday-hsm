@@ -280,7 +280,7 @@ impl PolicyView {
     /// Spec §8: `self` (destination) equal to or stricter than `source`.
     pub fn is_equal_or_stricter_than(&self, source: &PolicyView) -> bool {
         self.domain == source.domain
-            && self.type_constraint_hash == source.type_constraint_hash
+            && super::pqc_seed::equal_or_stricter(&self.type_constraint_hash, &source.type_constraint_hash)
             && (0..3).all(|i| !self.operations[i] || source.operations[i])
             && self.peers.iter().all(|p| source.peers.contains(p))
             && self.allowed_mechanisms.iter().all(|m| source.allowed_mechanisms.contains(m))
