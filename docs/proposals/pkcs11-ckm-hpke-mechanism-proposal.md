@@ -22,10 +22,13 @@ is not part of the normative proposal.
 
 PKCS #11 v3.2 (ratified 2026-06) defines no mechanism for HPKE (RFC 9180).
 The v3.3 working draft's `CKM_COMP_KEM` (targeting
-draft-ietf-lamps-pq-composite-kem) is adjacent but does not cover this case —
-different working group, different combiner, and critically, `CKM_COMP_KEM`
-is KEM-only: it has no notion of RFC 9180's KeySchedule, AEAD Seal/Open, or
-Export API, all of which HPKE requires.
+draft-ietf-lamps-pq-composite-kem) is adjacent but does not cover this case:
+`CKM_COMP_KEM` is KEM-only, with no notion of RFC 9180's KeySchedule, AEAD
+Seal/Open, or Export API, all of which HPKE requires. It is, however, the same
+function as the key-agreement step of three HPKE-PQ hybrid KEMs (§1.2). The
+v3.3 working draft contains no HPKE mechanism; the committee's repository has
+an open request for one (issue #121, milestone 3.3, no text yet). This
+document has not been submitted to it.
 
 Every real deployment of HPKE against a v3.2-conformant token therefore
 composes it from primitives: `CKM_ECDH1_DERIVE` / `CKM_ML_KEM` for the KEM
@@ -60,26 +63,39 @@ for its case.
   Key Derivation Function (HKDF)", RFC 5869, May 2010.
 - **[PKCS11-BASE]** PKCS #11 Specification Version 3.2 (OASIS Standard,
   2026-06-03).
-- **[COMP-KEM]** draft-ietf-lamps-pq-composite-kem — referenced only for
-  contrast in §1 and §10; not a dependency of this proposal.
+- **[COMP-KEM]** draft-ietf-lamps-pq-composite-kem — referenced for the
+  KEM-step relationship in §1 and §1.2 and for contrast in §10; not a
+  dependency of this proposal.
 
 ### 1.2 Relationship to CKM_COMP_KEM
 
-`CKM_COMP_KEM` and `CKM_HPKE` are complementary, not competing, and MUST NOT
-be treated as interchangeable:
+`CKM_COMP_KEM` is one step of what `CKM_HPKE` does. They are complementary:
+`CKM_COMP_KEM` alone is not HPKE, and `CKM_HPKE` is not limited to the suites
+that `CKM_COMP_KEM` covers.
 
 | | CKM_COMP_KEM (v3.3 draft) | CKM_HPKE (this proposal) |
 |---|---|---|
 | Target spec | [COMP-KEM] (LAMPS WG, X.509-oriented) | [RFC9180] + [HPKE-PQ] + [HYBRID-KEMS] (CFRG/IRTF) |
 | Scope | KEM only (Encaps/Decaps → shared secret) | Full protocol: KEM + KeySchedule + AEAD + Export |
-| Combiner | Fixed SHA3-256, one KDF for every parameter set | Fixed SHA3-256 at the KEM-combiner layer (same shape); KDF selectable at the outer HPKE suite layer (§4) |
+| Combiner | Fixed SHA3-256, one KDF for every parameter set | For MLKEM768-X25519, MLKEM768-P256 and MLKEM1024-P384: **the same function** (same hash, input order, label and key/ciphertext layout). KDF selectable at the outer HPKE suite layer (§4) |
+| Private key | 64-byte ML-KEM seed ‖ traditional key | 32-byte seed, expanded with SHAKE256 (`DeriveKeyPair`) |
 | Output | A shared secret key object | A ready-to-use AEAD key object (+ optional exporter key) |
 
-Both combiners are, incidentally, the same *shape* —
-`SHA3-256(ss_PQ ‖ ss_T ‖ ct_T ‖ ek_T ‖ Label)` — because both descend from the
-same NIST SP 800-227 hybrid-combiner allowance (see §7.3). That similarity is
-coincidental to their shared cryptographic ancestry, not a sign either
-mechanism can stand in for the other.
+For those three suites both sides compute
+`SHA3-256(ss_PQ ‖ ss_T ‖ ct_T ‖ ek_T ‖ Label)` with the same label
+(`\.//^\`, `MLKEM768-P256`, `MLKEM1024-P384`) and the same
+PQ-half-first encapsulation key and ciphertext. This was measured, not only
+read: in the reference engine `CKM_COMP_KEM` reproduces the published CFRG and
+X-Wing shared secrets, and the HPKE-PQ KEM code decapsulates composite
+ciphertexts to the same secret (`rust/kat/hpke/COMPOSITE-KEM-EQUIVALENCE.md`).
+An engine that offers `CKM_COMP_KEM` therefore already has the KEM step of
+these three suites, and a `CKM_HPKE` implementation may call it.
+
+The two still cannot stand in for each other: the private-key formats differ
+(the seed derivation above), the drafts belong to different working groups and
+can diverge, and `CKM_COMP_KEM` has no KeySchedule, AEAD or Export. The result
+covers key agreement for these three suites only, on drafts that have not been
+published as standards.
 
 ## 2. Mechanisms vs. Functions
 
