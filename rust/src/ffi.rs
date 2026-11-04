@@ -7359,7 +7359,8 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     };
     // KEY_TYPE ↔ CLASS consistency (§4.1.1 — CKR_TEMPLATE_INCONSISTENT).
     let secret_only = key_type == CKK_AES || key_type == CKK_AES_XTS || key_type == CKK_GENERIC_SECRET
-        || key_type == 0x33 /* CKK_CHACHA20 */;
+        || key_type == 0x33 /* CKK_CHACHA20 */
+        || key_type == CKK_KMAC; // PKCS#11 v3.3 working draft, kmac.md: CKO_SECRET_KEY only
     let asym_only = key_type == CKK_RSA
         || key_type == CKK_EC
         || key_type == CKK_EC_EDWARDS
@@ -8226,6 +8227,7 @@ const SECRET_KEY_TYPES: &[u32] = &[
     CKK_AES,
     CKK_AES_XTS,
     CKK_CHACHA20,
+    CKK_KMAC,
     CKK_HKDF,
     CKK_MD5_HMAC,
     CKK_SHA_1_HMAC,
@@ -8271,7 +8273,9 @@ fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
         // §6.28 (generic secret) holds "a variable-length byte string";
         // §6.62.1's CKK_HKDF and every HMAC key type are bounded only by the
         // PRF, which accepts any key length. Any non-empty length is legal.
+        // CKK_KMAC (v3.3 working draft, kmac.md): "The key can be of arbitrary length".
         CKK_GENERIC_SECRET
+        | CKK_KMAC
         | CKK_HKDF
         | CKK_MD5_HMAC
         | CKK_SHA_1_HMAC

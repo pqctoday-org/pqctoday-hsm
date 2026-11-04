@@ -899,6 +899,36 @@ fn k1_draft_kmac_key_type_rules() {
     assert_eq!(sign(session, &vendor, aes, b"x"), Err(CKR_KEY_TYPE_INCONSISTENT), "same for the vendor number");
 }
 
+/// A CKK_KMAC key is a secret key of arbitrary length (kmac.md, "KMAC key
+/// objects" and "KMAC Usage"): it can be created, it signs under both draft
+/// numbers, and it gives the same MAC as a generic secret key holding the same
+/// bytes. As a secret key type it is refused in a public- or private-key
+/// object.
+#[test]
+fn k1_draft_kmac_key_objects() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    for len in [1usize, 16, 32, 200] {
+        let value: Vec<u8> = (0..len).map(|i| (i as u8) ^ 0x5a).collect();
+        let kmac_key = secret_key(session, CKK_KMAC, &value);
+        let generic = secret_key(session, CKK_GENERIC_SECRET, &value);
+        for mech in [CKM_KMAC128, CKM_KMAC256] {
+            let a = sign(session, &mechanism(mech, &kmac_std_params(kmac_key, 32, b"S")), kmac_key, b"data")
+                .unwrap_or_else(|rv| panic!("CKK_KMAC key of {len} bytes under {mech:#x}: {rv:#x}"));
+            let b = sign(session, &mechanism(mech, &kmac_std_params(generic, 32, b"S")), generic, b"data")
+                .expect("generic secret key signs");
+            assert_eq!(a, b, "{len}-byte key, {mech:#x}: CKK_KMAC and generic secret agree");
+        }
+    }
+    for class in [CKO_PRIVATE_KEY, CKO_PUBLIC_KEY] {
+        let made = create(
+            session,
+            &[(CKA_CLASS, ul(class)), (CKA_KEY_TYPE, ul(CKK_KMAC)), (CKA_VALUE, vec![7u8; 32])],
+        );
+        assert_eq!(made, Err(CKR_TEMPLATE_INCONSISTENT), "CKK_KMAC in class {class:#x}");
+    }
+}
+
 /// Both pairs of numbers are advertised with the same key range and
 /// sign/verify flags.
 #[test]

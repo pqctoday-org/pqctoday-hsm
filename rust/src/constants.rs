@@ -203,8 +203,9 @@ pub const CKK_SLH_DSA: u32 = 0x0000_004b;
 // https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L443-L444
 pub const CKK_COMP_KEM: u32 = 0x0000_004c;
 pub const CKK_COMP_SIG: u32 = 0x0000_004d;
-// KMAC key type, PKCS#11 v3.3 working draft (kmac.md). Status `approved` in the TC
-// identifier database since PR #156; in the TC header since #159 (c55388c):
+// KMAC key type, PKCS#11 v3.3 working draft (kmac.md). Added to the TC identifier
+// database as proposed by PR #156; approved there and added to the TC header by
+// PR #159 (c55388c):
 // https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L445
 pub const CKK_KMAC: u32 = 0x0000_004e;
 // Stateful hash-based signature key types (PKCS#11 v3.2 §6.14)
@@ -646,8 +647,9 @@ pub const CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS: u32 = 0x0000_0002;
 // committee's numbers below: the engine answers to both.
 pub const CKM_KMAC_128: u32 = 0x8000_0100;
 pub const CKM_KMAC_256: u32 = 0x8000_0101;
-// KMAC, PKCS#11 v3.3 working draft (kmac.md, CK_KMAC_PARAMS). Approved in the TC
-// identifier database (PR #156) and in the TC header (PR #159, c55388c):
+// KMAC, PKCS#11 v3.3 working draft (kmac.md, CK_KMAC_PARAMS). Added to the TC
+// identifier database as proposed by PR #156; approved there and added to the TC
+// header by PR #159 (c55388c):
 // https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L1273-L1274
 // Only the C_Sign / C_Verify side is implemented: the draft's C_DigestXof* functions
 // are not in pkcs11f.h (no function was added in v3.3), so XOF mode (ulMacLength 0)

@@ -329,8 +329,8 @@ PINNED = {
     # CKP_COMP_KEM_* https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L2801-L2812
     "CKK_COMP_KEM": (0x0000004C, "v33-draft"),
     "CKK_COMP_SIG": (0x0000004D, "v33-draft"),
-    # KMAC (v3.3 working draft kmac.md): `approved` in the TC identifier database (PR #156),
-    # in the TC header by PR #159 (c55388c):
+    # KMAC (v3.3 working draft kmac.md): added to the TC identifier database as proposed by
+    # PR #156; approved there and added to the TC header by PR #159 (c55388c):
     # CKK_KMAC https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L445
     # CKM_KMAC* https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L1273-L1274
     "CKK_KMAC": (0x0000004E, "v33-draft"),
