@@ -58,7 +58,7 @@ for its case.
 - **[CONCRETE-HYBRID-KEMS]** draft-irtf-cfrg-concrete-hybrid-kems §4 — the
   concrete instantiation of [HYBRID-KEMS] (labels, component order) that
   [HPKE-PQ]'s three registered hybrid KEM IDs use.
-  <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-concrete-hybrid-kems-03>
+  <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-concrete-hybrid-kems-04>
 - **[RFC5869]** Krawczyk, H. and P. Eronen, "HMAC-based Extract-and-Expand
   Key Derivation Function (HKDF)", RFC 5869, May 2010.
 - **[PKCS11-BASE]** PKCS #11 Specification Version 3.2 (OASIS Standard,
