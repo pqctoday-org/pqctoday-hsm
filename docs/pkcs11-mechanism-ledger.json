@@ -3142,23 +3142,23 @@
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x0000001e (OASIS PKCS 11 TC commit c55388c, working/headers/pkcs11t.h; working/doc/spec/kmac.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Runs the same KMAC128 code as the vendor mechanism CKM_KMAC_128 (identical MACs, checked against NIST SP 800-185 samples and an OpenSSL oracle) with CK_KMAC_PARAMS (hKey, ulMacLength, pCustomizationString, ulCustomizationStringLen); ulMacLength 0 (XOF mode) is refused because the draft's C_DigestXof* functions are not in the header. Key types CKK_KMAC or CKK_GENERIC_SECRET. Rust engine only; the C++ engine keeps the vendor numbers. Key-size range: 16 to 64 bytes, as the vendor mechanism.",
-      "rust_min": 16,
-      "rust_max": 64
+      "note": "PKCS#11 v3.3 working draft mechanism 0x0000001e (OASIS PKCS 11 TC commit c55388c, working/headers/pkcs11t.h; working/doc/spec/kmac.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Runs the same KMAC128 code as the vendor mechanism CKM_KMAC_128 (identical MACs, checked against NIST SP 800-185 samples and an OpenSSL oracle) with CK_KMAC_PARAMS (hKey, ulMacLength, pCustomizationString, ulCustomizationStringLen); ulMacLength 0 (XOF mode) is refused because the draft's C_DigestXof* functions are not in the header. Key types CKK_KMAC or CKK_GENERIC_SECRET. Rust engine only; the C++ engine keeps the vendor numbers. Key-size range: any length from 1 byte (kmac.md: the key can be of arbitrary length); the engine accepts any non-empty key and says so, unlike the vendor numbers. The C++ engine does not carry the draft's composite or KMAC mechanisms.",
+      "rust_min": 1,
+      "rust_max": 2147483647
     },
     "CKM_KMAC256": {
       "value": "engine-extension",
       "cpp": "not-advertised",
       "rust": "implemented",
-      "note": "PKCS#11 v3.3 working draft mechanism 0x00000022 (OASIS PKCS 11 TC commit c55388c, working/headers/pkcs11t.h; working/doc/spec/kmac.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Runs the same KMAC256 code as the vendor mechanism CKM_KMAC_256 (identical MACs, checked against NIST SP 800-185 samples and an OpenSSL oracle) with CK_KMAC_PARAMS (hKey, ulMacLength, pCustomizationString, ulCustomizationStringLen); ulMacLength 0 (XOF mode) is refused because the draft's C_DigestXof* functions are not in the header. Key types CKK_KMAC or CKK_GENERIC_SECRET. Rust engine only; the C++ engine keeps the vendor numbers. Key-size range: 16 to 64 bytes, as the vendor mechanism.",
-      "rust_min": 16,
-      "rust_max": 64
+      "note": "PKCS#11 v3.3 working draft mechanism 0x00000022 (OASIS PKCS 11 TC commit c55388c, working/headers/pkcs11t.h; working/doc/spec/kmac.md), not in the canonical v3.2 header; the engine still reports Cryptoki 3.2.0. Runs the same KMAC256 code as the vendor mechanism CKM_KMAC_256 (identical MACs, checked against NIST SP 800-185 samples and an OpenSSL oracle) with CK_KMAC_PARAMS (hKey, ulMacLength, pCustomizationString, ulCustomizationStringLen); ulMacLength 0 (XOF mode) is refused because the draft's C_DigestXof* functions are not in the header. Key types CKK_KMAC or CKK_GENERIC_SECRET. Rust engine only; the C++ engine keeps the vendor numbers. Key-size range: any length from 1 byte (kmac.md: the key can be of arbitrary length); the engine accepts any non-empty key and says so, unlike the vendor numbers. The C++ engine does not carry the draft's composite or KMAC mechanisms.",
+      "rust_min": 1,
+      "rust_max": 2147483647
     },
     "CKM_KMAC_128": {
       "value": "engine-extension",
       "cpp": "implemented",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Known limit: the Rust engine advertises 16 to 64 bytes for this number but accepts any non-empty key; the answer is kept so recorded results do not change (the draft's numbers advertise the real range).",
       "cpp_min": 16,
       "cpp_max": 2147483647,
       "rust_min": 16,
@@ -3168,7 +3168,7 @@
       "value": "engine-extension",
       "cpp": "implemented",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism. Known limit: the Rust engine advertises 16 to 64 bytes for this number but accepts any non-empty key; the answer is kept so recorded results do not change (the draft's numbers advertise the real range).",
       "cpp_min": 32,
       "cpp_max": 2147483647,
       "rust_min": 16,

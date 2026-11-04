@@ -893,9 +893,11 @@ fn k1_draft_kmac_key_type_rules() {
     let _g = test_lock::acquire();
     let session = setup_session();
     let aes = secret_key(session, CKK_AES, &[0x33u8; 32]);
-    let m = mechanism(CKM_KMAC256, &kmac_std_params(aes, 64, b""));
+    let params = kmac_std_params(aes, 64, b"");
+    let m = mechanism(CKM_KMAC256, &params);
     assert_eq!(sign(session, &m, aes, b"x"), Err(CKR_KEY_TYPE_INCONSISTENT), "an AES key");
-    let vendor = mechanism(CKM_KMAC_256, &kmac_params(b"", 64));
+    let vendor_params = kmac_params(b"", 64);
+    let vendor = mechanism(CKM_KMAC_256, &vendor_params);
     assert_eq!(sign(session, &vendor, aes, b"x"), Err(CKR_KEY_TYPE_INCONSISTENT), "same for the vendor number");
 }
 
@@ -929,8 +931,11 @@ fn k1_draft_kmac_key_objects() {
     }
 }
 
-/// Both pairs of numbers are advertised with the same key range and
-/// sign/verify flags.
+/// Both pairs of numbers are advertised with the same sign/verify flags. The
+/// key range differs on purpose: the vendor numbers keep their historic answer
+/// of 16 to 64 bytes (recorded results do not change); the draft's numbers say
+/// what the engine does, which is any length from 1 byte (kmac.md: "The key
+/// can be of arbitrary length").
 #[test]
 fn k1_draft_numbers_are_advertised_beside_the_vendor_ones() {
     let _g = test_lock::acquire();
@@ -939,13 +944,43 @@ fn k1_draft_numbers_are_advertised_beside_the_vendor_ones() {
     for m in [CKM_KMAC_128, CKM_KMAC_256, CKM_KMAC128, CKM_KMAC256] {
         assert!(list.contains(&m), "{m:#x} advertised");
     }
-    assert_eq!(mech_info(CKM_KMAC128), mech_info(CKM_KMAC_128));
-    assert_eq!(mech_info(CKM_KMAC256), mech_info(CKM_KMAC_256));
-    let (min, max, flags) = mech_info(CKM_KMAC128);
-    assert_eq!((min, max), (16, 64));
-    // CKF_SIGN = 0x800, CKF_VERIFY = 0x2000, CKF_DIGEST = 0x400 (PKCS#11 v3.2 §5.1).
-    assert_eq!(flags & (0x800 | 0x2000), 0x800 | 0x2000);
-    assert_eq!(flags & 0x400, 0, "no digest/XOF function: the C_DigestXof* functions are not in the draft header");
+    for (draft, vendor) in [(CKM_KMAC128, CKM_KMAC_128), (CKM_KMAC256, CKM_KMAC_256)] {
+        let (dmin, dmax, dflags) = mech_info(draft);
+        let (vmin, vmax, vflags) = mech_info(vendor);
+        assert_eq!(dflags, vflags, "same functions advertised");
+        assert_eq!((vmin, vmax), (16, 64), "vendor numbers keep their historic range");
+        assert_eq!((dmin, dmax), (1, 0x7fff_ffff), "draft numbers advertise the real range");
+        // CKF_SIGN = 0x800, CKF_VERIFY = 0x2000, CKF_DIGEST = 0x400 (PKCS#11 v3.2 §5.1).
+        assert_eq!(dflags & (0x800 | 0x2000), 0x800 | 0x2000);
+        assert_eq!(dflags & 0x400, 0, "no digest/XOF function: the C_DigestXof* functions are not in the draft header");
+    }
+}
+
+/// What the draft numbers advertise is what they execute: a 1-byte key (the
+/// advertised minimum) and a 65,536-byte key both sign and verify under both
+/// draft numbers, and the MAC equals the vendor number's for the same key.
+#[test]
+fn k1_draft_kmac_advertised_key_range_executes() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    for (draft, vendor) in [(CKM_KMAC128, CKM_KMAC_128), (CKM_KMAC256, CKM_KMAC_256)] {
+        let (min, max, _) = mech_info(draft);
+        for len in [min as usize, 15, 16, 64, 65, 65_536] {
+            assert!((min as usize..=max as usize).contains(&len));
+            let value: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(7) ^ 0xa5).collect();
+            let key = secret_key(session, CKK_KMAC, &value);
+            // The mechanism points at its parameter block, so the block must outlive it.
+            let params = kmac_std_params(key, 32, b"range");
+            let m = mechanism(draft, &params);
+            let mac = sign(session, &m, key, b"data")
+                .unwrap_or_else(|rv| panic!("{draft:#x}, {len}-byte key: {rv:#x}"));
+            assert_eq!(verify(session, &m, key, b"data", &mac), CKR_OK, "{draft:#x}, {len}-byte key verifies");
+            let generic = secret_key(session, CKK_GENERIC_SECRET, &value);
+            let vendor_params = kmac_params(b"range", 32);
+            let v = mechanism(vendor, &vendor_params);
+            assert_eq!(sign(session, &v, generic, b"data"), Ok(mac), "{len}-byte key: same MAC under the vendor number");
+        }
+    }
 }
 
 // ═══ E17 — HMAC key-size advertisement matches what the engine accepts ════

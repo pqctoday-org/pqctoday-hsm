@@ -147,7 +147,7 @@ fn seed_len(shape: &KemShape) -> Option<usize> {
     }
 }
 
-// ── One-stage KDF (draft-ietf-hpke-hpke-03 §4.4, draft-ietf-hpke-pq-05 §5) ──
+// ── One-stage KDF (draft-ietf-hpke-hpke-06 §4.4, draft-ietf-hpke-pq-05 §5) ──
 
 /// `SHAKE256.Derive(ikm, L) = SHAKE256(M = ikm, d = 8L)`.
 fn shake256_derive(ikm: &[u8], l: usize) -> Vec<u8> {
@@ -161,13 +161,13 @@ fn shake256_derive(ikm: &[u8], l: usize) -> Vec<u8> {
 
 fn length_prefixed(x: &[u8]) -> Result<Vec<u8>, CkRv> {
     if x.len() > 0xffff {
-        // draft-ietf-hpke-hpke-03 §7.2.1: 65,535-byte limit for one-stage KDF inputs.
+        // draft-ietf-hpke-hpke-06 §7.2.1: 65,535-byte limit for one-stage KDF inputs.
         return Err(CKR_ARGUMENTS_BAD);
     }
     Ok([&i2osp2(x.len())[..], x].concat())
 }
 
-/// draft-ietf-hpke-hpke-03 §4.4 `LabeledDerive(ikm, label, context, L)` with
+/// draft-ietf-hpke-hpke-06 §4.4 `LabeledDerive(ikm, label, context, L)` with
 /// SHAKE256: `Derive(ikm ‖ "HPKE-v1" ‖ suite_id ‖ lengthPrefixed(label) ‖
 /// I2OSP(L, 2) ‖ context, L)`.
 fn labeled_derive(suite_id: &[u8], ikm: &[u8], label: &[u8], context: &[u8], l: usize) -> Result<Vec<u8>, CkRv> {
@@ -721,7 +721,7 @@ fn key_schedule(
     Ok(KeyScheduleOutput { key, base_nonce, exporter_secret })
 }
 
-/// draft-ietf-hpke-hpke-03 §5.1 `KeySchedule` with `CombineSecrets_OneStage`:
+/// draft-ietf-hpke-hpke-06 §5.1 `KeySchedule` with `CombineSecrets_OneStage`:
 /// `secret = LabeledDerive(lengthPrefixed(psk) ‖ lengthPrefixed(shared_secret),
 /// "secret", mode ‖ lengthPrefixed(psk_id) ‖ lengthPrefixed(info), Nk+Nn+Nh)`,
 /// split as key ‖ base_nonce ‖ exporter_secret.
@@ -736,7 +736,7 @@ fn key_schedule_one_stage(
     aead_nk_nn: Option<(usize, usize)>,
     n_h: usize,
 ) -> Result<KeyScheduleOutput, CkRv> {
-    // hpke-hpke-03 Table 1 defines only mode_base and mode_psk.
+    // hpke-hpke-06 Table 1 defines only mode_base and mode_psk.
     if mode != CKZ_HPKE_MODE_BASE && mode != CKZ_HPKE_MODE_PSK {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }

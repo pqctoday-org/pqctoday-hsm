@@ -23,7 +23,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the `CKK_KMAC` key type work for `C_Sign` and `C_Verify`, beside the existing `CKM_KMAC_128` / `CKM_KMAC_256`
   vendor numbers, and give identical MACs (checked against the NIST SP 800-185 samples and an OpenSSL oracle).
   Extendable output (`ulMacLength` 0) is refused because the draft's `C_DigestXof*` functions are not in its header.
-  The C++ engine keeps the vendor numbers.
+  The same missing functions are why the draft's `CKM_SHAKE_128` / `CKM_SHAKE_256` digest mechanisms, which the draft
+  defines only for `C_DigestXof*`, are not implemented. A KMAC key may be any non-empty length, and the draft numbers
+  advertise that (1 byte upward); the vendor numbers keep their earlier advertised range of 16 to 64 bytes so recorded
+  results do not change, although they accept the same keys. Rules for the draft numbers: the key handle inside
+  `CK_KMAC_PARAMS` must equal the key passed to `C_SignInit` / `C_VerifyInit`; the MAC length is 1 to 1,024 bytes; the
+  customization string is up to 1,024 bytes. The C++ engine keeps the vendor numbers and does not carry the draft's
+  composite or KMAC mechanisms.
 - Tests and evidence: the `CKM_COMP_KEM` shared secret is measured equal to the HPKE-PQ hybrid KEM secret for X-Wing,
   MLKEM768-P256 and MLKEM1024-P384, in both directions, against the published CFRG and X-Wing vectors
   (`rust/kat/hpke/COMPOSITE-KEM-EQUIVALENCE.md`).

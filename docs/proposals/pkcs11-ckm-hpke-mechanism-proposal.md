@@ -157,9 +157,9 @@ Parameter set types (values = the corresponding `kem_id` from [RFC9180] §7.1
 - CKD_HPKE_HKDF_SHA256 (0x0001), CKD_HPKE_HKDF_SHA384 (0x0002),
   CKD_HPKE_HKDF_SHA512 (0x0003) — two-stage, [RFC9180] KeySchedule
 - CKD_HPKE_SHAKE256 (0x0011) — one-stage ([HPKE-PQ] §5 Table 1), added
-  2026-10-01. Uses draft-ietf-hpke-hpke-03 §4.4 `LabeledDerive` and §5.1
+  2026-10-01. Uses draft-ietf-hpke-hpke-06 §4.4 `LabeledDerive` and §5.1
   `CombineSecrets_OneStage` (Nh = 64). Only `mode_base`/`mode_psk`
-  (hpke-hpke-03 Table 1 reserves 0x02/0x03): Auth/AuthPSK with this KDF is
+  (hpke-hpke-06 Table 1 reserves 0x02/0x03): Auth/AuthPSK with this KDF is
   `CKR_MECHANISM_PARAM_INVALID`. psk, psk_id and info are each limited to
   65,535 bytes (§7.2.1). SHAKE128 and TurboSHAKE128/256 (0x0010, 0x0012,
   0x0013) are not implemented.

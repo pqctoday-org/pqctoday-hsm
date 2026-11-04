@@ -19,3 +19,7 @@ Published reference vectors replayed by `rust/src/hpke_pq_vectors_tests.rs`. All
 None of them shares code with this engine.
 
 **Cross-check before the Rust implementation existed:** a Node reference model built on noble ML-KEM, hybrids and SHAKE256 reproduced all of these vectors (61/61 checks). It is in the Antigravity workspace at `hpke-jwe-evidence-10012026/refmodel/hpke_ref.mjs`.
+
+## Citation check: draft-ietf-hpke-hpke
+
+The code comments and the CKM_HPKE proposal cite `draft-ietf-hpke-hpke` for `LabeledDerive` (§4.4), `KeySchedule` with `CombineSecrets_OneStage` (§5.1), `Export_OneStage` (§5.3), the 65,535-byte input and length limits (§7.2.1) and the mode table (Table 1). Revision 06 was read against the revision 03 the code had been written from: the section numbers are unchanged and the text of §4.4, §5.1 and §7.2.1 differs only in wording and cross-references. §5.3 adds an explicit rule that a one-stage export length cannot exceed 65,535, which `labeled_derive` already enforces. Revision 06 also states that it defines no one-stage KDFs; the SHAKE256 one-stage KDF is defined in `draft-ietf-hpke-pq` §5 (revision 05), which the code already cites for it. The citations now name revision 06.

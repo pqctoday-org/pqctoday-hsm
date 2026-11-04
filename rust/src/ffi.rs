@@ -1747,7 +1747,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_RIPEMD160_HMAC_GENERAL
         | CKM_SHA_1_HMAC_GENERAL
         | CKM_MD5_HMAC_GENERAL => HMAC_KEY_RANGE,
-        CKM_KMAC_128 | CKM_KMAC_256 | CKM_KMAC128 | CKM_KMAC256 => (16, 64, 0x00000800 | 0x00002000),
+        // Vendor KMAC: historic answer, kept so recorded results do not change.
+        CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
+        // v3.3 working draft kmac.md: "The key can be of arbitrary length", and
+        // ulMinKeySize/ulMaxKeySize give the supported KMAC key sizes in bytes.
+        // The engine accepts any non-empty key (checked up to 65,536 bytes), so it
+        // says so; the upper bound is the largest value the field can hold.
+        CKM_KMAC128 | CKM_KMAC256 => (1, 0x7fff_ffff, 0x00000800 | 0x00002000),
         // §3 Wave 4 — AES-CMAC (NIST SP 800-38B), a 16-byte MAC over an
         // AES key of 128/192/256 bits.
         CKM_AES_CMAC => (16, 32, 0x00000800 | 0x00002000),

@@ -272,7 +272,7 @@ pub const CKD_HPKE_HKDF_SHA256: u32 = 0x0001;
 pub const CKD_HPKE_HKDF_SHA384: u32 = 0x0002;
 pub const CKD_HPKE_HKDF_SHA512: u32 = 0x0003;
 /// One-stage KDF (draft-ietf-hpke-pq-05 §5, Table 1; key schedule per
-/// draft-ietf-hpke-hpke-03 §4.4/§5.1 `LabeledDerive`/`CombineSecrets_OneStage`).
+/// draft-ietf-hpke-hpke-06 §4.4/§5.1 `LabeledDerive`/`CombineSecrets_OneStage`).
 pub const CKD_HPKE_SHAKE256: u32 = 0x0011;
 
 /// `CK_HPKE_AEAD_TYPE` — equal to RFC 9180 §7.3's `aead_id`.
