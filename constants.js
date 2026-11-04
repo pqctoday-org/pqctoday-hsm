@@ -213,6 +213,7 @@ module.exports = Object.freeze({
   // OASIS PKCS 11 TC working tree, commit 9ef73f9, working/headers/pkcs11t.h:443-444
   CKK_COMP_KEM: 0x0000004c,
   CKK_COMP_SIG: 0x0000004d,
+  CKK_KMAC: 0x0000004e,
   CKK_VENDOR_DEFINED: 0x80000000,
 
   // ── Mechanisms (CKM_*) ───────────────────────────────────────────────────
@@ -340,6 +341,8 @@ module.exports = Object.freeze({
   CKM_XEDDSA: 0x00004029,
   CKM_KMAC_128: 0x80000100,
   CKM_KMAC_256: 0x80000101,
+  CKM_KMAC128: 0x0000001e,
+  CKM_KMAC256: 0x00000022,
   CKM_HKDF_DERIVE: 0x0000402a,
   CKM_HKDF_DATA: 0x0000402b,
   CKM_HKDF_KEY_GEN: 0x0000402c,

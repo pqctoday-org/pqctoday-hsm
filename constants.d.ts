@@ -155,6 +155,8 @@ export declare const CKK_SLH_DSA: number
 export declare const CKK_COMP_KEM: number
 /** Composite ML-DSA key type — PKCS#11 v3.3 working draft */
 export declare const CKK_COMP_SIG: number
+/** KMAC key type — PKCS#11 v3.3 working draft */
+export declare const CKK_KMAC: number
 /** ML-KEM (FIPS 203) key type — PKCS#11 v3.2 */
 export declare const CKK_ML_KEM: number
 export declare const CKK_VENDOR_DEFINED: number
@@ -279,6 +281,10 @@ export declare const CKM_HASH_SLH_DSA_SHAKE256: number
 export declare const CKM_KMAC_128: number
 /** KMAC-256 — keyed MAC using KECCAK-256 XOF (FIPS 202 / SP 800-185) */
 export declare const CKM_KMAC_256: number
+/** KMAC128 — PKCS#11 v3.3 working draft number (CK_KMAC_PARAMS); same function as CKM_KMAC_128 */
+export declare const CKM_KMAC128: number
+/** KMAC256 — PKCS#11 v3.3 working draft number (CK_KMAC_PARAMS); same function as CKM_KMAC_256 */
+export declare const CKM_KMAC256: number
 export declare const CKM_VENDOR_DEFINED: number
 
 // ── Attributes (CKA_*) ──────────────────────────────────────────────────────

@@ -467,6 +467,20 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_KMAC_PARAMS` (PKCS#11 v3.3 working draft, kmac.md; `pkcs11t.h` at
+    /// c55388c) — the committee's KMAC parameter, for `CKM_KMAC128` /
+    /// `CKM_KMAC256`. NOT the vendor layout above: the key handle comes first,
+    /// the output length (`L`, 0 = XOF mode) comes before the customization
+    /// string, and `pCustomizationString` sits third. `hKey` is a
+    /// `CK_OBJECT_HANDLE` (a `CK_ULONG`).
+    kmac_std, "CK_KMAC_PARAMS", {
+    H_KEY: F::Ulong,
+    UL_MAC_LENGTH: F::Ulong,
+    P_CUSTOMIZATION_STRING: F::Ptr,
+    UL_CUSTOMIZATION_STRING_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_MAC_GENERAL_PARAMS` (v3.2 §6.x) — **instance 4**. A bare
     /// `typedef CK_ULONG`, so the "struct" is one native-width word.
     mac_general, "CK_MAC_GENERAL_PARAMS", {
@@ -1056,6 +1070,7 @@ mod tests {
             (&aes_ctr::LAYOUT, vec![0, 4], 20, vec![0, 8], 24),
             (&eddsa::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&kmac::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
+            (&kmac_std::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
             (&mac_general::LAYOUT, vec![0], 4, vec![0], 8),
             (&gcm::LAYOUT, vec![0, 4, 8, 12, 16, 20], 24, vec![0, 8, 16, 24, 32, 40], 48),
             (&chacha20::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
@@ -1368,6 +1383,35 @@ mod tests {
                 core::ptr::read_unaligned(w.add(2)),
             )
         }
+    }
+
+    #[test]
+    fn kmac_std_reads_the_drafts_field_order_not_the_vendor_one() {
+        let custom = b"KMAC customization".to_vec();
+        let buf = build(
+            &kmac_std::LAYOUT,
+            &[V::U(0x1234), V::U(32), V::P(custom.as_ptr()), V::U(custom.len())],
+        );
+        let r = unsafe {
+            ParamReader::new(buf.as_ptr(), buf.len(), &kmac_std::LAYOUT, kmac_std::FIELD_COUNT)
+        }
+        .unwrap();
+        assert_eq!(unsafe { r.ulong32(kmac_std::H_KEY) }, 0x1234);
+        assert_eq!(unsafe { r.ulong32(kmac_std::UL_MAC_LENGTH) }, 32);
+        assert_eq!(
+            unsafe {
+                r.buffer(kmac_std::P_CUSTOMIZATION_STRING, kmac_std::UL_CUSTOMIZATION_STRING_LEN)
+            },
+            &custom[..]
+        );
+        // The vendor layout puts the pointer first: reading the same bytes with it
+        // does not recover the customization string, which is why the two
+        // mechanisms must not share a parser.
+        let wrong = unsafe {
+            ParamReader::new(buf.as_ptr(), buf.len(), &kmac::LAYOUT, kmac::FIELD_COUNT)
+        }
+        .unwrap();
+        assert_ne!(unsafe { wrong.ptr(kmac::P_CUSTOMIZATION) }, custom.as_ptr());
     }
 
     #[test]
