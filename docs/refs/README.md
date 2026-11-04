@@ -80,24 +80,32 @@ Until 2026-10-15 a snapshot of that working tree was vendored here as
 - Repository: <https://github.com/oasis-tcs/pkcs11> (public TC repository; public
   feedback accepted under the OASIS Feedback License)
 - Branch: `master`
-- Current pin (2026-10-21): [`9ef73f9f44ed8a240b05484427a0851ab36be251`](https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251) (2026-10-21T13:10:05-07:00), 344 files.
-  It was moved here from the previous pin for the composite ML-DSA / ML-KEM
-  identifiers, which the TC approved and put in its header after that pin.
-  The engine's composite constants and parameter table are checked against
-  this commit, through the fact extracts in `rust/kat/pkcs11-v33/`
+- Current pin (2026-11-03): [`c55388c02702537876867ecda34601daa52b2df1`](https://github.com/oasis-tcs/pkcs11/tree/c55388c02702537876867ecda34601daa52b2df1) (2026-10-27T19:20:15Z), 344 files.
+  It was moved here from the previous pin for the KMAC identifiers
+  (`CKK_KMAC`, `CKM_KMAC128/256`), which the TC approved and put in its header
+  after that pin. One upstream commit (#159) separates the two pins. It adds to
+  the header `CKK_KMAC`, `CKM_KMAC128/256`, `CKM_SHAKE_128/256`, `CKA_FLAGS`,
+  `CKA_SUPPORTED_PARAMETER_SETS` and the `CK_KMAC_PARAMS` type, and marks those
+  identifiers approved in `working/identifier_db/raw_ids.db`. Every identifier
+  value recorded at the previous pin is unchanged at this one; only line numbers
+  moved. The engine's composite and KMAC constants are checked
+  against this commit, through the fact extracts in `rust/kat/pkcs11-v33/`
   (identifier values from the header, and the composite draft tables).
-- Previous pin: [`2b25dd8ed4a85d22937d8509bb296555cd329f43`](https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43) (2026-08-26T21:46:09+01:00).
+- Earlier pin: [`9ef73f9f44ed8a240b05484427a0851ab36be251`](https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251) (2026-10-21T13:10:05-07:00).
+  Source comments written against it name that commit and cite its line
+  numbers; they stay valid because they are permalinks to it.
+- Previous pin before that: [`2b25dd8ed4a85d22937d8509bb296555cd329f43`](https://github.com/oasis-tcs/pkcs11/tree/2b25dd8ed4a85d22937d8509bb296555cd329f43) (2026-08-26T21:46:09+01:00).
   The removed snapshot was that commit's tree byte for byte (334 files,
   re-verified against a fresh fetch on 2026-10-15), minus the four
   `working/doc/*/Makefile` files. Citations written against it stay valid:
   they are permalinks to that commit.
 
-A citation of the form `working/headers/pkcs11t.h:662 (commit 9ef73f9)` means
-<https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L662>.
+A citation of the form `working/headers/pkcs11t.h:662 (commit c55388c)` means
+<https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L662>.
 That is how `V33_CORRECTIONS` and the `v33-draft` entries in
 `scripts/check_pkcs11_constants.py` cite v3.3. To get a local tree:
 `python3 docs/refs/fetch_refs.py --v33`, or
-`git clone https://github.com/oasis-tcs/pkcs11.git && git -C pkcs11 checkout 9ef73f9`.
+`git clone https://github.com/oasis-tcs/pkcs11.git && git -C pkcs11 checkout c55388c`.
 
 This is not a stage document and has no publisher SHA-256 to check: it is a
 live branch, and every fact in it may change before ratification. Its markdown
@@ -105,7 +113,7 @@ carries no section numbers, so cite v3.2 section and table numbers and use
 v3.3 for prose only (see the root `CLAUDE.md`).
 
 Notable post-3.2 commits on `master` up to the current pin (22 commits
-separate the two pins; the rest are editorial, scanner and documentation
+separate the two earlier pins, and one more the current pin; the rest are editorial, scanner and documentation
 changes):
 
 | Date | Commit | Change |
@@ -123,7 +131,8 @@ changes):
 | 2026-10-07 | `45be037` | Composites (#143): allocates `CKK_COMP_KEM`/`CKK_COMP_SIG`, the five `CKM_COMP_*` mechanisms and the 18 + 12 `CKP_COMP_*` parameter sets |
 | 2026-10-14 | `3cb6647` | Update headers for `CK_MU_GEN_PARAMS` (#155) |
 | 2026-10-15 | `88f1ba8` | Update header files with composite values (#152): the composite identifiers approved and in `working/headers/pkcs11t.h` |
-| 2026-10-21 | `9ef73f9` | Add kmac and mechanism parameter identifiers (#156): `CKM_KMAC*`, `CKM_SHAKE_*`, `CKK_KMAC`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` allocated in `working/identifier_db/` but **not in the header**; not built here (current pin) |
+| 2026-10-21 | `9ef73f9` | Add kmac and mechanism parameter identifiers (#156): `CKM_KMAC*`, `CKM_SHAKE_*`, `CKK_KMAC`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` allocated in `working/identifier_db/` as proposed, not yet in the header (earlier pin) |
+| 2026-10-27 | `c55388c` | KMAC identifiers in headers (#159): `CKK_KMAC` (0x4e) and `CKM_KMAC128/256` (0x1e, 0x22) approved and in `working/headers/pkcs11t.h`; built here for `C_Sign` / `C_Verify` in the Rust engine (current pin). The draft's `CKM_SHAKE_128/256` are defined only for the `C_DigestXof…` functions, which the header does not declare, and are not built (`rust/kat/kmac/PROVENANCE.md`) |
 
 The v3.3 header at the current pin still declares `CRYPTOKI_VERSION_MINOR 2`;
 the engines keep reporting Cryptoki 3.2.0 and label the composites

@@ -934,3 +934,196 @@ fn supplied_random_refusals() {
         destroy(&[hp]);
     }
 }
+
+// ── P1: the composite KEM and the HPKE-PQ hybrid KEMs give the same secret ──
+//
+// Hybrid/HPKE alignment, work package P1 (2026-11-03). The drafts
+// describe one function for three suites: composite-kem-23 §3.4 and
+// hybrid-kems-12 §5.5 (C2PRI) both compute
+// SHA3-256(ss_PQ ‖ ss_T ‖ ct_T ‖ ek_T ‖ Label), the labels agree
+// (`\.//^\`, `MLKEM768-P256`, `MLKEM1024-P384`), and the encapsulation key and
+// ciphertext are both PQ-half-first. That was read, not run. These tests run it.
+//
+// What differs, and is deliberately bridged only in test code: the private
+// key. HPKE-PQ derives it from a 32-byte seed (SHAKE256); a composite private
+// key is `mlkemSeed(64) ‖ tradSK`. The CFRG vectors publish the expanded
+// components (`decapsulation_key_pq`, `decapsulation_key_t`), so the composite
+// key is assembled from them. X-Wing's 32-byte seed is expanded here with
+// SHAKE256 as draft-connolly-cfrg-xwing-kem §5.2 specifies.
+//
+// Vectors: `rust/kat/hpke/` (provenance there). They come from the CFRG
+// reference implementation and the X-Wing author, independent of this engine.
+
+use crate::native::hpke;
+
+fn p1_fixture(name: &str) -> Value {
+    let path = format!("{}/kat/hpke/{name}", env!("CARGO_MANIFEST_DIR"));
+    let s = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    serde_json::from_str(&s).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+}
+
+fn p1_hex(s: &str) -> Vec<u8> {
+    assert!(s.len() % 2 == 0, "odd-length hex");
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+}
+
+fn p1_h(v: &Value, k: &str) -> Vec<u8> {
+    p1_hex(v[k].as_str().unwrap_or_else(|| panic!("field {k}")))
+}
+
+/// One HPKE-PQ hybrid suite and the composite set that must equal it.
+struct P1Suite {
+    /// Key in `cfrg-concrete-hybrid-kems-test-vectors.json`.
+    key: &'static str,
+    ckp: u32,
+    hpke_kem: u32,
+    /// `None`: X25519 (raw 32-byte tradSK). `Some`: ECDH (DER ECPrivateKey).
+    curve: Option<EcCurve>,
+    /// A set the same key bytes must NOT import under (control).
+    wrong_ckp: u32,
+}
+
+const P1_SUITES: [P1Suite; 3] = [
+    P1Suite { key: "mlkem768_x25519", ckp: CKP_COMP_KEM_MLKEM768_X25519, hpke_kem: CKP_HPKE_KEM_MLKEM768_X25519, curve: None, wrong_ckp: CKP_COMP_KEM_MLKEM768_ECDH_P256 },
+    P1Suite { key: "mlkem768_p256", ckp: CKP_COMP_KEM_MLKEM768_ECDH_P256, hpke_kem: CKP_HPKE_KEM_MLKEM768_P256, curve: Some(EcCurve::P256), wrong_ckp: CKP_COMP_KEM_MLKEM768_ECDH_P384 },
+    P1Suite { key: "mlkem1024_p384", ckp: CKP_COMP_KEM_MLKEM1024_ECDH_P384, hpke_kem: CKP_HPKE_KEM_MLKEM1024_P384, curve: Some(EcCurve::P384), wrong_ckp: CKP_COMP_KEM_MLKEM768_X25519 },
+];
+
+fn p1_params(ckp: u32) -> &'static CompositeKemParams {
+    COMPOSITE_KEM_SETS.iter().find(|p| p.ckp == ckp).expect("composite KEM set")
+}
+
+/// `mlkemSeed(64) ‖ tradSK` from the vector's published components.
+fn p1_composite_dk(s: &P1Suite, t: &Value) -> Vec<u8> {
+    let mut dk = p1_h(t, "decapsulation_key_pq");
+    assert_eq!(dk.len(), 64, "{}: ML-KEM seed d‖z", s.key);
+    let sk_t = p1_h(t, "decapsulation_key_t");
+    match s.curve {
+        None => dk.extend_from_slice(&sk_t),
+        Some(c) => dk.extend_from_slice(&composite_key::ec_private_key_der(c, &sk_t)),
+    }
+    dk
+}
+
+fn p1_flip(ct: &[u8], index: usize) -> Vec<u8> {
+    let mut out = ct.to_vec();
+    out[index] ^= 0x01;
+    out
+}
+
+/// Forward direction: a CFRG vector's ciphertext, decapsulated by
+/// `CKM_COMP_KEM` under the vector's own key, yields the vector's
+/// `shared_secret`. 30 vectors, three suites. The controls make a pass mean
+/// something: the same comparison must FAIL for a damaged ciphertext and the
+/// same key bytes must be refused under a different parameter set.
+#[test]
+fn p1_composite_kem_reproduces_cfrg_hybrid_kem_secrets() {
+    let _guard = test_lock::acquire();
+    setup();
+    let all = p1_fixture("cfrg-concrete-hybrid-kems-test-vectors.json");
+    let (mut n, mut controls) = (0, 0);
+    for s in &P1_SUITES {
+        let layout = Layout::from(CompositeParams::Kem(p1_params(s.ckp)));
+        for (i, t) in all[s.key].as_array().unwrap().iter().enumerate() {
+            let name = format!("{} #{i}", s.key);
+            let (dk, ek, ct, want) = (p1_composite_dk(s, t), p1_h(t, "encapsulation_key"), p1_h(t, "ciphertext"), p1_h(t, "shared_secret"));
+
+            // The key formats line up: the engine derives the vector's own
+            // encapsulation key from the assembled composite private key.
+            assert_eq!(composite_key::public_from_private(&layout, &dk).unwrap(), ek, "{name}: dk → ek");
+            let (rv, hp) = import_public(s.ckp, &ek);
+            assert_eq!(rv, CKR_OK, "{name}: the vector's ek imports as a composite public key");
+
+            let (rv, hk) = import_private(s.ckp, &dk, vec![]);
+            assert_eq!(rv, CKR_OK, "{name}: import");
+            let (rv, hs) = decapsulate(hk, &ct);
+            assert_eq!(rv, CKR_OK, "{name}: decapsulate");
+            assert_eq!(value(hs), want, "{name}: composite secret == CFRG hybrid KEM secret");
+
+            // Control 1: a bit flipped in the ML-KEM part. Implicit rejection:
+            // the call succeeds and the secret is different.
+            let (rv, hbad) = decapsulate(hk, &p1_flip(&ct, 0));
+            assert_eq!(rv, CKR_OK, "{name}: ML-KEM part flip still returns a secret");
+            assert_ne!(value(hbad), want, "{name}: ... and it is not the vector's");
+            // Control 2: a bit flipped in the traditional part. Refused (ECDH,
+            // point off the curve) or a different secret (X25519).
+            let (rv, hbad2) = decapsulate(hk, &p1_flip(&ct, ct.len() - 1));
+            assert!(rv != CKR_OK || value(hbad2) != want, "{name}: traditional part flip must not reproduce the secret");
+            // Control 3: the same private-key bytes under a different set.
+            assert_ne!(import_private(s.wrong_ckp, &dk, vec![]).0, CKR_OK, "{name}: wrong parameter set refused");
+            controls += 3;
+
+            destroy(&[hp, hk, hs, hbad, hbad2]);
+            n += 1;
+        }
+    }
+    assert_eq!((n, controls), (30, 90));
+}
+
+/// The X-Wing draft's own vectors (author-independent of the CFRG file):
+/// MLKEM768-X25519 is X-Wing. The 32-byte seed is expanded with SHAKE256 to
+/// 96 bytes: ML-KEM seed d‖z = bytes 0..64, X25519 scalar = bytes 64..96
+/// (xwing-kem-11 §5.2). The composite private key is exactly that.
+#[test]
+fn p1_composite_kem_reproduces_xwing_vectors() {
+    let _guard = test_lock::acquire();
+    setup();
+    let layout = Layout::from(CompositeParams::Kem(p1_params(CKP_COMP_KEM_MLKEM768_X25519)));
+    let mut n = 0;
+    for (i, t) in p1_fixture("xwing-test-vectors.json").as_array().unwrap().iter().enumerate() {
+        let name = format!("X-Wing #{i}");
+        let expanded = hpke::shake256_for_test(&p1_h(t, "sk"), 96);
+        assert_eq!(expanded.len(), 96);
+        let (pk, ct, want) = (p1_h(t, "pk"), p1_h(t, "ct"), p1_h(t, "ss"));
+        let dk = expanded.clone(); // mlkemSeed(64) ‖ X25519 scalar(32)
+        assert_eq!(composite_key::public_from_private(&layout, &dk).unwrap(), pk, "{name}: seed → pk");
+        let (rv, hk) = import_private(CKP_COMP_KEM_MLKEM768_X25519, &dk, vec![]);
+        assert_eq!(rv, CKR_OK, "{name}: import");
+        let (rv, hs) = decapsulate(hk, &ct);
+        assert_eq!(rv, CKR_OK, "{name}: decapsulate");
+        assert_eq!(value(hs), want, "{name}: composite secret == X-Wing secret");
+        // Control: a flipped ciphertext must not reproduce it.
+        let (rv, hbad) = decapsulate(hk, &p1_flip(&ct, 5));
+        assert!(rv != CKR_OK || value(hbad) != want, "{name}: control");
+        destroy(&[hk, hs, hbad]);
+        n += 1;
+    }
+    assert_eq!(n, 3);
+}
+
+/// Reverse direction: a ciphertext PRODUCED by `CKM_COMP_KEM` (fresh
+/// randomness every time) is decapsulated by the engine's own HPKE-PQ KEM
+/// code, from the CFRG seed, and gives the same secret the composite sender
+/// computed. One engine, two independent code paths, 30 random encapsulations.
+#[test]
+fn p1_hpke_pq_kem_decapsulates_composite_ciphertexts() {
+    let _guard = test_lock::acquire();
+    let hsess = {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().expect("engine init");
+        crate::native::session::bootstrap_default_token(0, "so", "user", "p1-reverse").expect("bootstrap session")
+    };
+    setup();
+    let all = p1_fixture("cfrg-concrete-hybrid-kems-test-vectors.json");
+    let mut n = 0;
+    for s in &P1_SUITES {
+        let want_len = p1_params(s.ckp).ciphertext_size().bytes();
+        for (i, t) in all[s.key].as_array().unwrap().iter().enumerate() {
+            let name = format!("{} #{i}", s.key);
+            let (_pub_h, priv_h) = hpke::keygen_with_seed(hsess, s.hpke_kem, Some(&p1_h(t, "seed")), b"", "p1").unwrap();
+            let (rv, hp) = import_public(s.ckp, &p1_h(t, "encapsulation_key"));
+            assert_eq!(rv, CKR_OK, "{name}: composite public key");
+            let (rv, ct, h_enc) = encapsulate_with(CKM_COMP_KEM, &[], hp, want_len);
+            assert_eq!(rv, CKR_OK, "{name}: composite encapsulate");
+            let sender = value(h_enc);
+            let receiver = hpke::kem_shared_secret_for_test(hsess, priv_h, s.hpke_kem, &ct).expect("HPKE-PQ KEM decapsulate");
+            assert_eq!(sender, receiver, "{name}: HPKE-PQ KEM secret == composite secret");
+            // Control: the same comparison against a damaged ciphertext differs.
+            let damaged = hpke::kem_shared_secret_for_test(hsess, priv_h, s.hpke_kem, &p1_flip(&ct, 0));
+            assert!(damaged.map(|d| d != sender).unwrap_or(true), "{name}: control");
+            destroy(&[hp, h_enc]);
+            n += 1;
+        }
+    }
+    assert_eq!(n, 30);
+}

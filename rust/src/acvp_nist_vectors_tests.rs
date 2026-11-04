@@ -694,6 +694,295 @@ fn e16_kmac_length_checks_follow_the_parameter() {
     }
 }
 
+// ═══ K1 — KMAC under the PKCS#11 v3.3 working draft's numbers ═════════════
+//
+// CKM_KMAC128 / CKM_KMAC256 / CKK_KMAC / CK_KMAC_PARAMS are the committee's
+// identifiers (kmac.md; header c55388c). They run on the same KMAC
+// implementation as the vendor CKM_KMAC_128 / CKM_KMAC_256, so the published
+// NIST vectors and the vendor outputs are the oracle.
+
+/// The draft's CK_KMAC_PARAMS: key handle first, then the output length, then
+/// the customization string (NULL_PTR + 0 when there is none).
+fn kmac_std_params(h_key: u32, mac_len: usize, customization: &[u8]) -> Vec<u8> {
+    pack(
+        &ck_param::kmac_std::LAYOUT,
+        &[
+            (ck_param::kmac_std::H_KEY, h_key as usize),
+            (ck_param::kmac_std::UL_MAC_LENGTH, mac_len),
+            (ck_param::kmac_std::P_CUSTOMIZATION_STRING, ptr(customization)),
+            (ck_param::kmac_std::UL_CUSTOMIZATION_STRING_LEN, customization.len()),
+        ],
+    )
+}
+
+/// The same NIST KMAC-128 MVT vectors as `e16_kmac128_nist_mvt_output_length`,
+/// through the committee's mechanism number and parameter structure.
+#[test]
+fn k1_kmac128_draft_number_reproduces_the_nist_vectors() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = fixture("kmac_acvp_test.json");
+    let mut seen = 0;
+    for t in doc["testGroups"][0]["tests"].as_array().unwrap() {
+        let tc = &t["tcId"];
+        let (key, msg, mac, cust) =
+            (hx(s(t, "key")), hx(s(t, "msg")), hx(s(t, "mac")), hx(s(t, "customizationHex")));
+        let hk = secret_key(session, CKK_GENERIC_SECRET, &key);
+        let p = kmac_std_params(hk, mac.len(), &cust);
+        let m = mechanism(CKM_KMAC128, &p);
+        let rv = verify(session, &m, hk, &msg, &mac);
+        if t["testPassed"].as_bool().unwrap() {
+            assert_eq!(rv, CKR_OK, "tc {tc}: valid MAC");
+            assert_eq!(sign(session, &m, hk, &msg), Ok(mac), "tc {tc}: C_Sign output");
+        } else {
+            assert_eq!(rv, CKR_SIGNATURE_INVALID, "tc {tc}: invalid MAC");
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 2);
+}
+
+fn kmac_fixture(name: &str) -> serde_json::Value {
+    let path = format!("{}/kat/kmac/{name}", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+}
+
+/// One known answer through BOTH pairs of numbers: the committee's
+/// (CKM_KMAC128/256 with CK_KMAC_PARAMS) and the vendor's (CKM_KMAC_128/256 with
+/// CK_PQCTODAY_KMAC_PARAMS). Each must sign to the expected MAC, verify it, and
+/// refuse the same MAC with one bit changed (so a pass is not a stub's success).
+fn kmac_known_answer(session: u32, label: &str, strength: u64, key: &[u8], data: &[u8], cust: &[u8], mac: &[u8]) {
+    let (std, vendor) = match strength {
+        128 => (CKM_KMAC128, CKM_KMAC_128),
+        256 => (CKM_KMAC256, CKM_KMAC_256),
+        other => panic!("{label}: strength {other}"),
+    };
+    let hk = secret_key(session, CKK_GENERIC_SECRET, key);
+    let sp = kmac_std_params(hk, mac.len(), cust);
+    let vp = kmac_params(cust, mac.len());
+    for (name, m) in [("draft number", mechanism(std, &sp)), ("vendor number", mechanism(vendor, &vp))] {
+        assert_eq!(sign(session, &m, hk, data), Ok(mac.to_vec()), "{label}: C_Sign under the {name}");
+        assert_eq!(verify(session, &m, hk, data, mac), CKR_OK, "{label}: C_Verify under the {name}");
+        let mut bad = mac.to_vec();
+        bad[0] ^= 1;
+        assert_eq!(verify(session, &m, hk, data, &bad), CKR_SIGNATURE_INVALID, "{label}: control under the {name}");
+    }
+}
+
+/// The six worked examples of NIST SP 800-185 (three KMAC128, three KMAC256).
+#[test]
+fn k1_nist_sp800185_samples_through_both_numbers() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = kmac_fixture("kmac_sp800185_samples.json");
+    let mut n = 0;
+    for t in doc["samples"].as_array().unwrap() {
+        kmac_known_answer(
+            session,
+            &format!("NIST sample #{}", t["sample"]),
+            t["strength"].as_u64().unwrap(),
+            &hx(s(t, "key")),
+            &hx(s(t, "data")),
+            s(t, "customization").as_bytes(),
+            &hx(s(t, "mac")),
+        );
+        n += 1;
+    }
+    assert_eq!(n, 6);
+}
+
+/// 48 byte-aligned cases made by OpenSSL 3.6.3 (an implementation independent of
+/// the sp800-185 crate) at the Keccak rate and bytepad boundaries, through both
+/// pairs of numbers. An independent oracle, not a NIST vector.
+#[test]
+fn k1_openssl_oracle_through_both_numbers() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = kmac_fixture("kmac_openssl_oracle.json");
+    let mut n = 0;
+    for (i, t) in doc["cases"].as_array().unwrap().iter().enumerate() {
+        kmac_known_answer(
+            session,
+            &format!("OpenSSL oracle #{i}"),
+            t["strength"].as_u64().unwrap(),
+            &hx(s(t, "key")),
+            &hx(s(t, "data")),
+            &hx(s(t, "customizationHex")),
+            &hx(s(t, "mac")),
+        );
+        n += 1;
+    }
+    assert_eq!(n, 48);
+}
+
+/// The draft's numbers and the vendor numbers are one function: identical MACs
+/// at every length and customization, and a MAC made under one verifies under
+/// the other. Both security strengths.
+#[test]
+fn k1_draft_and_vendor_numbers_give_identical_macs() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let hk = secret_key(session, CKK_GENERIC_SECRET, &[0x5au8; 32]);
+    let msg = b"kmac under two numbers";
+    let mut checked = 0;
+    for (std, vendor) in [(CKM_KMAC128, CKM_KMAC_128), (CKM_KMAC256, CKM_KMAC_256)] {
+        for cust in [&b""[..], b"customization"] {
+            for len in [16usize, 32, 64, 100, 256] {
+                let sp = kmac_std_params(hk, len, cust);
+                let vp = kmac_params(cust, len);
+                let (sm, vm) = (mechanism(std, &sp), mechanism(vendor, &vp));
+                let a = sign(session, &sm, hk, msg).expect("draft-number sign");
+                let b = sign(session, &vm, hk, msg).expect("vendor-number sign");
+                assert_eq!(a, b, "{std:#x} vs {vendor:#x}, L={len}, S={cust:?}");
+                assert_eq!(a.len(), len);
+                assert_eq!(verify(session, &vm, hk, msg, &a), CKR_OK, "draft MAC under vendor number");
+                assert_eq!(verify(session, &sm, hk, msg, &b), CKR_OK, "vendor MAC under draft number");
+                let mut bad = a.clone();
+                bad[0] ^= 1;
+                assert_eq!(verify(session, &sm, hk, msg, &bad), CKR_SIGNATURE_INVALID, "control");
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 20);
+}
+
+/// What the draft requires, and the one choice this engine makes where it is
+/// silent (hKey in the parameter must be the C_SignInit key).
+#[test]
+fn k1_draft_kmac_parameter_rules() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let hk = secret_key(session, CKK_GENERIC_SECRET, &[0x11u8; 32]);
+    let other = secret_key(session, CKK_GENERIC_SECRET, &[0x22u8; 32]);
+    let msg = b"parameter rules";
+    let init = |p: &[u8]| {
+        let m = mechanism(CKM_KMAC128, p);
+        sign(session, &m, hk, msg).map(|_| ())
+    };
+    assert_eq!(init(&kmac_std_params(hk, 32, b"")), Ok(()), "baseline");
+    // The parameter is mandatory.
+    assert_eq!(init(&[]), Err(CKR_MECHANISM_PARAM_INVALID), "missing parameter");
+    let short = vec![0u8; ck_param::kmac_std::LAYOUT.size() - 1];
+    assert_eq!(init(&short), Err(CKR_MECHANISM_PARAM_INVALID), "truncated parameter");
+    // C_Sign / C_Verify cannot be XOF mode: ulMacLength must not be 0.
+    assert_eq!(init(&kmac_std_params(hk, 0, b"")), Err(CKR_MECHANISM_PARAM_INVALID), "L = 0");
+    assert_eq!(verify(session, &mechanism(CKM_KMAC128, &kmac_std_params(hk, 0, b"")), hk, msg, &[0u8; 32]), CKR_MECHANISM_PARAM_INVALID, "L = 0 on verify");
+    // Bounds shared with the vendor parameter.
+    assert_eq!(init(&kmac_std_params(hk, 1025, b"")), Err(CKR_MECHANISM_PARAM_INVALID), "L too large");
+    // A customization length with a NULL pointer cannot be read.
+    let null_ptr = pack(
+        &ck_param::kmac_std::LAYOUT,
+        &[
+            (ck_param::kmac_std::H_KEY, hk as usize),
+            (ck_param::kmac_std::UL_MAC_LENGTH, 32),
+            (ck_param::kmac_std::P_CUSTOMIZATION_STRING, 0),
+            (ck_param::kmac_std::UL_CUSTOMIZATION_STRING_LEN, 4),
+        ],
+    );
+    assert_eq!(init(&null_ptr), Err(CKR_MECHANISM_PARAM_INVALID), "S length without S");
+    // Engine choice: the key in the parameter and the init argument must agree.
+    assert_eq!(init(&kmac_std_params(other, 32, b"")), Err(CKR_MECHANISM_PARAM_INVALID), "hKey differs");
+}
+
+/// The key type must be CKK_KMAC or CKK_GENERIC_SECRET (kmac.md); other secret
+/// key types are refused, as they are for the vendor numbers.
+#[test]
+fn k1_draft_kmac_key_type_rules() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let aes = secret_key(session, CKK_AES, &[0x33u8; 32]);
+    let params = kmac_std_params(aes, 64, b"");
+    let m = mechanism(CKM_KMAC256, &params);
+    assert_eq!(sign(session, &m, aes, b"x"), Err(CKR_KEY_TYPE_INCONSISTENT), "an AES key");
+    let vendor_params = kmac_params(b"", 64);
+    let vendor = mechanism(CKM_KMAC_256, &vendor_params);
+    assert_eq!(sign(session, &vendor, aes, b"x"), Err(CKR_KEY_TYPE_INCONSISTENT), "same for the vendor number");
+}
+
+/// A CKK_KMAC key is a secret key of arbitrary length (kmac.md, "KMAC key
+/// objects" and "KMAC Usage"): it can be created, it signs under both draft
+/// numbers, and it gives the same MAC as a generic secret key holding the same
+/// bytes. As a secret key type it is refused in a public- or private-key
+/// object.
+#[test]
+fn k1_draft_kmac_key_objects() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    for len in [1usize, 16, 32, 200] {
+        let value: Vec<u8> = (0..len).map(|i| (i as u8) ^ 0x5a).collect();
+        let kmac_key = secret_key(session, CKK_KMAC, &value);
+        let generic = secret_key(session, CKK_GENERIC_SECRET, &value);
+        for mech in [CKM_KMAC128, CKM_KMAC256] {
+            let a = sign(session, &mechanism(mech, &kmac_std_params(kmac_key, 32, b"S")), kmac_key, b"data")
+                .unwrap_or_else(|rv| panic!("CKK_KMAC key of {len} bytes under {mech:#x}: {rv:#x}"));
+            let b = sign(session, &mechanism(mech, &kmac_std_params(generic, 32, b"S")), generic, b"data")
+                .expect("generic secret key signs");
+            assert_eq!(a, b, "{len}-byte key, {mech:#x}: CKK_KMAC and generic secret agree");
+        }
+    }
+    for class in [CKO_PRIVATE_KEY, CKO_PUBLIC_KEY] {
+        let made = create(
+            session,
+            &[(CKA_CLASS, ul(class)), (CKA_KEY_TYPE, ul(CKK_KMAC)), (CKA_VALUE, vec![7u8; 32])],
+        );
+        assert_eq!(made, Err(CKR_TEMPLATE_INCONSISTENT), "CKK_KMAC in class {class:#x}");
+    }
+}
+
+/// Both pairs of numbers are advertised with the same sign/verify flags. The
+/// key range differs on purpose: the vendor numbers keep their historic answer
+/// of 16 to 64 bytes (recorded results do not change); the draft's numbers say
+/// what the engine does, which is any length from 1 byte (kmac.md: "The key
+/// can be of arbitrary length").
+#[test]
+fn k1_draft_numbers_are_advertised_beside_the_vendor_ones() {
+    let _g = test_lock::acquire();
+    let _session = setup_session();
+    let list = crate::constants::advertised_mechanisms();
+    for m in [CKM_KMAC_128, CKM_KMAC_256, CKM_KMAC128, CKM_KMAC256] {
+        assert!(list.contains(&m), "{m:#x} advertised");
+    }
+    for (draft, vendor) in [(CKM_KMAC128, CKM_KMAC_128), (CKM_KMAC256, CKM_KMAC_256)] {
+        let (dmin, dmax, dflags) = mech_info(draft);
+        let (vmin, vmax, vflags) = mech_info(vendor);
+        assert_eq!(dflags, vflags, "same functions advertised");
+        assert_eq!((vmin, vmax), (16, 64), "vendor numbers keep their historic range");
+        assert_eq!((dmin, dmax), (1, 0x7fff_ffff), "draft numbers advertise the real range");
+        // CKF_SIGN = 0x800, CKF_VERIFY = 0x2000, CKF_DIGEST = 0x400 (PKCS#11 v3.2 §5.1).
+        assert_eq!(dflags & (0x800 | 0x2000), 0x800 | 0x2000);
+        assert_eq!(dflags & 0x400, 0, "no digest/XOF function: the C_DigestXof* functions are not in the draft header");
+    }
+}
+
+/// What the draft numbers advertise is what they execute: a 1-byte key (the
+/// advertised minimum) and a 65,536-byte key both sign and verify under both
+/// draft numbers, and the MAC equals the vendor number's for the same key.
+#[test]
+fn k1_draft_kmac_advertised_key_range_executes() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    for (draft, vendor) in [(CKM_KMAC128, CKM_KMAC_128), (CKM_KMAC256, CKM_KMAC_256)] {
+        let (min, max, _) = mech_info(draft);
+        for len in [min as usize, 15, 16, 64, 65, 65_536] {
+            assert!((min as usize..=max as usize).contains(&len));
+            let value: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(7) ^ 0xa5).collect();
+            let key = secret_key(session, CKK_KMAC, &value);
+            // The mechanism points at its parameter block, so the block must outlive it.
+            let params = kmac_std_params(key, 32, b"range");
+            let m = mechanism(draft, &params);
+            let mac = sign(session, &m, key, b"data")
+                .unwrap_or_else(|rv| panic!("{draft:#x}, {len}-byte key: {rv:#x}"));
+            assert_eq!(verify(session, &m, key, b"data", &mac), CKR_OK, "{draft:#x}, {len}-byte key verifies");
+            let generic = secret_key(session, CKK_GENERIC_SECRET, &value);
+            let vendor_params = kmac_params(b"range", 32);
+            let v = mechanism(vendor, &vendor_params);
+            assert_eq!(sign(session, &v, generic, b"data"), Ok(mac), "{len}-byte key: same MAC under the vendor number");
+        }
+    }
+}
+
 // ═══ E17 — HMAC key-size advertisement matches what the engine accepts ════
 
 /// Every HMAC / HMAC_GENERAL mechanism, paired with its general twin.

@@ -1747,7 +1747,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_RIPEMD160_HMAC_GENERAL
         | CKM_SHA_1_HMAC_GENERAL
         | CKM_MD5_HMAC_GENERAL => HMAC_KEY_RANGE,
+        // Vendor KMAC: historic answer, kept so recorded results do not change.
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
+        // v3.3 working draft kmac.md: "The key can be of arbitrary length", and
+        // ulMinKeySize/ulMaxKeySize give the supported KMAC key sizes in bytes.
+        // The engine accepts any non-empty key (checked up to 65,536 bytes), so it
+        // says so; the upper bound is the largest value the field can hold.
+        CKM_KMAC128 | CKM_KMAC256 => (1, 0x7fff_ffff, 0x00000800 | 0x00002000),
         // §3 Wave 4 — AES-CMAC (NIST SP 800-38B), a 16-byte MAC over an
         // AES key of 128/192/256 bits.
         CKM_AES_CMAC => (16, 32, 0x00000800 | 0x00002000),
@@ -7359,7 +7365,8 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     };
     // KEY_TYPE ↔ CLASS consistency (§4.1.1 — CKR_TEMPLATE_INCONSISTENT).
     let secret_only = key_type == CKK_AES || key_type == CKK_AES_XTS || key_type == CKK_GENERIC_SECRET
-        || key_type == 0x33 /* CKK_CHACHA20 */;
+        || key_type == 0x33 /* CKK_CHACHA20 */
+        || key_type == CKK_KMAC; // PKCS#11 v3.3 working draft, kmac.md: CKO_SECRET_KEY only
     let asym_only = key_type == CKK_RSA
         || key_type == CKK_EC
         || key_type == CKK_EC_EDWARDS
@@ -8226,6 +8233,7 @@ const SECRET_KEY_TYPES: &[u32] = &[
     CKK_AES,
     CKK_AES_XTS,
     CKK_CHACHA20,
+    CKK_KMAC,
     CKK_HKDF,
     CKK_MD5_HMAC,
     CKK_SHA_1_HMAC,
@@ -8271,7 +8279,9 @@ fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
         // §6.28 (generic secret) holds "a variable-length byte string";
         // §6.62.1's CKK_HKDF and every HMAC key type are bounded only by the
         // PRF, which accepts any key length. Any non-empty length is legal.
+        // CKK_KMAC (v3.3 working draft, kmac.md): "The key can be of arbitrary length".
         CKK_GENERIC_SECRET
+        | CKK_KMAC
         | CKK_HKDF
         | CKK_MD5_HMAC
         | CKK_SHA_1_HMAC
@@ -8412,6 +8422,8 @@ fn mech_key_types(mech: u32) -> Option<&'static [u32]> {
         CKM_SHA3_512_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA3_512_HMAC],
         // Vendor KMAC (SP 800-185) — generic secret, as in the C++ engine.
         CKM_KMAC_128 | CKM_KMAC_256 => &[CKK_GENERIC_SECRET],
+        // v3.3 draft kmac.md, "KMAC Usage": the key type must be CKK_KMAC or CKK_GENERIC_SECRET.
+        CKM_KMAC128 | CKM_KMAC256 => &[CKK_GENERIC_SECRET, CKK_KMAC],
         // §6.11 — AES (every mode, CMAC, GMAC, key wrap, ENCRYPT_DATA derive).
         CKM_AES_ECB | CKM_AES_CBC | CKM_AES_CBC_PAD | CKM_AES_CTR | CKM_AES_GCM
         | CKM_AES_CCM | CKM_AES_OFB | CKM_AES_CFB1 | CKM_AES_CFB8 | CKM_AES_CFB128
@@ -8622,6 +8634,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Ok(v) => v,
             Err(rv) => return rv,
         };
+        mech_type = kmac_internal_mech(mech_type);
         // Composite ML-DSA (PKCS#11 v3.3 working draft, comp_sig.md): key and
         // hedge-variant checks, and a fresh streaming PH(M) for C_SignUpdate.
         if mech_type == CKM_COMP_SIG || mech_type == CKM_COMP_SIG_EXTERNAL_HASH {
@@ -8888,6 +8901,61 @@ fn check_sign_random(mech: u32, h_key: u32, r: &[u8]) -> Result<(), u32> {
     }
 }
 
+/// `CK_KMAC_PARAMS` of the PKCS#11 v3.3 working draft (`kmac.md`) for
+/// `CKM_KMAC128` / `CKM_KMAC256`, read with the draft's own field order, not the
+/// vendor one. Returns the context the (shared) KMAC implementation reads: the
+/// requested MAC length as a little-endian u32, then the customization string.
+///
+/// What the draft requires, and what this engine decides where it is silent:
+///  - the parameter is mandatory (a missing or short one is
+///    CKR_MECHANISM_PARAM_INVALID);
+///  - for C_Sign / C_Verify `ulMacLength` must not be 0 (XOF mode belongs to
+///    the `C_DigestXof*` functions, which are not in the v3.3 header, so they
+///    do not exist here);
+///  - an empty customization string is `NULL_PTR` with length 0;
+///  - `hKey`: the draft gives the key twice, in the parameter and as the
+///    `C_SignInit` / `C_VerifyInit` argument, and does not say which wins. A
+///    mismatch would let a caller believe one key was used while another was.
+///    This engine therefore requires them to be the same handle.
+unsafe fn std_kmac_params(m: &ck_param::Mech, h_key: u32) -> Result<Vec<u8>, u32> {
+    let r = unsafe { m.params(&ck_param::kmac_std::LAYOUT, ck_param::kmac_std::FIELD_COUNT) }
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let (key, mac_len, s_len) = unsafe {
+        (
+            r.ulong(ck_param::kmac_std::H_KEY),
+            r.ulong(ck_param::kmac_std::UL_MAC_LENGTH),
+            r.ulong(ck_param::kmac_std::UL_CUSTOMIZATION_STRING_LEN),
+        )
+    };
+    if key != h_key as usize || mac_len == 0 || mac_len > 1024 || s_len > 1024 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if s_len > 0 && unsafe { r.ptr(ck_param::kmac_std::P_CUSTOMIZATION_STRING) }.is_null() {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let custom = unsafe {
+        r.buffer(
+            ck_param::kmac_std::P_CUSTOMIZATION_STRING,
+            ck_param::kmac_std::UL_CUSTOMIZATION_STRING_LEN,
+        )
+    };
+    let mut ctx = (mac_len as u32).to_le_bytes().to_vec();
+    ctx.extend_from_slice(custom);
+    Ok(ctx)
+}
+
+/// The committee's KMAC numbers run on the vendor KMAC implementation: once
+/// `std_kmac_params` has accepted the parameter, the operation is stored under
+/// the vendor number so signing, verification, streaming and the length
+/// queries are the code paths the NIST vectors already exercise.
+fn kmac_internal_mech(mech: u32) -> u32 {
+    match mech {
+        CKM_KMAC128 => CKM_KMAC_128,
+        CKM_KMAC256 => CKM_KMAC_256,
+        other => other,
+    }
+}
+
 /// `parse_sign_mech_params` for one side of the operation, also returning
 /// the optional test inputs (plan M1–M4). Every rule is checked here, at
 /// the Init call, before any work (M4).
@@ -8903,6 +8971,10 @@ unsafe fn parse_sign_mech_params_op(
         return Err(CKR_MECHANISM_INVALID);
     }
     let m = ck_param::mech(p_mechanism);
+    if mech_type == CKM_KMAC128 || mech_type == CKM_KMAC256 {
+        return std_kmac_params(&m, h_key)
+            .map(|ctx| (ctx, false, crate::state::SuppliedInput::default()));
+    }
     if takes_sign_additional_ctx(mech_type) {
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
         // (PKCS#11 v3.2 §6.67/§6.69), PLUS CKM_ML_DSA_EXTERNAL_MU
@@ -9700,6 +9772,7 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Ok(v) => v,
             Err(rv) => return rv,
         };
+        mech_type = kmac_internal_mech(mech_type);
         // Composite ML-DSA: see C_SignInit.
         if mech_type == CKM_COMP_SIG || mech_type == CKM_COMP_SIG_EXTERNAL_HASH {
             match comp_sig_init(h_key, false, slh_det) {
@@ -10437,6 +10510,7 @@ pub fn C_VerifySignatureInit(
             Ok(v) => v,
             Err(rv) => return rv,
         };
+        mech_type = kmac_internal_mech(mech_type);
         let signature = std::slice::from_raw_parts(p_signature, ul_signature_len as usize).to_vec();
         // Composite ML-DSA: see C_SignInit; the streaming PH(M) lives in the
         // operation's own context.

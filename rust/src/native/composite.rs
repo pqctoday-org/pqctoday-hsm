@@ -886,9 +886,9 @@ mod tests {
     fn header_values() -> BTreeMap<String, u32> {
         let v = json(IDENTIFIERS);
         let prov = &v["_provenance"];
-        assert_eq!(prov["source_commit"], "9ef73f9f44ed8a240b05484427a0851ab36be251");
+        assert_eq!(prov["source_commit"], "c55388c02702537876867ecda34601daa52b2df1");
         assert_eq!(prov["source_path"], "working/headers/pkcs11t.h");
-        assert_eq!(prov["source_sha256"], "765a28ac349d3cd940e5a90392fb9bc4a939151b29f63b5c156723c64f61f70e");
+        assert_eq!(prov["source_sha256"], "e25bad884ae0e4451b3548d27632e3d22cfd99509b392cbd9494e128b43be643");
         v["identifiers"]
             .as_array()
             .unwrap()
@@ -917,6 +917,9 @@ mod tests {
             ("CKM_COMP_KEM", CKM_COMP_KEM),
             ("CKM_ML_DSA_EXTERNAL_MU_GEN", CKM_ML_DSA_EXTERNAL_MU_GEN),
             ("CKM_ML_DSA_EXTERNAL_MU", CKM_ML_DSA_EXTERNAL_MU),
+            ("CKK_KMAC", CKK_KMAC),
+            ("CKM_KMAC128", CKM_KMAC128),
+            ("CKM_KMAC256", CKM_KMAC256),
             ("CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256", CKP_COMP_SIG_MLDSA44_RSA2048_PSS_SHA256),
             ("CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256", CKP_COMP_SIG_MLDSA44_RSA2048_PKCS15_SHA256),
             ("CKP_COMP_SIG_MLDSA44_ED25519_SHA512", CKP_COMP_SIG_MLDSA44_ED25519_SHA512),

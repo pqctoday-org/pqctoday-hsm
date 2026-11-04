@@ -78,6 +78,24 @@
       "citation": "PKCS#11 v3.2 has no composite mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit 9ef73f9f44ed8a240b05484427a0851ab36be251, working/headers/pkcs11t.h#L1229 defines CKM_COMP_KEM = 0x00004041; working/doc/spec/comp_kem.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
     },
     {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-KMAC128",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x0000001e",
+      "rust": "present",
+      "justification": "ADDED 2026-11-03. CKM_KMAC128 (0x0000001e) is a PKCS#11 v3.3 working-draft mechanism (KMAC, NIST SP 800-185, with CK_KMAC_PARAMS and the CKK_KMAC key type). The Rust engine implements and advertises it for C_Sign and C_Verify, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; it runs the same implementation as the vendor number CKM_KMAC_128 and gives identical MACs. The C++ engine does not implement it and keeps the vendor numbers only. The harness prints it as CKM_0x0000001e because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no mechanism at this number. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so this mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no KMAC mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit c55388c02702537876867ecda34601daa52b2df1, working/headers/pkcs11t.h#L1273 defines CKM_KMAC128 = 0x0000001e; working/doc/spec/kmac.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
+      "id": "LEGAL-V33-DRAFT-MECHANISM-KMAC256",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_0x00000022",
+      "rust": "present",
+      "justification": "ADDED 2026-11-03. CKM_KMAC256 (0x00000022) is a PKCS#11 v3.3 working-draft mechanism (KMAC, NIST SP 800-185, with CK_KMAC_PARAMS and the CKK_KMAC key type). The Rust engine implements and advertises it for C_Sign and C_Verify, labelled \"PKCS#11 v3.3 working draft\", while still reporting Cryptoki 3.2.0; it runs the same implementation as the vendor number CKM_KMAC_256 and gives identical MACs. The C++ engine does not implement it and keeps the vendor numbers only. The harness prints it as CKM_0x00000022 because its name table and the C header src/lib/pkcs11/pkcs11t.h are canonical v3.2, which has no mechanism at this number. Recorded per mechanism, ahead of LEGAL-MECHANISM-SET, so this mechanism appearing on the C++ side, or disappearing from the Rust side, is a new divergence rather than one silently absorbed by the general entry.",
+      "citation": "PKCS#11 v3.2 has no KMAC mechanism, so v3.3 governs this gap (CLAUDE.md, v3.2 baseline / v3.3 fills the gaps). OASIS PKCS 11 TC working tree, commit c55388c02702537876867ecda34601daa52b2df1, working/headers/pkcs11t.h#L1274 defines CKM_KMAC256 = 0x00000022; working/doc/spec/kmac.md describes it. No v3.2 profile requires it: PKCS #11 Profiles v3.2 OS §5.1 Baseline, \"Supports the following mechanisms: a. None specified\" (see LEGAL-MECHANISM-SET)."
+    },
+    {
       "id": "LEGAL-VENDOR-MECHANISMS",
       "status": "legal",
       "scenario": "env.mechanism_set",

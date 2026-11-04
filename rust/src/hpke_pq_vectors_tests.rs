@@ -172,7 +172,7 @@ fn hpke_pq_published_vectors_all_in_scope_suites() {
 /// The one-stage key schedule on its own: DHKEM(P-384, HKDF-SHA384) is an
 /// existing KEM, so the published `shared_secret` → key/base_nonce/
 /// exporter_secret/exports isolates `CombineSecrets_OneStage` and
-/// `Export_OneStage` (draft-ietf-hpke-hpke-03 §5.1, §5.3). Driven through a
+/// `Export_OneStage` (draft-ietf-hpke-hpke-06 §5.1, §5.3). Driven through a
 /// real keygen+Encap/Decap round trip is impossible for a published
 /// shared_secret, so the schedule is checked via the X-Wing/SHAKE256 vector
 /// (full path, test above) and here at the function level.

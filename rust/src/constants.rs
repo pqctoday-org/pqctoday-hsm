@@ -203,6 +203,11 @@ pub const CKK_SLH_DSA: u32 = 0x0000_004b;
 // https://github.com/oasis-tcs/pkcs11/blob/9ef73f9f44ed8a240b05484427a0851ab36be251/working/headers/pkcs11t.h#L443-L444
 pub const CKK_COMP_KEM: u32 = 0x0000_004c;
 pub const CKK_COMP_SIG: u32 = 0x0000_004d;
+// KMAC key type, PKCS#11 v3.3 working draft (kmac.md). Added to the TC identifier
+// database as proposed by PR #156; approved there and added to the TC header by
+// PR #159 (c55388c):
+// https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L445
+pub const CKK_KMAC: u32 = 0x0000_004e;
 // Stateful hash-based signature key types (PKCS#11 v3.2 §6.14)
 pub const CKK_HSS: u32 = 0x0000_0046; // HSS/LMS multi-level (standard)
 pub const CKK_XMSS: u32 = 0x0000_0047; // XMSS single-tree (standard)
@@ -267,7 +272,7 @@ pub const CKD_HPKE_HKDF_SHA256: u32 = 0x0001;
 pub const CKD_HPKE_HKDF_SHA384: u32 = 0x0002;
 pub const CKD_HPKE_HKDF_SHA512: u32 = 0x0003;
 /// One-stage KDF (draft-ietf-hpke-pq-05 §5, Table 1; key schedule per
-/// draft-ietf-hpke-hpke-03 §4.4/§5.1 `LabeledDerive`/`CombineSecrets_OneStage`).
+/// draft-ietf-hpke-hpke-06 §4.4/§5.1 `LabeledDerive`/`CombineSecrets_OneStage`).
 pub const CKD_HPKE_SHAKE256: u32 = 0x0011;
 
 /// `CK_HPKE_AEAD_TYPE` — equal to RFC 9180 §7.3's `aead_id`.
@@ -638,9 +643,19 @@ pub const CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS: u32 = 0x0000_0001;
 /// number of PRF-output blocks), not just the derived key length(s).
 pub const CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS: u32 = 0x0000_0002;
 
-// KMAC
+// KMAC, vendor numbers (CK_PQCTODAY_KMAC_PARAMS). Kept working unchanged next to the
+// committee's numbers below: the engine answers to both.
 pub const CKM_KMAC_128: u32 = 0x8000_0100;
 pub const CKM_KMAC_256: u32 = 0x8000_0101;
+// KMAC, PKCS#11 v3.3 working draft (kmac.md, CK_KMAC_PARAMS). Added to the TC
+// identifier database as proposed by PR #156; approved there and added to the TC
+// header by PR #159 (c55388c):
+// https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L1273-L1274
+// Only the C_Sign / C_Verify side is implemented: the draft's C_DigestXof* functions
+// are not in pkcs11f.h (no function was added in v3.3), so XOF mode (ulMacLength 0)
+// is refused. Internally these map onto the vendor numbers above.
+pub const CKM_KMAC128: u32 = 0x0000_001e;
+pub const CKM_KMAC256: u32 = 0x0000_0022;
 
 // Generic Secret
 pub const CKM_GENERIC_SECRET_KEY_GEN: u32 = 0x0000_0350;
@@ -1200,9 +1215,11 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA3_224_HMAC_GENERAL,
     CKM_SHA3_384_HMAC_GENERAL,
     CKM_RIPEMD160_HMAC_GENERAL,
-    // KMAC
+    // KMAC (vendor numbers, and the v3.3 draft's numbers)
     CKM_KMAC_128,
     CKM_KMAC_256,
+    CKM_KMAC128,
+    CKM_KMAC256,
     // Secret key generation
     CKM_GENERIC_SECRET_KEY_GEN,
     // EC / ECDSA / EdDSA
