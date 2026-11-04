@@ -19,6 +19,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   group (ML-KEM encapsulation, ML-DSA and SLH-DSA hedged, pre-hash and internal) now byte-matches in both engines.
 - The generic `CKM_HASH_ML_DSA` and `CKM_HASH_SLH_DSA` accept `CKM_SHA512_224` and `CKM_SHA512_256` as their hash,
   as the PKCS#11 v3.3 working draft allows.
+- Rust engine: the PKCS#11 v3.3 working draft's own KMAC numbers. `CKM_KMAC128` / `CKM_KMAC256` with `CK_KMAC_PARAMS`
+  and the `CKK_KMAC` key type work for `C_Sign` and `C_Verify`, beside the existing `CKM_KMAC_128` / `CKM_KMAC_256`
+  vendor numbers, and give identical MACs (checked against the NIST SP 800-185 samples and an OpenSSL oracle).
+  Extendable output (`ulMacLength` 0) is refused because the draft's `C_DigestXof*` functions are not in its header.
+  The C++ engine keeps the vendor numbers.
+- Tests and evidence: the `CKM_COMP_KEM` shared secret is measured equal to the HPKE-PQ hybrid KEM secret for X-Wing,
+  MLKEM768-P256 and MLKEM1024-P384, in both directions, against the published CFRG and X-Wing vectors
+  (`rust/kat/hpke/COMPOSITE-KEM-EQUIVALENCE.md`).
 
 ### Changed
 
