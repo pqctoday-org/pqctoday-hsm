@@ -61,9 +61,10 @@ MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 # OASIS PKCS 11 TC repository (github.com/oasis-tcs/pkcs11) at the commit
 # pinned when it was registered, so a reader can check the correction rather
 # than trust it. Both entries below were registered at commit
-# 2b25dd8ed4a85d22937d8509bb296555cd329f43 and re-verified at the current pin
-# 9ef73f9f44ed8a240b05484427a0851ab36be251 (2026-10-21), where the same
-# defines sit at working/headers/pkcs11t.h:662-663.
+# 2b25dd8ed4a85d22937d8509bb296555cd329f43 and re-verified at the pin
+# 9ef73f9f44ed8a240b05484427a0851ab36be251 (2026-10-21) and again at the current
+# pin c55388c02702537876867ecda34601daa52b2df1 (2026-10-27), where the same
+# defines still sit at working/headers/pkcs11t.h:662-663.
 # The citation is a permalink to that commit; this public repository no
 # longer carries a copy of the TC tree (`python3 docs/refs/fetch_refs.py --v33`
 # restores one locally, gitignored).

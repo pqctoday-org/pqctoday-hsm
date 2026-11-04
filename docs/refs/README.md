@@ -83,9 +83,12 @@ Until 2026-10-15 a snapshot of that working tree was vendored here as
 - Current pin (2026-11-03): [`c55388c02702537876867ecda34601daa52b2df1`](https://github.com/oasis-tcs/pkcs11/tree/c55388c02702537876867ecda34601daa52b2df1) (2026-10-27T19:20:15Z), 344 files.
   It was moved here from the previous pin for the KMAC identifiers
   (`CKK_KMAC`, `CKM_KMAC128/256`), which the TC approved and put in its header
-  after that pin; that is the only change between the two pins (#159). Every
-  identifier value recorded at the previous pin is unchanged at this one; only
-  line numbers moved. The engine's composite and KMAC constants are checked
+  after that pin. One upstream commit (#159) separates the two pins. It adds to
+  the header `CKK_KMAC`, `CKM_KMAC128/256`, `CKM_SHAKE_128/256`, `CKA_FLAGS`,
+  `CKA_SUPPORTED_PARAMETER_SETS` and the `CK_KMAC_PARAMS` type, and marks those
+  identifiers approved in `working/identifier_db/raw_ids.db`. Every identifier
+  value recorded at the previous pin is unchanged at this one; only line numbers
+  moved. The engine's composite and KMAC constants are checked
   against this commit, through the fact extracts in `rust/kat/pkcs11-v33/`
   (identifier values from the header, and the composite draft tables).
 - Earlier pin: [`9ef73f9f44ed8a240b05484427a0851ab36be251`](https://github.com/oasis-tcs/pkcs11/tree/9ef73f9f44ed8a240b05484427a0851ab36be251) (2026-10-21T13:10:05-07:00).

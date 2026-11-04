@@ -22,16 +22,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Rust engine: the PKCS#11 v3.3 working draft's own KMAC numbers. `CKM_KMAC128` / `CKM_KMAC256` with `CK_KMAC_PARAMS`
   and the `CKK_KMAC` key type work for `C_Sign` and `C_Verify`, beside the existing `CKM_KMAC_128` / `CKM_KMAC_256`
   vendor numbers, and give identical MACs (checked against the NIST SP 800-185 samples and an OpenSSL oracle).
-  Extendable output (`ulMacLength` 0) is refused because the draft's `C_DigestXof*` functions are not in its header.
-  The same missing functions are why the draft's `CKM_SHAKE_128` / `CKM_SHAKE_256` digest mechanisms, which the draft
+  A result length of 0 (extendable-output mode) is refused for `C_Sign` and `C_Verify`, as the draft requires; the
+  extendable-output mode itself is not offered because the `C_DigestXof*` functions it needs are not in the draft's
+  header. The same missing functions are why the draft's `CKM_SHAKE_128` / `CKM_SHAKE_256` digest mechanisms, which the draft
   defines only for `C_DigestXof*`, are not implemented. A KMAC key may be any non-empty length, and the draft numbers
   advertise that (1 byte upward); the vendor numbers keep their earlier advertised range of 16 to 64 bytes so recorded
   results do not change, although they accept the same keys. Rules for the draft numbers: the key handle inside
   `CK_KMAC_PARAMS` must equal the key passed to `C_SignInit` / `C_VerifyInit`; the MAC length is 1 to 1,024 bytes; the
   customization string is up to 1,024 bytes. The C++ engine keeps the vendor numbers and does not carry the draft's
   composite or KMAC mechanisms.
-- The committee draft this engine is checked against moves from commit `9ef73f9` to `c55388c`, whose only change is
-  the KMAC identifiers; every identifier value recorded before is unchanged. The recorded extract and the provenance
+- The committee draft this engine is checked against moves from commit `9ef73f9` to `c55388c`, which adds the KMAC
+  identifiers to the header (with `CKM_SHAKE_128/256`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` and the
+  `CK_KMAC_PARAMS` type); every identifier value recorded before is unchanged. The recorded extract and the provenance
   notes are updated.
 - Tests and evidence: the `CKM_COMP_KEM` shared secret is measured equal to the HPKE-PQ hybrid KEM secret for X-Wing,
   MLKEM768-P256 and MLKEM1024-P384, in both directions, against the published CFRG and X-Wing vectors
