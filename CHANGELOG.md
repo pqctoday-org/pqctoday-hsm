@@ -30,6 +30,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `CK_KMAC_PARAMS` must equal the key passed to `C_SignInit` / `C_VerifyInit`; the MAC length is 1 to 1,024 bytes; the
   customization string is up to 1,024 bytes. The C++ engine keeps the vendor numbers and does not carry the draft's
   composite or KMAC mechanisms.
+- The committee draft this engine is checked against moves from commit `9ef73f9` to `c55388c`, whose only change is
+  the KMAC identifiers; every identifier value recorded before is unchanged. The recorded extract and the provenance
+  notes are updated.
 - Tests and evidence: the `CKM_COMP_KEM` shared secret is measured equal to the HPKE-PQ hybrid KEM secret for X-Wing,
   MLKEM768-P256 and MLKEM1024-P384, in both directions, against the published CFRG and X-Wing vectors
   (`rust/kat/hpke/COMPOSITE-KEM-EQUIVALENCE.md`).
