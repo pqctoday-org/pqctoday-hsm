@@ -146,8 +146,8 @@ engine also implements composite ML-KEM and composite ML-DSA
 parameter sets; module `src/native/composite*.rs`) and `CKA_KEYS_REMAINING` on XMSS/XMSS-MT keys,
 and the draft's own KMAC numbers (`CKM_KMAC128/256`, `CKK_KMAC`, for
 `C_Sign` and `C_Verify`), from the OASIS PKCS 11 TC's unpublished v3.3 working
-draft (commit `c55388c`; the composite and key-counter identifiers were first
-taken from `9ef73f9`, and their values are unchanged). They are labelled "PKCS#11 v3.3 working draft" and the engine
+draft (commit `a110ba8`; the KMAC identifiers were first taken from `c55388c`
+and the composite and key-counter identifiers from `9ef73f9`, and their values are unchanged). They are labelled "PKCS#11 v3.3 working draft" and the engine
 still reports Cryptoki 3.2.0. No v3.3 specification, profile or test cases
 exist, so the v3.2 report above makes no claim about them, and nothing
 here claims v3.3 conformance. The evidence is the draft authors' test

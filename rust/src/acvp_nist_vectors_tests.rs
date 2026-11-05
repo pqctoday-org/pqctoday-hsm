@@ -931,6 +931,52 @@ fn k1_draft_kmac_key_objects() {
     }
 }
 
+/// Every secret key type is refused in a public- or private-key object and
+/// accepted as a secret key. The spec names the class outright only for some
+/// of them (AES, generic secret, KMAC); for the HMAC types and CKK_HKDF it is
+/// silent, and the engine refuses them for consistency. The list is spelled
+/// out here on purpose, so dropping a type from the engine's list fails.
+#[test]
+fn secret_key_types_are_refused_outside_the_secret_class() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let types: [(u32, usize); 19] = [
+        (CKK_GENERIC_SECRET, 32),
+        (CKK_AES, 16),
+        (CKK_AES_XTS, 32),
+        (CKK_CHACHA20, 32),
+        (CKK_KMAC, 32),
+        (CKK_HKDF, 32),
+        (CKK_MD5_HMAC, 32),
+        (CKK_SHA_1_HMAC, 32),
+        (CKK_RIPEMD160_HMAC, 32),
+        (CKK_SHA224_HMAC, 32),
+        (CKK_SHA256_HMAC, 32),
+        (CKK_SHA384_HMAC, 48),
+        (CKK_SHA512_HMAC, 64),
+        (CKK_SHA512_224_HMAC, 32),
+        (CKK_SHA512_256_HMAC, 32),
+        (CKK_SHA3_224_HMAC, 32),
+        (CKK_SHA3_256_HMAC, 32),
+        (CKK_SHA3_384_HMAC, 48),
+        (CKK_SHA3_512_HMAC, 64),
+    ];
+    for (kt, len) in types {
+        for class in [CKO_PRIVATE_KEY, CKO_PUBLIC_KEY] {
+            let made = create(
+                session,
+                &[(CKA_CLASS, ul(class)), (CKA_KEY_TYPE, ul(kt)), (CKA_VALUE, vec![7u8; len])],
+            );
+            assert_eq!(made, Err(CKR_TEMPLATE_INCONSISTENT), "key type {kt:#x} in class {class:#x}");
+        }
+        let made = create(
+            session,
+            &[(CKA_CLASS, ul(CKO_SECRET_KEY)), (CKA_KEY_TYPE, ul(kt)), (CKA_VALUE, vec![7u8; len])],
+        );
+        assert!(made.is_ok(), "key type {kt:#x} as a secret key: {made:?}");
+    }
+}
+
 /// Both pairs of numbers are advertised with the same sign/verify flags. The
 /// key range differs on purpose: the vendor numbers keep their historic answer
 /// of 16 to 64 bytes (recorded results do not change); the draft's numbers say

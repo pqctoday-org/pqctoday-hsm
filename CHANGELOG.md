@@ -33,7 +33,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   composite or KMAC mechanisms.
 - The committee draft this engine is checked against moves from commit `9ef73f9` to `c55388c`, which adds the KMAC
   identifiers to the header (with `CKM_SHAKE_128/256`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` and the
-  `CK_KMAC_PARAMS` type); every identifier value recorded before is unchanged. The recorded extract and the provenance
+  `CK_KMAC_PARAMS` type), and then to `a110ba8`, which leaves the header unchanged (it adds single-step functions, a
+  creation-timestamp attribute and two IKEv2 mechanisms as text, none yet in the header); every identifier value
+  recorded before is unchanged. The recorded extract and the provenance
   notes are updated.
 - Tests and evidence: the `CKM_COMP_KEM` shared secret is measured equal to the HPKE-PQ hybrid KEM secret for X-Wing,
   MLKEM768-P256 and MLKEM1024-P384, in both directions, against the published CFRG and X-Wing vectors
@@ -41,6 +43,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Rust engine: an HMAC key type (`CKK_SHA256_HMAC` and the rest of the family) or `CKK_HKDF` in a public- or
+  private-key object is now refused with `CKR_TEMPLATE_INCONSISTENT`, as AES, generic secret, ChaCha20 and KMAC
+  keys already were. The PKCS#11 specification does not require this for these types; it makes the check treat
+  every secret key type the same way. The C++ engine already refused them (with `CKR_ATTRIBUTE_VALUE_INVALID`).
 - Rust engine: X448 key agreement now refuses an all-zero shared secret, as X25519 already did (RFC 7748 section 6.2; RFC 9180 section 7.1.4 for DHKEM(X448)). The `x448` library refused the canonical encodings of the low-order points but not their non-canonical encodings (u = p and u = p + 1), which returned an all-zero secret. The check is on the result and covers key derivation, encapsulation, HPKE and the composite KEMs; such a peer key now fails with `CKR_ARGUMENTS_BAD` (derive: `CKR_ENCRYPTED_DATA_INVALID`), as on the C++ engine.
 - Decapsulation (`CKM_ML_KEM`) and ECDSA verification now refuse a mechanism parameter, and a signing-context
   structure of any size other than the standard or extended one is refused instead of being read as absent.

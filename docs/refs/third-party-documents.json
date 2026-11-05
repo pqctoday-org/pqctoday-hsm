@@ -251,14 +251,14 @@
   ],
   "git_snapshots": [
     {
-      "path": "docs/refs/pkcs11-v3.3-draft-git-snapshot-20261103",
+      "path": "docs/refs/pkcs11-v3.3-draft-git-snapshot-20261104",
       "repo": "https://github.com/oasis-tcs/pkcs11.git",
-      "commit": "c55388c02702537876867ecda34601daa52b2df1",
-      "commit_date": "2026-10-27T19:20:15Z",
-      "snapshot_date": "2026-11-03",
+      "commit": "a110ba8aae5a9c6dd488107319a4cfa142bd599d",
+      "commit_date": "2026-11-04T13:38:01-08:00",
+      "snapshot_date": "2026-11-04",
       "title": "OASIS PKCS 11 TC working tree (PKCS #11 v3.3 working draft, unpublished)",
-      "files": 344,
-      "note": "Re-pinned 2026-11-03 from 9ef73f9f44ed8a240b05484427a0851ab36be251 (2026-10-21) for the KMAC identifiers added to working/headers/pkcs11t.h (CKK_KMAC, CKM_KMAC128/256, CK_KMAC_PARAMS, with CKA_FLAGS, CKA_SUPPORTED_PARAMETER_SETS and CKM_SHAKE_128/256); one upstream commit (#159) separates the two pins. Earlier history: Re-pinned 2026-10-21 from 2b25dd8ed4a85d22937d8509bb296555cd329f43 (2026-08-26; 334 files, formerly vendored as docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828 minus the four working/doc/*/Makefile files) for the approved composite ML-DSA / ML-KEM identifiers in working/headers/pkcs11t.h. Commit table in docs/refs/README.md."
+      "files": 347,
+      "note": "Re-pinned 2026-11-04 from c55388c02702537876867ecda34601daa52b2df1 (2026-10-27) to stay current. Four upstream commits separate the two pins (#160, #114, #126, #149): IKEv2 mechanism numbers (proposed, not in the header), single-step (atomic) functions and CKA_CREATION_TIMESTAMP (text only, no identifiers). working/headers/ is byte-identical, so every identifier value is unchanged. Earlier: Re-pinned 2026-11-03 from 9ef73f9f44ed8a240b05484427a0851ab36be251 (2026-10-21) for the KMAC identifiers added to working/headers/pkcs11t.h (CKK_KMAC, CKM_KMAC128/256, CK_KMAC_PARAMS, with CKA_FLAGS, CKA_SUPPORTED_PARAMETER_SETS and CKM_SHAKE_128/256); one upstream commit (#159) separates the two pins. Earlier history: Re-pinned 2026-10-21 from 2b25dd8ed4a85d22937d8509bb296555cd329f43 (2026-08-26; 334 files, formerly vendored as docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828 minus the four working/doc/*/Makefile files) for the approved composite ML-DSA / ML-KEM identifiers in working/headers/pkcs11t.h. Commit table in docs/refs/README.md."
     }
   ]
 }

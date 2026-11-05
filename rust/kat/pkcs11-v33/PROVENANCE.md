@@ -44,7 +44,7 @@ at the commits above); their READMEs add no licence terms. It reads:
 
 | File | Source | Source sha256 |
 |---|---|---|
-| `pkcs11-v33-identifiers.json` | OASIS PKCS 11 TC, https://github.com/oasis-tcs/pkcs11 commit `c55388c02702537876867ecda34601daa52b2df1`, `working/headers/pkcs11t.h` | `e25bad884ae0e4451b3548d27632e3d22cfd99509b392cbd9494e128b43be643` |
+| `pkcs11-v33-identifiers.json` | OASIS PKCS 11 TC, https://github.com/oasis-tcs/pkcs11 commit `a110ba8aae5a9c6dd488107319a4cfa142bd599d` (header byte-identical to `c55388c`), `working/headers/pkcs11t.h` | `e25bad884ae0e4451b3548d27632e3d22cfd99509b392cbd9494e128b43be643` |
 | `composite-sigs-draft19-facts.json` | https://www.ietf.org/archive/id/draft-ietf-lamps-pq-composite-sigs-19.txt (§2.2, §6, §6.1, Appendix A) | `b4ee04416efc26e7d8de7c740dc3848ffe8b8cc9dcd035ad9d4e33e18844ec83` |
 | `composite-kem-draft23-facts.json` | https://www.ietf.org/archive/id/draft-ietf-lamps-pq-composite-kem-23.txt (§3.4, §6, §6.1, Appendix A) | `aaaffdf5eca9cf8e2757e2fd4257a30536f2c6ead7c6eb24f542fcc8b28e26b8` |
 

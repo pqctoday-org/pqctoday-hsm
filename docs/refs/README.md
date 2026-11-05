@@ -80,8 +80,14 @@ Until 2026-10-15 a snapshot of that working tree was vendored here as
 - Repository: <https://github.com/oasis-tcs/pkcs11> (public TC repository; public
   feedback accepted under the OASIS Feedback License)
 - Branch: `master`
-- Current pin (2026-11-03): [`c55388c02702537876867ecda34601daa52b2df1`](https://github.com/oasis-tcs/pkcs11/tree/c55388c02702537876867ecda34601daa52b2df1) (2026-10-27T19:20:15Z), 344 files.
-  It was moved here from the previous pin for the KMAC identifiers
+- Current pin (2026-11-04): [`a110ba8aae5a9c6dd488107319a4cfa142bd599d`](https://github.com/oasis-tcs/pkcs11/tree/a110ba8aae5a9c6dd488107319a4cfa142bd599d) (2026-11-04T13:38:01-08:00), 347 files.
+  It was moved here from `c55388c` to stay current. Four upstream commits separate
+  the two pins (#160, #114, #126, #149): IKEv2 mechanism numbers (proposed, not
+  in the header), single-step (atomic) functions and `CKA_CREATION_TIMESTAMP`
+  (text only, no identifiers). `working/headers/` is byte-identical, so every
+  identifier value and every cited header line number is unchanged.
+- Previous pin (2026-11-03): [`c55388c02702537876867ecda34601daa52b2df1`](https://github.com/oasis-tcs/pkcs11/tree/c55388c02702537876867ecda34601daa52b2df1) (2026-10-27T19:20:15Z), 344 files.
+  It was moved there from the previous pin for the KMAC identifiers
   (`CKK_KMAC`, `CKM_KMAC128/256`), which the TC approved and put in its header
   after that pin. One upstream commit (#159) separates the two pins. It adds to
   the header `CKK_KMAC`, `CKM_KMAC128/256`, `CKM_SHAKE_128/256`, `CKA_FLAGS`,
@@ -100,12 +106,12 @@ Until 2026-10-15 a snapshot of that working tree was vendored here as
   `working/doc/*/Makefile` files. Citations written against it stay valid:
   they are permalinks to that commit.
 
-A citation of the form `working/headers/pkcs11t.h:662 (commit c55388c)` means
-<https://github.com/oasis-tcs/pkcs11/blob/c55388c02702537876867ecda34601daa52b2df1/working/headers/pkcs11t.h#L662>.
+A citation of the form `working/headers/pkcs11t.h:662 (commit a110ba8)` means
+<https://github.com/oasis-tcs/pkcs11/blob/a110ba8aae5a9c6dd488107319a4cfa142bd599d/working/headers/pkcs11t.h#L662>.
 That is how `V33_CORRECTIONS` and the `v33-draft` entries in
 `scripts/check_pkcs11_constants.py` cite v3.3. To get a local tree:
 `python3 docs/refs/fetch_refs.py --v33`, or
-`git clone https://github.com/oasis-tcs/pkcs11.git && git -C pkcs11 checkout c55388c`.
+`git clone https://github.com/oasis-tcs/pkcs11.git && git -C pkcs11 checkout a110ba8`.
 
 This is not a stage document and has no publisher SHA-256 to check: it is a
 live branch, and every fact in it may change before ratification. Its markdown
@@ -133,6 +139,7 @@ changes):
 | 2026-10-15 | `88f1ba8` | Update header files with composite values (#152): the composite identifiers approved and in `working/headers/pkcs11t.h` |
 | 2026-10-21 | `9ef73f9` | Add kmac and mechanism parameter identifiers (#156): `CKM_KMAC*`, `CKM_SHAKE_*`, `CKK_KMAC`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` allocated in `working/identifier_db/` as proposed, not yet in the header (earlier pin) |
 | 2026-10-27 | `c55388c` | KMAC identifiers in headers (#159): `CKK_KMAC` (0x4e) and `CKM_KMAC128/256` (0x1e, 0x22) approved and in `working/headers/pkcs11t.h`; built here for `C_Sign` / `C_Verify` in the Rust engine (current pin). The draft's `CKM_SHAKE_128/256` are defined only for the `C_DigestXof…` functions, which the header does not declare, and are not built (`rust/kat/kmac/PROVENANCE.md`) |
+| 2026-11-04 | `afa9ad7`, `8dafbb8`, `e59b48f`, `a110ba8` | IKE mechanism numbers (#160), `CKM_IKE2_PRF_MULTI_KEY_DERIVE`/`CKM_IKE2_PRF_RESUME_DERIVE` (0x54/0x55, proposed; #114), single-step functions (#126), `CKA_CREATION_TIMESTAMP` (#149). No header change. `a110ba8` is the current pin |
 
 The v3.3 header at the current pin still declares `CRYPTOKI_VERSION_MINOR 2`;
 the engines keep reporting Cryptoki 3.2.0 and label the composites
