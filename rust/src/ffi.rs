@@ -7364,9 +7364,11 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(kt) => kt,
     };
     // KEY_TYPE ↔ CLASS consistency (§4.1.1 — CKR_TEMPLATE_INCONSISTENT).
-    let secret_only = key_type == CKK_AES || key_type == CKK_AES_XTS || key_type == CKK_GENERIC_SECRET
-        || key_type == 0x33 /* CKK_CHACHA20 */
-        || key_type == CKK_KMAC; // PKCS#11 v3.3 working draft, kmac.md: CKO_SECRET_KEY only
+    // Every secret key type, one list (SECRET_KEY_TYPES). The spec names
+    // CKO_SECRET_KEY outright for AES, generic secret and KMAC (v3.3 working
+    // draft, kmac.md); it is silent for the HMAC types and CKK_HKDF, which are
+    // refused here for consistency with the other secret key types.
+    let secret_only = SECRET_KEY_TYPES.contains(&key_type);
     let asym_only = key_type == CKK_RSA
         || key_type == CKK_EC
         || key_type == CKK_EC_EDWARDS
