@@ -33,7 +33,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   composite or KMAC mechanisms.
 - The committee draft this engine is checked against moves from commit `9ef73f9` to `c55388c`, which adds the KMAC
   identifiers to the header (with `CKM_SHAKE_128/256`, `CKA_FLAGS`, `CKA_SUPPORTED_PARAMETER_SETS` and the
-  `CK_KMAC_PARAMS` type); every identifier value recorded before is unchanged. The recorded extract and the provenance
+  `CK_KMAC_PARAMS` type), and then to `a110ba8`, which leaves the header unchanged (it adds single-step functions, a
+  creation-timestamp attribute and two IKEv2 mechanisms as text, none yet in the header); every identifier value
+  recorded before is unchanged. The recorded extract and the provenance
   notes are updated.
 - Tests and evidence: the `CKM_COMP_KEM` shared secret is measured equal to the HPKE-PQ hybrid KEM secret for X-Wing,
   MLKEM768-P256 and MLKEM1024-P384, in both directions, against the published CFRG and X-Wing vectors

@@ -135,8 +135,8 @@ New functions in pkcs11f.h:
   and every citation in `tests/differential/exceptions.json` references v3.2
   section and table numbers.
 - **v3.3 governs where v3.2 has a gap or a plain error.** The OASIS PKCS 11
-  TC's working tree is pinned at commit `c55388c02702537876867ecda34601daa52b2df1`
-  (2026-10-27; https://github.com/oasis-tcs/pkcs11/tree/c55388c02702537876867ecda34601daa52b2df1; previous pins `9ef73f9`, `2b25dd8`; provenance and commit table in `docs/refs/README.md`). Where v3.2 is silent,
+  TC's working tree is pinned at commit `a110ba8aae5a9c6dd488107319a4cfa142bd599d`
+  (2026-11-04; https://github.com/oasis-tcs/pkcs11/tree/a110ba8aae5a9c6dd488107319a4cfa142bd599d; previous pins `c55388c`, `9ef73f9`, `2b25dd8`; provenance and commit table in `docs/refs/README.md`). Where v3.2 is silent,
   ambiguous, or demonstrably wrong, v3.3 is the authority.
 - **Composites are such a gap.** v3.2 has no composite ML-DSA or ML-KEM. The
   v3.3 identifiers (`CKK_COMP_SIG`/`CKK_COMP_KEM`, the five `CKM_COMP_*`

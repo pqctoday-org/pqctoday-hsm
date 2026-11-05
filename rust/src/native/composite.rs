@@ -886,7 +886,7 @@ mod tests {
     fn header_values() -> BTreeMap<String, u32> {
         let v = json(IDENTIFIERS);
         let prov = &v["_provenance"];
-        assert_eq!(prov["source_commit"], "c55388c02702537876867ecda34601daa52b2df1");
+        assert_eq!(prov["source_commit"], "a110ba8aae5a9c6dd488107319a4cfa142bd599d");
         assert_eq!(prov["source_path"], "working/headers/pkcs11t.h");
         assert_eq!(prov["source_sha256"], "e25bad884ae0e4451b3548d27632e3d22cfd99509b392cbd9494e128b43be643");
         v["identifiers"]
