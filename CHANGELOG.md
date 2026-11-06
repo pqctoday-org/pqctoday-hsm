@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`bench-harness`: AES-GCM migration profile.** The AES-128-GCM and AES-256-GCM sweep now covers 16 B, 64 B, 1 KiB,
+  16 KiB, 64 KiB and 1 MiB payloads, and each point is also measured for decryption (including GCM tag verification
+  on a ciphertext made once per worker). The matching test plan for the X1 VAES-512 comparison is
+  `docs/vaes-512-x1-long-payload-test-plan-2026-10-25.md`; it states no result.
 - **Optional test inputs for randomised operations, both engines (ACVP explicit-randomness model).** The value an
   operation would draw at random may be supplied by the caller; absent, behaviour is unchanged. `CKM_ML_KEM`
   encapsulation takes m and `CKM_ECDSA` signing takes k as the mechanism parameter; ML-DSA, SLH-DSA, their pre-hash
