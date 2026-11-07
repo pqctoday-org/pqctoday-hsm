@@ -8,7 +8,117 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-11-06
+
+Release gate (local, on the release commit): the core gate; the C++ build with the full `ctest` run and the PKCS#11 v3.2 compliance harness (962 pass, 0 fail, 2 skip, 3 known engine-bug cases); the ACVP WebAssembly harness (20 suites, both engines); the XMSS and XMSS^MT round trip against the release WebAssembly build; and the hybrid TLS group proof against OpenSSL 3.6.3. Not run for this release: the JavaJCE and JavaJCE-remote suites, which need a JDK 27 container and a live gRPC stack. The vendored OpenSSL provider suite ran 106 pass and 6 fail: the six failures are the LMS/HSS cross-verification cases, because the local OpenSSL 3.6.3 build used as the oracle was compiled without `enable-lms`; that suite is not part of this release's gate marker.
+
 ### Added
+
+- **FHE custody in the default native build, served over KMIP.** A new default cargo feature, `fhe-custody`, puts CKKS
+  key custody and the replication layer it depends on into native builds; the WebAssembly build is unchanged. TFHE
+  custody (TFHE-rs) stays opt-in behind `educational-fhe` and is marked non-commercial use only; the default library
+  contains no TFHE-rs code. The security officer enrols FHE decryption policies and recipients, and destroys a seed, as
+  signed admin requests on the same path as the other replication admin operations (`[5] enrollFheDecryptPolicy`, `[6]
+  enrollFheRecipient`, `[7] destroyFheSeed`).
+  - The KMIP server, started with `--fhe-custody`, serves the interface `PQCTODAY_FHE_1_0` on Operation PKCS_11 (0x33),
+    one KMIP function per PKCS#11 call: `C_GenerateKey(CKM_PQCTODAY_FHE_KEY_GEN)`,
+    `C_DeriveKey(CKM_PQCTODAY_FHE_DERIVE_PUBLIC)`, `C_GetAttributeValue`, `C_DestroyObject`,
+    `C_DecryptInit(CKM_PQCTODAY_FHE_DECRYPT)` and a single-part `C_Decrypt` for the normal user, and nonce issue and
+    admin execute for the security officer. Roles follow the PKCS#11 v3.2 model; there is no FHE-specific role.
+  - FHE seeds carry `CKA_DESTROYABLE = FALSE`: the token refuses `C_DestroyObject` on them for every caller, and the
+    security officer's signed `destroyFheSeed` is the only removal path. A pending decryption belongs to the client that
+    started it and is cancelled after 2 minutes; derived public objects left undeleted are destroyed after 10 minutes.
+  - Fixed on the way: `C_Decrypt(CKM_PQCTODAY_FHE_DECRYPT)` with a buffer below the size-query length used to decrypt,
+    spend one decrypt-counter unit, discard the result and end the operation. It now returns `CKR_BUFFER_TOO_SMALL`
+    before decrypting and keeps the operation active (PKCS#11 v3.2 section 5.2).
+  - The interface is specified in `kmip/docs/FHE_CUSTODY_INTERFACE.md`, and the Python client gains `pqctoday_kmip.fhe`
+    (standard library only). (#369, #370)
+
+- **FHE custody on the boards: provisioning tools, a token-signed TFHE manifest and larger KMIP replies.**
+  `repl_edu_board` now builds with the default `fhe-custody` feature (appliance image). `repl_edu_courier fhe-provision`
+  enrols one board (test manufacturing root, device certificate, admin authority, CKKS and optional TFHE replication
+  policies) and keeps the root, the CRLs and the admin-authority key on the host. `repl_edu_courier fhe-so` sends the
+  security officer's signed requests over KMIP (enrol a CKKS or TFHE decryption policy, destroy a seed) and verifies
+  every receipt on the host.
+  - TFHE parameter version 1, kind 3: the token signs the SHA-256 of the kind 1 and kind 2 objects the session exported,
+    with the device receipt-signing key and chain, as kind 6 does for CKKS. `fhe_tfhe::verify_tfhe_manifest` checks it
+    against the manufacturing root.
+  - KMIP replies may be up to 48 MiB, so the TFHE server key (about 29 MiB) is read in one call; requests stay capped at
+    16 MiB.
+  - FHE seeds installed by replication now carry `CKA_DESTROYABLE = FALSE`, like generated seeds. `PQCTODAY_FHE_1_0`
+    function 6 returns the needed length with `CKR_BUFFER_TOO_SMALL`, as PKCS#11 does. `replication::set_clock_override`
+    is compiled only with `test-support`: the replication layer is now in the default native build, and a shipped token
+    must not let a caller move its clock.
+  - The FHE mechanism specification, `docs/proposals/pkcs11-ckm-pqctoday-fhe-proposal.md`, is at revision 7 with this
+    change. Known limit: the KMIP server still bootstraps its token with a fixed security-officer PIN (`so-pin`) and
+    takes the user PIN from `--pin`. (#371)
+
+- **Educational feature only: protected key replication between two boards over KMIP, with signed administration.**
+  Behind `educational-replication` / `educational-fhe`; nothing here is in a default or release build.
+  - Test tooling: `repl_edu_board` (board-local enrolment, admin-authority enrolment, policy-bound key generation,
+    functional checks and FHE custodian commands; it takes an exclusive lock on the engine store, because two processes
+    on one store corrupt it), a KMIP PKCS#11-operation bridge, `repl_edu_courier` (bootstrap, the ceremony over KMIP
+    with host receipt verification, restore and negative modes, the signed-admin phase) and `pqctoday-kmip
+    --educational-replication` with `--replication-so-pin-file`. The admin interface runs in its own per-connection
+    application context with a real security-officer login.
+  - The admin and ceremony interfaces addendum (draft 3.2, after two independent reviews) is
+    `docs/proposals/pqctoday-key-replication-admin-interface-1.0.md`.
+  - Recorded on two NXP i.MX 95 boards (FRDM-IMX95 and FRDM-IMX95-PRO, KMIP with TLS 1.3 X25519MLKEM768): 6 of 6
+    replication ceremonies (AES-256, ML-KEM-768, ML-DSA-65, both directions) and 36 of 36 negative cases; 8 of 8 signed
+    admin operations over KMIP with host-verified receipts, 12 of 12 admin negatives, and a live clone with rotated keys
+    after the admin operations, 6 of 6 negatives; a TFHE seed custodian backed up offline over KMIP to the second board,
+    where an independent compute-side check gave identical decrypt decisions on both boards.
+  - The bridge serves the ceremony calls under the real interface name `PQCTODAY_KEY_REPLICATION_CEREMONY_1_0` with the
+    addendum 6.9 envelopes (BeginReceive takes the BeginReceive DER, decoded strictly by the engine's own parser). The
+    temporary lab name `PQCTODAY_KEY_REPLICATION_EDU_CEREMONY_TEST` stays as a deprecated alias for one release, with
+    its flat 113-byte input.
+  - The admin audit context carries the SHA-256 of the client certificate and the listener of the connection, so the
+    engine's admin audit lines name the certificate (before, the hash was all zeros and the listener a fixed string);
+    without a TLS connection the fields stay empty. (#326, #338, #339)
+
+- **Rust engine (educational feature only): browser backup and recovery of ML-KEM-768 and ML-DSA-65 keys over the
+  existing protected replication.** A new policy-bound Seed profile protects the retained seed (the 64-byte d||z of
+  ML-KEM-768, the 32-byte xi of ML-DSA-65). Recovery regenerates the key through the existing seed key generation,
+  checks it against the original public value, and keeps the seed so the recovered key can be backed up again. The
+  legacy Expanded profile stays supported; a legacy key cannot gain Seed rights afterwards, and a Seed-profile key may
+  move only to an Expanded destination (which drops seed retention), never the reverse. The destination policy selects
+  the representation, so the request format is unchanged. After an explicit educational opt-in, the browser build
+  exposes typed adapters (`pqctodaySelectEducationalReplicationProfile`, `pqctodayCreateReplicationPackage`,
+  `pqctodayImportReplicationPackage`, `pqctodayCloneKey`); only requests, encrypted packages, signed receipts and
+  handles cross the boundary, and no seed or private value is returned. `rust/build-wasm-bundle.sh --replication` builds
+  this variant, and the engine bundle declaration lists the matching JavaScript, type files and `build-profile.json`.
+  The amendment is in `docs/proposals/pqctoday-key-replication-interface-1.0.md`. Native tests and a built-WASM smoke
+  test cover refusals and Seed and Expanded recovery identity, receipts and retry for both algorithms. (#386)
+
+- **`scripts/publish_engines.py`: package the browser engines as a pinnable release.** For a GitHub release in its own
+  tag series (`engines-N`) it writes one deterministic tarball per bundle (`<bundle>-<commit8>.tar.gz`),
+  `engines-manifest.json` (the build commit, the tarball SHA-256, and the SHA-256 and size of every file) and
+  `SHA256SUMS`; a `verify` mode checks release files, or a folder laid out like the consumer's, against the manifest.
+  `engines/bundles.json` declares the bundles built here, and each bundle lists its files explicitly: the tool rejects a
+  folder entry, so a declaration cannot sweep in consumer code (the `cacp-kmip` bundle is seven files). The tool never
+  uploads, it prints the `gh release create` command, and it does not rebuild anything: a release attests which files
+  were published, not that they rebuild bit for bit. `engines/README.md` explains the steps. (#359, #361)
+
+- **`bench-harness`: native hybrid KEM and signature rows.** `HYBRID-SIG-MLDSA65-ECDSA-P256` (one `CKK_COMP_SIG` object
+  through `CKM_COMP_SIG`) and `HYBRID-KEM-MLKEM768-X25519` (one `CKK_COMP_KEM` object through `CKM_COMP_KEM`) join the
+  signature and KEM matrices at security level L3. They are PKCS#11 v3.3 working-draft composite operations, not a
+  modelled pair of independent calls or a TLS/SSH hybrid group, and must stay labelled as such because the module
+  reports Cryptoki 3.2. Provisioning now proves that key-agreement and KEM shared secrets are equal inside the HSM, by
+  an HMAC computed under one handle and verified under the other (a tampered tag must fail), instead of reading
+  `CKA_VALUE`. A new `--tenants 1|2` option (default 2) measures one workload for a per-core or whole-machine total, or
+  keeps the two-tenant fairness split. (#382)
+
+- **FHE browser matrix: timings, sizes and a staged-time export recorded as facts (educational feature only).**
+  `docs/fhe-browser-matrix-plan-2026-10-03.md` now adds Firefox 155 beside Chromium and WebKit: all three pass the
+  client-key known-answer test and the FheUint8 add under a fresh server key. Medians of three runs on a loaded M5 Max
+  (10 to 16 of 18 cores busy) are recorded as upper bounds: server key + add + decrypt 5.5 to 5.7 s, module init 32 to
+  96 ms, client key 1 to 3 ms. A quiet-machine section on the M4 Pro (14 cores, load 0.08 to 0.18 per core) records the
+  compressed server-key export at 30,147,061 B, peak WASM memory of 101.5 MiB in every run and engine (a 100 MiB cap
+  fails with a catchable trap, 102 MiB passes), and a wasm bundle of 6,356,732 B (1,054,159 B brotli). A test-only wasm
+  export, `fheAddU8Staged`, which ships in no bundle, with `tests/browser/fhe-kat/run.mjs --staged`, times the stages
+  separately; median of 5 runs on the M4 Pro: server-key generation 3.21 to 3.47 s, one homomorphic add 2.54 to 2.69 s,
+  encrypt 2 to 3 ms, decrypt and client key under 1 ms, with the known-answer test passing and the sum 255 in all 15
+  runs. No ceiling, regression guard or per-worker memory limit is set; the limits stay open. (#331, #336, #337)
 
 - **`bench-harness`: AES-GCM migration profile.** The AES-128-GCM and AES-256-GCM sweep now covers 16 B, 64 B, 1 KiB,
   16 KiB, 64 KiB and 1 MiB payloads, and each point is also measured for decryption (including GCM tag verification
@@ -47,6 +157,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **KMIP policy presets: the final NIST IR 8547, and a precise RSA-3072 rejection message.** NIST published the final IR
+  8547 on 27 October 2026. The five `pqc-migration-2030` presets no longer call it an initial public draft; they now say
+  what the final report says: quantum-vulnerable public-key algorithms at 112-bit security and up are deprecated after
+  2030 and disallowed under NIST standards and guidelines after 2035. Their compliance mapping reads "NIST IR 8547" and
+  keeps its `stricter-than` status, because these presets hard-stop classical public-key algorithms at 2030. The
+  RSA-3072 minimum in `fips-only` and `fips-only-global` is now justified by NIST SP 800-57 Part 1 Rev. 5 alone
+  (RSA-3072 is its Table 2 size for 128-bit security, and 128 bits is the minimum for applying protection from 2031 in
+  its Table 4), and the rejection message says so: "RSA >= 3072 (SP 800-57 Part 1 Rev. 5: the RSA size for 128-bit
+  security, the minimum for applying protection from 2031; FIPS 186-5 minimum is 2048)". Wording only: algorithms,
+  parameters and the 3072-bit minimum are unchanged. (#383, #385)
+
+- **BSI policy presets note the October 2026 advice on Classic McEliece.** The comments and descriptions in
+  `bsi-tr-02102.yaml` and `bsi-tr-02102-key-establishment.yaml` record that Germany's BSI advised on 1 October 2026
+  against Classic McEliece for new developments, while TR-02102-1 (2026-01) still lists it for hybrid use. The
+  allowlists and rules are unchanged. (#375)
+
+- **`SECURITY.md` and the dependency comments now say where the `rsa` crate is still used.** They no longer list raw
+  X.509, unprefixed PKCS#1, PSS salt, hash variants or PKCS#1-DER keys as native `rsa` fallbacks. They say that no
+  native RSA private-key operation runs in `rsa` (all run in AWS-LC, 2048 to 8192 bits, checked by a test), and that the
+  crate remains for the browser build's private-key operations, the openpgp fork's legacy path, and public-key, parsing
+  and DER-conversion uses. The `--ignore RUSTSEC-2023-0071` in the dependency audit stays: `cargo audit` reads lockfiles
+  and cannot scope an ignore to one target, and `rsa` is still in all three lockfiles. (#334)
+
 - Rust engine: an HMAC key type (`CKK_SHA256_HMAC` and the rest of the family) or `CKK_HKDF` in a public- or
   private-key object is now refused with `CKR_TEMPLATE_INCONSISTENT`, as AES, generic secret, ChaCha20 and KMAC
   keys already were. The PKCS#11 specification does not require this for these types; it makes the check treat
@@ -61,6 +194,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   engine no longer accepts a multi-part `C_VerifySignatureUpdate`/`Final` on them (`CKR_OPERATION_NOT_INITIALIZED`).
 
 ### Removed
+
+- **54 internal planning and review documents are removed from the tree.** That is 39 under `docs/`, 9 under
+  `kmip/docs/`, and `kmip/conformance/analysis/REMEDIATION_PLAN.md`, `mlxpqc/ANALYSIS.md`, `mlxpqc/TEST_PLAN.md`,
+  `openssh-pkcs11/STATUS.md`, `rust/CK_ABI_NATIVE_COMPLIANCE_PLAN.md` and `softhsmrustv3design.md`. No code, CI or
+  configuration opens them. Older entries below cite some of them by path; the files remain in git history. (#340)
 
 - `CKM_PQCTODAY_ECDSA_EXPLICIT_K` (`0x80000015`) is retired in both engines: refused, no longer advertised, and the
   codepoint is never re-used. ECDSA with a supplied k is now `CKM_ECDSA` with k as its parameter.
@@ -169,6 +307,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **openpgp add-on: `rsa` 0.9.10 and `x509-certificate` 0.25.** `openpgp/lib` pinned `rsa` 0.7 (resolving 0.7.2), inside
+  the affected range of three open `rsa` advisories; the engine, KMIP, wasm, remoting and openmls-provider workspaces
+  already resolved 0.9.10. Only one of the three is fixed by the new version (GHSA-9c48-w39g-hm26, a panic on prime ==
+  1). The two Marvin timing advisories (GHSA-4grx-2x9w-596c, GHSA-c38w-74pg-36hr) have no patched release upstream;
+  0.9.10 is outside their recorded range, so they close without being fixed. The audit therefore still ignores
+  RUSTSEC-2023-0071, and the mitigation stays routing RSA private-key operations through AWS-LC. In this crate the only
+  private-key use is `RsaPrivateKey::from_components`, to derive CRT parameters before a key is uploaded into the HSM;
+  the RSA operation itself goes through the PKCS#11 session, and no automated test in the crate covers that path.
+  `x509-certificate` 0.20 to 0.25 moves `ring` 0.16.20 (RUSTSEC-2025-0009, an AES overflow panic, and an unmaintained
+  notice) to 0.17.14 with no source change. (#263)
+
+- **Rust engine: PKCS#1 v1.5 signing in the pure-Rust RSA path is now blinded.** `sign_rsa` called the `rsa` crate's
+  `Signer::sign`, which in 0.9.10 does not blind the private-key exponentiation, while the PSS signer in the same file
+  already did. It now uses the blinded signer. Output is unchanged (PKCS#1 v1.5 has no salt). The `rsa` crate has no
+  constant-time release upstream, so blinding is the available mitigation. When this was made, native builds reached
+  this path for the v1.5 variants AWS-LC does not expose (MD5, SHA-1, SHA-224, SHA-3); native builds now run RSA
+  private-key operations in AWS-LC, as the entry "RSA private-key operations run only in AWS-LC on the boards and the
+  Mac" records. A new test signs twice and requires byte-identical output, and requires AWS-LC to decline the
+  mechanisms it uses so that it cannot drift onto the fast path. (#265)
+
+- **Remoting services: configurable user PIN and token label, and a fixed label buffer.** The gRPC and REST PKCS#11
+  remoting services always served their in-memory token on the benchmark PIN `1234`, and the token label came back as
+  `pqctoday-remoting` followed by NULs and stray heap bytes. The user PIN now comes from `PKCS11_REMOTE_USER_PIN_FILE`
+  (first line) or `PKCS11_REMOTE_USER_PIN`, and the label from `PKCS11_REMOTE_TOKEN_LABEL`. When they are unset the
+  defaults (`1234`, `pqctoday-remoting`) stay, so sandbox, bench-harness and developer runs are unchanged. A configured
+  PIN that is unreadable, empty or outside 4 to 256 bytes stops startup instead of falling back to the default. The SO
+  PIN, which no client uses, is random per process, and the PIN comparison no longer returns at the first differing
+  byte. In the engine, `C_InitToken` reads exactly 32 label bytes (PKCS#11 v3.2 section 5.6), but the native helper
+  passed the bare label (17 bytes for `pqctoday-remoting`), an out-of-bounds read; it now passes a 32-byte blank-padded
+  buffer, truncated on a UTF-8 boundary, which also fixes the KMIP server's token label. (#352)
+
 - **Rust engine: RSA private-key operations run only in AWS-LC on the boards
   and the Mac (RUSTSEC-2023-0071, the "Marvin" timing attack).** Native builds
   now perform every RSA private-key operation in AWS-LC, whose RSA is blinded
@@ -186,6 +355,118 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   browser): it now is. Signatures are byte-for-byte unchanged.
 
 ### Fixed
+
+- **C++ engine: `C_GetMechanismInfo` for EC derivation and BIP32, and a seed-length check on
+  `CKM_BIP32_MASTER_DERIVE`.** `CKM_ECDH1_DERIVE` and `CKM_ECDH1_COFACTOR_DERIVE` now report `CKF_EC_F_P | CKF_EC_OID |
+  CKF_EC_UNCOMPRESS`, as `CKM_ECDSA` and `CKM_EC_KEY_PAIR_GEN` already did (a derive over a named prime curve with an
+  uncompressed peer point already worked; only the claim was missing). `CKM_X25519` and `CKM_X448` report key sizes
+  255/255 and 448/448 instead of 0/0, and `CKM_BIP32_CHILD_DERIVE` reports 32/32. `CKM_BIP32_MASTER_DERIVE` now reports
+  16/64 and enforces it: a seed shorter than 16 or longer than 64 bytes returns `CKR_KEY_SIZE_RANGE` and the seed is
+  wiped (before, any length derived); BIP-32 allows 128 to 512 bits, and 64 bytes is what BIP-39 produces. The X25519,
+  X448 and BIP32 mechanisms are vendor mechanisms outside PKCS#11 v3.2, and the EC chapter's flag rule is advisory, so
+  these are consistency fixes rather than conformance fixes. (#270)
+
+- **Rust engine: `C_DeriveKey` ignored the key type in the template.** A derived secret key was always
+  `CKK_GENERIC_SECRET`, so a key derived for ChaCha20-Poly1305 or AES-GCM failed at `C_EncryptInit` with
+  `CKR_KEY_TYPE_INCONSISTENT` once the key type was checked against the mechanism. That broke the hybrid HPKE key
+  schedule when it is composed from separate PKCS#11 calls. The secret-key output path now applies a template-supplied
+  `CKA_KEY_TYPE` (PKCS#11 v3.2 section 6.43.3): a type that is not a secret-key type returns
+  `CKR_TEMPLATE_INCONSISTENT`, and a length that does not fit the requested type returns `CKR_KEY_SIZE_RANGE`. A
+  template that is silent still yields `CKK_GENERIC_SECRET`, and the derived value is unchanged. (#272)
+
+- **SP 800-108 key derivation follows the caller's counter and iteration-variable placement (both engines).** PKCS#11
+  v3.2 describes the iteration-variable entry as identifying its location in the constructed PRF input, so the order of
+  the caller's `CK_PRF_DATA_PARAM` array now decides each round's layout in counter, feedback and double-pipeline modes.
+  The placement with the counter ahead of K(i-1) / A(i) was unreachable in both engines, so comparing the engines could
+  not see it.
+  - C++ engine: counter mode is now an SP 800-108 section 5.1 loop written on `EVP_MAC` (OpenSSL's KBKDF provider fixes
+    the counter first), and feedback and double-pipeline build each round from ordered segments instead of always
+    emitting the iteration variable first. A counter is big-endian unless `CK_SP800_108_COUNTER_FORMAT` asks for
+    little-endian, which the old code ignored. A counter width outside 8, 16, 24 or 32 bits is refused up front with
+    `CKR_MECHANISM_PARAM_INVALID` (it surfaced as `CKR_FUNCTION_FAILED`), as the Rust engine does. All 12 NIST ACVP
+    placement cases now match, and the 32 cases that passed before still pass.
+  - Rust engine: a new iteration-variable segment lets the chaining value sit where the caller placed it, and feedback
+    and double-pipeline no longer reject a conformant iteration variable with a null `pValue` (38 NIST cases; for a
+    fixed imported base key both engines now derive the same bytes).
+  - Without an iteration-variable entry the previous layout is kept in both engines. A new vector file,
+    `tests/acvp/sp800_108_kbkdf_placement_test.json` (56 NIST ACVP cases covering all five `counterLocation` values in
+    all three modes), is run against the Rust engine's HMAC cases. (#274, #275, #277)
+
+- **Rust engine: Ed25519ph and Ed448ph bind the `CK_EDDSA_PARAMS` context.** The pre-hash sign and verify functions
+  passed no context, so `pContextData` was accepted and silently dropped, and the engine returned `CKR_OK` with a
+  valid-looking signature of a different scheme than the one selected (RFC 8032 binds the context into the dom2/dom4
+  prefix of both hash calls). The context is now a required argument of both functions, so a caller cannot leave it out.
+  An empty context behaves byte for byte as before, and a context over 255 bytes is refused with
+  `CKR_MECHANISM_PARAM_INVALID`. The 20 NIST ACVP pre-hash vectors already in the repository (10 Ed25519ph, 10 Ed448ph,
+  each with a non-empty context) were loaded by no test; they now pass on byte-exact signature equality. The `C_Sign`
+  and `C_Verify` entry points needed a further fix, recorded in the entry "Ed25519ph and Ed448ph still dropped the
+  context through `C_Sign` and `C_Verify`". (#276)
+
+- **Rust engine: RSA private keys can be created from their PKCS#11 components.** PKCS#11 v3.2 Table 38 defines an RSA
+  private key by `CKA_MODULUS`, `CKA_PUBLIC_EXPONENT`, `CKA_PRIVATE_EXPONENT`, the primes, the exponents and the
+  coefficient, with no `CKA_VALUE`; the engine refused such a template with `CKR_TEMPLATE_INCOMPLETE` and accepted only
+  a PKCS#8 blob in `CKA_VALUE` beside the components. It now builds the PKCS#8 value from the components (the full CRT
+  set, or only n, e and d with the primes recovered), checks supplied CRT values against those derived from p, q and d,
+  and refuses an inconsistent template. `CKA_VALUE` stays hidden from `C_GetAttributeValue`. Two checks also apply to
+  the blob route: a public exponent of 2^33 or more is refused with `CKR_ATTRIBUTE_VALUE_INVALID` (a blob for a
+  34-bit-exponent key used to import as `CKR_OK` although no RSA library in the Rust engine can load it), and components
+  that disagree with the blob return `CKR_TEMPLATE_INCONSISTENT`. The exponent limit is deliberate: the `rsa` crate and
+  AWS-LC both reject these exponents, while OpenSSL, in the C++ engine, accepts them. Of the NIST RSA-OAEP vectors, the
+  2 small-exponent keys now import from components and decrypt NIST's ciphertext, and the 18 wide-exponent keys are
+  refused. (#278)
+
+- **C++ engine: one HSS or XMSS operation broke later HMAC operations on the same session.** After `C_Sign` or
+  `C_Verify` with `CKM_HSS`, `C_Sign` with an HMAC returned `CKR_KEY_HANDLE_INVALID`, even for a freshly imported key,
+  and `C_Verify` rejected a correct MAC. The session kept the stateful mechanism (HSS, XMSS or XMSS^MT) and key handles
+  after the operation ended, and routed the next operation into the stateful path. `Session::resetOp()` now also resets
+  the mechanism and clears the sign and verify key handles. The Rust engine was not affected. A session-manager test and
+  a compliance case (stateful operation, then HMAC sign and verify on the same session) cover it. (#312)
+
+- **PKCS#11 v3.3 working-draft audit: gaps closed in the Rust engine, and ML-DSA µ generation in the C++ engine.** A
+  comparison of the published v3.2 with the draft (68 changes, from OASIS TC commit `e8a56b8` to `9ef73f9`) found 13
+  places where the Rust engine fell short; all 13 are fixed, each with a test that fails without the fix. Four
+  follow-ups are included.
+  - `CKM_ML_DSA_EXTERNAL_MU_GEN` from a key handle: the Rust engine hashed the object's raw value, so a private-key
+    handle gave a wrong µ and signatures over it never verified, and it accepted any object. The key is now resolved
+    like any other key (hidden or non-key objects give `CKR_KEY_HANDLE_INVALID`, non-ML-DSA keys
+    `CKR_KEY_TYPE_INCONSISTENT`), tr is always computed from the public key (re-derived when a private key is given),
+    and a wrong-length µ gives `CKR_DATA_LEN_RANGE`. The C++ engine has the same fix. On the native path that remoting
+    and KMIP use, a wrong-length external µ also returns `CKR_DATA_LEN_RANGE` (it was `CKR_ARGUMENTS_BAD`), and gRPC and
+    REST report it as a client error (InvalidArgument / 400).
+  - Templates: the published v3.2 values `0x62a` / `0x62b` and the v3.3 values `0x4000062a` / `0x4000062b` of the
+    encapsulate and decapsulate template attributes are treated as the same attribute; `C_GetAttributeValue` returns a
+    proper `CK_ATTRIBUTE[]` with the two-call length protocol; nested templates are refused; every path that stores a
+    template deep-copies it. `CKA_DECAPSULATE_TEMPLATE` and `CKA_UNWRAP_TEMPLATE` are applied to the new key and then
+    checked against the caller's template, and `CKA_DERIVE_TEMPLATE` now works the same way in the common and BIP32
+    derive paths (it was only compared, so an omitted attribute was refused instead of applied); a conflict returns
+    `CKR_TEMPLATE_INCONSISTENT`. The C++ engine compares `CKA_UNWRAP_TEMPLATE` with the caller's template but does not
+    yet add it to the new key.
+  - A key template can no longer create a token object in a read-only session: unwrap, authenticated unwrap, decapsulate
+    (ML-KEM, vendor KEMs, composite KEM) and derive check the final `CKA_TOKEN` after the template is applied and return
+    `CKR_SESSION_READ_ONLY`.
+  - Stateful signatures: HSS key generation reads `CKA_HSS_LEVELS`, `CKA_HSS_LMS_TYPES` and `CKA_HSS_LMOTS_TYPES` from
+    the template (the legacy mechanism parameter still works, labelled a vendor extension, and the two must agree), and
+    the remaining-signatures count is kept on the private key only, at `CK_ULONG` width, capped at 2^32-1. Exhausted
+    XMSS and XMSS^MT keys give `CKR_KEY_EXHAUSTED`, which KMIP reports as `UsageLimitExceeded`. HSS, XMSS and XMSS^MT
+    now sign multi-part, as v3.3 allows; the one-time key is used only at `C_SignFinal`. `C_VerifySignatureUpdate`
+    enforces the single-part rules.
+  - `C_SetPIN` no longer returns a code reserved for `C_Login`: with no user PIN set it returns `CKR_PIN_INCORRECT`
+    instead of `CKR_USER_PIN_NOT_INITIALIZED`.
+  - Both engines accept multi-part `CKM_ML_DSA_EXTERNAL_MU` although the draft makes it single-part only, and the HSS
+    remaining count differs from the C++ engine; both are recorded in `tests/differential/exceptions.json`. (#379, #380)
+
+- **KMIP: quantum-safety classification, demo CA setup and policy lint for composite and hybrid algorithms.** The
+  quantum-safety classification now covers every algorithm: SecP384r1MLKEM1024, XMSS, HSS, FrodoKEM, Classic McEliece
+  and the pre-hash variants were wrongly reported as not quantum-safe. The demo CA setup now handles every composite
+  signature profile (one was silently dropped), and the policy lint accepts exactly the composite names that exist.
+  Stale policy text, a vector count and a citation were corrected. The composite mechanisms themselves are recorded in
+  the entry "Rust engine: composite ML-KEM and composite ML-DSA (PKCS#11 v3.3 working draft)". (#376)
+
+- **Rust engine (educational feature only): hardening shared by CKKS and TFHE custody.** The sealed-release size query
+  returns an upper bound; a copy of the seed is no longer left in cloned attributes; the AES key schedule is zeroized;
+  template `CK_ULONG` values and attribute types above 32 bits are refused; and the type gates are exact. The streamed
+  CKKS key custody that arrived with these fixes is recorded in the entry "Rust engine (educational feature only):
+  streamed CKKS evaluation keys". (#351)
 
 - **Rust engine: no leftover secret objects when a hybrid-KEM combiner fails part-way.** The intermediate secrets
   the combiner registers are now removed on every path, not only on success, and the derive helpers wipe their

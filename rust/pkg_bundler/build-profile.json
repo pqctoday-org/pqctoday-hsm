@@ -1,0 +1,6 @@
+{
+  "profile": "release",
+  "features": [],
+  "acvp_test_hooks": false,
+  "wasm_sha256": "69de439f866822410a5a7a187ca8d1386a2c657d1ee474a9e3b2641086d92592"
+}
