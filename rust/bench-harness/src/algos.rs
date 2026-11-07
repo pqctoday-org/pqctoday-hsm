@@ -445,6 +445,16 @@ aes_point!(AES_128_GCM_64B,  "AES-128-GCM-64B",  "L1", 16, CKM_AES_GCM, 64,   12
 aes_point!(AES_128_GCM_1KB,  "AES-128-GCM-1KB",  "L1", 16, CKM_AES_GCM, 1024, 12);
 aes_point!(AES_256_GCM_64B,  "AES-256-GCM-64B",  "L5", 32, CKM_AES_GCM, 64,   12);
 aes_point!(AES_256_GCM_1KB,  "AES-256-GCM-1KB",  "L5", 32, CKM_AES_GCM, 1024, 12);
+// Canonical cross-platform AEAD sweep.  Both AES-128-GCM and AES-256-GCM are
+// included so the result shows the real key-size/security-level trade-off,
+// rather than an unbounded AES mode matrix.  The name carries the exact
+// binary payload length so the JSONL series cannot be mistaken for each other.
+aes_point!(AES_128_GCM_16B,   "AES-128-GCM-16B",   "L1", 16, CKM_AES_GCM, 16,       12);
+aes_point!(AES_128_GCM_64KB,  "AES-128-GCM-64KB",  "L1", 16, CKM_AES_GCM, 65_536,   12);
+aes_point!(AES_128_GCM_1MB,   "AES-128-GCM-1MB",   "L1", 16, CKM_AES_GCM, 1_048_576, 12);
+aes_point!(AES_256_GCM_16B,   "AES-256-GCM-16B",   "L5", 32, CKM_AES_GCM, 16,       12);
+aes_point!(AES_256_GCM_64KB,  "AES-256-GCM-64KB",  "L5", 32, CKM_AES_GCM, 65_536,   12);
+aes_point!(AES_256_GCM_1MB,   "AES-256-GCM-1MB",   "L5", 32, CKM_AES_GCM, 1_048_576, 12);
 // 16 KiB — TLS 1.3's maximum record size (RFC 8446 §5.1), i.e. the largest
 // single chunk a real transport hands a cipher in one call. Added 2026-09-26
 // after the first run showed WHY a third size is needed: at 64 B the per-call
@@ -461,8 +471,10 @@ aes_point!(AES_256_GCM_16KB, "AES-256-GCM-16KB", "L5", 32, CKM_AES_GCM, 16384, 1
 pub const SYMMETRIC_ALGOS: &[SymmetricAlgo] = &[
     AES_128_CBC_64B, AES_128_CBC_1KB, AES_128_CBC_16KB,
     AES_256_CBC_64B, AES_256_CBC_1KB, AES_256_CBC_16KB,
-    AES_128_GCM_64B, AES_128_GCM_1KB, AES_128_GCM_16KB,
-    AES_256_GCM_64B, AES_256_GCM_1KB, AES_256_GCM_16KB,
+    AES_128_GCM_16B, AES_128_GCM_64B, AES_128_GCM_1KB,
+    AES_128_GCM_16KB, AES_128_GCM_64KB, AES_128_GCM_1MB,
+    AES_256_GCM_16B, AES_256_GCM_64B, AES_256_GCM_1KB,
+    AES_256_GCM_16KB, AES_256_GCM_64KB, AES_256_GCM_1MB,
 ];
 
 /// One benchmarked DIGEST point — mechanism plus the message size it is
