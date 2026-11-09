@@ -148,3 +148,9 @@ rust/pkg-acvp/
 /kmip/spec/oasis-kmip-*/**/*.docx
 /kmip/spec/oasis-kmip-*/**/*.html
 /kmip/spec/oasis-kmip-*/**/*.zip
+
+# Local agent instruction files are kept out of this repository.
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+CODEX.md
