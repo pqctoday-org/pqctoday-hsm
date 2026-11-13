@@ -10,7 +10,7 @@
  * key) — NOT an echo of a pre-canned cert like OpenSSL's apps/lib/cmp_mock_srv.c.
  *
  * Exposed:
- *   char *execute_cmp_simulation(const char *ee_key_path,
+ *   static char *execute_cmp_operation(const char *ee_key_path,
  *                                const char *subject_dn,
  *                                const char *reference,
  *                                const char *secret,
@@ -146,6 +146,10 @@ static int write_x509_pem(const char *path, X509 *cert) {
 typedef struct {
     X509 *ca_cert;
     EVP_PKEY *ca_key;
+    X509 *authorized_prior;
+    X509 *pending;
+    int key_update;
+    int confirmation_accepted;
 } srv_state_t;
 
 /*
@@ -216,6 +220,13 @@ static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
 
     unsigned char serial_bytes[8];
     if (RAND_bytes(serial_bytes, sizeof(serial_bytes)) != 1) {
+        if (st->key_update) {
+            X509_NAME_free(subject);
+            X509_free(new_cert);
+            log_event("server", "error", "certificate serial randomness unavailable");
+            log_openssl_err("server");
+            return NULL;
+        }
         memset(serial_bytes, 0x42, sizeof(serial_bytes));
     }
     serial_bytes[0] &= 0x7f;
@@ -270,6 +281,68 @@ static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
         log_openssl_err("server");
     }
     return ok_si;
+}
+
+/* The fictional PBM identity is authorized for this separately supplied prior
+ * certificate. A request cannot authorize itself by naming an issuer/serial.
+ */
+static OSSL_CMP_PKISI *process_key_update_request(OSSL_CMP_SRV_CTX *srv_ctx,
+    const OSSL_CMP_MSG *req, int id, const OSSL_CRMF_MSG *crm,
+    const X509_REQ *p10, X509 **out, STACK_OF(X509) **chain,
+    STACK_OF(X509) **pubs) {
+    srv_state_t *st = OSSL_CMP_SRV_CTX_get0_custom_ctx(srv_ctx);
+    OSSL_CRMF_CERTID *prior = crm == NULL ? NULL : OSSL_CRMF_MSG_get0_regCtrl_oldCertID(crm);
+    OSSL_CMP_PKISI *status;
+
+    if (st == NULL || st->authorized_prior == NULL || prior == NULL
+        || OSSL_CMP_MSG_get_bodytype(req) != OSSL_CMP_KUR
+        || X509_NAME_cmp(OSSL_CRMF_CERTID_get0_issuer(prior),
+               X509_get_issuer_name(st->authorized_prior)) != 0
+        || ASN1_INTEGER_cmp(OSSL_CRMF_CERTID_get0_serialNumber(prior),
+               X509_get0_serialNumber(st->authorized_prior)) != 0) {
+        log_event("server", "rejected", "prior certificate is not authorized for the sample identity");
+        return OSSL_CMP_STATUSINFO_new(OSSL_CMP_PKISTATUS_rejection,
+            1 << OSSL_CMP_PKIFAILUREINFO_badCertId, "unauthorized prior certificate");
+    }
+    status = process_cert_request(srv_ctx, req, id, crm, p10, out, chain, pubs);
+    if (status != NULL && *out != NULL) {
+        if (!X509_up_ref(*out)) {
+            OSSL_CMP_PKISI_free(status);
+            return NULL;
+        }
+        X509_free(st->pending);
+        st->pending = *out;
+        log_event("server", "proof_pending", "issued certificate will be encrypted; possession is not yet established");
+    }
+    return status;
+}
+
+static int process_key_update_confirmation(OSSL_CMP_SRV_CTX *srv_ctx,
+    const OSSL_CMP_MSG *req, int id, const ASN1_OCTET_STRING *hash,
+    const OSSL_CMP_PKISI *status) {
+    srv_state_t *st = OSSL_CMP_SRV_CTX_get0_custom_ctx(srv_ctx);
+    ASN1_OCTET_STRING *expected = NULL;
+    EVP_MD *digest = NULL;
+    int fallback = 0, ok;
+    (void)req;
+    (void)status; /* The opt-in core path rejects explicit non-accepted status. */
+
+    if (st == NULL || st->pending == NULL || st->confirmation_accepted
+        || id != 0 || hash == NULL) {
+        log_event("server", "confirmation_rejected", "missing, repeated or rejected certificate confirmation");
+        return 0;
+    }
+    expected = X509_digest_sig(st->pending, &digest, &fallback);
+    ok = expected != NULL && ASN1_OCTET_STRING_cmp(expected, hash) == 0;
+    ASN1_OCTET_STRING_free(expected);
+    EVP_MD_free(digest);
+    if (!ok) {
+        log_event("server", "confirmation_rejected", "certificate hash did not match the pending issued certificate");
+        return 0;
+    }
+    st->confirmation_accepted = 1;
+    log_event("server", "confirmation_accepted", "explicit certificate hash matches; new-key possession established for this sample");
+    return 1;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -399,13 +472,16 @@ done:
  * Public entry point
  * ------------------------------------------------------------------------- */
 
-char *execute_cmp_simulation(const char *ee_key_path,
+static char *execute_cmp_operation(const char *ee_key_path,
                              const char *subject_dn,
                              const char *reference,
                              const char *secret,
                              const char *ca_cert_path,
                              const char *ca_key_path,
-                             const char *out_cert_path) {
+                             const char *out_cert_path,
+                             const char *old_cert_path,
+                             const char *authorized_prior_path,
+                             int key_update) {
     log_reset();
     g_first_entry = 1;
 
@@ -419,9 +495,20 @@ char *execute_cmp_simulation(const char *ee_key_path,
     OSSL_CMP_CTX *cctx = NULL;
     OSSL_CMP_SRV_CTX *sctx = NULL;
     X509 *issued = NULL;
+    X509 *old_cert = NULL;
     srv_state_t srv_state = {0};
 
-    log_event("client", "start", "in-process CMP IR simulation");
+    log_event("client", "start", key_update ? "in-process CMP KUR with encrypted certificate and explicit confirmation" : "in-process CMP IR simulation");
+    srv_state.key_update = key_update;
+    if (key_update) {
+        remove(out_cert_path);
+        old_cert = load_x509_pem(old_cert_path);
+        srv_state.authorized_prior = load_x509_pem(authorized_prior_path);
+        if (old_cert == NULL || srv_state.authorized_prior == NULL) {
+            err_short = "load prior certificate or server authorization failed";
+            goto done;
+        }
+    }
 
     ca_cert = load_x509_pem(ca_cert_path);
     if (!ca_cert) {
@@ -456,20 +543,25 @@ char *execute_cmp_simulation(const char *ee_key_path,
     srv_state.ca_cert = ca_cert;
     srv_state.ca_key = ca_key;
     if (OSSL_CMP_SRV_CTX_init(sctx, &srv_state,
-                              process_cert_request,
-                              NULL, NULL, NULL, NULL, NULL) != 1) {
+                              key_update ? process_key_update_request : process_cert_request,
+                              NULL, NULL, NULL,
+                              key_update ? process_key_update_confirmation : NULL, NULL) != 1) {
         err_short = "OSSL_CMP_SRV_CTX_init failed";
         log_event("server", "error", "OSSL_CMP_SRV_CTX_init");
         log_openssl_err("server");
         goto done;
     }
-    OSSL_CMP_SRV_CTX_set_grant_implicit_confirm(sctx, 1);
+    OSSL_CMP_SRV_CTX_set_grant_implicit_confirm(sctx, !key_update);
+    if (key_update && !OSSL_CMP_SRV_CTX_set_accept_encrcert_popo(sctx, 1)) {
+        err_short = "enable encrypted-certificate proof failed";
+        goto done;
+    }
     OSSL_CMP_SRV_CTX_set_send_unprotected_errors(sctx, 1);
     /* Accept RAVERIFIED POP — required for ML-KEM (and other non-signing key)
      * enrollment, where the client cannot sign the CRMF as proof-of-possession.
      * In production this requires an out-of-band trust path (e.g. an RA that
      * vetted the request); for this workshop the in-process server is the RA. */
-    OSSL_CMP_SRV_CTX_set_accept_raverified(sctx, 1);
+    OSSL_CMP_SRV_CTX_set_accept_raverified(sctx, !key_update);
     {
         OSSL_CMP_CTX *srv_inner = OSSL_CMP_SRV_CTX_get0_cmp_ctx(sctx);
         if (srv_inner) {
@@ -536,6 +628,19 @@ char *execute_cmp_simulation(const char *ee_key_path,
     }
     OSSL_CMP_CTX_set1_subjectName(cctx, subj);
 
+    if (key_update) {
+        EVP_PKEY *prior_key = X509_get0_pubkey(old_cert);
+        if (!EVP_PKEY_is_a(ee_key, "ML-KEM-768") || prior_key == NULL
+            || EVP_PKEY_eq(ee_key, prior_key) != 0
+            || X509_check_issued(ca_cert, srv_state.authorized_prior) != X509_V_OK
+            || X509_verify(srv_state.authorized_prior, X509_get0_pubkey(ca_cert)) != 1
+            || !OSSL_CMP_CTX_set1_oldCert(cctx, old_cert)
+            || !OSSL_CMP_CTX_set_option(cctx, OSSL_CMP_OPT_POPO_METHOD, OSSL_CRMF_POPO_KEYENC)) {
+            err_short = "key update requires a fresh ML-KEM-768 key and valid authorized prior certificate";
+            goto done;
+        }
+        log_event("client", "popo", "keyEncipherment subsequentMessage=encrCert selected; explicit confirmation required");
+    } else {
     /* Detect whether the EE key can sign. ML-KEM (and any other pure KEM) has
      * no signing capability, so the OSSL_CRMF_POPO_SIGNATURE default would
      * fail at request-build time. For non-signing keys, accept the cert via
@@ -566,6 +671,8 @@ char *execute_cmp_simulation(const char *ee_key_path,
         }
     }
 
+    }
+
     OSSL_CMP_CTX_set0_newPkey(cctx, 1, ee_key);
     ee_key = NULL;
 
@@ -583,19 +690,24 @@ char *execute_cmp_simulation(const char *ee_key_path,
      * but it only grants when the CLIENT request header asks for it
      * (cmp_server.c:282-288). Without this we'd need a process_certConf
      * callback on the server too — easier to just skip the round trip. */
-    OSSL_CMP_CTX_set_option(cctx, OSSL_CMP_OPT_IMPLICIT_CONFIRM, 1);
-    log_event("client", "configured", "CTX ready, transfer_cb → in-process server, implicit-confirm requested");
+    OSSL_CMP_CTX_set_option(cctx, OSSL_CMP_OPT_IMPLICIT_CONFIRM, !key_update);
+    log_event("client", "configured", key_update ? "CTX ready; implicit confirmation disabled" : "CTX ready; implicit confirmation requested");
 
-    log_event("client", "ir_send", "calling OSSL_CMP_exec_IR_ses");
-    issued = OSSL_CMP_exec_IR_ses(cctx);
+    log_event("client", key_update ? "kur_send" : "ir_send",
+        key_update ? "calling OSSL_CMP_exec_KUR_ses" : "calling OSSL_CMP_exec_IR_ses");
+    issued = key_update ? OSSL_CMP_exec_KUR_ses(cctx) : OSSL_CMP_exec_IR_ses(cctx);
     if (!issued) {
         int s = OSSL_CMP_CTX_get_status(cctx);
-        err_short = "OSSL_CMP_exec_IR_ses returned NULL";
-        log_event("client", "error", "exec_IR_ses NULL, status=%d", s);
+        err_short = key_update ? "CMP key update failed" : "OSSL_CMP_exec_IR_ses returned NULL";
+        log_event("client", "error", key_update ? "exec_KUR_ses NULL, status=%d" : "exec_IR_ses NULL, status=%d", s);
         log_openssl_err("client");
         goto done;
     }
-    log_event("client", "validated", "IP response validated against trust store");
+    if (key_update && !srv_state.confirmation_accepted) {
+        err_short = "server did not accept explicit certificate confirmation";
+        goto done;
+    }
+    log_event("client", "validated", key_update ? "encrypted KUP recovered and validated; certConf accepted and PKIConfirm received" : "IP response validated against trust store");
 
     if (!write_x509_pem(out_cert_path, issued)) {
         err_short = "write issued cert failed";
@@ -607,6 +719,10 @@ char *execute_cmp_simulation(const char *ee_key_path,
     ok = 1;
 
 done:
+    if (key_update && !ok) remove(out_cert_path);
+    X509_free(old_cert);
+    X509_free(srv_state.authorized_prior);
+    X509_free(srv_state.pending);
     if (issued) X509_free(issued);
     if (cctx) OSSL_CMP_CTX_free(cctx);
     if (sctx) OSSL_CMP_SRV_CTX_free(sctx);
@@ -617,10 +733,14 @@ done:
     if (ca_cert) X509_free(ca_cert);
 
     /* Build final JSON: { "ok": bool, "error": "...", "transcript": [...], "certPath": "..." } */
-    size_t needed = strlen(g_log) + 256;
+    size_t needed = strlen(g_log) + strlen(out_cert_path) + 512;
     char *out = (char *)malloc(needed);
     if (!out) return NULL;
-    if (ok) {
+    if (key_update && ok) {
+        snprintf(out, needed,
+            "{\"ok\":true,\"operation\":\"KUR\",\"proofVerified\":true,\"confirmationAccepted\":true,\"certPath\":\"%s\",\"transcript\":[%s]}",
+            out_cert_path, g_log);
+    } else if (ok) {
         snprintf(out, needed,
                  "{\"ok\":true,\"certPath\":\"%s\",\"transcript\":[%s]}",
                  out_cert_path, g_log);
@@ -630,4 +750,29 @@ done:
                  err_short ? err_short : "unknown", g_log);
     }
     return out;
+}
+
+/* Keep the original initial-enrollment ABI and behavior. */
+char *execute_cmp_simulation(const char *ee_key_path, const char *subject_dn,
+    const char *reference, const char *secret, const char *ca_cert_path,
+    const char *ca_key_path, const char *out_cert_path) {
+    return execute_cmp_operation(ee_key_path, subject_dn, reference, secret,
+        ca_cert_path, ca_key_path, out_cert_path, NULL, NULL, 0);
+}
+
+char *execute_cmp_key_update(const char *ee_key_path, const char *old_cert_path,
+    const char *authorized_prior_path, const char *subject_dn,
+    const char *reference, const char *secret, const char *ca_cert_path,
+    const char *ca_key_path, const char *out_cert_path) {
+    if (ee_key_path == NULL || old_cert_path == NULL || authorized_prior_path == NULL
+        || subject_dn == NULL || reference == NULL || secret == NULL
+        || ca_cert_path == NULL || ca_key_path == NULL || out_cert_path == NULL
+        || strchr(out_cert_path, '"') != NULL || strchr(out_cert_path, '\\') != NULL) {
+        const char *error = "{\"ok\":false,\"error\":\"invalid key-update arguments\"}";
+        char *result = malloc(strlen(error) + 1);
+        if (result != NULL) strcpy(result, error);
+        return result;
+    }
+    return execute_cmp_operation(ee_key_path, subject_dn, reference, secret,
+        ca_cert_path, ca_key_path, out_cert_path, old_cert_path, authorized_prior_path, 1);
 }
