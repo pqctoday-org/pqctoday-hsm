@@ -71,6 +71,11 @@ static OSSL_CMP_MSG *wire_transfer(OSSL_CMP_CTX *client, const OSSL_CMP_MSG *req
     if (in == NULL) return NULL;
     if (type == OSSL_CMP_PKIBODY_KUR) {
         s->request_seen++;
+        if (ossl_cmp_asn1_get_int(in->header->pvno) != OSSL_CMP_PVNO_3) { OSSL_CMP_MSG_free(in); return NULL; }
+        if (strcmp(s->fault, "wrong-version") == 0) {
+            ossl_cmp_hdr_set_pvno(in->header, OSSL_CMP_PVNO_2);
+            if (!ossl_cmp_msg_protect(client, in)) { OSSL_CMP_MSG_free(in); return NULL; }
+        }
         if (strcmp(s->fault, "wrong-key") == 0)
             OSSL_CMP_CTX_set0_newPkey(client, 1, EVP_PKEY_Q_keygen(NULL, NULL, "ML-KEM-768"));
     }
@@ -206,7 +211,7 @@ int main(int argc, char **argv)
         || strcmp(s.fault,"wrong-transaction") == 0 || strcmp(s.fault,"wrong-nonce") == 0
         || strcmp(s.fault,"missing-confirmation") == 0 || strcmp(s.fault,"rejected-confirmation") == 0)
         ok = ok && s.reply_seen == 1 && s.conf_seen == 1;
-    if (strcmp(s.fault,"default-off") == 0 || strcmp(s.fault,"missing-callback") == 0 || strcmp(s.fault,"wrong-old-certificate") == 0)
+    if (strcmp(s.fault,"wrong-version") == 0 || strcmp(s.fault,"default-off") == 0 || strcmp(s.fault,"missing-callback") == 0 || strcmp(s.fault,"wrong-old-certificate") == 0)
         ok = ok && s.reply_seen == 0 && s.conf_seen == 0;
     if (expect && ok && s.saved_confirmation != NULL) {
         OSSL_CMP_MSG *replay = OSSL_CMP_SRV_process_request(s.server, s.saved_confirmation);

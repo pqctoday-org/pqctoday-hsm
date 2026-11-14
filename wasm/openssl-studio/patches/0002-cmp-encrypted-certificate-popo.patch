@@ -44,7 +44,7 @@
  
      if (!ossl_assert(srv_ctx != NULL && srv_ctx->ctx != NULL && req != NULL))
          return NULL;
-@@ -258,10 +272,42 @@
+@@ -258,10 +272,43 @@
      }
      srv_ctx->certReqId = certReqId;
  
@@ -67,6 +67,7 @@
 +                != OSSL_CRMF_SUBSEQUENTMESSAGE_ENCRCERT
 +            || requested_key == NULL
 +            || !EVP_PKEY_is_a(requested_key, "ML-KEM-768")
++            || ossl_cmp_asn1_get_int(req->header->pvno) != OSSL_CMP_PVNO_3
 +            || srv_ctx->process_certConf == NULL) {
 +            EVP_PKEY_free(requested_key);
 +            ERR_raise(ERR_LIB_CMP, ERR_R_UNSUPPORTED);
@@ -88,7 +89,7 @@
          && !ossl_cmp_verify_popo(srv_ctx->ctx, req, srv_ctx->acceptRAVerified)) {
          /* Proof of possession could not be verified */
          si = OSSL_CMP_STATUSINFO_new(OSSL_CMP_PKISTATUS_rejection,
-@@ -276,13 +322,17 @@
+@@ -276,13 +323,17 @@
              &certOut, &chainOut, &caPubs);
          if (si == NULL)
              goto err;
@@ -107,7 +108,7 @@
                      /* do not set if polling starts: */
                      && certOut != NULL))
              goto err;
-@@ -292,9 +342,10 @@
+@@ -292,9 +343,10 @@
      }
  
      msg = ossl_cmp_certrep_new(srv_ctx->ctx, bodytype, certReqId, si,
@@ -120,7 +121,7 @@
      if (msg == NULL)
          ERR_raise(ERR_LIB_CMP, CMP_R_ERROR_CREATING_CERTREP);
  
-@@ -411,6 +462,10 @@
+@@ -411,6 +463,10 @@
          return NULL;
      }
  
@@ -131,7 +132,7 @@
      if (num == 0) {
          ossl_cmp_err(ctx, "certificate rejected by client");
      } else {
-@@ -426,6 +481,11 @@
+@@ -426,6 +482,11 @@
  
          if (certReqId != srv_ctx->certReqId) {
              ERR_raise(ERR_LIB_CMP, CMP_R_BAD_REQUEST_ID);
@@ -143,7 +144,7 @@
              return NULL;
          }
          if (!srv_ctx->process_certConf(srv_ctx, req, certReqId, certHash, si))
-@@ -736,6 +796,7 @@
+@@ -736,6 +797,7 @@
      case OSSL_CMP_PKIBODY_GENP:
          /* Other terminating response message types are not supported */
          srv_ctx->certReqId = OSSL_CMP_CERTREQID_INVALID;
@@ -163,7 +164,20 @@
  
  OSSL_CMP_MSG *OSSL_CMP_MSG_new(OSSL_LIB_CTX *libctx, const char *propq)
  {
-@@ -500,6 +503,45 @@
+@@ -426,6 +429,12 @@
+     if (type != OSSL_CMP_PKIBODY_P10CR) {
+         EVP_PKEY *privkey = OSSL_CMP_CTX_get0_newPkey(ctx, 1);
+ 
++        /* CMS EnvelopedData / KEM proof requires CMP version 3. */
++        if (ctx->popoMethod == OSSL_CRMF_POPO_KEYENC && privkey != NULL
++            && EVP_PKEY_is_a(privkey, "ML-KEM-768")
++            && !ossl_cmp_hdr_set_pvno(msg->header, OSSL_CMP_PVNO_3))
++            goto err;
++
+         /* privkey is ctx->newPkey (if private, else NULL) or ctx->pkey */
+         if (ctx->popoMethod >= OSSL_CRMF_POPO_SIGNATURE && privkey == NULL) {
+             ERR_raise(ERR_LIB_CMP, CMP_R_MISSING_PRIVATE_KEY_FOR_POPO);
+@@ -500,6 +509,45 @@
  }
  #endif
  
@@ -209,7 +223,7 @@
  OSSL_CMP_MSG *ossl_cmp_certrep_new(OSSL_CMP_CTX *ctx, int bodytype,
      int certReqId, const OSSL_CMP_PKISI *si,
      X509 *cert, const EVP_PKEY *pkey,
-@@ -534,18 +576,30 @@
+@@ -534,18 +582,30 @@
      status = ossl_cmp_pkisi_get_status(resp->status);
      if (status != OSSL_CMP_PKISTATUS_rejection
          && status != OSSL_CMP_PKISTATUS_waiting && cert != NULL) {

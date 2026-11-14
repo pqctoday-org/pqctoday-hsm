@@ -26,10 +26,11 @@ cc -g -Wall -I"$OPENSSL_SRC/include" -Iwasm/openssl-studio/shims \
 ```
 
 Run each case in a separate temporary working directory. Transaction cases:
-`valid`, `default-off`, `missing-callback`, `wrong-key`,
+`valid`, `wrong-version`, `default-off`, `missing-callback`, `wrong-key`,
 `wrong-old-certificate`, `wrong-hash`, `wrong-request-id`, `wrong-transaction`,
 `wrong-nonce`, `missing-confirmation`, `altered-envelope`, `truncated-envelope`,
 `rejected-confirmation`. The valid case also rejects replay of its confirmation.
+The valid request must use CMP version 3; a version-2 encrypted-certificate request is rejected.
 The negative cases assert that they reached the expected stage and never
 completed confirmation. Retained DER messages contain public transaction data;
 never retain private keys from the test process.
