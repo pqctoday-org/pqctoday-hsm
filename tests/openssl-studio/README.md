@@ -70,3 +70,10 @@ uses remain present. The signer must be a valid, pinned signing certificate
 issued by that CA, and the requested subject must match the authorized prior
 certificate. Both legacy exports remain available. All tests require fictional
 keys and must run in mini-lab or Sandbox before browser packaging.
+
+The direct server-boundary controls `server-valid`, `server-other-signer` and
+`server-wrong-issued-ca` bypass the wrapper preflight. They prove the server's
+actual pinned-signature check rejects a different CA-issued signing identity,
+and the client rejects an inner certificate issued by an untrusted CA even
+when its target key and the outer CMP protection are correct. Enrolled-chain
+validation is required before the client sends an accepting confirmation.

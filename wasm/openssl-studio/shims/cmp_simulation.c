@@ -725,6 +725,13 @@ static char *execute_cmp_operation(const char *ee_key_path,
     X509_STORE_add_cert(trust, ca_cert);
     OSSL_CMP_CTX_set0_trustedStore(cctx, trust);
     trust = NULL;
+    if (key_update
+        && (!OSSL_CMP_CTX_set_certConf_cb(cctx, OSSL_CMP_certConf_cb)
+            || !OSSL_CMP_CTX_set_certConf_cb_arg(cctx,
+                OSSL_CMP_CTX_get0_trustedStore(cctx)))) {
+        err_short = "configure issued-certificate chain validation failed";
+        goto done;
+    }
 
     OSSL_CMP_CTX_set_transfer_cb(cctx, transfer_cb);
     OSSL_CMP_CTX_set_transfer_cb_arg(cctx, sctx);
