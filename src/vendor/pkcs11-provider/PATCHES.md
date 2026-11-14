@@ -11,7 +11,7 @@ Base: upstream commit `663dea335c80bec7fd96d544ff875af08d6461a9`
 folder with every upstream commit since 2024: it is the closest one (615
 changed lines at import). The import already carried some local changes.
 
-Changed by PQC Today, LLC, 2026-04-15 to 2026-10. Each modified file carries a
+Changed by PQC Today, LLC, 2026-04-15 to 2026-11. Each modified file carries a
 one-line "Modified by PQC Today, LLC" notice at the top (Apache-2.0 section
 4(b)). What changed: ML-KEM key management, encoders and KEM; ML-DSA
 external-mu and HashML-DSA; SLH-DSA, HSS/LMS and XMSS/XMSS-MT keys and

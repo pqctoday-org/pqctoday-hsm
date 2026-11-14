@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **SP 800-108 counter-mode KBKDF through the OpenSSL provider now gives the standard key.** The provider passed the
+  fixed input before the counter, so a token (both engines place the counter where the parameter list puts it, as
+  PKCS#11 v3.2 Table 199 requires) derived from fixed input || counter, while OpenSSL's own KBKDF, which the provider
+  stands in for, uses counter || fixed input. Keys derived with `openssl kdf -provider pkcs11 ... KBKDF` in counter
+  mode differed from the same derivation in software. The provider now lists the counter first. Feedback and
+  double-pipeline modes were not affected.
+- **The gate container's OpenSSL 3.6.3 is built with `enable-lms`.** Without it OpenSSL has no LMS verifier, and the
+  provider suite's three HSS/LMS cross-verification cases could not run. The 0.32.0 notes put all six provider-suite
+  failures down to this; three of them were the counter-mode KBKDF defect above. With both fixes the provider suite
+  passes 112 of 112.
+
 ## [0.32.0] — 2026-11-06
 
 Release gate (local, on the release commit): the core gate; the C++ build with the full `ctest` run and the PKCS#11 v3.2 compliance harness (962 pass, 0 fail, 2 skip, 3 known engine-bug cases); the ACVP WebAssembly harness (20 suites, both engines); the XMSS and XMSS^MT round trip against the release WebAssembly build; and the hybrid TLS group proof against OpenSSL 3.6.3. Not run for this release: the JavaJCE and JavaJCE-remote suites, which need a JDK 27 container and a live gRPC stack. The vendored OpenSSL provider suite ran 106 pass and 6 fail: the six failures are the LMS/HSS cross-verification cases, because the local OpenSSL 3.6.3 build used as the oracle was compiled without `enable-lms`; that suite is not part of this release's gate marker.
