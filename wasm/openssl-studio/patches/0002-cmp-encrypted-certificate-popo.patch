@@ -1,0 +1,282 @@
+--- a/crypto/cmp/cmp_server.c
++++ b/crypto/cmp/cmp_server.c
+@@ -12,6 +12,7 @@
+ /* general CMP server functions */
+ 
+ #include "cmp_local.h"
++#include "../crmf/crmf_local.h"
+ 
+ /* the context for the generic CMP server */
+ struct ossl_cmp_srv_ctx_st {
+@@ -32,6 +33,8 @@
+     int sendUnprotectedErrors; /* Send error and rejection msgs unprotected */
+     int acceptUnprotected; /* Accept requests with no/invalid prot. */
+     int acceptRAVerified; /* Accept ir/cr/kur with POPO RAVerified */
++    int acceptEncrCertPoP; /* Opt-in, bounded ML-KEM encrypted-certificate PoP */
++    int encrCertPending; /* Possession is not proven until explicit certConf */
+     int grantImplicitConfirm; /* Grant implicit confirmation if requested */
+ 
+ }; /* OSSL_CMP_SRV_CTX */
+@@ -145,6 +148,16 @@
+         return 0;
+     }
+     srv_ctx->acceptRAVerified = val != 0;
++    return 1;
++}
++
++int OSSL_CMP_SRV_CTX_set_accept_encrcert_popo(OSSL_CMP_SRV_CTX *srv_ctx, int val)
++{
++    if (srv_ctx == NULL) {
++        ERR_raise(ERR_LIB_CMP, CMP_R_NULL_ARGUMENT);
++        return 0;
++    }
++    srv_ctx->acceptEncrCertPoP = val != 0;
+     return 1;
+ }
+ 
+@@ -215,7 +228,8 @@
+     const OSSL_CRMF_MSG *crm = NULL;
+     const X509_REQ *p10cr = NULL;
+     int bodytype;
+-    int certReqId, central_keygen;
++    int certReqId, central_keygen, encrcert = 0;
++    EVP_PKEY *requested_key = NULL;
+ 
+     if (!ossl_assert(srv_ctx != NULL && srv_ctx->ctx != NULL && req != NULL))
+         return NULL;
+@@ -258,10 +272,43 @@
+     }
+     srv_ctx->certReqId = certReqId;
+ 
++    /* Deferred PoP is deliberately not accepted by generic CRMF verification.
++     * This opt-in sample profile supports KUR only, with explicit confirmation.
++     */
++    if (srv_ctx->acceptEncrCertPoP && bodytype == OSSL_CMP_PKIBODY_KUP
++        && crm != NULL && crm->popo != NULL
++        && crm->popo->type == OSSL_CRMF_POPO_KEYENC) {
++#ifndef OPENSSL_NO_CMS
++        OSSL_CRMF_POPOPRIVKEY *pop = crm->popo->value.keyEncipherment;
++        OSSL_CRMF_CERTTEMPLATE *tmpl = OSSL_CRMF_MSG_get0_tmpl(crm);
++        X509_PUBKEY *pub = OSSL_CRMF_CERTTEMPLATE_get0_publicKey(tmpl);
++
++        requested_key = pub == NULL ? NULL : X509_PUBKEY_get(pub);
++        if (pop == NULL
++            || pop->type != OSSL_CRMF_POPOPRIVKEY_SUBSEQUENTMESSAGE
++            || pop->value.subsequentMessage == NULL
++            || ASN1_INTEGER_get(pop->value.subsequentMessage)
++                != OSSL_CRMF_SUBSEQUENTMESSAGE_ENCRCERT
++            || requested_key == NULL
++            || !EVP_PKEY_is_a(requested_key, "ML-KEM-768")
++            || ossl_cmp_asn1_get_int(req->header->pvno) != OSSL_CMP_PVNO_3
++            || srv_ctx->process_certConf == NULL) {
++            EVP_PKEY_free(requested_key);
++            ERR_raise(ERR_LIB_CMP, ERR_R_UNSUPPORTED);
++            return NULL;
++        }
++        EVP_PKEY_free(requested_key);
++        encrcert = 1; /* Still pending; certConf must prove recovery. */
++#else
++        ERR_raise(ERR_LIB_CMP, ERR_R_UNSUPPORTED);
++        return NULL;
++#endif
++    }
++
+     central_keygen = OSSL_CRMF_MSG_centralkeygen_requested(crm, p10cr);
+     if (central_keygen < 0)
+         return NULL;
+-    if (central_keygen == 0
++    if (central_keygen == 0 && !encrcert
+         && !ossl_cmp_verify_popo(srv_ctx->ctx, req, srv_ctx->acceptRAVerified)) {
+         /* Proof of possession could not be verified */
+         si = OSSL_CMP_STATUSINFO_new(OSSL_CMP_PKISTATUS_rejection,
+@@ -276,13 +323,17 @@
+             &certOut, &chainOut, &caPubs);
+         if (si == NULL)
+             goto err;
++        if (encrcert && ossl_cmp_pkisi_get_status(si) == OSSL_CMP_PKISTATUS_waiting) {
++            ERR_raise(ERR_LIB_CMP, ERR_R_UNSUPPORTED);
++            goto err;
++        }
+         if (ossl_cmp_pkisi_get_status(si) == OSSL_CMP_PKISTATUS_waiting)
+             srv_ctx->polling = 1;
+         /* set OSSL_CMP_OPT_IMPLICIT_CONFIRM if and only if transaction ends */
+         if (!OSSL_CMP_CTX_set_option(srv_ctx->ctx,
+                 OSSL_CMP_OPT_IMPLICIT_CONFIRM,
+                 ossl_cmp_hdr_has_implicitConfirm(hdr)
+-                    && srv_ctx->grantImplicitConfirm
++                    && !encrcert && srv_ctx->grantImplicitConfirm
+                     /* do not set if polling starts: */
+                     && certOut != NULL))
+             goto err;
+@@ -292,9 +343,10 @@
+     }
+ 
+     msg = ossl_cmp_certrep_new(srv_ctx->ctx, bodytype, certReqId, si,
+-        certOut, keyOut, NULL /* enc */, chainOut, caPubs,
++        certOut, keyOut, encrcert ? certOut : NULL, chainOut, caPubs,
+         srv_ctx->sendUnprotectedErrors);
+-    /* When supporting OSSL_CRMF_POPO_KEYENC, "enc" will need to be set */
++    if (msg != NULL && encrcert && certOut != NULL)
++        srv_ctx->encrCertPending = 1;
+     if (msg == NULL)
+         ERR_raise(ERR_LIB_CMP, CMP_R_ERROR_CREATING_CERTREP);
+ 
+@@ -411,6 +463,10 @@
+         return NULL;
+     }
+ 
++    if (srv_ctx->encrCertPending && num != 1) {
++        ERR_raise(ERR_LIB_CMP, CMP_R_ERROR_UNEXPECTED_CERTCONF);
++        return NULL;
++    }
+     if (num == 0) {
+         ossl_cmp_err(ctx, "certificate rejected by client");
+     } else {
+@@ -426,6 +482,11 @@
+ 
+         if (certReqId != srv_ctx->certReqId) {
+             ERR_raise(ERR_LIB_CMP, CMP_R_BAD_REQUEST_ID);
++            return NULL;
++        }
++        if (srv_ctx->encrCertPending && si != NULL
++            && ossl_cmp_pkisi_get_status(si) != OSSL_CMP_PKISTATUS_accepted) {
++            ERR_raise(ERR_LIB_CMP, CMP_R_ERROR_UNEXPECTED_CERTCONF);
+             return NULL;
+         }
+         if (!srv_ctx->process_certConf(srv_ctx, req, certReqId, certHash, si))
+@@ -736,6 +797,7 @@
+     case OSSL_CMP_PKIBODY_GENP:
+         /* Other terminating response message types are not supported */
+         srv_ctx->certReqId = OSSL_CMP_CERTREQID_INVALID;
++        srv_ctx->encrCertPending = 0;
+         /* Prepare for next transaction, ignoring any errors here: */
+         if (srv_ctx->clean_transaction != NULL)
+             (void)srv_ctx->clean_transaction(srv_ctx, ctx->transactionID);
+--- a/crypto/cmp/cmp_msg.c
++++ b/crypto/cmp/cmp_msg.c
+@@ -14,6 +14,9 @@
+ #include "cmp_local.h"
+ 
+ #include <internal/cms.h> /* for ossl_cms_sign_encrypt() */
++#ifndef OPENSSL_NO_CMS
++# include "../cms/cms_local.h"
++#endif
+ 
+ OSSL_CMP_MSG *OSSL_CMP_MSG_new(OSSL_LIB_CTX *libctx, const char *propq)
+ {
+@@ -426,6 +429,12 @@
+     if (type != OSSL_CMP_PKIBODY_P10CR) {
+         EVP_PKEY *privkey = OSSL_CMP_CTX_get0_newPkey(ctx, 1);
+ 
++        /* CMS EnvelopedData / KEM proof requires CMP version 3. */
++        if (ctx->popoMethod == OSSL_CRMF_POPO_KEYENC && privkey != NULL
++            && EVP_PKEY_is_a(privkey, "ML-KEM-768")
++            && !ossl_cmp_hdr_set_pvno(msg->header, OSSL_CMP_PVNO_3))
++            goto err;
++
+         /* privkey is ctx->newPkey (if private, else NULL) or ctx->pkey */
+         if (ctx->popoMethod >= OSSL_CRMF_POPO_SIGNATURE && privkey == NULL) {
+             ERR_raise(ERR_LIB_CMP, CMP_R_MISSING_PRIVATE_KEY_FOR_POPO);
+@@ -500,6 +509,45 @@
+ }
+ #endif
+ 
++#ifndef OPENSSL_NO_CMS
++/* Encrypt the DER certificate directly, not a nested SignedData object.
++ * The complete CMP response is protected by ossl_cmp_msg_protect().
++ */
++static OSSL_CRMF_ENCRYPTEDKEY *enc_certificate(OSSL_CMP_CTX *ctx,
++    X509 *cert, const X509 *recipient)
++{
++    BIO *der = NULL;
++    EVP_CIPHER *cipher = NULL;
++    STACK_OF(X509) *recips = NULL;
++    CMS_ContentInfo *cms = NULL;
++    CMS_EnvelopedData *env = NULL;
++    OSSL_CRMF_ENCRYPTEDKEY *result = NULL;
++
++    if ((der = BIO_new(BIO_s_mem())) == NULL
++        || (recips = sk_X509_new_null()) == NULL
++        || !sk_X509_push(recips, (X509 *)recipient)
++        || i2d_X509_bio(der, cert) <= 0
++        || (cipher = EVP_CIPHER_fetch(ctx->libctx, "AES-256-CBC", ctx->propq)) == NULL)
++        goto end;
++    cms = CMS_encrypt_ex(recips, der, cipher, CMS_BINARY, ctx->libctx, ctx->propq);
++    if (cms == NULL || OBJ_obj2nid(CMS_get0_type(cms)) != NID_pkcs7_enveloped)
++        goto end;
++    env = CMS_EnvelopedData_dup(cms->d.envelopedData);
++    if (env == NULL)
++        goto end;
++    result = OSSL_CRMF_ENCRYPTEDKEY_init_envdata(env);
++    if (result != NULL)
++        env = NULL; /* ownership transferred */
++end:
++    M_ASN1_free_of(env, CMS_EnvelopedData);
++    CMS_ContentInfo_free(cms);
++    sk_X509_free(recips); /* borrowed recipient */
++    EVP_CIPHER_free(cipher);
++    BIO_free(der);
++    return result;
++}
++#endif
++
+ OSSL_CMP_MSG *ossl_cmp_certrep_new(OSSL_CMP_CTX *ctx, int bodytype,
+     int certReqId, const OSSL_CMP_PKISI *si,
+     X509 *cert, const EVP_PKEY *pkey,
+@@ -534,18 +582,30 @@
+     status = ossl_cmp_pkisi_get_status(resp->status);
+     if (status != OSSL_CMP_PKISTATUS_rejection
+         && status != OSSL_CMP_PKISTATUS_waiting && cert != NULL) {
+-        if (encryption_recip != NULL) {
+-            ERR_raise(ERR_LIB_CMP, ERR_R_UNSUPPORTED);
+-            goto err;
+-        }
+-
+         if ((resp->certifiedKeyPair = OSSL_CMP_CERTIFIEDKEYPAIR_new())
+             == NULL)
+             goto err;
+-        resp->certifiedKeyPair->certOrEncCert->type = OSSL_CMP_CERTORENCCERT_CERTIFICATE;
+-        if (!X509_up_ref(cert))
+-            goto err;
+-        resp->certifiedKeyPair->certOrEncCert->value.certificate = cert;
++        if (encryption_recip != NULL) {
++#ifndef OPENSSL_NO_CMS
++            OSSL_CRMF_ENCRYPTEDKEY *encrypted = enc_certificate(ctx, cert, encryption_recip);
++
++            if (encrypted == NULL
++                || !ossl_cmp_hdr_set_pvno(msg->header, OSSL_CMP_PVNO_3)) {
++                OSSL_CRMF_ENCRYPTEDKEY_free(encrypted);
++                goto err;
++            }
++            resp->certifiedKeyPair->certOrEncCert->type = OSSL_CMP_CERTORENCCERT_ENCRYPTEDCERT;
++            resp->certifiedKeyPair->certOrEncCert->value.encryptedCert = encrypted;
++#else
++            ERR_raise(ERR_LIB_CMP, ERR_R_UNSUPPORTED);
++            goto err;
++#endif
++        } else {
++            resp->certifiedKeyPair->certOrEncCert->type = OSSL_CMP_CERTORENCCERT_CERTIFICATE;
++            if (!X509_up_ref(cert))
++                goto err;
++            resp->certifiedKeyPair->certOrEncCert->value.certificate = cert;
++        }
+ 
+         if (pkey != NULL) {
+ #ifndef OPENSSL_NO_CMS
+--- a/include/openssl/cmp.h.in
++++ b/include/openssl/cmp.h.in
+@@ -554,6 +554,7 @@
+     int val);
+ int OSSL_CMP_SRV_CTX_set_accept_unprotected(OSSL_CMP_SRV_CTX *srv_ctx, int val);
+ int OSSL_CMP_SRV_CTX_set_accept_raverified(OSSL_CMP_SRV_CTX *srv_ctx, int val);
++int OSSL_CMP_SRV_CTX_set_accept_encrcert_popo(OSSL_CMP_SRV_CTX *srv_ctx, int val);
+ int OSSL_CMP_SRV_CTX_set_grant_implicit_confirm(OSSL_CMP_SRV_CTX *srv_ctx,
+     int val);
+ 
+--- a/util/libcrypto.num
++++ b/util/libcrypto.num
+@@ -5947,3 +5947,4 @@
+ CRYPTO_clear_realloc_array              6075	3_6_0	EXIST::FUNCTION:
+ CRYPTO_secure_malloc_array              6076	3_6_0	EXIST::FUNCTION:
+ CRYPTO_secure_calloc                    6077	3_6_0	EXIST::FUNCTION:
++OSSL_CMP_SRV_CTX_set_accept_encrcert_popo 6078	3_6_0	EXIST::FUNCTION:CMP
