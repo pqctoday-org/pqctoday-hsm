@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-11-14
+
+Engine files: engines-7 (`openssl-pkcs11-a013c43c.tar.gz`, built from `a013c43c6`).
+
+Release gate (local, on tree `ae8d37f4720d`, the tree of this release's source commit `a013c43c6`): `local-gate.sh --all`, all 40 steps passed — the core gate; the C++ build with the full `ctest` run and the PKCS#11 v3.2 compliance harness (962 pass, 0 fail, 2 skip, 3 known engine-bug cases); the Rust PKCS#11 v3.2 conformance matrix (1102 pass, 0 fail); the OASIS KMIP 3.0 replay (99 pass, 0 fail, 3 deprecated skips); the ACVP WebAssembly harness (20 suites, both engines); the XMSS and XMSS^MT round trip against the release WebAssembly build; the hybrid TLS group proof against OpenSSL 3.6.3; the JavaJCE suite (282 run, 0 failures, 0 errors, 0 skipped) and the JavaJCE-remote suite (19 run, 0 failures, 0 errors, 0 skipped); and the vendored OpenSSL provider suite (112 pass, 0 fail) against an OpenSSL 3.6.3 built with `enable-lms`.
+
+### Added
+
+- **ML-KEM certificate key update in the browser OpenSSL CMP path.** An ML-KEM key cannot sign its own renewal
+  request, so a key update for an ML-KEM certificate now uses an encrypted-certificate proof of possession and an
+  explicit confirmation, with a separate, pinned ML-DSA signing identity authorizing the request for the sample
+  requester. The server binds the prior certificate and subject; the client validates the new certificate and its
+  issuing chain; the exchange completes only on a matching explicit confirmation, and a failed exchange returns no
+  certificate. The server path is off by default and limited to the documented ML-KEM-768 sample profile; it is a
+  patch to the bundled OpenSSL 3.6.3 (`wasm/openssl-studio/patches/0002-cmp-encrypted-certificate-popo.patch`), not
+  something unmodified upstream OpenSSL supports. The existing initial-enrollment entry point is unchanged. Tests:
+  `tests/openssl-studio/`.
+
 ### Fixed
 
 - **SP 800-108 counter-mode KBKDF through the OpenSSL provider now gives the standard key.** The provider passed the
