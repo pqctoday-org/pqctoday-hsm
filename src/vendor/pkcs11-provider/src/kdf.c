@@ -1832,6 +1832,21 @@ static int p11prov_kbkdf_derive(void *ctx, unsigned char *key, size_t keylen,
         return RET_OSSL_ERR;
     }
 
+    /* Counter mode: the iteration variable goes FIRST. The array position
+     * of CK_SP800_108_ITERATION_VARIABLE is the position of the counter in
+     * each round's PRF input (PKCS#11 v3.2 Table 199), and OpenSSL's KBKDF,
+     * whose parameters this function maps, builds [i]_r || fixed input.
+     * Listing the fixed input first made a conforming token compute
+     * fixed input || [i]_r instead, a different key. */
+    if (kctx->mode == KBKDF_MODE_COUNTER) {
+        counter_fmt.bLittleEndian = CK_FALSE;
+        counter_fmt.ulWidthInBits = kctx->r_bits;
+        data_params[num_data_params].type = CK_SP800_108_ITERATION_VARIABLE;
+        data_params[num_data_params].pValue = &counter_fmt;
+        data_params[num_data_params].ulValueLen = sizeof(counter_fmt);
+        num_data_params++;
+    }
+
     if (kctx->salt != NULL && kctx->saltlen > 0) {
         data_params[num_data_params].type = CK_SP800_108_BYTE_ARRAY;
         data_params[num_data_params].pValue = kctx->salt;
@@ -1840,13 +1855,6 @@ static int p11prov_kbkdf_derive(void *ctx, unsigned char *key, size_t keylen,
     }
 
     if (kctx->mode == KBKDF_MODE_COUNTER) {
-        counter_fmt.bLittleEndian = CK_FALSE;
-        counter_fmt.ulWidthInBits = kctx->r_bits;
-        data_params[num_data_params].type = CK_SP800_108_ITERATION_VARIABLE;
-        data_params[num_data_params].pValue = &counter_fmt;
-        data_params[num_data_params].ulValueLen = sizeof(counter_fmt);
-        num_data_params++;
-
         counter_params.prfType = kctx->prf_mech;
         counter_params.ulNumberOfDataParams = num_data_params;
         counter_params.pDataParams = data_params;

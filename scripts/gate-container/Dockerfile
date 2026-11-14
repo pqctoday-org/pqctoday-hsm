@@ -47,6 +47,11 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # OpenSSL 3.6.3 at /usr/local/ssl — the gate's C++ build requires >= 3.6 to
 # compile (see local-gate.sh, step "C++ ctest"). SHA-256 is the one OpenSSL
 # publishes alongside the release tarball, re-checked on 2026-09-27.
+# enable-lms: OpenSSL builds its LMS verifier only when asked. The vendored
+# OpenSSL provider suite (--openssl-provider) verifies token-made HSS/LMS
+# signatures with it (T24, T24c, T24d); without it those cases fail with
+# "No decoders were found". It adds LMS and nothing else (checked with
+# `openssl list` on 2026-11-14); the library name stays libcrypto.so.3.
 ARG OPENSSL_VERSION=3.6.3
 ARG OPENSSL_SHA256=243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1
 RUN cd /tmp \
@@ -54,7 +59,7 @@ RUN cd /tmp \
  && echo "${OPENSSL_SHA256}  openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum -c - \
  && tar xzf "openssl-${OPENSSL_VERSION}.tar.gz" \
  && cd "openssl-${OPENSSL_VERSION}" \
- && ./Configure --prefix=/usr/local/ssl --openssldir=/usr/local/ssl --libdir=lib zlib shared \
+ && ./Configure --prefix=/usr/local/ssl --openssldir=/usr/local/ssl --libdir=lib zlib shared enable-lms \
  && make -j"$(nproc)" >/dev/null \
  && make install_sw install_ssldirs >/dev/null \
  && cd / && rm -rf /tmp/openssl-*
