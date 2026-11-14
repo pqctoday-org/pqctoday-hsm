@@ -51,3 +51,22 @@ the same success/failure outcomes through `execute_cmp_key_update` before
 publishing an engine bundle. Use freshly built or independently verified linked
 archives and retain their hashes with the build receipt. Native tests alone do
 not validate the browser bundle or the Hub lesson.
+
+The additive `execute_cmp_key_update_v2` export separates the renewal signer
+from the ML-KEM target. Its eleven arguments are the new target key, requested
+prior certificate, independently authorized prior certificate, signer certificate,
+signer key, independently pinned signer certificate, subject DN, CA certificate,
+CA key, output certificate and profile identifier. The bounded sample identifier
+is `MLKEM768-MLDSA65-explicit-confirm-v1`: ML-KEM-768 target, ML-DSA-65 signer
+and CA, CMS encrypted certificate (AES-256-CBC in this sample), explicit hash
+confirmation and no implicit confirmation. It is a fictional scenario profile,
+not a general CMP profile registry or a claim about another CA's cipher choice.
+
+Compile `cmp_signed_key_update_test.c` like the legacy shim test. Run separate
+directories for `valid`, `wrong-pin`, `wrong-signing-key`, `expired-signer`,
+`wrong-usage`, `same-key`, `wrong-profile`, `wrong-prior` and `wrong-subject`. The CA sample's
+digitalSignature usage permits signed CMP responses; its certification and CRL
+uses remain present. The signer must be a valid, pinned signing certificate
+issued by that CA, and the requested subject must match the authorized prior
+certificate. Both legacy exports remain available. All tests require fictional
+keys and must run in mini-lab or Sandbox before browser packaging.

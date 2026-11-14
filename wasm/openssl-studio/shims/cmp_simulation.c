@@ -283,7 +283,7 @@ static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
     return ok_si;
 }
 
-/* The fictional PBM identity is authorized for this separately supplied prior
+/* The fictional request identity is authorized for this separately supplied prior
  * certificate. A request cannot authorize itself by naming an issuer/serial.
  */
 static OSSL_CMP_PKISI *process_key_update_request(OSSL_CMP_SRV_CTX *srv_ctx,
@@ -292,9 +292,13 @@ static OSSL_CMP_PKISI *process_key_update_request(OSSL_CMP_SRV_CTX *srv_ctx,
     STACK_OF(X509) **pubs) {
     srv_state_t *st = OSSL_CMP_SRV_CTX_get0_custom_ctx(srv_ctx);
     OSSL_CRMF_CERTID *prior = crm == NULL ? NULL : OSSL_CRMF_MSG_get0_regCtrl_oldCertID(crm);
+    OSSL_CRMF_CERTTEMPLATE *tmpl = crm == NULL ? NULL : OSSL_CRMF_MSG_get0_tmpl(crm);
     OSSL_CMP_PKISI *status;
 
-    if (st == NULL || st->authorized_prior == NULL || prior == NULL
+    if (st == NULL || st->authorized_prior == NULL || prior == NULL || tmpl == NULL
+        || OSSL_CRMF_CERTTEMPLATE_get0_subject(tmpl) == NULL
+        || X509_NAME_cmp(OSSL_CRMF_CERTTEMPLATE_get0_subject(tmpl),
+               X509_get_subject_name(st->authorized_prior)) != 0
         || OSSL_CMP_MSG_get_bodytype(req) != OSSL_CMP_KUR
         || X509_NAME_cmp(OSSL_CRMF_CERTID_get0_issuer(prior),
                X509_get_issuer_name(st->authorized_prior)) != 0
@@ -433,7 +437,8 @@ char *generate_mock_ca_root(const char *alg_name,
         BASIC_CONSTRAINTS_free(bc);
 
         ASN1_BIT_STRING *ku = ASN1_BIT_STRING_new();
-        /* keyCertSign | cRLSign */
+        /* The fictional CMP CA also signs protocol response messages. */
+        ASN1_BIT_STRING_set_bit(ku, 0, 1); /* digitalSignature */
         ASN1_BIT_STRING_set_bit(ku, 5, 1);
         ASN1_BIT_STRING_set_bit(ku, 6, 1);
         ext = X509V3_EXT_i2d(NID_key_usage, 1, ku);
@@ -481,7 +486,10 @@ static char *execute_cmp_operation(const char *ee_key_path,
                              const char *out_cert_path,
                              const char *old_cert_path,
                              const char *authorized_prior_path,
-                             int key_update) {
+                             int key_update,
+                             const char *signer_cert_path,
+                             const char *signer_key_path,
+                             const char *authorized_signer_path) {
     log_reset();
     g_first_entry = 1;
 
@@ -496,6 +504,8 @@ static char *execute_cmp_operation(const char *ee_key_path,
     OSSL_CMP_SRV_CTX *sctx = NULL;
     X509 *issued = NULL;
     X509 *old_cert = NULL;
+    X509 *signer_cert = NULL, *authorized_signer = NULL;
+    EVP_PKEY *signer_key = NULL;
     srv_state_t srv_state = {0};
 
     log_event("client", "start", key_update ? "in-process CMP KUR with encrypted certificate and explicit confirmation" : "in-process CMP IR simulation");
@@ -523,6 +533,24 @@ static char *execute_cmp_operation(const char *ee_key_path,
         log_event("client", "error", "load CA key %s", ca_key_path);
         log_openssl_err("client");
         goto done;
+    }
+    if (key_update == 2) {
+        signer_cert = load_x509_pem(signer_cert_path);
+        signer_key = load_pkey_pem(signer_key_path);
+        authorized_signer = load_x509_pem(authorized_signer_path);
+        if (signer_cert == NULL || signer_key == NULL || authorized_signer == NULL
+            || X509_cmp(signer_cert, authorized_signer) != 0
+            || !EVP_PKEY_is_a(signer_key, "ML-DSA-65")
+            || X509_check_private_key(signer_cert, signer_key) != 1
+            || X509_check_issued(ca_cert, signer_cert) != X509_V_OK
+            || X509_verify(signer_cert, X509_get0_pubkey(ca_cert)) != 1
+            || X509_cmp_time(X509_get0_notBefore(signer_cert), NULL) >= 0
+            || X509_cmp_time(X509_get0_notAfter(signer_cert), NULL) <= 0
+            || X509_get_ext_by_NID(signer_cert, NID_key_usage, -1) < 0
+            || (X509_get_key_usage(signer_cert) & KU_DIGITAL_SIGNATURE) == 0) {
+            err_short = "renewal signer must match the authorized, valid ML-DSA-65 signing certificate and key";
+            goto done;
+        }
     }
     ee_key = load_pkey_pem(ee_key_path);
     if (!ee_key) {
@@ -564,7 +592,14 @@ static char *execute_cmp_operation(const char *ee_key_path,
     OSSL_CMP_SRV_CTX_set_accept_raverified(sctx, !key_update);
     {
         OSSL_CMP_CTX *srv_inner = OSSL_CMP_SRV_CTX_get0_cmp_ctx(sctx);
-        if (srv_inner) {
+        if (srv_inner && key_update == 2) {
+            if (!OSSL_CMP_CTX_set1_cert(srv_inner, ca_cert)
+                || !OSSL_CMP_CTX_set1_pkey(srv_inner, ca_key)
+                || !OSSL_CMP_CTX_set1_srvCert(srv_inner, authorized_signer)) {
+                err_short = "configure signed renewal server failed";
+                goto done;
+            }
+        } else if (srv_inner) {
             /* PBM-MAC only. Setting cert+pkey here would make libcrypto prefer
              * signature-based protection — that path tries to sign the IP
              * header with ML-DSA via EVP_DigestSign + a default md, ML-DSA
@@ -584,7 +619,9 @@ static char *execute_cmp_operation(const char *ee_key_path,
             OSSL_CMP_CTX_set1_subjectName(srv_inner, X509_get_subject_name(ca_cert));
         }
     }
-    log_event("server", "configured", "PBM-MAC secret wired, sender DN aligned to CA subject, cert_request_cb installed");
+    log_event("server", "configured", key_update == 2
+        ? "separate renewal signer pinned; CA signs responses; explicit certificate confirmation required"
+        : "PBM-MAC secret wired, sender DN aligned to CA subject, cert_request_cb installed");
 
     cctx = OSSL_CMP_CTX_new(NULL, NULL);
     if (!cctx) {
@@ -598,8 +635,16 @@ static char *execute_cmp_operation(const char *ee_key_path,
      * to use the same CA-cert subject as its sender (see srv_inner subjectName
      * below) so the sender check passes. */
     OSSL_CMP_CTX_set1_srvCert(cctx, ca_cert);
-    OSSL_CMP_CTX_set1_secretValue(cctx, (const unsigned char *)secret, (int)strlen(secret));
-    OSSL_CMP_CTX_set1_referenceValue(cctx, (const unsigned char *)reference, (int)strlen(reference));
+    if (key_update == 2) {
+        if (!OSSL_CMP_CTX_set1_cert(cctx, signer_cert)
+            || !OSSL_CMP_CTX_set1_pkey(cctx, signer_key)) {
+            err_short = "configure separate renewal signer failed";
+            goto done;
+        }
+    } else {
+        OSSL_CMP_CTX_set1_secretValue(cctx, (const unsigned char *)secret, (int)strlen(secret));
+        OSSL_CMP_CTX_set1_referenceValue(cctx, (const unsigned char *)reference, (int)strlen(reference));
+    }
 
     subj = X509_NAME_new();
     {
@@ -720,6 +765,9 @@ static char *execute_cmp_operation(const char *ee_key_path,
 
 done:
     if (key_update && !ok) remove(out_cert_path);
+    X509_free(signer_cert);
+    X509_free(authorized_signer);
+    EVP_PKEY_free(signer_key);
     X509_free(old_cert);
     X509_free(srv_state.authorized_prior);
     X509_free(srv_state.pending);
@@ -757,7 +805,7 @@ char *execute_cmp_simulation(const char *ee_key_path, const char *subject_dn,
     const char *reference, const char *secret, const char *ca_cert_path,
     const char *ca_key_path, const char *out_cert_path) {
     return execute_cmp_operation(ee_key_path, subject_dn, reference, secret,
-        ca_cert_path, ca_key_path, out_cert_path, NULL, NULL, 0);
+        ca_cert_path, ca_key_path, out_cert_path, NULL, NULL, 0, NULL, NULL, NULL);
 }
 
 char *execute_cmp_key_update(const char *ee_key_path, const char *old_cert_path,
@@ -774,5 +822,28 @@ char *execute_cmp_key_update(const char *ee_key_path, const char *old_cert_path,
         return result;
     }
     return execute_cmp_operation(ee_key_path, subject_dn, reference, secret,
-        ca_cert_path, ca_key_path, out_cert_path, old_cert_path, authorized_prior_path, 1);
+        ca_cert_path, ca_key_path, out_cert_path, old_cert_path, authorized_prior_path, 1,
+        NULL, NULL, NULL);
+}
+
+/* Additive signed-renewal contract. The legacy exports retain their meaning. */
+char *execute_cmp_key_update_v2(const char *ee_key_path, const char *old_cert_path,
+    const char *authorized_prior_path, const char *signer_cert_path,
+    const char *signer_key_path, const char *authorized_signer_path,
+    const char *subject_dn, const char *ca_cert_path, const char *ca_key_path,
+    const char *out_cert_path, const char *profile) {
+    if (ee_key_path == NULL || old_cert_path == NULL || authorized_prior_path == NULL
+        || signer_cert_path == NULL || signer_key_path == NULL || authorized_signer_path == NULL
+        || subject_dn == NULL || ca_cert_path == NULL || ca_key_path == NULL
+        || out_cert_path == NULL || profile == NULL
+        || strcmp(profile, "MLKEM768-MLDSA65-explicit-confirm-v1") != 0
+        || strchr(out_cert_path, '"') != NULL || strchr(out_cert_path, '\\') != NULL) {
+        const char *error = "{\"ok\":false,\"error\":\"invalid signed key-update arguments or profile\"}";
+        char *result = malloc(strlen(error) + 1);
+        if (result != NULL) strcpy(result, error);
+        return result;
+    }
+    return execute_cmp_operation(ee_key_path, subject_dn, NULL, NULL,
+        ca_cert_path, ca_key_path, out_cert_path, old_cert_path, authorized_prior_path, 2,
+        signer_cert_path, signer_key_path, authorized_signer_path);
 }
