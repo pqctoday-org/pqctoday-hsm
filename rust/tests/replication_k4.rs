@@ -920,17 +920,85 @@ fn k4_native_interface_discovery_and_calls() {
 
 const CHILD_ENV: &str = "PQCTODAY_REPL_CHILD_DIR";
 
+/// How long one side waits for the other's next file, measured as elapsed time.
+const HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `<name>` once its writer has finished it, else None. `put` writes `<name>` and only then
+/// creates `<name>.done`, so the data is read only after `.done` exists. Reading first and checking
+/// `.done` second (the old order) could return an empty or partial file: the read caught `fs::write`
+/// between its truncate and its write, the writer then finished, and `.done` was there by the time
+/// it was checked. Under load that returned an empty "now" to the child (14 Nov 2026), whose parse
+/// panicked; the parent then reported a 60 s "timed out waiting for csr".
+fn take_if_done(dir: &std::path::Path, name: &str, read: &mut dyn FnMut(&std::path::Path) -> std::io::Result<Vec<u8>>) -> Option<Vec<u8>> {
+    if !dir.join(format!("{name}.done")).exists() {
+        return None;
+    }
+    Some(read(&dir.join(name)).unwrap_or_else(|e| panic!("{name}.done exists but {name} is unreadable: {e}")))
+}
+
 fn wait_for(dir: &std::path::Path, name: &str) -> Vec<u8> {
-    let p = dir.join(name);
-    for _ in 0..1200 {
-        if let Ok(b) = std::fs::read(&p) {
-            if std::fs::metadata(dir.join(format!("{name}.done"))).is_ok() {
-                return b;
+    wait_for_peer(dir, name, None)
+}
+
+/// As `wait_for`, and fails at once, with its exit status, if `peer` exits before writing `name`.
+fn wait_for_peer(dir: &std::path::Path, name: &str, mut peer: Option<&mut std::process::Child>) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + HANDOFF_TIMEOUT;
+    loop {
+        if let Some(b) = take_if_done(dir, name, &mut |p| std::fs::read(p)) {
+            return b;
+        }
+        if let Some(child) = peer.as_deref_mut() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("child process exited ({status}) before writing {name}; its own failure is in its output above");
             }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out after {HANDOFF_TIMEOUT:?} waiting for {name}");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    panic!("timed out waiting for {name}");
+}
+
+/// The 14 Nov interleaving, made deterministic: the reader catches the file while it is still empty
+/// and the writer finishes (data, then `.done`) before the reader looks for `.done`. The result must
+/// be the finished data, never the empty read.
+#[test]
+fn k4_two_process_handoff_never_returns_a_file_caught_mid_write() {
+    let dir = std::env::temp_dir().join(format!("pqctoday-repl-handoff-{}-{}", std::process::id(), repl_nonce()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("now"), b"").unwrap(); // fs::write has truncated, not yet written
+    let finish = |d: &std::path::Path| {
+        if !d.join("now.done").exists() {
+            put(d, "now", b"1763164800");
+        }
+    };
+    let mut caught_mid_write = |p: &std::path::Path| {
+        let b = std::fs::read(p);
+        finish(p.parent().unwrap()); // the writer completes before the reader checks .done
+        b
+    };
+    let got = match take_if_done(&dir, "now", &mut caught_mid_write) {
+        Some(b) => b,
+        None => {
+            finish(&dir);
+            take_if_done(&dir, "now", &mut |p| std::fs::read(p)).expect("ready once .done exists")
+        }
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(got, b"1763164800", "returned the file as caught mid-write");
+}
+
+#[test]
+fn k4_two_process_wait_fails_at_once_when_the_child_has_exited() {
+    let dir = std::env::temp_dir().join(format!("pqctoday-repl-exit-{}-{}", std::process::id(), repl_nonce()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut child = std::process::Command::new("false").spawn().unwrap();
+    let started = std::time::Instant::now();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wait_for_peer(&dir, "csr", Some(&mut child))));
+    let _ = std::fs::remove_dir_all(&dir);
+    let msg = r.expect_err("must fail").downcast::<String>().map(|s| *s).unwrap_or_default();
+    assert!(msg.contains("child process exited") && msg.contains("before writing csr"), "{msg}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", started.elapsed());
 }
 
 fn put(dir: &std::path::Path, name: &str, data: &[u8]) {
@@ -981,7 +1049,7 @@ fn k4_two_process_create_transport_import() {
     let _g = lock();
     let dir = std::env::temp_dir().join(format!("pqctoday-repl-{}-{}", std::process::id(), repl_nonce()));
     std::fs::create_dir_all(&dir).unwrap();
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "k4_two_process_child_destination", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, &dir)
         .spawn()
@@ -989,12 +1057,12 @@ fn k4_two_process_create_transport_import() {
     let w = world(1);
     put(&dir, "now", w.now.to_string().as_bytes());
     let mut ca = w.ca;
-    let csr = wait_for(&dir, "csr");
+    let csr = wait_for_peer(&dir, "csr", Some(&mut child));
     put(&dir, "root", ca.root_der());
     put(&dir, "dev", &ca.issue_device(&csr, w.now).unwrap());
     let rootcrl = ca.crl(w.now - 10, w.now + 86_400).unwrap();
     put(&dir, "rootcrl", &rootcrl);
-    let (b_dev, b_crl, b_id) = (wait_for(&dir, "b_dev"), wait_for(&dir, "b_crl"), wait_for(&dir, "b_id"));
+    let (b_dev, b_crl, b_id) = (wait_for_peer(&dir, "b_dev", Some(&mut child)), wait_for_peer(&dir, "b_crl", Some(&mut child)), wait_for_peer(&dir, "b_id", Some(&mut child)));
     let a = &w.tokens[0];
     native::logout(a.user).unwrap();
     let so = native::open_session_so(0, SO).unwrap();
@@ -1012,14 +1080,14 @@ fn k4_two_process_create_transport_import() {
     // The source key is bound to the same policy (max 1 → transfers 0).
     let src = gen_aes(user, 32, Some(&pid)).unwrap();
     put(&dir, "chal", &repl::issue_source_challenge(user).unwrap());
-    let req = wait_for(&dir, "request");
+    let req = wait_for_peer(&dir, "request", Some(&mut child));
     let pkg = repl::create_replication_package(user, src, &req).unwrap();
     put(&dir, "package", &pkg);
-    let receipt = wait_for(&dir, "receipt");
+    let receipt = wait_for_peer(&dir, "receipt", Some(&mut child));
     host_verify::verify_receipt(&receipt, &pkg, &req, &repl::trust_inputs(0), w.now, Profile::Educational).expect("child's receipt verifies in parent");
     let ct = native::encrypt(user, src, CKM_AES_GCM, b"across processes", Some(&[3u8; 12]), None, b"", Some(16)).unwrap();
     put(&dir, "ct", &ct);
-    assert_eq!(wait_for(&dir, "pt"), b"across processes");
+    assert_eq!(wait_for_peer(&dir, "pt", Some(&mut child)), b"across processes");
     let status = child.wait_with_output().unwrap().status;
     assert!(status.success(), "child process failed");
     let _ = std::fs::remove_dir_all(&dir);
