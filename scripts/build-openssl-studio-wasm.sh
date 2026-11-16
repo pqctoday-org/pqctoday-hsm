@@ -44,6 +44,7 @@
 # Env overrides:
 #   SOFTHSM_AR=...        path to libsofthsmrustv3.a
 #   PKCS11_PROVIDER_AR=.. path to libpkcs11-provider.a
+#   WORK_DIR=...          isolated disposable OpenSSL source/build folder
 #   STAGING_DIR=...       output folder (default build-wasm/engines-staging)
 #   JOBS=N                make parallelism (default: CPU count)
 #   HSM_COMMIT=<sha>      commit recorded in openssl-link-inputs.json; pass it
@@ -60,7 +61,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STUDIO_DIR="$ROOT/wasm/openssl-studio"
 SHIMS="$STUDIO_DIR/shims"
 PATCH_DIR="$STUDIO_DIR/patches"
-WORK_DIR="$ROOT/build-wasm/openssl-studio"
+WORK_DIR="${WORK_DIR:-$ROOT/build-wasm/openssl-studio}"
 STAGING_DIR="${STAGING_DIR:-$ROOT/build-wasm/engines-staging}"
 TARBALL_DIR="$ROOT/deps/openssl-src"
 TARBALL="$TARBALL_DIR/openssl-${OSSL_VERSION}.tar.gz"

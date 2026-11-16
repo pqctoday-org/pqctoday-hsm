@@ -218,25 +218,27 @@ static OSSL_CMP_PKISI *process_cert_request(OSSL_CMP_SRV_CTX *srv_ctx,
         return NULL;
     }
 
-    unsigned char serial_bytes[8];
+    unsigned char serial_bytes[16];
     if (RAND_bytes(serial_bytes, sizeof(serial_bytes)) != 1) {
-        if (st->key_update) {
-            X509_NAME_free(subject);
-            X509_free(new_cert);
-            log_event("server", "error", "certificate serial randomness unavailable");
-            log_openssl_err("server");
-            return NULL;
-        }
-        memset(serial_bytes, 0x42, sizeof(serial_bytes));
+        X509_NAME_free(subject);
+        X509_free(new_cert);
+        log_event("server", "error", "certificate serial randomness unavailable");
+        log_openssl_err("server");
+        return NULL;
     }
-    serial_bytes[0] &= 0x7f;
+    serial_bytes[0] = (serial_bytes[0] & 0x7f) | 0x01;
     ASN1_INTEGER *serial = ASN1_INTEGER_new();
     BIGNUM *bn = BN_bin2bn(serial_bytes, sizeof(serial_bytes), NULL);
-    BN_to_ASN1_INTEGER(bn, serial);
+    if (!serial || !bn || !BN_to_ASN1_INTEGER(bn, serial)) {
+        BN_free(bn); ASN1_INTEGER_free(serial);
+        X509_NAME_free(subject); X509_free(new_cert);
+        log_event("server", "error", "certificate serial allocation failed");
+        return NULL;
+    }
     BN_free(bn);
     X509_set_serialNumber(new_cert, serial);
-    char serhex[20] = {0};
-    for (int i = 0; i < 8; i++) snprintf(serhex + i * 2, 3, "%02x", serial_bytes[i]);
+    char serhex[33] = {0};
+    for (int i = 0; i < 16; i++) snprintf(serhex + i * 2, 3, "%02x", serial_bytes[i]);
     log_event("server", "assigned_serial", "0x%s", serhex);
     ASN1_INTEGER_free(serial);
 
@@ -494,6 +496,7 @@ static char *execute_cmp_operation(const char *ee_key_path,
     g_first_entry = 1;
 
     int ok = 0;
+    int owns_output = 0;
     const char *err_short = NULL;
     X509 *ca_cert = NULL;
     EVP_PKEY *ca_key = NULL;
@@ -508,6 +511,19 @@ static char *execute_cmp_operation(const char *ee_key_path,
     EVP_PKEY *signer_key = NULL;
     srv_state_t srv_state = {0};
 
+    if (!out_cert_path || !*out_cert_path || !ee_key_path || !ca_cert_path || !ca_key_path ||
+        strcmp(out_cert_path, ee_key_path) == 0 || strcmp(out_cert_path, ca_cert_path) == 0 ||
+        strcmp(out_cert_path, ca_key_path) == 0 ||
+        (old_cert_path && strcmp(out_cert_path, old_cert_path) == 0) ||
+        (authorized_prior_path && strcmp(out_cert_path, authorized_prior_path) == 0) ||
+        (signer_cert_path && strcmp(out_cert_path, signer_cert_path) == 0) ||
+        (signer_key_path && strcmp(out_cert_path, signer_key_path) == 0) ||
+        (authorized_signer_path && strcmp(out_cert_path, authorized_signer_path) == 0)) {
+        err_short = "output must be separate from input artifacts";
+        goto done;
+    }
+    owns_output = 1;
+    remove(out_cert_path);
     log_event("client", "start", key_update ? "in-process CMP KUR with encrypted certificate and explicit confirmation" : "in-process CMP IR simulation");
     srv_state.key_update = key_update;
     if (key_update) {
@@ -771,7 +787,7 @@ static char *execute_cmp_operation(const char *ee_key_path,
     ok = 1;
 
 done:
-    if (key_update && !ok) remove(out_cert_path);
+    if (owns_output && !ok) remove(out_cert_path);
     X509_free(signer_cert);
     X509_free(authorized_signer);
     EVP_PKEY_free(signer_key);
