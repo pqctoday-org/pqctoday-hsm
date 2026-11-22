@@ -443,3 +443,4 @@ export interface SoftHSMModule {
 declare function createSoftHSMModule(moduleArg?: object): Promise<SoftHSMModule>
 export { createSoftHSMModule }
 export default createSoftHSMModule
+export declare const CK: typeof import('./constants.js').default

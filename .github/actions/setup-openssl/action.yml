@@ -1,0 +1,19 @@
+name: Set up pinned OpenSSL
+description: Install and verify the shared OpenSSL build used by the native and Rust CI jobs.
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      id: cache
+      with:
+        path: /opt/openssl-3.6
+        key: ${{ runner.os }}-${{ runner.arch }}-openssl-ci-${{ hashFiles('scripts/gate-container/openssl.sh') }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        sudo mkdir -p /opt/openssl-3.6
+        sudo chown "$USER" /opt/openssl-3.6
+        bash scripts/gate-container/openssl.sh install /opt/openssl-3.6 ci
+    - if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: bash scripts/gate-container/openssl.sh verify /opt/openssl-3.6 ci

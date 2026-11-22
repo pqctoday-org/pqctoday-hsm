@@ -245,3 +245,37 @@ void MlKemInputCheckTests::testLengthBoundaries()
 	f.check(rv == CKR_OK, "1088-byte NIST ciphertext: rv=" + acvpkat::rvHex(rv));
 	f.assertNone("ML-KEM length boundaries");
 }
+
+void MlKemInputCheckTests::testKeyPairTemplateTypes()
+{
+	CK_SESSION_HANDLE session;
+	openSession(session);
+	CK_MECHANISM mech = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+	CK_ULONG parameterSet = CKP_ML_KEM_768;
+	CK_KEY_TYPE matching = CKK_ML_KEM, other = CKK_RSA;
+	CK_KEY_TYPE* types[] = { NULL_PTR, &matching, &other };
+	for (auto pubType : types)
+	{
+		for (auto privType : types)
+		{
+			CK_ATTRIBUTE pub[] = {
+				{ CKA_PARAMETER_SET, &parameterSet, sizeof(parameterSet) },
+				{ CKA_KEY_TYPE, pubType, sizeof(matching) },
+			};
+			CK_ATTRIBUTE priv[] = {
+				{ CKA_PARAMETER_SET, &parameterSet, sizeof(parameterSet) },
+				{ CKA_KEY_TYPE, privType, sizeof(matching) },
+			};
+			CK_OBJECT_HANDLE pk = CK_INVALID_HANDLE, sk = CK_INVALID_HANDLE;
+			CK_RV rv = CRYPTOKI_F_PTR( C_GenerateKeyPair(session, &mech,
+				pub, pubType ? 2 : 1, priv, privType ? 2 : 1, &pk, &sk) );
+			CK_RV expected = pubType == &other || privType == &other ? CKR_TEMPLATE_INCONSISTENT : CKR_OK;
+			CPPUNIT_ASSERT_EQUAL(expected, rv);
+			if (rv == CKR_OK)
+			{
+				CRYPTOKI_F_PTR( C_DestroyObject(session, pk) );
+				CRYPTOKI_F_PTR( C_DestroyObject(session, sk) );
+			}
+		}
+	}
+}
