@@ -15,7 +15,8 @@
  *   wasm/softhsm.js + wasm/softhsm.wasm must exist (run scripts/build-wasm.sh first)
  */
 
-import { createRequire } from 'module';
+import assert from 'node:assert/strict';
+import CK from '../constants.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
@@ -29,42 +30,33 @@ console.log('[smoke] Module loaded.\n');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const CKR_OK                 = 0;
-const CKR_TOKEN_NOT_PRESENT  = 0xE1;
-const CKF_SERIAL_SESSION     = 0x00000004;
-const CKF_RW_SESSION         = 0x00000002;
-const CKU_SO                 = 0;
-const CKU_USER               = 1;
-
-// PKCS#11 attribute type constants
-const CKA_CLASS              = 0x00000000;
-const CKA_TOKEN              = 0x00000001;
-const CKA_SENSITIVE          = 0x00000103;
-const CKA_EXTRACTABLE        = 0x00000162;
-const CKA_ENCRYPT            = 0x00000104;
-const CKA_DECRYPT            = 0x00000105;
-const CKA_SIGN               = 0x00000108;
-const CKA_VERIFY             = 0x0000010A;
-const CKA_ENCAPSULATE        = 0x00000633;
-const CKA_DECAPSULATE        = 0x00000634;
-const CKA_PARAMETER_SET      = 0x0000061D;
-const CKA_VALUE_LEN          = 0x00000161;
-
-const CKO_PUBLIC_KEY         = 0x00000002;
-const CKO_PRIVATE_KEY        = 0x00000003;
-const CKO_SECRET_KEY         = 0x00000004;
-
-const CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000F;
-const CKM_ML_KEM             = 0x00000017;
-const CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001C;
-const CKM_ML_DSA             = 0x0000001D;
-const CKK_GENERIC_SECRET     = 0x00000010;
-const CKK_ML_KEM             = 0x00000049;
-
-// CKA_PARAMETER_SET values for ML-KEM
-const CKP_ML_KEM_768         = 0x00000002;
-// CKA_PARAMETER_SET values for ML-DSA
-const CKP_ML_DSA_65          = 0x00000002;
+const {
+    CKR_OK,
+    CKF_SERIAL_SESSION,
+    CKF_RW_SESSION,
+    CKU_SO,
+    CKU_USER,
+    CKA_CLASS,
+    CKA_TOKEN,
+    CKA_SENSITIVE,
+    CKA_EXTRACTABLE,
+    CKA_ENCRYPT,
+    CKA_DECRYPT,
+    CKA_SIGN,
+    CKA_VERIFY,
+    CKA_ENCAPSULATE,
+    CKA_DECAPSULATE,
+    CKA_PARAMETER_SET,
+    CKA_VALUE_LEN,
+    CKO_SECRET_KEY,
+    CKM_ML_KEM_KEY_PAIR_GEN,
+    CKM_ML_KEM,
+    CKM_ML_DSA_KEY_PAIR_GEN,
+    CKM_ML_DSA,
+    CKP_ML_KEM_768,
+    CKP_ML_DSA_65,
+    CKA_VALUE,
+} = CK;
 
 const check = (label, rv) => {
     if (rv !== CKR_OK) {
@@ -266,7 +258,7 @@ const prvTmpl = buildTemplate([
     { type: CKA_PARAMETER_SET, value: CKP_ML_KEM_768 },
 ]);
 
-const mech = M._malloc(8);  // CK_MECHANISM { type(4), pParam(4), paramLen(4) } = 12 bytes
+const mech = M._malloc(CK.CK_MECHANISM_SIZE);  // CK_MECHANISM { type(4), pParam(4), paramLen(4) } = 12 bytes
 M.setValue(mech + 0, CKM_ML_KEM_KEY_PAIR_GEN, 'i32');
 M.setValue(mech + 4, 0, 'i32');  // pParam = NULL
 M.setValue(mech + 8, 0, 'i32');  // ulParameterLen = 0
@@ -297,6 +289,7 @@ M.setValue(kemMech + 8, 0, 'i32');
 const ctLenPtr = allocUlong();
 const ssLenPtr = allocUlong();
 const ssTmpl = buildTemplate([
+    { type: CKA_SENSITIVE,   value: false },
     { type: CKA_CLASS,       value: CKO_SECRET_KEY },
     { type: CKA_TOKEN,       value: false },
     { type: CKA_EXTRACTABLE, value: true  },
@@ -339,56 +332,20 @@ M._free(kemMech);
 
 // Extract both shared secrets and compare
 console.log('\n── Compare shared secrets ──');
-const getVal = (hKey) => {
-    const lenAttr = buildTemplate([{ type: CKA_VALUE_LEN, value: 0 }]);
-    M._C_GetAttributeValue(hSession, hKey, lenAttr.arrPtr, 1);
-    const baseAttr = lenAttr.arrPtr;
-    const valLen = M.getValue(M.getValue(baseAttr + 4, 'i32'), 'i32') >>> 0;
-    freeTemplate(lenAttr);
-
-    const valBuf = M._malloc(valLen);
-    const attr = buildTemplate([{ type: 0x00000130 /* CKA_VALUE */, value: new Uint8Array(valLen) }]);
-    // Overwrite the value ptr in the template with our buffer
-    M.setValue(attr.arrPtr + 4, valBuf, 'i32');
-    M.setValue(attr.arrPtr + 8, valLen, 'i32');
-    check(`C_GetAttributeValue(CKA_VALUE, key=${hKey})`,
-        M._C_GetAttributeValue(hSession, hKey, attr.arrPtr, 1));
-    const bytes = new Uint8Array(M.HEAPU8.buffer, valBuf, valLen).slice();
-    freeTemplate(attr);
-    M._free(valBuf);
-    return bytes;
-};
-
-const CKA_VALUE = 0x00000011;
 const extractSecret = (hKey, label) => {
-    const bufPtr = M._malloc(64);  // ML-KEM shared secret is 32 bytes
-    const attrPtr = M._malloc(12);
-    M.setValue(attrPtr + 0, CKA_VALUE, 'i32');
-    M.setValue(attrPtr + 4, bufPtr,    'i32');
-    M.setValue(attrPtr + 8, 64,        'i32');
-    const rv = M._C_GetAttributeValue(hSession, hKey, attrPtr, 1);
-    if (rv !== CKR_OK) {
-        console.log(`  ⚠  GetAttributeValue(${label}) skipped (rv=0x${rv.toString(16)}) — key may be sensitive`);
-        M._free(bufPtr);
-        M._free(attrPtr);
-        return null;
+    const attr = buildTemplate([{ type: CKA_VALUE, value: new Uint8Array(32) }]);
+    try {
+        check(`C_GetAttributeValue(${label})`, M._C_GetAttributeValue(hSession, hKey, attr.arrPtr, 1));
+        assert.equal(readUlong(attr.arrPtr + 8), 32, `${label} length`);
+        const ptr = attr.valuePtrs[0];
+        return M.HEAPU8.slice(ptr, ptr + 32);
+    } finally {
+        freeTemplate(attr);
     }
-    const len = M.getValue(attrPtr + 8, 'i32') >>> 0;
-    const bytes = new Uint8Array(M.HEAPU8.buffer, bufPtr, len).slice();
-    M._free(bufPtr);
-    M._free(attrPtr);
-    return bytes;
 };
 
-const ss1 = extractSecret(hSS1, 'SS1');
-const ss2 = extractSecret(hSS2, 'SS2');
-if (ss1 && ss2) {
-    const match = ss1.length === ss2.length && ss1.every((b, i) => b === ss2[i]);
-    if (!match) throw new Error('FAIL: shared secrets do not match!');
-    console.log(`  ✓  Shared secrets match (${ss1.length} bytes)`);
-} else {
-    console.log('  ℹ  Skipped shared secret comparison (keys are sensitive)');
-}
+assert.deepEqual(extractSecret(hSS1, 'SS1'), extractSecret(hSS2, 'SS2'));
+console.log('  ✓  Shared secrets match (32 bytes)');
 
 console.log('\n── C_GenerateKeyPair (ML-DSA-65) ──');
 const dsaPubTmpl = buildTemplate([

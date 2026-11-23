@@ -678,47 +678,47 @@ CK_RV SoftHSM::generateKeyPairImpl
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Check the mechanism, only accept RSA, DSA, EC and DH key pair generation.
-	CK_KEY_TYPE keyType;
+	// Resolve the expected type once, before either template is read.
+	CK_KEY_TYPE expectedKeyType;
 	switch (pMechanism->mechanism)
 	{
 		case CKM_RSA_PKCS_KEY_PAIR_GEN:
-			keyType = CKK_RSA;
+			expectedKeyType = CKK_RSA;
 			break;
 #ifdef WITH_ECC
 		case CKM_EC_KEY_PAIR_GEN:
 		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
-			keyType = CKK_EC;
+			expectedKeyType = CKK_EC;
 			break;
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EC_EDWARDS_KEY_PAIR_GEN:
-			keyType = CKK_EC_EDWARDS;
+			expectedKeyType = CKK_EC_EDWARDS;
 			break;
 		case CKM_EC_MONTGOMERY_KEY_PAIR_GEN:
-			keyType = CKK_EC_MONTGOMERY;
+			expectedKeyType = CKK_EC_MONTGOMERY;
 			break;
 #endif
 		case CKM_ML_DSA_KEY_PAIR_GEN:
-			keyType = CKK_ML_DSA;
+			expectedKeyType = CKK_ML_DSA;
 			break;
 		case CKM_SLH_DSA_KEY_PAIR_GEN:
-			keyType = CKK_SLH_DSA;
+			expectedKeyType = CKK_SLH_DSA;
 			break;
 		case CKM_ML_KEM_KEY_PAIR_GEN:
-			keyType = CKK_ML_KEM;
+			expectedKeyType = CKK_ML_KEM;
 			break;
 		case CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN:
-			keyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
+			expectedKeyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
 			break;
 		case CKM_HSS_KEY_PAIR_GEN:
-			keyType = CKK_HSS;
+			expectedKeyType = CKK_HSS;
 			break;
 		case CKM_XMSS_KEY_PAIR_GEN:
-			keyType = CKK_XMSS;
+			expectedKeyType = CKK_XMSS;
 			break;
 		case CKM_XMSSMT_KEY_PAIR_GEN:
-			keyType = CKK_XMSSMT;
+			expectedKeyType = CKK_XMSSMT;
 			break;
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -726,71 +726,31 @@ CK_RV SoftHSM::generateKeyPairImpl
 	CK_CERTIFICATE_TYPE dummy;
 
 	// Extract information from the public key template that is needed to create the object.
+	CK_KEY_TYPE publicKeyType = expectedKeyType;
 	CK_OBJECT_CLASS publicKeyClass = CKO_PUBLIC_KEY;
 	CK_BBOOL ispublicKeyToken = CK_FALSE;
 	CK_BBOOL ispublicKeyPrivate = CK_FALSE;
 	bool isPublicKeyImplicit = true;
-	extractObjectInformation(pPublicKeyTemplate, ulPublicKeyAttributeCount, publicKeyClass, keyType, dummy, ispublicKeyToken, ispublicKeyPrivate, isPublicKeyImplicit);
+	extractObjectInformation(pPublicKeyTemplate, ulPublicKeyAttributeCount, publicKeyClass, publicKeyType, dummy, ispublicKeyToken, ispublicKeyPrivate, isPublicKeyImplicit);
 
 	// Report errors caused by accidental template mix-ups in the application using this cryptoki lib.
 	if (publicKeyClass != CKO_PUBLIC_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
-	if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN && keyType != CKK_RSA)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_EDWARDS_KEY_PAIR_GEN && keyType != CKK_EC_EDWARDS)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_MONTGOMERY_KEY_PAIR_GEN && keyType != CKK_EC_MONTGOMERY)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_ML_DSA_KEY_PAIR_GEN && keyType != CKK_ML_DSA)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN && keyType != CKK_SLH_DSA)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if ((pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
-	     pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS) && keyType != CKK_EC)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN && keyType != CKK_XMSS)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN && keyType != CKK_XMSSMT)
+	if (publicKeyType != expectedKeyType)
 		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Extract information from the private key template that is needed to create the object.
+	CK_KEY_TYPE privateKeyType = expectedKeyType;
 	CK_OBJECT_CLASS privateKeyClass = CKO_PRIVATE_KEY;
 	CK_BBOOL isprivateKeyToken = CK_FALSE;
 	CK_BBOOL isprivateKeyPrivate = CK_TRUE;
 	bool isPrivateKeyImplicit = true;
-	extractObjectInformation(pPrivateKeyTemplate, ulPrivateKeyAttributeCount, privateKeyClass, keyType, dummy, isprivateKeyToken, isprivateKeyPrivate, isPrivateKeyImplicit);
+	extractObjectInformation(pPrivateKeyTemplate, ulPrivateKeyAttributeCount, privateKeyClass, privateKeyType, dummy, isprivateKeyToken, isprivateKeyPrivate, isPrivateKeyImplicit);
 
 	// Report errors caused by accidental template mix-ups in the application using this cryptoki lib.
 	if (privateKeyClass != CKO_PRIVATE_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
-	if (pMechanism->mechanism == CKM_RSA_PKCS_KEY_PAIR_GEN && keyType != CKK_RSA)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_EDWARDS_KEY_PAIR_GEN && keyType != CKK_EC_EDWARDS)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_MONTGOMERY_KEY_PAIR_GEN && keyType != CKK_EC_MONTGOMERY)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_ML_DSA_KEY_PAIR_GEN && keyType != CKK_ML_DSA)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN && keyType != CKK_SLH_DSA)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if ((pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
-	     pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS) && keyType != CKK_EC)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN && keyType != CKK_XMSS)
-		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN && keyType != CKK_XMSSMT)
+	if (privateKeyType != expectedKeyType)
 		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Check user credentials

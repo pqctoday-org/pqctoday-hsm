@@ -19,12 +19,14 @@ class MlKemInputCheckTests : public TestsBase
 	CPPUNIT_TEST(testNistKeyChecks);
 	CPPUNIT_TEST(testNistDecapsulation);
 	CPPUNIT_TEST(testLengthBoundaries);
+	CPPUNIT_TEST(testKeyPairTemplateTypes);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
 	void testNistKeyChecks();
 	void testNistDecapsulation();
 	void testLengthBoundaries();
+	void testKeyPairTemplateTypes();
 
 protected:
 	void openSession(CK_SESSION_HANDLE& hSession);

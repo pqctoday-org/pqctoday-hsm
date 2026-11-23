@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { existsSync } from 'fs';
-import { loadEngine } from './helpers.mjs';
+import { buildMech, loadEngine } from './helpers.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -196,8 +196,7 @@ const rPrvTmpl = buildTemplate(R, [
     { type: CKA_PARAMETER_SET, value: CKP_ML_KEM_768 },
 ]);
 
-const rMech = R._malloc(12);
-R.setValue(rMech + 0, CKM_ML_KEM_KEY_PAIR_GEN, 'i32');
+const rMech = buildMech(R, CKM_ML_KEM_KEY_PAIR_GEN);
 
 const rPubPtr = R._malloc(4);
 const rPrvPtr = R._malloc(4);
@@ -227,8 +226,7 @@ check('CPP C_CreateObject', C._C_CreateObject(cSession, cImportTmplFull.arrPtr, 
 const cPubHandle = C.getValue(cImportHandlePtr, 'i32');
 
 // C++ Encapsulates
-const cMech = C._malloc(12);
-C.setValue(cMech + 0, CKM_ML_KEM, 'i32');
+const cMech = buildMech(C, CKM_ML_KEM);
 const ctLenPtr = C._malloc(4);
 C.setValue(ctLenPtr, 1088, 'i32');
 const pCiphertext = C._malloc(1088);
@@ -296,10 +294,7 @@ const CKA_SIGN = 0x00000108;
 const CKA_VERIFY = 0x0000010A;
 
 // 1. C++ Generates ML-DSA Key Pair
-const cDsaMech = C._malloc(12);
-C.setValue(cDsaMech + 0, CKM_ML_DSA_KEY_PAIR_GEN, 'i32');
-C.setValue(cDsaMech + 4, 0, 'i32');
-C.setValue(cDsaMech + 8, 0, 'i32');
+const cDsaMech = buildMech(C, CKM_ML_DSA_KEY_PAIR_GEN);
 
 const cDsaPubTmpl = buildTemplate(C, [
     { type: CKA_VERIFY, value: true },
@@ -324,10 +319,7 @@ console.log("actualPubSize:", actualPubSize);
 const dsaPubKeyBytes = new Uint8Array(C.HEAPU8.buffer, C.getValue(dsaPubExtract.arrPtr + 4, 'i32'), actualPubSize).slice();
 
 // C++ Signs Message
-const dsaSignMech = C._malloc(12);
-C.setValue(dsaSignMech + 0, CKM_ML_DSA, 'i32');
-C.setValue(dsaSignMech + 4, 0, 'i32');
-C.setValue(dsaSignMech + 8, 0, 'i32');
+const dsaSignMech = buildMech(C, CKM_ML_DSA);
 
 const msgStr = "Hello Post-Quantum World!";
 const msgBytes = Buffer.from(msgStr, 'utf8');
@@ -364,10 +356,7 @@ R.HEAPU8.set(msgBytes, rMsgPtr);
 const rSigPtr = R._malloc(sigLen);
 R.HEAPU8.set(cppSignature, rSigPtr);
 
-const rDsaMech = R._malloc(12);
-R.setValue(rDsaMech + 0, CKM_ML_DSA, 'i32');
-R.setValue(rDsaMech + 4, 0, 'i32');
-R.setValue(rDsaMech + 8, 0, 'i32');
+const rDsaMech = buildMech(R, CKM_ML_DSA);
 check('RUST C_VerifyInit', R._C_VerifyInit(rSession, rDsaMech, rDsaPubHandleImport));
 
 try {

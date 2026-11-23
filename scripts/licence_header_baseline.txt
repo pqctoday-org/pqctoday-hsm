@@ -78,7 +78,6 @@ cmake/modules/tests/test_openssl_ed448.c
 cmake/modules/tests/test_openssl_fips.c
 cmake/modules/tests/test_openssl_rfc3394.c
 cmake/modules/tests/test_openssl_rfc5649.c
-constants.d.ts
 constants.js
 index.d.ts
 index.js
